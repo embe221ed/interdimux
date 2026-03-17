@@ -6,6 +6,9 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 interdimux_key=$(tmux show-option -gqv @interdimux-key)
 interdimux_key="${interdimux_key:-f}"
 
+dashboard_key=$(tmux show-option -gqv @interdimux-dashboard-key)
+dashboard_key="${dashboard_key:-g}"
+
 popup_width=$(tmux show-option -gqv @interdimux-popup-width)
 popup_width="${popup_width:-80%}"
 
@@ -18,7 +21,14 @@ show_preview="${show_preview:-on}"
 show_full_command=$(tmux show-option -gqv @interdimux-show-full-command)
 show_full_command="${show_full_command:-on}"
 
-# Register the key binding — prefix + key opens the popup
+ENV_VARS="INTERDIMUX_SHOW_PREVIEW=$show_preview INTERDIMUX_SHOW_FULL_COMMAND=$show_full_command"
+
+# prefix + f — open the navigator directly
 tmux bind-key "$interdimux_key" run-shell -b \
   "tmux popup -w '$popup_width' -h '$popup_height' -E \
-    'INTERDIMUX_SHOW_PREVIEW=$show_preview INTERDIMUX_SHOW_FULL_COMMAND=$show_full_command $CURRENT_DIR/scripts/interdimux.sh'"
+    '$ENV_VARS $CURRENT_DIR/scripts/interdimux.sh'"
+
+# prefix + g — open the dashboard
+tmux bind-key "$dashboard_key" run-shell -b \
+  "tmux popup -w '$popup_width' -h '$popup_height' -E \
+    '$ENV_VARS $CURRENT_DIR/scripts/interdimux.sh --dashboard'"
