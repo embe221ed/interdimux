@@ -21,7 +21,10 @@ show_preview="${show_preview:-on}"
 show_full_command=$(tmux show-option -gqv @interdimux-show-full-command)
 show_full_command="${show_full_command:-on}"
 
-ENV_VARS="INTERDIMUX_SHOW_PREVIEW=$show_preview INTERDIMUX_SHOW_FULL_COMMAND=$show_full_command"
+show_git_branch=$(tmux show-option -gqv @interdimux-show-git-branch)
+show_git_branch="${show_git_branch:-on}"
+
+ENV_VARS="INTERDIMUX_SHOW_PREVIEW=$show_preview INTERDIMUX_SHOW_FULL_COMMAND=$show_full_command INTERDIMUX_SHOW_GIT_BRANCH=$show_git_branch"
 
 # prefix + f — open the navigator directly
 tmux bind-key "$interdimux_key" run-shell -b \

@@ -9,12 +9,17 @@ A portal gun for your tmux sessions.
 - Fuzzy switching between sessions, windows, and panes in a single list
 - Dashboard menu for easy access to all features
 - tmux popup integration (no new terminal needed)
-- Live preview of target pane contents
+- Live preview of target pane contents (toggle with `Ctrl-/`)
 - Metadata: current command, working directory, attached state, active markers
+- Git branch display (`‹branch›` badge) with detached HEAD support
+- SSH-aware display: highlights `user@host` for SSH/mosh connections
+- Editor-aware display: highlights the filename for vim, nvim, emacs, etc.
 - Panes only shown for multi-pane windows (keeps the list clean)
 - Kill sessions/windows/panes and rename sessions/windows inline
+- Zoom/unzoom panes, swap windows/panes, detach sessions, send keys to panes
 - Create new sessions from a directory picker
-- Dedicated kill and rename modes for batch operations
+- Dynamic context header — keybinding hints change based on selection type
+- Dedicated modes for kill, rename, zoom, swap, detach, and send operations
 - Configurable key binding, popup size, and preview toggle
 
 ## Dependencies
@@ -60,20 +65,18 @@ There are two entry points:
 
 ### Dashboard (`prefix + g`)
 
-A menu that provides access to all features:
+A fuzzy menu that provides access to all features:
 
-```
-  interdimux
+- **Switch** — Navigate & jump to target
+- **New Session** — Create session from directory
+- **Rename** — Rename a session or window
+- **Kill** — Remove sessions, windows, or panes
+- **Zoom** — Toggle pane zoom
+- **Swap** — Swap windows or panes
+- **Detach** — Detach clients from session
+- **Send Keys** — Send a command to a pane
 
-   s  Switch          Navigate & jump to target
-   n  New Session     Create session from directory
-   r  Rename          Rename a session or window
-   k  Kill            Remove sessions, windows, or panes
-
-   q  quit    esc  back
-```
-
-Press a single key to launch the corresponding tool. Kill and rename modes open the navigator with a modified prompt — `Enter` performs the action on the selected target, and the list reloads so you can repeat. Press `Esc` when done.
+Select an action to launch the corresponding tool. Action modes open the navigator with a modified prompt — `Enter` performs the action on the selected target, and the list reloads so you can repeat. Press `Esc` when done.
 
 ### Navigator (`prefix + f`)
 
@@ -85,16 +88,23 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 | `Ctrl-x` | Kill the selected session, window, or pane |
 | `Ctrl-e` | Rename the selected session or window |
 | `Ctrl-o` | Open directory picker to create a new session |
+| `Ctrl-z` | Toggle zoom on the selected pane |
+| `Ctrl-s` | Swap the selected window or pane |
+| `Ctrl-d` | Detach clients from the selected session |
+| `Ctrl-t` | Send a command to the selected pane |
+| `Ctrl-/` | Toggle preview pane |
 | `Ctrl-r` | Reload the list |
 | `Esc` | Cancel |
+
+The header dynamically updates to show only the relevant keybindings for the currently focused item (session, window, or pane).
 
 ### Tree display
 
 ```
 ▸ * my-project  (3 wins) [a]
-  ├─ * 0:editor    nvim           ~/code/proj
-  ├─   1:shell     zsh            ~/code/proj
-  └─   2:logs      tail           ~/code/proj
+  ├─ * 0:editor    nvim main.c    ~/code/proj     ‹feature-x›
+  ├─   1:shell     zsh            ~/code/proj     ‹feature-x›
+  └─   2:remote    ssh user@host  ~/code/proj
     │  ├─   .0     tail           ~/code/proj
     │  └─   .1     zsh            ~/code/proj
 ▸   other-session  (1 wins)
@@ -106,8 +116,10 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 - `│` continuation lines connect panes to their parent window
 - `*` marks the current target
 - `[a]` marks attached sessions
+- `‹branch›` git branch badge (purple) for directories inside a git repo
+- SSH connections show `user@host` highlighted in blue
+- Editors show the filename highlighted in green
 - Panes only shown for multi-pane windows
-- Full command with args shown inline (e.g. `vim -p file.c`, `ssh user@host`)
 
 ## Configuration
 
@@ -130,6 +142,9 @@ set -g @interdimux-show-preview 'on'
 # Show full command line with arguments (default: on)
 # Set to 'off' to show only the command name (faster for many panes)
 set -g @interdimux-show-full-command 'on'
+
+# Show git branch in tree display (default: on)
+set -g @interdimux-show-git-branch 'on'
 
 # Colon-separated list of directories to search for new sessions (ctrl-o)
 # Defaults to ~/projects:~/code:~/src:~/repos:~/work:~/dev (whichever exist)

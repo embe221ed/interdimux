@@ -33,6 +33,7 @@ fi
 # ---------------------------------------------------------------------------
 
 SHOW_FULL_COMMAND="${INTERDIMUX_SHOW_FULL_COMMAND:-on}"
+SHOW_GIT_BRANCH="${INTERDIMUX_SHOW_GIT_BRANCH:-on}"
 
 # Silently disable full command display when pgrep is unavailable
 if [ "$SHOW_FULL_COMMAND" = "on" ] && ! command -v pgrep >/dev/null 2>&1; then
@@ -51,6 +52,9 @@ BOLD_AMBER=$'\033[1;38;5;173m'
 DIM_SEP=$'\033[2;37m'       # dim white for separator
 DIM_PATH=$'\033[38;5;180m'  # #d7af87 — warm muted gold for paths
 DIM_CMD=$'\033[38;5;173m'   # amber for commands
+DIM_SSH=$'\033[38;5;109m'   # #87afaf — muted blue for SSH hosts
+DIM_EDIT=$'\033[38;5;150m'  # #afd787 — muted green for editor files
+DIM_GIT=$'\033[38;5;140m'   # #af87d7 — muted purple for git branches
 MARKER_COLOR=$'\033[1;38;5;173m' # bold amber for *
 
 # Column separator (dim pipe)
@@ -157,6 +161,105 @@ resolve_command() {
     [ -n "$fcmd" ] && { printf '%s' "$fcmd"; return; }
   fi
   printf '%s' "$short_cmd"
+}
+
+# ---------------------------------------------------------------------------
+# Git branch (pure bash — no subprocess per pane)
+# ---------------------------------------------------------------------------
+
+declare -A GIT_BRANCH_CACHE=()
+
+get_git_branch() {
+  local dir="$1"
+  [ "$SHOW_GIT_BRANCH" != "on" ] && return
+
+  # Check cache first
+  if [ -n "${GIT_BRANCH_CACHE[$dir]+x}" ]; then
+    printf '%s' "${GIT_BRANCH_CACHE[$dir]}"
+    return
+  fi
+
+  # Walk up to find .git
+  local d="$dir"
+  while [ "$d" != "/" ] && [ -n "$d" ]; do
+    if [ -d "$d/.git" ]; then
+      local head_file="$d/.git/HEAD"
+      [ -f "$head_file" ] || break
+      local head_content
+      read -r head_content < "$head_file" 2>/dev/null || break
+      local branch=""
+      case "$head_content" in
+        "ref: refs/heads/"*)
+          branch="${head_content#ref: refs/heads/}"
+          ;;
+        *)
+          # Detached HEAD — show short SHA
+          branch="@${head_content:0:7}"
+          ;;
+      esac
+      GIT_BRANCH_CACHE["$dir"]="$branch"
+      printf '%s' "$branch"
+      return
+    fi
+    d="${d%/*}"
+  done
+
+  GIT_BRANCH_CACHE["$dir"]=""
+}
+
+# ---------------------------------------------------------------------------
+# Smart command formatting (SSH host, editor context)
+# ---------------------------------------------------------------------------
+
+# Known editors for context-aware display
+EDITORS_PATTERN='^(n?vim|vi|nvim|nano|emacs|code|hx|helix|micro|kate|gedit|subl)$'
+
+format_command() {
+  local cmd_str="$1"
+  local cmd_name="${cmd_str%% *}"
+  local cmd_base="${cmd_name##*/}"
+
+  # SSH: highlight user@host
+  case "$cmd_base" in
+    ssh|mosh)
+      local host=""
+      local args="${cmd_str#* }"
+      # Extract last non-flag argument as the host
+      local word=""
+      for word in $args; do
+        case "$word" in
+          -*) ;;
+          *)  host="$word" ;;
+        esac
+      done
+      if [ -n "$host" ]; then
+        printf '%s%s %s%s%s' "$DIM_CMD" "$cmd_base" "$DIM_SSH" "$host" "$RST"
+        return
+      fi
+      ;;
+  esac
+
+  # Editors: highlight the file being edited
+  if [[ "$cmd_base" =~ $EDITORS_PATTERN ]]; then
+    local file=""
+    local args="${cmd_str#* }"
+    [ "$args" = "$cmd_str" ] && args=""
+    local word=""
+    for word in $args; do
+      case "$word" in
+        -*) ;;
+        *)  file="$word" ;;
+      esac
+    done
+    if [ -n "$file" ]; then
+      local fname="${file##*/}"
+      printf '%s%s %s%s%s' "$DIM_CMD" "$cmd_base" "$DIM_EDIT" "$fname" "$RST"
+      return
+    fi
+  fi
+
+  # Default
+  printf '%s%s%s' "$DIM_CMD" "$cmd_str" "$RST"
 }
 
 # ---------------------------------------------------------------------------
@@ -299,24 +402,33 @@ gather_targets() {
       local wmarker=" "
       [ "$sname" = "$current_session" ] && [ "$widx" = "$current_window" ] && wmarker="${MARKER_COLOR}*${RST}"
 
+      local wpath_raw="$wpath"
       wpath="${wpath/#$HOME/\~}"
       wpath=$(trim_path "$wpath" 22)
 
       local branch="├─"
       [ "$wi" -eq "$win_count" ] && branch="└─"
 
-      local cmd_display
-      cmd_display=$(resolve_command "$wcmd" "$wpid")
+      local raw_cmd
+      raw_cmd=$(resolve_command "$wcmd" "$wpid")
+      local cmd_formatted
+      cmd_formatted=$(format_command "$raw_cmd")
+
+      # Git branch badge
+      local git_badge=""
+      local gbranch
+      gbranch=$(get_git_branch "$wpath_raw")
+      [ -n "$gbranch" ] && git_badge=" ${DIM_GIT}‹${gbranch}›${RST}"
 
       local padded_id padded_path
       padded_id=$(dpad "$widx:$wname" 14)
       padded_path=$(dpad "$wpath" 22)
 
-      printf 'W:%s:%s\t  %s %s %s %s %s%s%s %s %s%s%s\n' \
+      printf 'W:%s:%s\t  %s %s %s %s %s%s%s %s %s%s\n' \
         "$sname" "$widx" \
         "$branch" "$wmarker" "$padded_id" \
         "$SEP" "$DIM_PATH" "$padded_path" "$RST" \
-        "$SEP" "$DIM_CMD" "$cmd_display" "$RST"
+        "$SEP" "$cmd_formatted" "$git_badge"
 
       # --- Panes (only for multi-pane windows) ---
       if [ "$wpanes" -gt 1 ]; then
@@ -338,24 +450,33 @@ gather_targets() {
           local pmarker=" "
           [ "$sname" = "$current_session" ] && [ "$widx" = "$current_window" ] && [ "$pidx" = "$current_pane" ] && pmarker="${MARKER_COLOR}*${RST}"
 
+          local ppath_raw="$ppath"
           ppath="${ppath/#$HOME/\~}"
           ppath=$(trim_path "$ppath" 22)
 
           local pbranch="├─"
           [ "$pi" -eq "$pane_count" ] && pbranch="└─"
 
-          local cmd_display
-          cmd_display=$(resolve_command "$pcmd" "$ppid")
+          local raw_cmd
+          raw_cmd=$(resolve_command "$pcmd" "$ppid")
+          local cmd_formatted
+          cmd_formatted=$(format_command "$raw_cmd")
+
+          # Git branch badge
+          local git_badge=""
+          local gbranch
+          gbranch=$(get_git_branch "$ppath_raw")
+          [ -n "$gbranch" ] && git_badge=" ${DIM_GIT}‹${gbranch}›${RST}"
 
           local padded_id padded_path
           padded_id=$(dpad ".$pidx" 11)
           padded_path=$(dpad "$ppath" 22)
 
-          printf 'P:%s:%s:%s\t  %s%s %s %s %s %s%s%s %s %s%s%s\n' \
+          printf 'P:%s:%s:%s\t  %s%s %s %s %s %s%s%s %s %s%s\n' \
             "$sname" "$widx" "$pidx" \
             "$cont" "$pbranch" "$pmarker" "$padded_id" \
             "$SEP" "$DIM_PATH" "$padded_path" "$RST" \
-            "$SEP" "$DIM_CMD" "$cmd_display" "$RST"
+            "$SEP" "$cmd_formatted" "$git_badge"
         done <<< "$pane_data"
       fi
     done <<< "$session_windows"
@@ -372,7 +493,31 @@ if [ "${1:-}" = "--preview" ]; then
   parse_spec "$spec"
 
   target=$(spec_target)
-  tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null || echo "(cannot capture pane)"
+
+  case "$SPEC_TYPE" in
+    S)
+      # Session summary: list windows with their commands and paths
+      printf '\033[1;38;5;173m%s\033[0m\n\n' "$SPEC_SESSION"
+      tmux list-windows -t "=$SPEC_SESSION" \
+        -F "#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}" 2>/dev/null | \
+      while IFS="$US" read -r wid wcmd wpath wact wpanes; do
+        marker=" "
+        [ "$wact" = "1" ] && marker="*"
+        wpath="${wpath/#$HOME/\~}"
+        printf ' %s \033[1m%-14s\033[0m \033[38;5;173m%-16s\033[0m \033[38;5;180m%s\033[0m' \
+          "$marker" "$wid" "$wcmd" "$wpath"
+        [ "$wpanes" -gt 1 ] && printf '  \033[2m(%s panes)\033[0m' "$wpanes"
+        printf '\n'
+      done
+      echo ""
+      # Show active pane content of the session
+      printf '\033[2m── active pane ──\033[0m\n'
+      tmux capture-pane -t "=$SPEC_SESSION" -p -e -S -30 2>/dev/null || echo "(no active pane)"
+      ;;
+    *)
+      tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null || echo "(cannot capture pane)"
+      ;;
+  esac
   exit 0
 fi
 
@@ -434,6 +579,111 @@ if [ "${1:-}" = "--action" ]; then
         fi
         sleep 0.5
       fi
+      ;;
+
+    zoom)
+      if [ "$SPEC_TYPE" != "P" ]; then
+        printf '\n  Only panes can be zoomed.\n' >"$tty"
+        sleep 1
+        exit 0
+      fi
+      tmux resize-pane -Z -t "$target" 2>/dev/null
+      if [ $? -eq 0 ]; then
+        printf '\n  \033[32mToggled zoom on %s.\033[0m\n' "$label" >"$tty"
+      else
+        printf '\n  \033[31mFailed to toggle zoom.\033[0m\n' >"$tty"
+      fi
+      sleep 0.4
+      ;;
+
+    detach)
+      if [ "$SPEC_TYPE" != "S" ]; then
+        printf '\n  Only sessions can be detached.\n' >"$tty"
+        sleep 1
+        exit 0
+      fi
+      printf '\n  \033[1mDetach all clients from %s?\033[0m\n\n  Press [y] to confirm: ' "$label" >"$tty"
+      read -rsn1 confirm <"$tty"
+      echo >"$tty"
+      if [[ "$confirm" =~ ^[yY]$ ]]; then
+        tmux detach-client -s "$target" 2>/dev/null
+        if [ $? -eq 0 ]; then
+          printf '\n  \033[32mDetached clients from %s.\033[0m\n' "$label" >"$tty"
+        else
+          printf '\n  \033[31mFailed to detach.\033[0m\n' >"$tty"
+        fi
+        sleep 0.5
+      fi
+      ;;
+
+    send)
+      printf '\n  \033[1mSend keys to %s\033[0m\n\n  Command: ' "$label" >"$tty"
+      read -r send_cmd <"$tty"
+      if [ -n "$send_cmd" ]; then
+        tmux send-keys -t "$target" "$send_cmd" Enter 2>/dev/null
+        if [ $? -eq 0 ]; then
+          printf '\n  \033[32mSent to %s.\033[0m\n' "$label" >"$tty"
+        else
+          printf '\n  \033[31mFailed to send keys.\033[0m\n' >"$tty"
+        fi
+        sleep 0.5
+      fi
+      ;;
+
+    swap)
+      printf '\n  \033[1mSwap %s with…\033[0m\n' "$label" >"$tty"
+      sleep 0.3
+
+      # Build list of valid swap targets (same type)
+      local swap_list
+      swap_list=$(bash "$SCRIPT_PATH" --list)
+
+      case "$SPEC_TYPE" in
+        W)
+          swap_list=$(printf '%s\n' "$swap_list" | grep "^W:")
+          ;;
+        P)
+          swap_list=$(printf '%s\n' "$swap_list" | grep "^P:")
+          ;;
+        *)
+          printf '\n  Only windows and panes can be swapped.\n' >"$tty"
+          sleep 1
+          exit 0
+          ;;
+      esac
+
+      [ -z "$swap_list" ] && { printf '\n  No valid swap targets.\n' >"$tty"; sleep 1; exit 0; }
+
+      local dest
+      dest=$(printf '%s\n' "$swap_list" | fzf \
+        "${FZF_THEME[@]}" \
+        --delimiter=$'\t' \
+        --with-nth=2 \
+        --prompt='swap with ❯ ' \
+        --header='Select swap destination (ESC to cancel)' \
+      ) || exit 0
+
+      local dest_spec="${dest%%	*}"
+      parse_spec "$dest_spec"
+      local dest_target
+      dest_target=$(spec_target)
+
+      # Re-parse source
+      parse_spec "$spec"
+      local src_target
+      src_target=$(spec_target)
+
+      case "$SPEC_TYPE" in
+        W) tmux swap-window -s "$src_target" -t "$dest_target" 2>/dev/null ;;
+        P) tmux swap-pane   -s "$src_target" -t "$dest_target" 2>/dev/null ;;
+      esac
+
+      if [ $? -eq 0 ]; then
+        printf '\n  \033[32mSwapped.\033[0m\n' >"$tty"
+      else
+        printf '\n  \033[31mSwap failed.\033[0m\n' >"$tty"
+      fi
+      sleep 0.4
       ;;
   esac
   exit 0
@@ -519,6 +769,23 @@ if [ "${1:-}" = "--list" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Dynamic header (called by fzf focus:transform-header)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--header-for" ]; then
+  spec="$2"
+  spec="${spec%%	*}"
+  type="${spec%%:*}"
+  case "$type" in
+    S) echo "enter=switch  ^x=kill  ^e=rename  ^d=detach  ^o=new  ^/=preview" ;;
+    W) echo "enter=switch  ^x=kill  ^e=rename  ^s=swap  ^o=new  ^/=preview" ;;
+    P) echo "enter=switch  ^x=kill  ^z=zoom  ^s=swap  ^t=send  ^/=preview" ;;
+    *)  echo "enter=switch  ^x=kill  ^e=rename  ^o=new  ^/=preview" ;;
+  esac
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
 
@@ -526,10 +793,14 @@ if [ "${1:-}" = "--dashboard" ]; then
   SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
   items=$(printf '%s\t  \033[1;38;5;173m%-16s\033[0m \033[2m%s\033[0m\n' \
-    "switch" "Switch"      "Navigate & jump to target" \
+    "switch" "Switch"       "Navigate & jump to target" \
     "new"    "New Session"  "Create session from directory" \
     "rename" "Rename"       "Rename a session or window" \
-    "kill"   "Kill"         "Remove sessions, windows, or panes")
+    "kill"   "Kill"         "Remove sessions, windows, or panes" \
+    "zoom"   "Zoom"         "Toggle pane zoom" \
+    "swap"   "Swap"         "Swap windows or panes" \
+    "detach" "Detach"       "Detach clients from session" \
+    "send"   "Send Keys"    "Send a command to a pane")
 
   choice=$(printf '%s\n' "$items" | fzf \
     "${FZF_THEME[@]}" \
@@ -547,6 +818,10 @@ if [ "${1:-}" = "--dashboard" ]; then
     new)    exec bash "$SCRIPT_PATH" --dirs ;;
     rename) INTERDIMUX_MODE=rename exec bash "$SCRIPT_PATH" ;;
     kill)   INTERDIMUX_MODE=kill   exec bash "$SCRIPT_PATH" ;;
+    zoom)   INTERDIMUX_MODE=zoom   exec bash "$SCRIPT_PATH" ;;
+    swap)   INTERDIMUX_MODE=swap   exec bash "$SCRIPT_PATH" ;;
+    detach) INTERDIMUX_MODE=detach exec bash "$SCRIPT_PATH" ;;
+    send)   INTERDIMUX_MODE=send   exec bash "$SCRIPT_PATH" ;;
   esac
 fi
 
@@ -582,13 +857,47 @@ case "$INTERDIMUX_MODE" in
       --bind="enter:execute(bash '$SCRIPT_PATH' --action rename {1})+reload(bash '$SCRIPT_PATH' --list)"
     )
     ;;
+  zoom)
+    fzf_opts+=(
+      --prompt='interdimux zoom ❯ '
+      --header='enter=toggle zoom  ctrl-r=reload  esc=quit'
+      --bind="enter:execute-silent(bash '$SCRIPT_PATH' --action zoom {1})+reload(bash '$SCRIPT_PATH' --list)"
+    )
+    ;;
+  swap)
+    fzf_opts+=(
+      --prompt='interdimux swap ❯ '
+      --header='enter=swap  ctrl-r=reload  esc=quit'
+      --bind="enter:execute(bash '$SCRIPT_PATH' --action swap {1})+reload(bash '$SCRIPT_PATH' --list)"
+    )
+    ;;
+  detach)
+    fzf_opts+=(
+      --prompt='interdimux detach ❯ '
+      --header='enter=detach  ctrl-r=reload  esc=quit'
+      --bind="enter:execute(bash '$SCRIPT_PATH' --action detach {1})+reload(bash '$SCRIPT_PATH' --list)"
+    )
+    ;;
+  send)
+    fzf_opts+=(
+      --prompt='interdimux send ❯ '
+      --header='enter=send keys  ctrl-r=reload  esc=quit'
+      --bind="enter:execute(bash '$SCRIPT_PATH' --action send {1})+reload(bash '$SCRIPT_PATH' --list)"
+    )
+    ;;
   *)
     fzf_opts+=(
       --prompt='interdimux ❯ '
-      --header='enter=switch  ctrl-x=kill  ctrl-e=rename  ctrl-o=new session  ctrl-r=reload'
+      --header='enter=switch  ^x=kill  ^e=rename  ^o=new  ^/=preview'
+      --bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {1})"
       --bind="ctrl-x:execute(bash '$SCRIPT_PATH' --action kill {1})+reload(bash '$SCRIPT_PATH' --list)"
       --bind="ctrl-e:execute(bash '$SCRIPT_PATH' --action rename {1})+reload(bash '$SCRIPT_PATH' --list)"
       --bind="ctrl-o:execute(bash '$SCRIPT_PATH' --dirs)+reload(bash '$SCRIPT_PATH' --list)"
+      --bind="ctrl-z:execute-silent(bash '$SCRIPT_PATH' --action zoom {1})+reload(bash '$SCRIPT_PATH' --list)"
+      --bind="ctrl-s:execute(bash '$SCRIPT_PATH' --action swap {1})+reload(bash '$SCRIPT_PATH' --list)"
+      --bind="ctrl-d:execute(bash '$SCRIPT_PATH' --action detach {1})+reload(bash '$SCRIPT_PATH' --list)"
+      --bind="ctrl-t:execute(bash '$SCRIPT_PATH' --action send {1})+reload(bash '$SCRIPT_PATH' --list)"
+      --bind='ctrl-/:toggle-preview'
     )
     ;;
 esac
