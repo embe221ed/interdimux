@@ -24,14 +24,14 @@ show_full_command="${show_full_command:-on}"
 show_git_branch=$(tmux show-option -gqv @interdimux-show-git-branch)
 show_git_branch="${show_git_branch:-on}"
 
-ENV_VARS="INTERDIMUX_SHOW_PREVIEW=$show_preview INTERDIMUX_SHOW_FULL_COMMAND=$show_full_command INTERDIMUX_SHOW_GIT_BRANCH=$show_git_branch"
+ENV_VARS="INTERDIMUX_SHOW_PREVIEW=$show_preview INTERDIMUX_SHOW_FULL_COMMAND=$show_full_command INTERDIMUX_SHOW_GIT_BRANCH=$show_git_branch INTERDIMUX_POPUP_WIDTH=$popup_width INTERDIMUX_POPUP_HEIGHT=$popup_height"
 
 # prefix + f — open the navigator directly
 tmux bind-key "$interdimux_key" run-shell -b \
   "tmux popup -w '$popup_width' -h '$popup_height' -E \
     '$ENV_VARS $CURRENT_DIR/scripts/interdimux.sh'"
 
-# prefix + g — open the dashboard
+# prefix + g — open the dashboard (compact menu)
 tmux bind-key "$dashboard_key" run-shell -b \
-  "tmux popup -w '$popup_width' -h '$popup_height' -E \
+  "tmux popup -w 70 -h 20 -E \
     '$ENV_VARS $CURRENT_DIR/scripts/interdimux.sh --dashboard'"

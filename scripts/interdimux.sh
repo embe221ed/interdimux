@@ -1137,6 +1137,16 @@ fi
 if [ "${1:-}" = "--dashboard" ]; then
   SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
+  # Popup dimensions for the full-size tools (passed from interdimux.tmux)
+  PW="${INTERDIMUX_POPUP_WIDTH:-80%}"
+  PH="${INTERDIMUX_POPUP_HEIGHT:-75%}"
+
+  # Re-export env vars for the child popup
+  ENV_FWD="INTERDIMUX_SHOW_PREVIEW=${INTERDIMUX_SHOW_PREVIEW:-on}"
+  ENV_FWD+=" INTERDIMUX_SHOW_FULL_COMMAND=${INTERDIMUX_SHOW_FULL_COMMAND:-on}"
+  ENV_FWD+=" INTERDIMUX_SHOW_GIT_BRANCH=${INTERDIMUX_SHOW_GIT_BRANCH:-on}"
+  ENV_FWD+=" INTERDIMUX_POPUP_WIDTH=$PW INTERDIMUX_POPUP_HEIGHT=$PH"
+
   items=$(printf '%s\t  \033[1;38;5;173m%-16s\033[0m \033[2m%s\033[0m\n' \
     "switch" "Switch"       "Navigate & jump to target" \
     "new"    "New Session"  "Create session from directory" \
@@ -1158,16 +1168,25 @@ if [ "${1:-}" = "--dashboard" ]; then
   ) || exit 0
 
   action="${choice%%	*}"
+
+  # Launch the selected tool in a new full-size popup.
+  # Use run-shell -b so the popup command runs asynchronously after
+  # the dashboard's popup closes (can't nest popups).
+  launch() {
+    tmux run-shell -b "tmux popup -w '$PW' -h '$PH' -E '$ENV_FWD $1'"
+  }
+
   case "$action" in
-    switch) exec bash "$SCRIPT_PATH" ;;
-    new)    exec bash "$SCRIPT_PATH" --dirs ;;
-    rename) INTERDIMUX_MODE=rename exec bash "$SCRIPT_PATH" ;;
-    kill)   INTERDIMUX_MODE=kill   exec bash "$SCRIPT_PATH" ;;
-    zoom)   INTERDIMUX_MODE=zoom   exec bash "$SCRIPT_PATH" ;;
-    swap)   INTERDIMUX_MODE=swap   exec bash "$SCRIPT_PATH" ;;
-    detach) INTERDIMUX_MODE=detach exec bash "$SCRIPT_PATH" ;;
-    send)   INTERDIMUX_MODE=send   exec bash "$SCRIPT_PATH" ;;
+    switch) launch "bash '${SCRIPT_PATH}'" ;;
+    new)    launch "bash '${SCRIPT_PATH}' --dirs" ;;
+    rename) launch "INTERDIMUX_MODE=rename bash '${SCRIPT_PATH}'" ;;
+    kill)   launch "INTERDIMUX_MODE=kill bash '${SCRIPT_PATH}'" ;;
+    zoom)   launch "INTERDIMUX_MODE=zoom bash '${SCRIPT_PATH}'" ;;
+    swap)   launch "INTERDIMUX_MODE=swap bash '${SCRIPT_PATH}'" ;;
+    detach) launch "INTERDIMUX_MODE=detach bash '${SCRIPT_PATH}'" ;;
+    send)   launch "INTERDIMUX_MODE=send bash '${SCRIPT_PATH}'" ;;
   esac
+  exit 0
 fi
 
 # ---------------------------------------------------------------------------
