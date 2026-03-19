@@ -14,6 +14,9 @@ set -euo pipefail
 
 US=$'\x1f'  # Unit separator — safe field delimiter for tmux data parsing
 
+# Script path — computed once, used by fzf bindings to call back into this script
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
@@ -35,13 +38,8 @@ fi
 SHOW_FULL_COMMAND="${INTERDIMUX_SHOW_FULL_COMMAND:-on}"
 SHOW_GIT_BRANCH="${INTERDIMUX_SHOW_GIT_BRANCH:-on}"
 
-# Silently disable full command display when pgrep is unavailable
-if [ "$SHOW_FULL_COMMAND" = "on" ] && ! command -v pgrep >/dev/null 2>&1; then
-  SHOW_FULL_COMMAND="off"
-fi
-
 # ---------------------------------------------------------------------------
-# Colors — warm palette inspired by Claude Code UI
+# Colors — warm palette
 # ---------------------------------------------------------------------------
 
 RST=$'\033[0m'
@@ -95,7 +93,7 @@ detect_project_type() {
   [ -f "$dir/flake.nix" ]       && { echo "Nix";     return; }
   [ -f "$dir/Makefile" ]        && { echo "Make";    return; }
   [ -d "$dir/.git" ]            && { echo "Git";     return; }
-  echo ""
+  return 0
 }
 
 RECENT_DIRS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/interdimux/recent_dirs"
@@ -117,19 +115,16 @@ record_recent_dir() {
   dir_parent="$(dirname "$RECENT_DIRS_FILE")"
   [ -d "$dir_parent" ] || mkdir -p "$dir_parent"
 
-  # Build new file: selected dir on top, then existing entries (deduped)
   local tmp
   tmp=$(mktemp)
   echo "$dir" > "$tmp"
   if [ -f "$RECENT_DIRS_FILE" ]; then
     grep -v "^${dir}$" "$RECENT_DIRS_FILE" >> "$tmp" 2>/dev/null || true
   fi
-  # Truncate to 50 entries
   head -50 "$tmp" > "$RECENT_DIRS_FILE"
   rm -f "$tmp"
 }
 
-# Resolve the directory finder binary once
 resolve_finder() {
   if command -v fd >/dev/null 2>&1; then
     echo "fd"
@@ -142,7 +137,6 @@ resolve_finder() {
   fi
 }
 
-# Scan directories under a root at a given depth using fd or find
 scan_dirs() {
   local root="$1" depth="$2" finder="$3"
   [ -d "$root" ] || return
@@ -156,18 +150,43 @@ scan_dirs() {
   esac
 }
 
-# Resolve search paths from config or defaults
 resolve_search_paths() {
   local project_dirs="${INTERDIMUX_PROJECT_DIRS:-$(tmux show-option -gqv @interdimux-project-dirs 2>/dev/null || true)}"
   if [ -n "${project_dirs:-}" ]; then
     IFS=':' read -ra _paths <<< "$project_dirs"
     for p in "${_paths[@]}"; do
-      eval echo "$p"  # expand ~
+      # Safe tilde expansion without eval
+      echo "${p/#\~/$HOME}"
     done
   else
     for d in "$HOME/projects" "$HOME/code" "$HOME/src" "$HOME/repos" "$HOME/work" "$HOME/dev"; do
       [ -d "$d" ] && echo "$d"
     done
+  fi
+}
+
+# Shared helper for --dirs-list deep/scan modes: classify a dir as project or other
+collect_dir() {
+  local d="$1"
+  if is_project_root "$d"; then
+    _projects+=("$d")
+  else
+    _others+=("$d")
+  fi
+}
+
+# Sort and emit arrays of dirs by tier (projects first, then others)
+emit_sorted_tiers() {
+  if [ "${#_projects[@]}" -gt 0 ]; then
+    local sorted
+    while IFS= read -r d; do
+      emit_dir "$d" project ""
+    done < <(printf '%s\n' "${_projects[@]}" | sort -u)
+  fi
+  if [ "${#_others[@]}" -gt 0 ]; then
+    while IFS= read -r d; do
+      emit_dir "$d" dir ""
+    done < <(printf '%s\n' "${_others[@]}" | sort -u)
   fi
 }
 
@@ -276,13 +295,11 @@ get_git_branch() {
   local dir="$1"
   [ "$SHOW_GIT_BRANCH" != "on" ] && return
 
-  # Check cache first
   if [ -n "${GIT_BRANCH_CACHE[$dir]+x}" ]; then
     printf '%s' "${GIT_BRANCH_CACHE[$dir]}"
     return
   fi
 
-  # Walk up to find .git
   local d="$dir"
   while [ "$d" != "/" ] && [ -n "$d" ]; do
     if [ -d "$d/.git" ]; then
@@ -292,13 +309,8 @@ get_git_branch() {
       read -r head_content < "$head_file" 2>/dev/null || break
       local branch=""
       case "$head_content" in
-        "ref: refs/heads/"*)
-          branch="${head_content#ref: refs/heads/}"
-          ;;
-        *)
-          # Detached HEAD — show short SHA
-          branch="@${head_content:0:7}"
-          ;;
+        "ref: refs/heads/"*) branch="${head_content#ref: refs/heads/}" ;;
+        *) branch="@${head_content:0:7}" ;;
       esac
       GIT_BRANCH_CACHE["$dir"]="$branch"
       printf '%s' "$branch"
@@ -314,7 +326,6 @@ get_git_branch() {
 # Smart command formatting (SSH host, editor context)
 # ---------------------------------------------------------------------------
 
-# Known editors for context-aware display
 EDITORS_PATTERN='^(n?vim|vi|nvim|nano|emacs|code|hx|helix|micro|kate|gedit|subl)$'
 
 format_command() {
@@ -325,10 +336,8 @@ format_command() {
   # SSH: highlight user@host
   case "$cmd_base" in
     ssh|mosh)
-      local host=""
+      local host="" word
       local args="${cmd_str#* }"
-      # Extract last non-flag argument as the host
-      local word=""
       for word in $args; do
         case "$word" in
           -*) ;;
@@ -344,10 +353,9 @@ format_command() {
 
   # Editors: highlight the file being edited
   if [[ "$cmd_base" =~ $EDITORS_PATTERN ]]; then
-    local file=""
+    local file="" word
     local args="${cmd_str#* }"
     [ "$args" = "$cmd_str" ] && args=""
-    local word=""
     for word in $args; do
       case "$word" in
         -*) ;;
@@ -361,7 +369,6 @@ format_command() {
     fi
   fi
 
-  # Default
   printf '%s%s%s' "$DIM_CMD" "$cmd_str" "$RST"
 }
 
@@ -381,10 +388,8 @@ dpad() {
 trim_path() {
   local path="$1" max_width="$2"
 
-  # Already fits
   [ "${#path}" -le "$max_width" ] && { printf '%s' "$path"; return; }
 
-  # Preserve leading ~ or / as the root prefix
   local prefix=""
   case "$path" in
     "~/"*) prefix="~/"; path="${path#\~/}" ;;
@@ -394,7 +399,6 @@ trim_path() {
   local ellipsis="…/"
   local budget=$(( max_width - ${#prefix} - ${#ellipsis} ))
 
-  # Take path components from the right until budget is exhausted
   local result="" remainder="$path"
   while [ -n "$remainder" ]; do
     local component="${remainder##*/}"
@@ -408,7 +412,6 @@ trim_path() {
       break
     fi
 
-    # Pop rightmost component
     remainder="${remainder%/*}"
     if [ -z "$result" ]; then
       result="$component"
@@ -478,52 +481,49 @@ gather_targets() {
   done <<< "$all_panes_raw"
 
   # Iterate sessions in list-sessions order
+  local marker flags session_windows win_count wi
+  local wmarker wpath_raw branch raw_cmd cmd_formatted git_badge gbranch padded_id padded_path
+  local pane_data pane_count pi cont
+  local pmarker ppath_raw pbranch
+
   while IFS="$US" read -r sname swins sattach; do
-    # --- Session header ---
-    local marker=" "
+    marker=" "
     [ "$sname" = "$current_session" ] && marker="${MARKER_COLOR}*${RST}"
 
-    local flags=""
+    flags=""
     [ -n "$sattach" ] && flags=" ${DIM}[a]${RST}"
 
     printf 'S:%s\t%s▸%s %s %s%s  %s(%s wins)%s%s\n' \
       "$sname" \
       "$BOLD" "$RST" "$marker" "$BOLD" "$sname" "$DIM" "$swins" "$RST" "$flags"
 
-    # --- Windows for this session ---
-    local session_windows="${windows_by_session[$sname]:-}"
+    session_windows="${windows_by_session[$sname]:-}"
     [ -z "$session_windows" ] && continue
 
-    local win_count
     win_count=$(printf '%s\n' "$session_windows" | wc -l)
     win_count=${win_count// /}
 
-    local wi=0
+    wi=0
     while IFS="$US" read -r _sn widx wname _wact wcmd wpath wpanes wpid; do
       wi=$((wi + 1))
 
-      local wmarker=" "
+      wmarker=" "
       [ "$sname" = "$current_session" ] && [ "$widx" = "$current_window" ] && wmarker="${MARKER_COLOR}*${RST}"
 
-      local wpath_raw="$wpath"
+      wpath_raw="$wpath"
       wpath="${wpath/#$HOME/\~}"
       wpath=$(trim_path "$wpath" 22)
 
-      local branch="├─"
+      branch="├─"
       [ "$wi" -eq "$win_count" ] && branch="└─"
 
-      local raw_cmd
       raw_cmd=$(resolve_command "$wcmd" "$wpid")
-      local cmd_formatted
       cmd_formatted=$(format_command "$raw_cmd")
 
-      # Git branch badge
-      local git_badge=""
-      local gbranch
+      git_badge=""
       gbranch=$(get_git_branch "$wpath_raw")
       [ -n "$gbranch" ] && git_badge=" ${DIM_GIT}‹${gbranch}›${RST}"
 
-      local padded_id padded_path
       padded_id=$(dpad "$widx:$wname" 14)
       padded_path=$(dpad "$wpath" 22)
 
@@ -533,45 +533,38 @@ gather_targets() {
         "$SEP" "$DIM_PATH" "$padded_path" "$RST" \
         "$SEP" "$cmd_formatted" "$git_badge"
 
-      # --- Panes (only for multi-pane windows) ---
+      # Panes (only for multi-pane windows)
       if [ "$wpanes" -gt 1 ]; then
-        local pane_data="${panes_by_window[${sname}${US}${widx}]:-}"
+        pane_data="${panes_by_window[${sname}${US}${widx}]:-}"
         [ -z "$pane_data" ] && continue
 
-        local pane_count
         pane_count=$(printf '%s\n' "$pane_data" | wc -l)
         pane_count=${pane_count// /}
-        local pi=0
+        pi=0
 
-        # Continuation: │ aligns under ├/└, blank for last window
-        local cont="│  "
+        cont="│  "
         [ "$wi" -eq "$win_count" ] && cont="   "
 
         while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2; do
           pi=$((pi + 1))
 
-          local pmarker=" "
+          pmarker=" "
           [ "$sname" = "$current_session" ] && [ "$widx" = "$current_window" ] && [ "$pidx" = "$current_pane" ] && pmarker="${MARKER_COLOR}*${RST}"
 
-          local ppath_raw="$ppath"
+          ppath_raw="$ppath"
           ppath="${ppath/#$HOME/\~}"
           ppath=$(trim_path "$ppath" 22)
 
-          local pbranch="├─"
+          pbranch="├─"
           [ "$pi" -eq "$pane_count" ] && pbranch="└─"
 
-          local raw_cmd
           raw_cmd=$(resolve_command "$pcmd" "$ppid")
-          local cmd_formatted
           cmd_formatted=$(format_command "$raw_cmd")
 
-          # Git branch badge
-          local git_badge=""
-          local gbranch
+          git_badge=""
           gbranch=$(get_git_branch "$ppath_raw")
           [ -n "$gbranch" ] && git_badge=" ${DIM_GIT}‹${gbranch}›${RST}"
 
-          local padded_id padded_path
           padded_id=$(dpad ".$pidx" 11)
           padded_path=$(dpad "$ppath" 22)
 
@@ -591,6 +584,7 @@ gather_targets() {
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--preview" ]; then
+  set +e
   spec="$2"
   spec="${spec%%	*}"
   parse_spec "$spec"
@@ -599,7 +593,6 @@ if [ "${1:-}" = "--preview" ]; then
 
   case "$SPEC_TYPE" in
     S)
-      # Session summary: list windows with their commands and paths
       printf '\033[1;38;5;173m%s\033[0m\n\n' "$SPEC_SESSION"
       tmux list-windows -t "=$SPEC_SESSION" \
         -F "#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}" 2>/dev/null | \
@@ -613,7 +606,6 @@ if [ "${1:-}" = "--preview" ]; then
         printf '\n'
       done
       echo ""
-      # Show active pane content of the session
       printf '\033[2m── active pane ──\033[0m\n'
       tmux capture-pane -t "=$SPEC_SESSION" -p -e -S -30 2>/dev/null || echo "(no active pane)"
       ;;
@@ -629,6 +621,7 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--dirs-preview" ]; then
+  set +e
   dir="$2"
   [ -d "$dir" ] || { echo "(directory not found)"; exit 0; }
 
@@ -636,50 +629,38 @@ if [ "${1:-}" = "--dirs-preview" ]; then
   printf '\033[1;38;5;173m%s\033[0m\n' "$(basename "$dir")"
   printf '\033[2m%s\033[0m\n\n' "$display_path"
 
-  # Project type
   ptype=$(detect_project_type "$dir")
   [ -n "$ptype" ] && printf '  \033[38;5;150mType:\033[0m %s\n' "$ptype"
 
-  # Git info
   if [ -d "$dir/.git" ]; then
-    local_branch=""
     head_file="$dir/.git/HEAD"
     if [ -f "$head_file" ]; then
-      head_content=""
-      read -r head_content < "$head_file" 2>/dev/null
+      read -r head_content < "$head_file" 2>/dev/null || head_content=""
       case "$head_content" in
-        "ref: refs/heads/"*) local_branch="${head_content#ref: refs/heads/}" ;;
-        *) local_branch="@${head_content:0:7}" ;;
+        "ref: refs/heads/"*) printf '  \033[38;5;140mBranch:\033[0m %s\n' "${head_content#ref: refs/heads/}" ;;
+        ?*) printf '  \033[38;5;140mBranch:\033[0m @%s\n' "${head_content:0:7}" ;;
       esac
     fi
-    [ -n "$local_branch" ] && printf '  \033[38;5;140mBranch:\033[0m %s\n' "$local_branch"
 
-    # Last commit (one-liner)
     last_commit=$(git -C "$dir" log -1 --oneline 2>/dev/null || true)
     [ -n "$last_commit" ] && printf '  \033[38;5;180mCommit:\033[0m %s\n' "$last_commit"
 
-    # Working tree status summary
     changed=$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
     [ "$changed" -gt 0 ] && printf '  \033[38;5;173mChanges:\033[0m %s files\n' "$changed"
   fi
 
-  # README excerpt
   for readme in README.md README.rst README.txt README; do
     if [ -f "$dir/$readme" ]; then
-      desc=""
       while IFS= read -r line; do
-        # Skip empty lines and markdown headings
         case "$line" in
           ""|\#*|=*|-*) continue ;;
-          *) desc="$line"; break ;;
+          *) printf '\n  \033[2m%s\033[0m\n' "$line"; break ;;
         esac
       done < "$dir/$readme"
-      [ -n "$desc" ] && printf '\n  \033[2m%s\033[0m\n' "$desc"
       break
     fi
   done
 
-  # Compact directory listing
   printf '\n\033[2m── contents ──\033[0m\n'
   ls -1p "$dir" 2>/dev/null | head -20
 
@@ -698,8 +679,8 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --deep) mode="deep"; query="$2"; shift 2 ;;
-      --scan) mode="scan"; query="$2"; shift 2 ;;
+      --deep) mode="deep"; query="${2:-}"; shift 2 ;;
+      --scan) mode="scan"; query="${2:-}"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -707,11 +688,9 @@ if [ "${1:-}" = "--dirs-list" ]; then
   finder=$(resolve_finder)
   [ -z "$finder" ] && { echo "interdimux: no directory finder available" >&2; exit 1; }
 
-  # Collect search paths
   mapfile -t search_paths < <(resolve_search_paths)
   [ ${#search_paths[@]} -eq 0 ] && search_paths=("$HOME")
 
-  # Track already-emitted paths to avoid duplicates
   declare -A seen=()
 
   emit_dir() {
@@ -741,64 +720,36 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
   case "$mode" in
     default)
-      # Tier 1: Recent directories
       while IFS= read -r d; do
         [ -n "$d" ] && emit_dir "$d" recent ""
       done < <(load_recent_dirs)
 
-      # Tier 2: Project roots (depth 1 children of search paths)
-      projects=()
-      others=()
+      _projects=()
+      _others=()
       for sp in "${search_paths[@]}"; do
         [ -d "$sp" ] || continue
         while IFS= read -r d; do
           [ -z "$d" ] || [ "$d" = "$sp" ] && continue
-          if is_project_root "$d"; then
-            projects+=("$d")
-          else
-            others+=("$d")
-          fi
+          collect_dir "$d"
         done < <(scan_dirs "$sp" 1 "$finder")
       done
-
-      # Emit projects sorted
-      IFS=$'\n' sorted_projects=($(printf '%s\n' "${projects[@]}" | sort)); unset IFS
-      for d in "${sorted_projects[@]}"; do
-        emit_dir "$d" project ""
-      done
-
-      # Tier 3: Other directories
-      IFS=$'\n' sorted_others=($(printf '%s\n' "${others[@]}" | sort)); unset IFS
-      for d in "${sorted_others[@]}"; do
-        emit_dir "$d" dir ""
-      done
+      emit_sorted_tiers
       ;;
 
     deep)
       # Deep scan: increase depth on directories matching the query.
       # If query is empty, scan all search paths at depth 2.
-
-      # Emit matching recent dirs
       while IFS= read -r d; do
         [ -n "$d" ] || continue
-        [ -z "$query" ] || [[ "$d" == *"$query"* ]] && emit_dir "$d" recent ""
+        if [ -z "$query" ] || [[ "$d" == *"$query"* ]]; then
+          emit_dir "$d" recent ""
+        fi
       done < <(load_recent_dirs)
 
-      # Collect all candidates, then emit projects before plain dirs
-      projects=()
-      others=()
-
-      collect_dir() {
-        local d="$1"
-        if is_project_root "$d"; then
-          projects+=("$d")
-        else
-          others+=("$d")
-        fi
-      }
+      _projects=()
+      _others=()
 
       if [ -z "$query" ]; then
-        # No query: scan all search paths at depth 2
         for sp in "${search_paths[@]}"; do
           [ -d "$sp" ] || continue
           while IFS= read -r d; do
@@ -807,7 +758,6 @@ if [ "${1:-}" = "--dirs-list" ]; then
           done < <(scan_dirs "$sp" 2 "$finder")
         done
       else
-        # Query present: deep-scan only matching children at depth 3
         for sp in "${search_paths[@]}"; do
           [ -d "$sp" ] || continue
           while IFS= read -r d; do
@@ -822,7 +772,6 @@ if [ "${1:-}" = "--dirs-list" ]; then
           done < <(scan_dirs "$sp" 1 "$finder")
         done
 
-        # If query looks like an absolute path, scan it directly
         if [[ "$query" == /* ]] && [ -d "$query" ]; then
           while IFS= read -r d; do
             [ -z "$d" ] && continue
@@ -831,62 +780,33 @@ if [ "${1:-}" = "--dirs-list" ]; then
         fi
       fi
 
-      IFS=$'\n' sorted_projects=($(printf '%s\n' "${projects[@]}" | sort -u)); unset IFS
-      for d in "${sorted_projects[@]}"; do
-        emit_dir "$d" project ""
-      done
-      IFS=$'\n' sorted_others=($(printf '%s\n' "${others[@]}" | sort -u)); unset IFS
-      for d in "${sorted_others[@]}"; do
-        emit_dir "$d" dir ""
-      done
+      emit_sorted_tiers
       ;;
 
     scan)
-      # Custom path scan: treat query as a filesystem path
       scan_root=""
 
-      # Try the query as-is first, then expand ~
-      if [ -d "$query" ]; then
+      if [ -n "$query" ] && [ -d "$query" ]; then
         scan_root="$query"
-      else
+      elif [ -n "$query" ]; then
         expanded="${query/#\~/$HOME}"
         if [ -d "$expanded" ]; then
           scan_root="$expanded"
         else
-          # Try the parent directory
           parent="$(dirname "$expanded")"
           [ -d "$parent" ] && scan_root="$parent"
         fi
       fi
 
       if [ -n "$scan_root" ]; then
-        # Collect all candidates, then emit projects before plain dirs
-        projects=()
-        others=()
-
-        collect_dir() {
-          local d="$1"
-          if is_project_root "$d"; then
-            projects+=("$d")
-          else
-            others+=("$d")
-          fi
-        }
-
+        _projects=()
+        _others=()
         collect_dir "$scan_root"
         while IFS= read -r d; do
           [ -z "$d" ] || [ "$d" = "$scan_root" ] && continue
           collect_dir "$d"
         done < <(scan_dirs "$scan_root" 2 "$finder")
-
-        IFS=$'\n' sorted_projects=($(printf '%s\n' "${projects[@]}" | sort -u)); unset IFS
-        for d in "${sorted_projects[@]}"; do
-          emit_dir "$d" project ""
-        done
-        IFS=$'\n' sorted_others=($(printf '%s\n' "${others[@]}" | sort -u)); unset IFS
-        for d in "${sorted_others[@]}"; do
-          emit_dir "$d" dir ""
-        done
+        emit_sorted_tiers
       fi
       ;;
   esac
@@ -899,9 +819,6 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--action" ]; then
-  # Disable set -e inside action handlers — we handle errors ourselves
-  set +e
-  # Disable set -e inside action handlers — we handle errors ourselves
   set +e
   action="$2"
   spec="$3"
@@ -910,8 +827,6 @@ if [ "${1:-}" = "--action" ]; then
   target=$(spec_target)
   label=$(spec_label)
 
-  # Write directly to /dev/tty — fzf's execute captures stdout,
-  # so normal printf is invisible inside a tmux popup.
   tty=/dev/tty
 
   case "$action" in
@@ -962,8 +877,7 @@ if [ "${1:-}" = "--action" ]; then
         sleep 1
         exit 0
       fi
-      tmux resize-pane -Z -t "$target" 2>/dev/null
-      if [ $? -eq 0 ]; then
+      if tmux resize-pane -Z -t "$target" 2>/dev/null; then
         printf '\n  \033[32mToggled zoom on %s.\033[0m\n' "$label" >"$tty"
       else
         printf '\n  \033[31mFailed to toggle zoom.\033[0m\n' >"$tty"
@@ -981,8 +895,7 @@ if [ "${1:-}" = "--action" ]; then
       read -rsn1 confirm <"$tty"
       echo >"$tty"
       if [[ "$confirm" =~ ^[yY]$ ]]; then
-        tmux detach-client -s "$target" 2>/dev/null
-        if [ $? -eq 0 ]; then
+        if tmux detach-client -s "$target" 2>/dev/null; then
           printf '\n  \033[32mDetached clients from %s.\033[0m\n' "$label" >"$tty"
         else
           printf '\n  \033[31mFailed to detach.\033[0m\n' >"$tty"
@@ -995,8 +908,7 @@ if [ "${1:-}" = "--action" ]; then
       printf '\n  \033[1mSend keys to %s\033[0m\n\n  Command: ' "$label" >"$tty"
       read -r send_cmd <"$tty"
       if [ -n "$send_cmd" ]; then
-        tmux send-keys -t "$target" "$send_cmd" Enter 2>/dev/null
-        if [ $? -eq 0 ]; then
+        if tmux send-keys -t "$target" "$send_cmd" Enter 2>/dev/null; then
           printf '\n  \033[32mSent to %s.\033[0m\n' "$label" >"$tty"
         else
           printf '\n  \033[31mFailed to send keys.\033[0m\n' >"$tty"
@@ -1009,17 +921,12 @@ if [ "${1:-}" = "--action" ]; then
       printf '\n  \033[1mSwap %s with…\033[0m\n' "$label" >"$tty"
       sleep 0.3
 
-      # Build list of valid swap targets (same type)
-      local swap_list
-      swap_list=$(bash "$SCRIPT_PATH" --list)
+      # Call gather_targets directly (subprocess would hit set -euo issues)
+      swap_list=$(gather_targets)
 
       case "$SPEC_TYPE" in
-        W)
-          swap_list=$(printf '%s\n' "$swap_list" | grep "^W:")
-          ;;
-        P)
-          swap_list=$(printf '%s\n' "$swap_list" | grep "^P:")
-          ;;
+        W) swap_list=$(printf '%s\n' "$swap_list" | grep "^W:" || true) ;;
+        P) swap_list=$(printf '%s\n' "$swap_list" | grep "^P:" || true) ;;
         *)
           printf '\n  Only windows and panes can be swapped.\n' >"$tty"
           sleep 1
@@ -1029,7 +936,6 @@ if [ "${1:-}" = "--action" ]; then
 
       [ -z "$swap_list" ] && { printf '\n  No valid swap targets.\n' >"$tty"; sleep 1; exit 0; }
 
-      local dest
       dest=$(printf '%s\n' "$swap_list" | fzf \
         "${FZF_THEME[@]}" \
         --delimiter=$'\t' \
@@ -1038,14 +944,11 @@ if [ "${1:-}" = "--action" ]; then
         --header='Select swap destination (ESC to cancel)' \
       ) || exit 0
 
-      local dest_spec="${dest%%	*}"
+      dest_spec="${dest%%	*}"
       parse_spec "$dest_spec"
-      local dest_target
       dest_target=$(spec_target)
 
-      # Re-parse source
       parse_spec "$spec"
-      local src_target
       src_target=$(spec_target)
 
       case "$SPEC_TYPE" in
@@ -1070,7 +973,6 @@ fi
 
 if [ "${1:-}" = "--dirs" ]; then
   set +e
-  SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
   selected=$(bash "$SCRIPT_PATH" --dirs-list | fzf \
     "${FZF_THEME[@]}" \
@@ -1089,12 +991,10 @@ if [ "${1:-}" = "--dirs" ]; then
   dir_path="${selected%%	*}"
   dir_path="${dir_path%/}"
 
-  # Record to history
   record_recent_dir "$dir_path"
 
   session_name=$(basename "$dir_path" | tr '.:' '-')
 
-  # Switch to existing session or create a new one
   if tmux has-session -t "=$session_name" 2>/dev/null; then
     tmux switch-client -t "=$session_name"
   else
@@ -1109,6 +1009,7 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--list" ]; then
+  set +e
   gather_targets
   exit 0
 fi
@@ -1122,10 +1023,10 @@ if [ "${1:-}" = "--header-for" ]; then
   spec="${spec%%	*}"
   type="${spec%%:*}"
   case "$type" in
-    S) echo "enter=switch  ^x=kill  ^e=rename  ^d=detach  ^o=new  ^/=preview" ;;
-    W) echo "enter=switch  ^x=kill  ^e=rename  ^s=swap  ^o=new  ^/=preview" ;;
-    P) echo "enter=switch  ^x=kill  ^z=zoom  ^s=swap  ^t=send  ^/=preview" ;;
-    *)  echo "enter=switch  ^x=kill  ^e=rename  ^o=new  ^/=preview" ;;
+    S) echo "enter=switch  ^x=kill  ^e=rename  ^d=detach  ^o=new  ^r=reload  ^/=preview" ;;
+    W) echo "enter=switch  ^x=kill  ^e=rename  ^s=swap  ^o=new  ^r=reload  ^/=preview" ;;
+    P) echo "enter=switch  ^x=kill  ^z=zoom  ^s=swap  ^t=send  ^r=reload  ^/=preview" ;;
+    *)  echo "enter=switch  ^x=kill  ^e=rename  ^o=new  ^r=reload  ^/=preview" ;;
   esac
   exit 0
 fi
@@ -1135,13 +1036,10 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--dashboard" ]; then
-  SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-
-  # Popup dimensions for the full-size tools (passed from interdimux.tmux)
+  set +e
   PW="${INTERDIMUX_POPUP_WIDTH:-80%}"
   PH="${INTERDIMUX_POPUP_HEIGHT:-75%}"
 
-  # Re-export env vars for the child popup
   ENV_FWD="INTERDIMUX_SHOW_PREVIEW=${INTERDIMUX_SHOW_PREVIEW:-on}"
   ENV_FWD+=" INTERDIMUX_SHOW_FULL_COMMAND=${INTERDIMUX_SHOW_FULL_COMMAND:-on}"
   ENV_FWD+=" INTERDIMUX_SHOW_GIT_BRANCH=${INTERDIMUX_SHOW_GIT_BRANCH:-on}"
@@ -1169,9 +1067,8 @@ if [ "${1:-}" = "--dashboard" ]; then
 
   action="${choice%%	*}"
 
-  # Launch the selected tool in a new full-size popup.
-  # Use run-shell -b so the popup command runs asynchronously after
-  # the dashboard's popup closes (can't nest popups).
+  # Launch the selected tool in a new full-size popup via run-shell -b
+  # (can't nest popups, so this runs asynchronously after dashboard closes)
   launch() {
     tmux run-shell -b "tmux popup -w '$PW' -h '$PH' -E '$ENV_FWD $1'"
   }
@@ -1190,105 +1087,109 @@ if [ "${1:-}" = "--dashboard" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Main
+# Main — navigator loop
 # ---------------------------------------------------------------------------
 
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 INTERDIMUX_MODE="${INTERDIMUX_MODE:-switch}"
 
-# Base fzf options shared across all modes
-fzf_opts=(
-  "${FZF_THEME[@]}"
-  --delimiter=$'\t'
-  --with-nth=2
-  --tiebreak=length,begin,index
-  --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --list)"
-)
+# Temp file to signal "run action then restart fzf"
+RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX")
+trap 'rm -f "$RESUME_FILE"' EXIT
 
-# Mode-specific prompt, header, and bindings
-case "$INTERDIMUX_MODE" in
-  kill)
-    fzf_opts+=(
-      --prompt='interdimux kill ❯ '
-      --header='enter=kill  ctrl-r=reload  esc=quit'
-      --bind="enter:execute(bash '$SCRIPT_PATH' --action kill {1})+reload(bash '$SCRIPT_PATH' --list)"
-    )
-    ;;
-  rename)
-    fzf_opts+=(
-      --prompt='interdimux rename ❯ '
-      --header='enter=rename  ctrl-r=reload  esc=quit'
-      --bind="enter:execute(bash '$SCRIPT_PATH' --action rename {1})+reload(bash '$SCRIPT_PATH' --list)"
-    )
-    ;;
-  zoom)
-    fzf_opts+=(
-      --prompt='interdimux zoom ❯ '
-      --header='enter=toggle zoom  ctrl-r=reload  esc=quit'
-      --bind="enter:execute-silent(bash '$SCRIPT_PATH' --action zoom {1})+reload(bash '$SCRIPT_PATH' --list)"
-    )
-    ;;
-  swap)
-    fzf_opts+=(
-      --prompt='interdimux swap ❯ '
-      --header='enter=swap  ctrl-r=reload  esc=quit'
-      --bind="enter:execute(bash '$SCRIPT_PATH' --action swap {1})+reload(bash '$SCRIPT_PATH' --list)"
-    )
-    ;;
-  detach)
-    fzf_opts+=(
-      --prompt='interdimux detach ❯ '
-      --header='enter=detach  ctrl-r=reload  esc=quit'
-      --bind="enter:execute(bash '$SCRIPT_PATH' --action detach {1})+reload(bash '$SCRIPT_PATH' --list)"
-    )
-    ;;
-  send)
-    fzf_opts+=(
-      --prompt='interdimux send ❯ '
-      --header='enter=send keys  ctrl-r=reload  esc=quit'
-      --bind="enter:execute(bash '$SCRIPT_PATH' --action send {1})+reload(bash '$SCRIPT_PATH' --list)"
-    )
-    ;;
-  *)
-    fzf_opts+=(
-      --prompt='interdimux ❯ '
-      --header='enter=switch  ^x=kill  ^e=rename  ^o=new  ^/=preview'
-      --bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {1})"
-      --bind="ctrl-x:execute(bash '$SCRIPT_PATH' --action kill {1})+reload(bash '$SCRIPT_PATH' --list)"
-      --bind="ctrl-e:execute(bash '$SCRIPT_PATH' --action rename {1})+reload(bash '$SCRIPT_PATH' --list)"
-      --bind="ctrl-o:execute(bash '$SCRIPT_PATH' --dirs)+reload(bash '$SCRIPT_PATH' --list)"
-      --bind="ctrl-z:execute-silent(bash '$SCRIPT_PATH' --action zoom {1})+reload(bash '$SCRIPT_PATH' --list)"
-      --bind="ctrl-s:execute(bash '$SCRIPT_PATH' --action swap {1})+reload(bash '$SCRIPT_PATH' --list)"
-      --bind="ctrl-d:execute(bash '$SCRIPT_PATH' --action detach {1})+reload(bash '$SCRIPT_PATH' --list)"
-      --bind="ctrl-t:execute(bash '$SCRIPT_PATH' --action send {1})+reload(bash '$SCRIPT_PATH' --list)"
-      --bind='ctrl-/:toggle-preview'
-    )
-    ;;
-esac
-
-if [ "${INTERDIMUX_SHOW_PREVIEW:-on}" = "on" ]; then
+# Helper: build an fzf --bind that executes an action, signals resume, and aborts.
+_action_bind() {
+  local key="$1" action_cmd="$2"
   fzf_opts+=(
-    --preview="bash '$SCRIPT_PATH' --preview {1}"
-    --preview-window="right:50%:wrap"
+    --bind="$key:execute($action_cmd)+execute-silent(echo resume > '$RESUME_FILE')+abort"
   )
-fi
+}
 
-# In kill/rename modes, Enter is bound to execute (not accept),
-# so fzf only exits via ESC/ctrl-c — no selection to process.
-if [ "$INTERDIMUX_MODE" != "switch" ]; then
-  gather_targets | fzf "${fzf_opts[@]}" || true
+while true; do
+  : > "$RESUME_FILE"
+
+  fzf_opts=(
+    "${FZF_THEME[@]}"
+    --delimiter=$'\t'
+    --with-nth=2
+    --tiebreak=length,begin,index
+    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --list)"
+  )
+
+  case "$INTERDIMUX_MODE" in
+    kill)
+      fzf_opts+=(--prompt='interdimux kill ❯ ' --header='enter=kill  ctrl-r=reload  esc=quit')
+      _action_bind "enter" "bash '$SCRIPT_PATH' --action kill {1}"
+      ;;
+    rename)
+      fzf_opts+=(--prompt='interdimux rename ❯ ' --header='enter=rename  ctrl-r=reload  esc=quit')
+      _action_bind "enter" "bash '$SCRIPT_PATH' --action rename {1}"
+      ;;
+    zoom)
+      fzf_opts+=(
+        --prompt='interdimux zoom ❯ '
+        --header='enter=toggle zoom  ctrl-r=reload  esc=quit'
+        --bind="enter:execute-silent(bash '$SCRIPT_PATH' --action zoom {1})+execute-silent(echo resume > '$RESUME_FILE')+abort"
+      )
+      ;;
+    swap)
+      fzf_opts+=(--prompt='interdimux swap ❯ ' --header='enter=swap  ctrl-r=reload  esc=quit')
+      _action_bind "enter" "bash '$SCRIPT_PATH' --action swap {1}"
+      ;;
+    detach)
+      fzf_opts+=(--prompt='interdimux detach ❯ ' --header='enter=detach  ctrl-r=reload  esc=quit')
+      _action_bind "enter" "bash '$SCRIPT_PATH' --action detach {1}"
+      ;;
+    send)
+      fzf_opts+=(--prompt='interdimux send ❯ ' --header='enter=send keys  ctrl-r=reload  esc=quit')
+      _action_bind "enter" "bash '$SCRIPT_PATH' --action send {1}"
+      ;;
+    *)
+      fzf_opts+=(
+        --prompt='interdimux ❯ '
+        --header='enter=switch  ^x=kill  ^e=rename  ^o=new  ^r=reload  ^/=preview'
+        --bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {1})"
+        --bind="ctrl-z:execute-silent(bash '$SCRIPT_PATH' --action zoom {1})+execute-silent(echo resume > '$RESUME_FILE')+abort"
+        --bind='ctrl-/:toggle-preview'
+      )
+      _action_bind "ctrl-x" "bash '$SCRIPT_PATH' --action kill {1}"
+      _action_bind "ctrl-e" "bash '$SCRIPT_PATH' --action rename {1}"
+      _action_bind "ctrl-o" "bash '$SCRIPT_PATH' --dirs"
+      _action_bind "ctrl-s" "bash '$SCRIPT_PATH' --action swap {1}"
+      _action_bind "ctrl-d" "bash '$SCRIPT_PATH' --action detach {1}"
+      _action_bind "ctrl-t" "bash '$SCRIPT_PATH' --action send {1}"
+      ;;
+  esac
+
+  if [ "${INTERDIMUX_SHOW_PREVIEW:-on}" = "on" ]; then
+    fzf_opts+=(
+      --preview="bash '$SCRIPT_PATH' --preview {1}"
+      --preview-window="right:50%:wrap"
+    )
+  fi
+
+  set +e
+  selection=$(gather_targets | fzf "${fzf_opts[@]}")
+  fzf_rc=$?
+  set -e
+
+  # Action requested a restart — loop back
+  [ -s "$RESUME_FILE" ] && continue
+
+  # Esc/ctrl-c or empty selection — exit
+  if [ "$fzf_rc" -ne 0 ] || [ -z "$selection" ]; then
+    exit 0
+  fi
+
+  # Action modes use execute+abort (always resume), so reaching here
+  # in a non-switch mode means something unexpected — just exit
+  [ "$INTERDIMUX_MODE" != "switch" ] && exit 0
+
+  # Switch to selected target
+  spec="${selection%%	*}"
+  parse_spec "$spec"
+  target=$(spec_target)
+
+  tmux switch-client -t "$target" 2>/dev/null || \
+    tmux display-message "interdimux: $(spec_label) no longer exists"
   exit 0
-fi
-
-selection=$(gather_targets | fzf "${fzf_opts[@]}") || exit 0
-
-# ---------------------------------------------------------------------------
-# Switch to selected target
-# ---------------------------------------------------------------------------
-
-spec="${selection%%	*}"
-parse_spec "$spec"
-target=$(spec_target)
-
-tmux switch-client -t "$target" 2>/dev/null || \
-  tmux display-message "interdimux: $(spec_label) no longer exists"
+done
