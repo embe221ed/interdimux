@@ -69,6 +69,109 @@ FZF_THEME=(
 )
 
 # ---------------------------------------------------------------------------
+# Directory picker: project detection & history
+# ---------------------------------------------------------------------------
+
+PROJECT_MARKERS=(.git Makefile package.json Cargo.toml go.mod pyproject.toml CMakeLists.txt .hg .svn build.gradle pom.xml mix.exs flake.nix)
+
+is_project_root() {
+  local dir="$1"
+  for m in "${PROJECT_MARKERS[@]}"; do
+    [ -e "$dir/$m" ] && return 0
+  done
+  return 1
+}
+
+detect_project_type() {
+  local dir="$1"
+  [ -f "$dir/Cargo.toml" ]      && { echo "Rust";    return; }
+  [ -f "$dir/go.mod" ]          && { echo "Go";      return; }
+  [ -f "$dir/package.json" ]    && { echo "Node.js"; return; }
+  [ -f "$dir/pyproject.toml" ]  && { echo "Python";  return; }
+  [ -f "$dir/CMakeLists.txt" ]  && { echo "C/C++";   return; }
+  [ -f "$dir/build.gradle" ]    && { echo "Java";    return; }
+  [ -f "$dir/pom.xml" ]         && { echo "Java";    return; }
+  [ -f "$dir/mix.exs" ]         && { echo "Elixir";  return; }
+  [ -f "$dir/flake.nix" ]       && { echo "Nix";     return; }
+  [ -f "$dir/Makefile" ]        && { echo "Make";    return; }
+  [ -d "$dir/.git" ]            && { echo "Git";     return; }
+  echo ""
+}
+
+RECENT_DIRS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/interdimux/recent_dirs"
+
+load_recent_dirs() {
+  [ -f "$RECENT_DIRS_FILE" ] || return
+  local count=0
+  while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    echo "$d"
+    count=$((count + 1))
+    [ "$count" -ge 10 ] && break
+  done < "$RECENT_DIRS_FILE"
+}
+
+record_recent_dir() {
+  local dir="$1"
+  local dir_parent
+  dir_parent="$(dirname "$RECENT_DIRS_FILE")"
+  [ -d "$dir_parent" ] || mkdir -p "$dir_parent"
+
+  # Build new file: selected dir on top, then existing entries (deduped)
+  local tmp
+  tmp=$(mktemp)
+  echo "$dir" > "$tmp"
+  if [ -f "$RECENT_DIRS_FILE" ]; then
+    grep -v "^${dir}$" "$RECENT_DIRS_FILE" >> "$tmp" 2>/dev/null || true
+  fi
+  # Truncate to 50 entries
+  head -50 "$tmp" > "$RECENT_DIRS_FILE"
+  rm -f "$tmp"
+}
+
+# Resolve the directory finder binary once
+resolve_finder() {
+  if command -v fd >/dev/null 2>&1; then
+    echo "fd"
+  elif command -v fdfind >/dev/null 2>&1; then
+    echo "fdfind"
+  elif command -v find >/dev/null 2>&1; then
+    echo "find"
+  else
+    echo ""
+  fi
+}
+
+# Scan directories under a root at a given depth using fd or find
+scan_dirs() {
+  local root="$1" depth="$2" finder="$3"
+  [ -d "$root" ] || return
+  case "$finder" in
+    fd|fdfind)
+      "$finder" --type d --max-depth "$depth" --absolute-path . "$root" 2>/dev/null || true
+      ;;
+    find)
+      find "$root" -maxdepth "$depth" -type d -not -path '*/.*' 2>/dev/null || true
+      ;;
+  esac
+}
+
+# Resolve search paths from config or defaults
+resolve_search_paths() {
+  local project_dirs="${INTERDIMUX_PROJECT_DIRS:-$(tmux show-option -gqv @interdimux-project-dirs 2>/dev/null || true)}"
+  if [ -n "${project_dirs:-}" ]; then
+    IFS=':' read -ra _paths <<< "$project_dirs"
+    for p in "${_paths[@]}"; do
+      eval echo "$p"  # expand ~
+    done
+  else
+    for d in "$HOME/projects" "$HOME/code" "$HOME/src" "$HOME/repos" "$HOME/work" "$HOME/dev"; do
+      [ -d "$d" ] && echo "$d"
+    done
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Spec parsing
 # ---------------------------------------------------------------------------
 #
@@ -522,10 +625,282 @@ if [ "${1:-}" = "--preview" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Directory preview (called by fzf --preview for dir picker)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--dirs-preview" ]; then
+  dir="$2"
+  [ -d "$dir" ] || { echo "(directory not found)"; exit 0; }
+
+  display_path="${dir/#$HOME/\~}"
+  printf '\033[1;38;5;173m%s\033[0m\n' "$(basename "$dir")"
+  printf '\033[2m%s\033[0m\n\n' "$display_path"
+
+  # Project type
+  ptype=$(detect_project_type "$dir")
+  [ -n "$ptype" ] && printf '  \033[38;5;150mType:\033[0m %s\n' "$ptype"
+
+  # Git info
+  if [ -d "$dir/.git" ]; then
+    local_branch=""
+    head_file="$dir/.git/HEAD"
+    if [ -f "$head_file" ]; then
+      head_content=""
+      read -r head_content < "$head_file" 2>/dev/null
+      case "$head_content" in
+        "ref: refs/heads/"*) local_branch="${head_content#ref: refs/heads/}" ;;
+        *) local_branch="@${head_content:0:7}" ;;
+      esac
+    fi
+    [ -n "$local_branch" ] && printf '  \033[38;5;140mBranch:\033[0m %s\n' "$local_branch"
+
+    # Last commit (one-liner)
+    last_commit=$(git -C "$dir" log -1 --oneline 2>/dev/null || true)
+    [ -n "$last_commit" ] && printf '  \033[38;5;180mCommit:\033[0m %s\n' "$last_commit"
+
+    # Working tree status summary
+    changed=$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    [ "$changed" -gt 0 ] && printf '  \033[38;5;173mChanges:\033[0m %s files\n' "$changed"
+  fi
+
+  # README excerpt
+  for readme in README.md README.rst README.txt README; do
+    if [ -f "$dir/$readme" ]; then
+      desc=""
+      while IFS= read -r line; do
+        # Skip empty lines and markdown headings
+        case "$line" in
+          ""|\#*|=*|-*) continue ;;
+          *) desc="$line"; break ;;
+        esac
+      done < "$dir/$readme"
+      [ -n "$desc" ] && printf '\n  \033[2m%s\033[0m\n' "$desc"
+      break
+    fi
+  done
+
+  # Compact directory listing
+  printf '\n\033[2m── contents ──\033[0m\n'
+  ls -1p "$dir" 2>/dev/null | head -20
+
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Directory list generation (called by fzf reload for dir picker)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--dirs-list" ]; then
+  set +e
+  shift
+  mode="default"
+  query=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deep) mode="deep"; query="$2"; shift 2 ;;
+      --scan) mode="scan"; query="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  finder=$(resolve_finder)
+  [ -z "$finder" ] && { echo "interdimux: no directory finder available" >&2; exit 1; }
+
+  # Collect search paths
+  mapfile -t search_paths < <(resolve_search_paths)
+  [ ${#search_paths[@]} -eq 0 ] && search_paths=("$HOME")
+
+  # Track already-emitted paths to avoid duplicates
+  declare -A seen=()
+
+  emit_dir() {
+    local dir="$1" tier="$2" extra="$3"
+    [ -n "${seen[$dir]+x}" ] && return
+    seen["$dir"]=1
+    local display_path="${dir/#$HOME/\~}"
+    case "$tier" in
+      recent)
+        printf '%s\t  %s★%s  %-40s %s(recent)%s\n' \
+          "$dir" "$BOLD_AMBER" "$RST" "$display_path" "$DIM" "$RST"
+        ;;
+      project)
+        local ptype
+        ptype=$(detect_project_type "$dir")
+        local type_badge=""
+        [ -n "$ptype" ] && type_badge=" ${DIM}${ptype}${RST}"
+        printf '%s\t  \033[38;5;150m◆\033[0m  %-40s%s\n' \
+          "$dir" "$display_path" "$type_badge"
+        ;;
+      dir)
+        printf '%s\t  %s·%s  %s\n' \
+          "$dir" "$DIM" "$RST" "$display_path"
+        ;;
+    esac
+  }
+
+  case "$mode" in
+    default)
+      # Tier 1: Recent directories
+      while IFS= read -r d; do
+        [ -n "$d" ] && emit_dir "$d" recent ""
+      done < <(load_recent_dirs)
+
+      # Tier 2: Project roots (depth 1 children of search paths)
+      projects=()
+      others=()
+      for sp in "${search_paths[@]}"; do
+        [ -d "$sp" ] || continue
+        while IFS= read -r d; do
+          [ -z "$d" ] || [ "$d" = "$sp" ] && continue
+          if is_project_root "$d"; then
+            projects+=("$d")
+          else
+            others+=("$d")
+          fi
+        done < <(scan_dirs "$sp" 1 "$finder")
+      done
+
+      # Emit projects sorted
+      IFS=$'\n' sorted_projects=($(printf '%s\n' "${projects[@]}" | sort)); unset IFS
+      for d in "${sorted_projects[@]}"; do
+        emit_dir "$d" project ""
+      done
+
+      # Tier 3: Other directories
+      IFS=$'\n' sorted_others=($(printf '%s\n' "${others[@]}" | sort)); unset IFS
+      for d in "${sorted_others[@]}"; do
+        emit_dir "$d" dir ""
+      done
+      ;;
+
+    deep)
+      # Deep scan: increase depth on directories matching the query.
+      # If query is empty, scan all search paths at depth 2.
+
+      # Emit matching recent dirs
+      while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        [ -z "$query" ] || [[ "$d" == *"$query"* ]] && emit_dir "$d" recent ""
+      done < <(load_recent_dirs)
+
+      # Collect all candidates, then emit projects before plain dirs
+      projects=()
+      others=()
+
+      collect_dir() {
+        local d="$1"
+        if is_project_root "$d"; then
+          projects+=("$d")
+        else
+          others+=("$d")
+        fi
+      }
+
+      if [ -z "$query" ]; then
+        # No query: scan all search paths at depth 2
+        for sp in "${search_paths[@]}"; do
+          [ -d "$sp" ] || continue
+          while IFS= read -r d; do
+            [ -z "$d" ] || [ "$d" = "$sp" ] && continue
+            collect_dir "$d"
+          done < <(scan_dirs "$sp" 2 "$finder")
+        done
+      else
+        # Query present: deep-scan only matching children at depth 3
+        for sp in "${search_paths[@]}"; do
+          [ -d "$sp" ] || continue
+          while IFS= read -r d; do
+            [ -z "$d" ] || [ "$d" = "$sp" ] && continue
+            if [[ "$d" == *"$query"* ]]; then
+              collect_dir "$d"
+              while IFS= read -r sub; do
+                [ -z "$sub" ] && continue
+                collect_dir "$sub"
+              done < <(scan_dirs "$d" 3 "$finder")
+            fi
+          done < <(scan_dirs "$sp" 1 "$finder")
+        done
+
+        # If query looks like an absolute path, scan it directly
+        if [[ "$query" == /* ]] && [ -d "$query" ]; then
+          while IFS= read -r d; do
+            [ -z "$d" ] && continue
+            collect_dir "$d"
+          done < <(scan_dirs "$query" 3 "$finder")
+        fi
+      fi
+
+      IFS=$'\n' sorted_projects=($(printf '%s\n' "${projects[@]}" | sort -u)); unset IFS
+      for d in "${sorted_projects[@]}"; do
+        emit_dir "$d" project ""
+      done
+      IFS=$'\n' sorted_others=($(printf '%s\n' "${others[@]}" | sort -u)); unset IFS
+      for d in "${sorted_others[@]}"; do
+        emit_dir "$d" dir ""
+      done
+      ;;
+
+    scan)
+      # Custom path scan: treat query as a filesystem path
+      scan_root=""
+
+      # Try the query as-is first, then expand ~
+      if [ -d "$query" ]; then
+        scan_root="$query"
+      else
+        expanded="${query/#\~/$HOME}"
+        if [ -d "$expanded" ]; then
+          scan_root="$expanded"
+        else
+          # Try the parent directory
+          parent="$(dirname "$expanded")"
+          [ -d "$parent" ] && scan_root="$parent"
+        fi
+      fi
+
+      if [ -n "$scan_root" ]; then
+        # Collect all candidates, then emit projects before plain dirs
+        projects=()
+        others=()
+
+        collect_dir() {
+          local d="$1"
+          if is_project_root "$d"; then
+            projects+=("$d")
+          else
+            others+=("$d")
+          fi
+        }
+
+        collect_dir "$scan_root"
+        while IFS= read -r d; do
+          [ -z "$d" ] || [ "$d" = "$scan_root" ] && continue
+          collect_dir "$d"
+        done < <(scan_dirs "$scan_root" 2 "$finder")
+
+        IFS=$'\n' sorted_projects=($(printf '%s\n' "${projects[@]}" | sort -u)); unset IFS
+        for d in "${sorted_projects[@]}"; do
+          emit_dir "$d" project ""
+        done
+        IFS=$'\n' sorted_others=($(printf '%s\n' "${others[@]}" | sort -u)); unset IFS
+        for d in "${sorted_others[@]}"; do
+          emit_dir "$d" dir ""
+        done
+      fi
+      ;;
+  esac
+
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Actions (called by fzf keybindings via execute)
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--action" ]; then
+  # Disable set -e inside action handlers — we handle errors ourselves
+  set +e
   # Disable set -e inside action handlers — we handle errors ourselves
   set +e
   action="$2"
@@ -695,58 +1070,28 @@ fi
 
 if [ "${1:-}" = "--dirs" ]; then
   set +e
-  project_dirs="${INTERDIMUX_PROJECT_DIRS:-$(tmux show-option -gqv @interdimux-project-dirs 2>/dev/null)}"
+  SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-  # Pick the fastest available directory finder
-  if command -v fd >/dev/null 2>&1; then
-    finder="fd"
-  elif command -v fdfind >/dev/null 2>&1; then
-    finder="fdfind"
-  elif command -v find >/dev/null 2>&1; then
-    finder="find"
-  else
-    echo "interdimux: no directory finder (fd/find) available" >&2
-    exit 1
-  fi
-
-  # Determine search roots
-  search_paths=()
-  if [ -n "${project_dirs:-}" ]; then
-    IFS=':' read -ra search_paths <<< "$project_dirs"
-  else
-    for d in "$HOME/projects" "$HOME/code" "$HOME/src" "$HOME/repos" "$HOME/work" "$HOME/dev"; do
-      [ -d "$d" ] && search_paths+=("$d")
-    done
-    [ ${#search_paths[@]} -eq 0 ] && search_paths=("$HOME")
-  fi
-
-  # Collect directories
-  dir_list=""
-  for sp in "${search_paths[@]}"; do
-    [ -d "$sp" ] || continue
-    case "$finder" in
-      fd|fdfind)
-        dir_list+=$("$finder" --type d --max-depth 3 --absolute-path . "$sp" 2>/dev/null || true)$'\n'
-        ;;
-      find)
-        dir_list+=$(find "$sp" -maxdepth 3 -type d -not -path '*/.*' 2>/dev/null || true)$'\n'
-        ;;
-    esac
-    dir_list+="${sp}"$'\n'
-  done
-
-  dir_list=$(printf '%s' "$dir_list" | sed '/^$/d' | sort -u)
-  [ -z "$dir_list" ] && { echo "No directories found"; exit 1; }
-
-  selected=$(printf '%s\n' "$dir_list" | \
-    fzf "${FZF_THEME[@]}" \
-      --prompt='interdimux new session ❯ ' \
-      --header='Select directory (ESC to cancel)' \
-      --preview="ls -la --color=always {} 2>/dev/null || ls -la {} 2>/dev/null | head -30" \
-      --preview-window="right:40%:wrap" \
+  selected=$(bash "$SCRIPT_PATH" --dirs-list | fzf \
+    "${FZF_THEME[@]}" \
+    --no-sort \
+    --delimiter=$'\t' \
+    --with-nth=2 \
+    --prompt='new session ❯ ' \
+    --header='enter=create  ^f=deep search  ^g=browse into  ^r=reset  esc=cancel' \
+    --preview="bash '$SCRIPT_PATH' --dirs-preview {1}" \
+    --preview-window="right:40%:wrap" \
+    --bind="ctrl-f:reload:bash '$SCRIPT_PATH' --dirs-list --deep {q}" \
+    --bind="ctrl-g:reload:bash '$SCRIPT_PATH' --dirs-list --scan {1}" \
+    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-header(echo 'enter=create  ^f=deep search  ^g=browse into  ^r=reset  esc=cancel')" \
   ) || exit 0
 
-  dir_path="$selected"
+  dir_path="${selected%%	*}"
+  dir_path="${dir_path%/}"
+
+  # Record to history
+  record_recent_dir "$dir_path"
+
   session_name=$(basename "$dir_path" | tr '.:' '-')
 
   # Switch to existing session or create a new one
