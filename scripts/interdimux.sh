@@ -294,9 +294,11 @@ declare -A GIT_BRANCH_CACHE=()
 get_git_branch() {
   local dir="$1"
   [ "$SHOW_GIT_BRANCH" != "on" ] && return
+  [ -z "$dir" ] && return
 
-  if [ -n "${GIT_BRANCH_CACHE[$dir]+x}" ]; then
-    printf '%s' "${GIT_BRANCH_CACHE[$dir]}"
+  local _cache_key="$dir"
+  if [[ -v "GIT_BRANCH_CACHE[$_cache_key]" ]]; then
+    printf '%s' "${GIT_BRANCH_CACHE[$_cache_key]}"
     return
   fi
 
@@ -312,14 +314,14 @@ get_git_branch() {
         "ref: refs/heads/"*) branch="${head_content#ref: refs/heads/}" ;;
         *) branch="@${head_content:0:7}" ;;
       esac
-      GIT_BRANCH_CACHE["$dir"]="$branch"
+      GIT_BRANCH_CACHE["$_cache_key"]="$branch"
       printf '%s' "$branch"
       return
     fi
     d="${d%/*}"
   done
 
-  GIT_BRANCH_CACHE["$dir"]=""
+  GIT_BRANCH_CACHE["$_cache_key"]=""
 }
 
 # ---------------------------------------------------------------------------
@@ -462,7 +464,7 @@ gather_targets() {
   declare -A windows_by_session=()
   while IFS= read -r line; do
     local sn="${line%%"$US"*}"
-    if [ -n "${windows_by_session[$sn]+x}" ]; then
+    if [[ -v "windows_by_session[$sn]" ]]; then
       windows_by_session["$sn"]+=$'\n'"$line"
     else
       windows_by_session["$sn"]="$line"
@@ -473,7 +475,7 @@ gather_targets() {
   declare -A panes_by_window=()
   while IFS="$US" read -r sn widx rest; do
     local key="${sn}${US}${widx}"
-    if [ -n "${panes_by_window[$key]+x}" ]; then
+    if [[ -v "panes_by_window[$key]" ]]; then
       panes_by_window["$key"]+=$'\n'"$rest"
     else
       panes_by_window["$key"]="$rest"
@@ -695,7 +697,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
   emit_dir() {
     local dir="$1" tier="$2" extra="$3"
-    [ -n "${seen[$dir]+x}" ] && return
+    [[ -v "seen[$dir]" ]] && return
     seen["$dir"]=1
     local display_path="${dir/#$HOME/\~}"
     case "$tier" in
