@@ -119,7 +119,7 @@ record_recent_dir() {
   tmp=$(mktemp)
   echo "$dir" > "$tmp"
   if [ -f "$RECENT_DIRS_FILE" ]; then
-    grep -v "^${dir}$" "$RECENT_DIRS_FILE" >> "$tmp" 2>/dev/null || true
+    grep -Fxv "$dir" "$RECENT_DIRS_FILE" >> "$tmp" 2>/dev/null || true
   fi
   head -50 "$tmp" > "$RECENT_DIRS_FILE"
   rm -f "$tmp"
@@ -261,15 +261,32 @@ build_process_table() {
   done < <(ps -eo pid=,ppid=,args= 2>/dev/null)
 }
 
-# Walk the process tree from a given pid to its leaf child
+# Known shells — used to decide whether to descend one level
+SHELLS_PATTERN='^-?(ba|z|fi|da|a|k|tc|c|)sh$|^-?login$'
+
+# Get the user's actual command from a pane pid.
+# Strategy: if the pane process is a shell, show its direct child (the
+# command the user typed).  Do NOT walk further — deeper children are
+# subprocesses of that command (LSPs, formatters, watchers, …) and
+# showing those is misleading.
 full_command() {
-  local pid="$1" children
-  while true; do
-    children="${PS_CHILDREN[$pid]:-}"
-    [ -z "$children" ] && break
-    pid="${children%% *}"
-  done
-  printf '%s' "${PS_ARGS[$pid]:-}"
+  local pid="$1"
+  local args="${PS_ARGS[$pid]:-}"
+  local cmd_name="${args%% *}"
+  cmd_name="${cmd_name##*/}"
+
+  # If the pane process is a shell, look one level down
+  if [[ "$cmd_name" =~ $SHELLS_PATTERN ]]; then
+    local children="${PS_CHILDREN[$pid]:-}"
+    if [ -n "$children" ]; then
+      local child="${children%% *}"
+      printf '%s' "${PS_ARGS[$child]:-}"
+      return
+    fi
+  fi
+
+  # Not a shell (or shell has no children) — use as-is
+  printf '%s' "$args"
 }
 
 # Resolve the command string to display for a pane.
@@ -304,9 +321,23 @@ get_git_branch() {
 
   local d="$dir"
   while [ "$d" != "/" ] && [ -n "$d" ]; do
+    local head_file=""
     if [ -d "$d/.git" ]; then
-      local head_file="$d/.git/HEAD"
-      [ -f "$head_file" ] || break
+      head_file="$d/.git/HEAD"
+    elif [ -f "$d/.git" ]; then
+      # Worktrees/submodules: .git is a file containing "gitdir: <path>"
+      local gitdir_line
+      read -r gitdir_line < "$d/.git" 2>/dev/null || { d="${d%/*}"; continue; }
+      local gitdir="${gitdir_line#gitdir: }"
+      # Resolve relative paths
+      case "$gitdir" in
+        /*) ;;
+        *)  gitdir="$d/$gitdir" ;;
+      esac
+      [ -f "$gitdir/HEAD" ] && head_file="$gitdir/HEAD"
+    fi
+
+    if [ -n "$head_file" ] && [ -f "$head_file" ]; then
       local head_content
       read -r head_content < "$head_file" 2>/dev/null || break
       local branch=""
@@ -328,25 +359,45 @@ get_git_branch() {
 # Smart command formatting (SSH host, editor context)
 # ---------------------------------------------------------------------------
 
-EDITORS_PATTERN='^(n?vim|vi|nvim|nano|emacs|code|hx|helix|micro|kate|gedit|subl)$'
+EDITORS_PATTERN='^(n?vim|vi|nano|emacs|code|hx|helix|micro|kate|gedit|subl)$'
+
+# SSH flags that consume the next argument (so we skip both flag and value)
+SSH_FLAGS_WITH_VALUE='^-(b|c|D|E|e|F|I|i|J|L|l|m|O|o|p|Q|R|S|W|w)$'
+
+# Editor flags that consume the next argument
+EDITOR_FLAGS_WITH_VALUE='^-[uUsSpc]$|^--cmd$|^--listen$'
 
 format_command() {
   local cmd_str="$1"
+  [ -z "$cmd_str" ] && return
   local cmd_name="${cmd_str%% *}"
   local cmd_base="${cmd_name##*/}"
+
+  # Disable globbing for word-splitting of arguments
+  local old_set="$-"
+  set -f
 
   # SSH: highlight user@host
   case "$cmd_base" in
     ssh|mosh)
-      local host="" word
+      local host="" skip_next=""
       local args="${cmd_str#* }"
+      [ "$args" = "$cmd_str" ] && args=""
+      local word
       for word in $args; do
+        if [ -n "$skip_next" ]; then
+          skip_next=""
+          continue
+        fi
         case "$word" in
-          -*) ;;
+          -*)
+            [[ "$word" =~ $SSH_FLAGS_WITH_VALUE ]] && skip_next=1
+            ;;
           *)  host="$word" ;;
         esac
       done
       if [ -n "$host" ]; then
+        [[ "$old_set" != *f* ]] && set +f
         printf '%s%s %s%s%s' "$DIM_CMD" "$cmd_base" "$DIM_SSH" "$host" "$RST"
         return
       fi
@@ -355,22 +406,32 @@ format_command() {
 
   # Editors: highlight the file being edited
   if [[ "$cmd_base" =~ $EDITORS_PATTERN ]]; then
-    local file="" word
+    local file="" skip_next=""
     local args="${cmd_str#* }"
     [ "$args" = "$cmd_str" ] && args=""
+    local word
     for word in $args; do
+      if [ -n "$skip_next" ]; then
+        skip_next=""
+        continue
+      fi
       case "$word" in
-        -*) ;;
+        -*)
+          [[ "$word" =~ $EDITOR_FLAGS_WITH_VALUE ]] && skip_next=1
+          ;;
+        +*) ;;  # vim +line / +/pattern
         *)  file="$word" ;;
       esac
     done
     if [ -n "$file" ]; then
       local fname="${file##*/}"
+      [[ "$old_set" != *f* ]] && set +f
       printf '%s%s %s%s%s' "$DIM_CMD" "$cmd_base" "$DIM_EDIT" "$fname" "$RST"
       return
     fi
   fi
 
+  [[ "$old_set" != *f* ]] && set +f
   printf '%s%s%s' "$DIM_CMD" "$cmd_str" "$RST"
 }
 
