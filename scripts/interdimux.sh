@@ -262,7 +262,7 @@ build_process_table() {
 }
 
 # Known shells — used to decide whether to descend one level
-SHELLS_PATTERN='^-?(ba|z|fi|da|a|k|tc|c|)sh$|^-?login$'
+SHELLS_PATTERN='^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$'
 
 # Get the user's actual command from a pane pid.
 # Strategy: if the pane process is a shell, show its direct child (the
