@@ -545,9 +545,9 @@ gather_targets() {
 
   # Iterate sessions in list-sessions order
   local marker flags session_windows win_count wi
-  local wmarker wpath_raw branch raw_cmd cmd_formatted git_badge gbranch padded_id padded_path
-  local pane_data pane_count pi cont
-  local pmarker ppath_raw pbranch
+  local wmarker wpath_raw raw_cmd cmd_formatted git_badge gbranch padded_id padded_path
+  local pane_data pane_count pi
+  local pmarker ppath_raw
 
   while IFS="$US" read -r sname swins sattach; do
     marker=" "
@@ -577,9 +577,6 @@ gather_targets() {
       wpath="${wpath/#$HOME/\~}"
       wpath=$(trim_path "$wpath" 22)
 
-      branch="├─"
-      [ "$wi" -eq "$win_count" ] && branch="└─"
-
       raw_cmd=$(resolve_command "$wcmd" "$wpid")
       cmd_formatted=$(format_command "$raw_cmd")
 
@@ -590,9 +587,9 @@ gather_targets() {
       padded_id=$(dpad "$widx:$wname" 14)
       padded_path=$(dpad "$wpath" 22)
 
-      printf 'W:%s:%s\t  %s %s %s %s %s%s%s %s %s%s\n' \
+      printf 'W:%s:%s\t    %s %s %s %s%s%s %s %s%s\n' \
         "$sname" "$widx" \
-        "$branch" "$wmarker" "$padded_id" \
+        "$wmarker" "$padded_id" \
         "$SEP" "$DIM_PATH" "$padded_path" "$RST" \
         "$SEP" "$cmd_formatted" "$git_badge"
 
@@ -605,9 +602,6 @@ gather_targets() {
         pane_count=${pane_count// /}
         pi=0
 
-        cont="│  "
-        [ "$wi" -eq "$win_count" ] && cont="   "
-
         while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2; do
           pi=$((pi + 1))
 
@@ -618,9 +612,6 @@ gather_targets() {
           ppath="${ppath/#$HOME/\~}"
           ppath=$(trim_path "$ppath" 22)
 
-          pbranch="├─"
-          [ "$pi" -eq "$pane_count" ] && pbranch="└─"
-
           raw_cmd=$(resolve_command "$pcmd" "$ppid")
           cmd_formatted=$(format_command "$raw_cmd")
 
@@ -628,12 +619,12 @@ gather_targets() {
           gbranch=$(get_git_branch "$ppath_raw")
           [ -n "$gbranch" ] && git_badge=" ${DIM_GIT}‹${gbranch}›${RST}"
 
-          padded_id=$(dpad ".$pidx" 11)
+          padded_id=$(dpad ".$pidx" 12)
           padded_path=$(dpad "$ppath" 22)
 
-          printf 'P:%s:%s:%s\t  %s%s %s %s %s %s%s%s %s %s%s\n' \
+          printf 'P:%s:%s:%s\t      %s %s %s %s%s%s %s %s%s\n' \
             "$sname" "$widx" "$pidx" \
-            "$cont" "$pbranch" "$pmarker" "$padded_id" \
+            "$pmarker" "$padded_id" \
             "$SEP" "$DIM_PATH" "$padded_path" "$RST" \
             "$SEP" "$cmd_formatted" "$git_badge"
         done <<< "$pane_data"
@@ -1045,7 +1036,7 @@ if [ "${1:-}" = "--dirs" ]; then
     --prompt='new session ❯ ' \
     --header='enter=create  ^f=deep search  ^g=browse into  ^r=reset  esc=cancel' \
     --preview="bash '$SCRIPT_PATH' --dirs-preview {1}" \
-    --preview-window="right:40%:wrap" \
+    --preview-window="right:40%:nowrap" \
     --bind="ctrl-f:reload:bash '$SCRIPT_PATH' --dirs-list --deep {q}" \
     --bind="ctrl-g:reload:bash '$SCRIPT_PATH' --dirs-list --scan {1}" \
     --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-header(echo 'enter=create  ^f=deep search  ^g=browse into  ^r=reset  esc=cancel')" \
@@ -1226,7 +1217,7 @@ while true; do
   if [ "${INTERDIMUX_SHOW_PREVIEW:-on}" = "on" ]; then
     fzf_opts+=(
       --preview="bash '$SCRIPT_PATH' --preview {1}"
-      --preview-window="right:50%:wrap"
+      --preview-window="right:50%:nowrap"
     )
   fi
 
