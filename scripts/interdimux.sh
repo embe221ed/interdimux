@@ -881,13 +881,15 @@ if [ "${1:-}" = "--action" ]; then
   target=$(spec_target)
   label=$(spec_label)
 
-  tty=/dev/tty
+  # /dev/tty for interactive I/O; overridable for testing
+  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
+  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
 
   case "$action" in
     kill)
-      printf '\n  \033[1;31mKill %s?\033[0m\n\n  Press [y] to confirm, any other key to cancel: ' "$label" >"$tty"
-      read -rsn1 confirm <"$tty"
-      echo >"$tty"
+      printf '\n  \033[1;31mKill %s?\033[0m\n\n  Press [y] to confirm, any other key to cancel: ' "$label" >"$tty_out"
+      read -rsn1 confirm <"$tty_in"
+      echo >"$tty_out"
       if [[ "$confirm" =~ ^[yY]$ ]]; then
         case "$SPEC_TYPE" in
           S) tmux kill-session -t "$target" 2>/dev/null ;;
@@ -895,9 +897,9 @@ if [ "${1:-}" = "--action" ]; then
           P) tmux kill-pane    -t "$target" 2>/dev/null ;;
         esac
         if [ $? -eq 0 ]; then
-          printf '\n  \033[32mDone.\033[0m\n' >"$tty"
+          printf '\n  \033[32mDone.\033[0m\n' >"$tty_out"
         else
-          printf '\n  \033[31mFailed to kill %s.\033[0m\n' "$label" >"$tty"
+          printf '\n  \033[31mFailed to kill %s.\033[0m\n' "$label" >"$tty_out"
         fi
         sleep 0.5
       fi
@@ -905,21 +907,21 @@ if [ "${1:-}" = "--action" ]; then
 
     rename)
       if [ "$SPEC_TYPE" = "P" ]; then
-        printf '\n  Panes cannot be renamed.\n' >"$tty"
+        printf '\n  Panes cannot be renamed.\n' >"$tty_out"
         sleep 1
         exit 0
       fi
-      printf '\n  \033[1mRename %s\033[0m\n\n  New name: ' "$label" >"$tty"
-      read -r new_name <"$tty"
+      printf '\n  \033[1mRename %s\033[0m\n\n  New name: ' "$label" >"$tty_out"
+      read -r new_name <"$tty_in"
       if [ -n "$new_name" ]; then
         case "$SPEC_TYPE" in
           S) tmux rename-session -t "$target" "$new_name" 2>/dev/null ;;
           W) tmux rename-window  -t "$target" "$new_name" 2>/dev/null ;;
         esac
         if [ $? -eq 0 ]; then
-          printf '\n  \033[32mRenamed to: %s\033[0m\n' "$new_name" >"$tty"
+          printf '\n  \033[32mRenamed to: %s\033[0m\n' "$new_name" >"$tty_out"
         else
-          printf '\n  \033[31mFailed to rename.\033[0m\n' >"$tty"
+          printf '\n  \033[31mFailed to rename.\033[0m\n' >"$tty_out"
         fi
         sleep 0.5
       fi
@@ -927,52 +929,81 @@ if [ "${1:-}" = "--action" ]; then
 
     zoom)
       if [ "$SPEC_TYPE" != "P" ]; then
-        printf '\n  Only panes can be zoomed.\n' >"$tty"
+        printf '\n  Only panes can be zoomed.\n' >"$tty_out"
         sleep 1
         exit 0
       fi
       if tmux resize-pane -Z -t "$target" 2>/dev/null; then
-        printf '\n  \033[32mToggled zoom on %s.\033[0m\n' "$label" >"$tty"
+        printf '\n  \033[32mToggled zoom on %s.\033[0m\n' "$label" >"$tty_out"
       else
-        printf '\n  \033[31mFailed to toggle zoom.\033[0m\n' >"$tty"
+        printf '\n  \033[31mFailed to toggle zoom.\033[0m\n' >"$tty_out"
       fi
       sleep 0.4
       ;;
 
     detach)
       if [ "$SPEC_TYPE" != "S" ]; then
-        printf '\n  Only sessions can be detached.\n' >"$tty"
+        printf '\n  Only sessions can be detached.\n' >"$tty_out"
         sleep 1
         exit 0
       fi
-      printf '\n  \033[1mDetach all clients from %s?\033[0m\n\n  Press [y] to confirm: ' "$label" >"$tty"
-      read -rsn1 confirm <"$tty"
-      echo >"$tty"
+      printf '\n  \033[1mDetach all clients from %s?\033[0m\n\n  Press [y] to confirm: ' "$label" >"$tty_out"
+      read -rsn1 confirm <"$tty_in"
+      echo >"$tty_out"
       if [[ "$confirm" =~ ^[yY]$ ]]; then
         if tmux detach-client -s "$target" 2>/dev/null; then
-          printf '\n  \033[32mDetached clients from %s.\033[0m\n' "$label" >"$tty"
+          printf '\n  \033[32mDetached clients from %s.\033[0m\n' "$label" >"$tty_out"
         else
-          printf '\n  \033[31mFailed to detach.\033[0m\n' >"$tty"
+          printf '\n  \033[31mFailed to detach.\033[0m\n' >"$tty_out"
         fi
         sleep 0.5
       fi
       ;;
 
     send)
-      printf '\n  \033[1mSend keys to %s\033[0m\n\n  Command: ' "$label" >"$tty"
-      read -r send_cmd <"$tty"
+      printf '\n  \033[1mSend keys to %s\033[0m\n\n  Command: ' "$label" >"$tty_out"
+      read -r send_cmd <"$tty_in"
       if [ -n "$send_cmd" ]; then
-        if tmux send-keys -t "$target" "$send_cmd" Enter 2>/dev/null; then
-          printf '\n  \033[32mSent to %s.\033[0m\n' "$label" >"$tty"
+        # Build list of pane targets to send to
+        send_targets=()
+        case "$SPEC_TYPE" in
+          P)
+            send_targets+=("$target")
+            ;;
+          W)
+            # All panes in this window
+            while read -r pidx; do
+              send_targets+=("=$SPEC_SESSION:$SPEC_WIDX.$pidx")
+            done < <(tmux list-panes -t "$target" -F '#{pane_index}' 2>/dev/null)
+            ;;
+          S)
+            # All panes in all windows of this session
+            while IFS=$'\t' read -r widx pidx; do
+              send_targets+=("=$SPEC_SESSION:$widx.$pidx")
+            done < <(tmux list-panes -s -t "$target" -F '#{window_index}	#{pane_index}' 2>/dev/null)
+            ;;
+        esac
+
+        sent=0 failed=0
+        for t in "${send_targets[@]}"; do
+          if tmux send-keys -t "$t" "$send_cmd" Enter 2>/dev/null; then
+            sent=$((sent + 1))
+          else
+            failed=$((failed + 1))
+          fi
+        done
+
+        if [ "$failed" -eq 0 ]; then
+          printf '\n  \033[32mSent to %d pane(s) in %s.\033[0m\n' "$sent" "$label" >"$tty_out"
         else
-          printf '\n  \033[31mFailed to send keys.\033[0m\n' >"$tty"
+          printf '\n  \033[33mSent to %d pane(s), %d failed in %s.\033[0m\n' "$sent" "$failed" "$label" >"$tty_out"
         fi
         sleep 0.5
       fi
       ;;
 
     swap)
-      printf '\n  \033[1mSwap %s with…\033[0m\n' "$label" >"$tty"
+      printf '\n  \033[1mSwap %s with…\033[0m\n' "$label" >"$tty_out"
       sleep 0.3
 
       # Call gather_targets directly (subprocess would hit set -euo issues)
@@ -982,13 +1013,13 @@ if [ "${1:-}" = "--action" ]; then
         W) swap_list=$(printf '%s\n' "$swap_list" | grep "^W:" || true) ;;
         P) swap_list=$(printf '%s\n' "$swap_list" | grep "^P:" || true) ;;
         *)
-          printf '\n  Only windows and panes can be swapped.\n' >"$tty"
+          printf '\n  Only windows and panes can be swapped.\n' >"$tty_out"
           sleep 1
           exit 0
           ;;
       esac
 
-      [ -z "$swap_list" ] && { printf '\n  No valid swap targets.\n' >"$tty"; sleep 1; exit 0; }
+      [ -z "$swap_list" ] && { printf '\n  No valid swap targets.\n' >"$tty_out"; sleep 1; exit 0; }
 
       dest=$(printf '%s\n' "$swap_list" | fzf \
         "${FZF_THEME[@]}" \
@@ -1011,9 +1042,9 @@ if [ "${1:-}" = "--action" ]; then
       esac
 
       if [ $? -eq 0 ]; then
-        printf '\n  \033[32mSwapped.\033[0m\n' >"$tty"
+        printf '\n  \033[32mSwapped.\033[0m\n' >"$tty_out"
       else
-        printf '\n  \033[31mSwap failed.\033[0m\n' >"$tty"
+        printf '\n  \033[31mSwap failed.\033[0m\n' >"$tty_out"
       fi
       sleep 0.4
       ;;
