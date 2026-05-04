@@ -151,6 +151,10 @@ set -g @interdimux-show-git-branch 'on'
 set -g @interdimux-project-dirs '~/projects:~/work'
 ```
 
+## TODO
+- [ ] implement plugins system to define custom actions
+  - [ ] once implemented, convert current actions to plugins system
+
 ## License
 
 MIT

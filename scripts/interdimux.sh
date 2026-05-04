@@ -63,7 +63,6 @@ FZF_THEME=(
   --ansi
   --reverse
   --pointer='❯'
-  --color='pointer:173,prompt:173,hl:173,hl+:173:bold,fg+:white:bold,bg+:237,header:245,info:245,spinner:173'
 )
 
 # ---------------------------------------------------------------------------
