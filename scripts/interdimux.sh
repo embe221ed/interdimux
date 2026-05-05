@@ -62,7 +62,6 @@ SEP="${DIM_SEP}│${RST}"
 FZF_THEME=(
   --ansi
   --reverse
-  --pointer='❯'
 )
 
 # ---------------------------------------------------------------------------
@@ -555,7 +554,7 @@ gather_targets() {
     flags=""
     [ -n "$sattach" ] && flags=" ${DIM}[a]${RST}"
 
-    printf 'S:%s\t%s▸%s %s %s%s  %s(%s wins)%s%s\n' \
+    printf 'S:%s\t%s%s %s %s%s  %s(%s wins)%s%s\n' \
       "$sname" \
       "$BOLD" "$RST" "$marker" "$BOLD" "$sname" "$DIM" "$swins" "$RST" "$flags"
 
