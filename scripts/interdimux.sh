@@ -26,6 +26,17 @@ if ! command -v fzf >/dev/null 2>&1; then
   exit 1
 fi
 
+# Bindings use focus events and transform-header, which need fzf >= 0.38.
+# Skip the check if the version string is unparseable rather than block.
+fzf_version=$(fzf --version 2>/dev/null | awk '{print $1}')
+IFS=. read -r fzf_major fzf_minor _ <<< "$fzf_version"
+if [[ "${fzf_major:-}" =~ ^[0-9]+$ && "${fzf_minor:-}" =~ ^[0-9]+$ ]]; then
+  if [ "$fzf_major" -eq 0 ] && [ "$fzf_minor" -lt 38 ]; then
+    echo "interdimux: fzf >= 0.38 is required (found $fzf_version)" >&2
+    exit 1
+  fi
+fi
+
 if [ -z "${TMUX:-}" ]; then
   echo "interdimux: not running inside tmux" >&2
   exit 1
@@ -38,6 +49,24 @@ fi
 SHOW_FULL_COMMAND="${INTERDIMUX_SHOW_FULL_COMMAND:-on}"
 SHOW_GIT_BRANCH="${INTERDIMUX_SHOW_GIT_BRANCH:-on}"
 
+# Read a config value: env override → tmux option → default.
+get_opt() {
+  local env_val="$1" opt_name="$2" default="$3"
+  if [ -n "$env_val" ]; then
+    printf '%s' "$env_val"
+    return
+  fi
+  local v
+  v=$(tmux show-option -gqv "$opt_name" 2>/dev/null || true)
+  printf '%s' "${v:-$default}"
+}
+
+RECENT_LIMIT=$(get_opt "${INTERDIMUX_RECENT_LIMIT:-}" @interdimux-recent-limit 10)
+SCAN_DEPTH=$(get_opt "${INTERDIMUX_SCAN_DEPTH:-}" @interdimux-scan-depth 3)
+USE_ZOXIDE=$(get_opt "${INTERDIMUX_USE_ZOXIDE:-}" @interdimux-use-zoxide on)
+DIRS_LIVE=$(get_opt "${INTERDIMUX_DIRS_LIVE:-}" @interdimux-dirs-live-search off)
+EXTRA_MARKERS=$(get_opt "${INTERDIMUX_PROJECT_MARKERS:-}" @interdimux-project-markers "")
+
 # ---------------------------------------------------------------------------
 # Colors — warm palette
 # ---------------------------------------------------------------------------
@@ -45,8 +74,7 @@ SHOW_GIT_BRANCH="${INTERDIMUX_SHOW_GIT_BRANCH:-on}"
 RST=$'\033[0m'
 DIM=$'\033[2m'
 BOLD=$'\033[1m'
-AMBER=$'\033[38;5;173m'     # #d7875f — warm amber accent
-BOLD_AMBER=$'\033[1;38;5;173m'
+BOLD_AMBER=$'\033[1;38;5;173m'  # #d7875f — warm amber accent
 DIM_SEP=$'\033[2;37m'       # dim white for separator
 DIM_PATH=$'\033[38;5;180m'  # #d7af87 — warm muted gold for paths
 DIM_CMD=$'\033[38;5;173m'   # amber for commands
@@ -70,6 +98,12 @@ FZF_THEME=(
 
 PROJECT_MARKERS=(.git Makefile package.json Cargo.toml go.mod pyproject.toml CMakeLists.txt .hg .svn build.gradle pom.xml mix.exs flake.nix)
 
+# Additional user-defined markers (colon-separated)
+if [ -n "$EXTRA_MARKERS" ]; then
+  IFS=':' read -ra _extra_markers <<< "$EXTRA_MARKERS"
+  PROJECT_MARKERS+=("${_extra_markers[@]}")
+fi
+
 is_project_root() {
   local dir="$1"
   for m in "${PROJECT_MARKERS[@]}"; do
@@ -78,33 +112,53 @@ is_project_root() {
   return 1
 }
 
+# Sets REPLY instead of printing: callers run per-directory in hot
+# loops, and a $(…) subshell fork per dir dominates the runtime there.
 detect_project_type() {
   local dir="$1"
-  [ -f "$dir/Cargo.toml" ]      && { echo "Rust";    return; }
-  [ -f "$dir/go.mod" ]          && { echo "Go";      return; }
-  [ -f "$dir/package.json" ]    && { echo "Node.js"; return; }
-  [ -f "$dir/pyproject.toml" ]  && { echo "Python";  return; }
-  [ -f "$dir/CMakeLists.txt" ]  && { echo "C/C++";   return; }
-  [ -f "$dir/build.gradle" ]    && { echo "Java";    return; }
-  [ -f "$dir/pom.xml" ]         && { echo "Java";    return; }
-  [ -f "$dir/mix.exs" ]         && { echo "Elixir";  return; }
-  [ -f "$dir/flake.nix" ]       && { echo "Nix";     return; }
-  [ -f "$dir/Makefile" ]        && { echo "Make";    return; }
-  [ -d "$dir/.git" ]            && { echo "Git";     return; }
+  REPLY=""
+  [ -f "$dir/Cargo.toml" ]      && { REPLY="Rust";    return; }
+  [ -f "$dir/go.mod" ]          && { REPLY="Go";      return; }
+  [ -f "$dir/package.json" ]    && { REPLY="Node.js"; return; }
+  [ -f "$dir/pyproject.toml" ]  && { REPLY="Python";  return; }
+  [ -f "$dir/CMakeLists.txt" ]  && { REPLY="C/C++";   return; }
+  [ -f "$dir/build.gradle" ]    && { REPLY="Java";    return; }
+  [ -f "$dir/pom.xml" ]         && { REPLY="Java";    return; }
+  [ -f "$dir/mix.exs" ]         && { REPLY="Elixir";  return; }
+  [ -f "$dir/flake.nix" ]       && { REPLY="Nix";     return; }
+  [ -f "$dir/Makefile" ]        && { REPLY="Make";    return; }
+  [ -d "$dir/.git" ]            && { REPLY="Git";     return; }
   return 0
 }
 
 RECENT_DIRS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/interdimux/recent_dirs"
 
 load_recent_dirs() {
-  [ -f "$RECENT_DIRS_FILE" ] || return
-  local count=0
-  while IFS= read -r d; do
-    [ -d "$d" ] || continue
-    echo "$d"
-    count=$((count + 1))
-    [ "$count" -ge 10 ] && break
-  done < "$RECENT_DIRS_FILE"
+  local d count=0
+  local -A _recent_seen=()
+  if [ -f "$RECENT_DIRS_FILE" ]; then
+    while IFS= read -r d; do
+      [ -d "$d" ] || continue
+      [[ -v "_recent_seen[$d]" ]] && continue
+      _recent_seen["$d"]=1
+      echo "$d"
+      count=$((count + 1))
+      [ "$count" -ge "$RECENT_LIMIT" ] && break
+    done < "$RECENT_DIRS_FILE"
+  fi
+
+  # Merge frecent dirs from zoxide when available
+  if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
+    local zcount=0
+    while IFS= read -r d; do
+      [ -d "$d" ] || continue
+      [[ -v "_recent_seen[$d]" ]] && continue
+      _recent_seen["$d"]=1
+      echo "$d"
+      zcount=$((zcount + 1))
+      [ "$zcount" -ge "$RECENT_LIMIT" ] && break
+    done < <(zoxide query --list 2>/dev/null || true)
+  fi
 }
 
 record_recent_dir() {
@@ -113,14 +167,21 @@ record_recent_dir() {
   dir_parent="$(dirname "$RECENT_DIRS_FILE")"
   [ -d "$dir_parent" ] || mkdir -p "$dir_parent"
 
-  local tmp
-  tmp=$(mktemp)
+  # Rebuild the file: new dir first, then surviving entries (pruning
+  # duplicates and dirs that no longer exist), atomically replaced.
+  local tmp d count=1
+  tmp=$(mktemp "$dir_parent/.recent_dirs.XXXXXX")
   echo "$dir" > "$tmp"
   if [ -f "$RECENT_DIRS_FILE" ]; then
-    grep -Fxv "$dir" "$RECENT_DIRS_FILE" >> "$tmp" 2>/dev/null || true
+    while IFS= read -r d; do
+      [ "$d" = "$dir" ] && continue
+      [ -d "$d" ] || continue
+      echo "$d" >> "$tmp"
+      count=$((count + 1))
+      [ "$count" -ge 50 ] && break
+    done < "$RECENT_DIRS_FILE"
   fi
-  head -50 "$tmp" > "$RECENT_DIRS_FILE"
-  rm -f "$tmp"
+  mv -f "$tmp" "$RECENT_DIRS_FILE"
 }
 
 resolve_finder() {
@@ -135,15 +196,47 @@ resolve_finder() {
   fi
 }
 
+# When scanning all of $HOME (the fallback when no project dirs are
+# configured), prune ~/Library: app caches and Chrome profiles are
+# noise, and CloudStorage mounts there can stall traversal for seconds.
+_scan_prune() {
+  FD_EXCL=()
+  FIND_PRUNE="//none"
+  if [ "$1" = "$HOME" ]; then
+    FD_EXCL=(--exclude /Library)
+    FIND_PRUNE="$HOME/Library"
+  fi
+}
+
 scan_dirs() {
   local root="$1" depth="$2" finder="$3"
   [ -d "$root" ] || return
+  _scan_prune "$root"
+  # Trailing slashes stripped: fd emits "dir/" while find emits "dir",
+  # which breaks dedup between tiers and finder backends.
   case "$finder" in
     fd|fdfind)
-      "$finder" --type d --max-depth "$depth" --absolute-path . "$root" 2>/dev/null || true
+      "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} . "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
       ;;
     find)
-      find "$root" -maxdepth "$depth" -type d -not -path '*/.*' 2>/dev/null || true
+      find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -print 2>/dev/null | sed 's:/\{1,\}$::' || true
+      ;;
+  esac
+}
+
+# Find dirs whose *name* contains the query, case-insensitively, using
+# the finder's native matching — much deeper reach than scanning
+# everything and filtering in bash.
+match_dirs() {
+  local root="$1" query="$2" depth="$3" finder="$4"
+  [ -d "$root" ] || return
+  _scan_prune "$root"
+  case "$finder" in
+    fd|fdfind)
+      "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} -- "$query" "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
+      ;;
+    find)
+      find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -iname "*$query*" -print 2>/dev/null | sed 's:/\{1,\}$::' || true
       ;;
   esac
 }
@@ -173,10 +266,39 @@ collect_dir() {
   fi
 }
 
+# Directory of a session's active pane — used to detect whether an
+# existing session with a given name belongs to a directory.
+session_dir() {
+  tmux list-panes -t "=$1" -F '#{pane_current_path}' -f '#{pane_active}' 2>/dev/null | head -1
+}
+
+# Derive a session name for a directory.  When a same-named session
+# exists for a *different* directory, disambiguate with the parent dir
+# name (then numeric suffixes) instead of silently reusing it.
+resolve_session_name() {
+  local dir_path="$1"
+  local session_name base_name parent_name n
+  session_name=$(basename "$dir_path" | tr '.:' '-')
+
+  if tmux has-session -t "=$session_name" 2>/dev/null; then
+    if [ "$(session_dir "$session_name")" != "$dir_path" ]; then
+      base_name="$session_name"
+      parent_name=$(basename "$(dirname "$dir_path")" | tr '.:' '-')
+      session_name="${parent_name}-${base_name}"
+      n=2
+      while tmux has-session -t "=$session_name" 2>/dev/null; do
+        [ "$(session_dir "$session_name")" = "$dir_path" ] && break
+        session_name="${base_name}-${n}"
+        n=$((n + 1))
+      done
+    fi
+  fi
+  printf '%s' "$session_name"
+}
+
 # Sort and emit arrays of dirs by tier (projects first, then others)
 emit_sorted_tiers() {
   if [ "${#_projects[@]}" -gt 0 ]; then
-    local sorted
     while IFS= read -r d; do
       emit_dir "$d" project ""
     done < <(printf '%s\n' "${_projects[@]}" | sort -u)
@@ -452,6 +574,7 @@ trim_path() {
   [ "${#path}" -le "$max_width" ] && { printf '%s' "$path"; return; }
 
   local prefix=""
+  # shellcheck disable=SC2088  # literal "~/" match is intentional
   case "$path" in
     "~/"*) prefix="~/"; path="${path#\~/}" ;;
     "/"*)  prefix="/";  path="${path#/}" ;;
@@ -681,8 +804,8 @@ if [ "${1:-}" = "--dirs-preview" ]; then
   printf '\033[1;38;5;173m%s\033[0m\n' "$(basename "$dir")"
   printf '\033[2m%s\033[0m\n\n' "$display_path"
 
-  ptype=$(detect_project_type "$dir")
-  [ -n "$ptype" ] && printf '  \033[38;5;150mType:\033[0m %s\n' "$ptype"
+  detect_project_type "$dir"
+  [ -n "$REPLY" ] && printf '  \033[38;5;150mType:\033[0m %s\n' "$REPLY"
 
   if [ -d "$dir/.git" ]; then
     head_file="$dir/.git/HEAD"
@@ -694,11 +817,12 @@ if [ "${1:-}" = "--dirs-preview" ]; then
       esac
     fi
 
-    last_commit=$(git -C "$dir" log -1 --oneline 2>/dev/null || true)
+    last_commit=$(git -C "$dir" --no-optional-locks log -1 --oneline 2>/dev/null || true)
     [ -n "$last_commit" ] && printf '  \033[38;5;180mCommit:\033[0m %s\n' "$last_commit"
 
-    changed=$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-    [ "$changed" -gt 0 ] && printf '  \033[38;5;173mChanges:\033[0m %s files\n' "$changed"
+    changed=$(git -C "$dir" --no-optional-locks status --porcelain 2>/dev/null | head -200 | wc -l | tr -d ' ')
+    [ "$changed" -eq 200 ] && changed="200+"
+    [ "$changed" != "0" ] && printf '  \033[38;5;173mChanges:\033[0m %s files\n' "$changed"
   fi
 
   for readme in README.md README.rst README.txt README; do
@@ -746,7 +870,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
   declare -A seen=()
 
   emit_dir() {
-    local dir="$1" tier="$2" extra="$3"
+    local dir="$1" tier="$2"
     [[ -v "seen[$dir]" ]] && return
     seen["$dir"]=1
     local display_path="${dir/#$HOME/\~}"
@@ -756,10 +880,9 @@ if [ "${1:-}" = "--dirs-list" ]; then
           "$dir" "$BOLD_AMBER" "$RST" "$display_path" "$DIM" "$RST"
         ;;
       project)
-        local ptype
-        ptype=$(detect_project_type "$dir")
+        detect_project_type "$dir"
         local type_badge=""
-        [ -n "$ptype" ] && type_badge=" ${DIM}${ptype}${RST}"
+        [ -n "$REPLY" ] && type_badge=" ${DIM}${REPLY}${RST}"
         printf '%s\t  \033[38;5;150m◆\033[0m  %-40s%s\n' \
           "$dir" "$display_path" "$type_badge"
         ;;
@@ -791,9 +914,11 @@ if [ "${1:-}" = "--dirs-list" ]; then
     deep)
       # Deep scan: increase depth on directories matching the query.
       # If query is empty, scan all search paths at depth 2.
+      # All query matching is case-insensitive (like fzf's own filtering).
+      expanded="${query/#\~/$HOME}"
       while IFS= read -r d; do
         [ -n "$d" ] || continue
-        if [ -z "$query" ] || [[ "$d" == *"$query"* ]]; then
+        if [ -z "$query" ] || [[ "${d,,}" == *"${expanded,,}"* ]]; then
           emit_dir "$d" recent ""
         fi
       done < <(load_recent_dirs)
@@ -810,25 +935,90 @@ if [ "${1:-}" = "--dirs-list" ]; then
           done < <(scan_dirs "$sp" 2 "$finder")
         done
       else
-        for sp in "${search_paths[@]}"; do
-          [ -d "$sp" ] || continue
+        # Try the query as a literal path first: if relative, resolve
+        # against $HOME and each search path.  Any existing directory is
+        # scanned directly at depth 3.
+        query_roots=()
+        if [[ "$expanded" == /* ]]; then
+          query_roots+=("$expanded")
+        else
+          query_roots+=("$HOME/$expanded")
+          for sp in "${search_paths[@]}"; do
+            query_roots+=("$sp/$expanded")
+          done
+        fi
+        for qr in "${query_roots[@]}"; do
+          if [ -d "$qr" ]; then
+            collect_dir "$qr"
+            while IFS= read -r d; do
+              [ -z "$d" ] || [ "$d" = "$qr" ] && continue
+              collect_dir "$d"
+            done < <(scan_dirs "$qr" "$SCAN_DEPTH" "$finder")
+            continue
+          fi
+          # Partially typed path: walk up to the deepest existing
+          # ancestor, then scan it for dirs completing the typed prefix.
+          anc="$qr"
+          stripped=0
+          while [ "$anc" != "/" ] && [ ! -d "$anc" ]; do
+            anc="${anc%/*}"
+            [ -z "$anc" ] && anc="/"
+            stripped=$((stripped + 1))
+          done
+          [ "$anc" = "/" ] && continue
+          [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
           while IFS= read -r d; do
-            [ -z "$d" ] || [ "$d" = "$sp" ] && continue
-            if [[ "$d" == *"$query"* ]]; then
+            [ -z "$d" ] && continue
+            if [[ "${d,,}" == "${qr,,}"* ]]; then
               collect_dir "$d"
               while IFS= read -r sub; do
                 [ -z "$sub" ] && continue
                 collect_dir "$sub"
-              done < <(scan_dirs "$d" 3 "$finder")
+              done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
             fi
-          done < <(scan_dirs "$sp" 1 "$finder")
+          done < <(scan_dirs "$anc" "$stripped" "$finder")
         done
 
-        if [[ "$query" == /* ]] && [ -d "$query" ]; then
-          while IFS= read -r d; do
-            [ -z "$d" ] && continue
-            collect_dir "$d"
-          done < <(scan_dirs "$query" 3 "$finder")
+        if [[ "$query" != */* ]]; then
+          # Name fragment (no slash): let the finder search for matching
+          # dir names natively — reaches deep at low cost.
+          for sp in "${search_paths[@]}"; do
+            [ -d "$sp" ] || continue
+            mapfile -t _matches < <(match_dirs "$sp" "$query" $((SCAN_DEPTH * 2)) "$finder" | sort)
+            _scanned_root=""
+            for d in "${_matches[@]}"; do
+              [ -z "$d" ] || [ "$d" = "$sp" ] && continue
+              collect_dir "$d"
+              # A match inside an already-scanned match is covered
+              [ -n "$_scanned_root" ] && [[ "$d" == "$_scanned_root"/* ]] && continue
+              _scanned_root="$d"
+              while IFS= read -r sub; do
+                [ -z "$sub" ] && continue
+                collect_dir "$sub"
+              done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
+            done
+          done
+        else
+          # Multi-component query: match it as a path substring against a
+          # scan deep enough for it to appear, capped to keep the scan
+          # cheap.  (Real paths are handled by the query_roots pass above.)
+          slashes="${query//[^\/]/}"
+          match_depth=$((1 + ${#slashes}))
+          [ "$match_depth" -lt 2 ] && match_depth=2
+          [ "$match_depth" -gt "$SCAN_DEPTH" ] && match_depth="$SCAN_DEPTH"
+          for sp in "${search_paths[@]}"; do
+            [ -d "$sp" ] || continue
+            while IFS= read -r d; do
+              [ -z "$d" ] || [ "$d" = "$sp" ] && continue
+              if [[ "${d,,}" == *"${query,,}"* ]]; then
+                collect_dir "$d"
+                while IFS= read -r sub; do
+                  [ -z "$sub" ] && continue
+                  collect_dir "$sub"
+                done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
+              fi
+            done < <(scan_dirs "$sp" "$match_depth" "$finder")
+          done
         fi
       fi
 
@@ -863,6 +1053,17 @@ if [ "${1:-}" = "--dirs-list" ]; then
       ;;
   esac
 
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Session name resolution (exposed for tests)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--session-name-for" ]; then
+  set +e
+  resolve_session_name "$2"
+  echo
   exit 0
 fi
 
@@ -1057,26 +1258,37 @@ fi
 if [ "${1:-}" = "--dirs" ]; then
   set +e
 
+  dirs_header='enter=create  ^f=deep search  ^g=browse into  ^r=reset  esc=cancel'
+
+  # Optional live deep search: re-scan as the query changes
+  dirs_live_bind=()
+  if [ "$DIRS_LIVE" = "on" ]; then
+    dirs_live_bind+=(--bind="change:reload:sleep 0.1; bash '$SCRIPT_PATH' --dirs-list --deep {q}")
+  fi
+
   selected=$(bash "$SCRIPT_PATH" --dirs-list | fzf \
     "${FZF_THEME[@]}" \
     --no-sort \
     --delimiter=$'\t' \
     --with-nth=2 \
     --prompt='new session ❯ ' \
-    --header='enter=create  ^f=deep search  ^g=browse into  ^r=reset  esc=cancel' \
+    --header="$dirs_header" \
     --preview="bash '$SCRIPT_PATH' --dirs-preview {1}" \
     --preview-window="right:40%:nowrap" \
-    --bind="ctrl-f:reload:bash '$SCRIPT_PATH' --dirs-list --deep {q}" \
-    --bind="ctrl-g:reload:bash '$SCRIPT_PATH' --dirs-list --scan {1}" \
-    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-header(echo 'enter=create  ^f=deep search  ^g=browse into  ^r=reset  esc=cancel')" \
+    --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-header(echo 'deep search: '{q}'  ^r=reset  esc=cancel')" \
+    --bind="ctrl-g:reload(bash '$SCRIPT_PATH' --dirs-list --scan {1})+transform-header(echo 'browsing: '{1}'  ^r=reset  esc=cancel')" \
+    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-header(echo '$dirs_header')" \
+    ${dirs_live_bind[@]+"${dirs_live_bind[@]}"} \
   ) || exit 0
 
   dir_path="${selected%%	*}"
   dir_path="${dir_path%/}"
+  # Physical path, so comparisons match finder output (which resolves symlinks)
+  dir_path=$(cd "$dir_path" 2>/dev/null && pwd -P || echo "$dir_path")
 
   record_recent_dir "$dir_path"
 
-  session_name=$(basename "$dir_path" | tr '.:' '-')
+  session_name=$(resolve_session_name "$dir_path")
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
     tmux switch-client -t "=$session_name"
@@ -1190,6 +1402,7 @@ _action_bind() {
 while true; do
   : > "$RESUME_FILE"
 
+  # shellcheck disable=SC2054  # commas are part of a single fzf argument
   fzf_opts=(
     "${FZF_THEME[@]}"
     --delimiter=$'\t'

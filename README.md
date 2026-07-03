@@ -25,9 +25,10 @@ A portal gun for your tmux sessions.
 ## Dependencies
 
 - `tmux` >= 3.2 (for popup support)
-- `fzf`
+- `fzf` >= 0.38
 - `bash` >= 4.0
 - `fd` or `find` (for directory picker)
+- `zoxide` (optional — feeds the directory picker's recent tier)
 
 ## Installation
 
@@ -98,6 +99,26 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 
 The header dynamically updates to show only the relevant keybindings for the currently focused item (session, window, or pane).
 
+### Directory picker (`Ctrl-o` / dashboard "New Session")
+
+Creates (or switches to) a session from a directory. The list has three tiers:
+
+- `★` recent — directories you created sessions from before (plus, when [zoxide](https://github.com/ajeetdsouza/zoxide) is installed, your most frecent zoxide dirs)
+- `◆` projects — directories containing a project marker (`.git`, `package.json`, `Cargo.toml`, `go.mod`, …)
+- `·` plain directories
+
+By default the configured project directories (see `@interdimux-project-dirs`) are scanned one level deep. To go deeper:
+
+| Key | Action |
+|---|---|
+| `Enter` | Create a session from the selected directory (or switch to it if one exists) |
+| `Ctrl-f` | Deep search — re-scan using the current query. Path-style queries (`work/api`, `~/Desktop/proj`, `/abs/path`) are resolved as paths, including partially typed ones; name fragments (`aftermath`) match directory names case-insensitively at any depth (up to 2× scan depth). `~/Library` is skipped when searching from `$HOME` |
+| `Ctrl-g` | Browse into the highlighted directory |
+| `Ctrl-r` | Reset to the default view |
+| `Esc` | Cancel |
+
+The preview shows project type, git branch/status/last commit, a README excerpt, and the directory contents. Session names are derived from the directory basename; when two projects share a basename, the new session is disambiguated with the parent directory name.
+
 ### Tree display
 
 ```
@@ -149,6 +170,23 @@ set -g @interdimux-show-git-branch 'on'
 # Colon-separated list of directories to search for new sessions (ctrl-o)
 # Defaults to ~/projects:~/code:~/src:~/repos:~/work:~/dev (whichever exist)
 set -g @interdimux-project-dirs '~/projects:~/work'
+
+# Max entries shown in the recent tier of the directory picker (default: 10)
+set -g @interdimux-recent-limit '10'
+
+# How deep the directory picker's deep search (ctrl-f) scans (default: 3)
+set -g @interdimux-scan-depth '3'
+
+# Merge zoxide results into the recent tier when zoxide is installed (default: on)
+set -g @interdimux-use-zoxide 'on'
+
+# Re-run the deep search automatically as you type, instead of on ctrl-f
+# (default: off)
+set -g @interdimux-dirs-live-search 'off'
+
+# Colon-separated extra project markers, added to the built-in list
+# (.git, package.json, Cargo.toml, go.mod, ...)
+set -g @interdimux-project-markers 'Move.toml:deno.json'
 ```
 
 ## TODO
