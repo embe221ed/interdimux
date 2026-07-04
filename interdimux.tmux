@@ -2,36 +2,19 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Read user options with defaults
+# Read user options with defaults.  All other configuration is read by
+# the script itself at popup time (env override → tmux option → default),
+# so no env plumbing is needed here.
 interdimux_key=$(tmux show-option -gqv @interdimux-key)
 interdimux_key="${interdimux_key:-f}"
 
 dashboard_key=$(tmux show-option -gqv @interdimux-dashboard-key)
 dashboard_key="${dashboard_key:-g}"
 
-popup_width=$(tmux show-option -gqv @interdimux-popup-width)
-popup_width="${popup_width:-80%}"
-
-popup_height=$(tmux show-option -gqv @interdimux-popup-height)
-popup_height="${popup_height:-75%}"
-
-show_preview=$(tmux show-option -gqv @interdimux-show-preview)
-show_preview="${show_preview:-on}"
-
-show_full_command=$(tmux show-option -gqv @interdimux-show-full-command)
-show_full_command="${show_full_command:-on}"
-
-show_git_branch=$(tmux show-option -gqv @interdimux-show-git-branch)
-show_git_branch="${show_git_branch:-on}"
-
-ENV_VARS="INTERDIMUX_SHOW_PREVIEW=$show_preview INTERDIMUX_SHOW_FULL_COMMAND=$show_full_command INTERDIMUX_SHOW_GIT_BRANCH=$show_git_branch INTERDIMUX_POPUP_WIDTH=$popup_width INTERDIMUX_POPUP_HEIGHT=$popup_height"
-
-# prefix + f — open the navigator directly
+# prefix + f — open the navigator (the script owns popup size and chrome)
 tmux bind-key "$interdimux_key" run-shell -b \
-  "tmux popup -w '$popup_width' -h '$popup_height' -E \
-    '$ENV_VARS $CURRENT_DIR/scripts/interdimux.sh'"
+  "bash '$CURRENT_DIR/scripts/interdimux.sh' --launch switch"
 
-# prefix + g — open the dashboard (compact menu)
+# prefix + g — open the dashboard (native menu on tmux >= 3.4)
 tmux bind-key "$dashboard_key" run-shell -b \
-  "tmux popup -w 70 -h 20 -E \
-    '$ENV_VARS $CURRENT_DIR/scripts/interdimux.sh --dashboard'"
+  "bash '$CURRENT_DIR/scripts/interdimux.sh' --dashboard-launch"

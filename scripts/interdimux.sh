@@ -26,28 +26,44 @@ if ! command -v fzf >/dev/null 2>&1; then
   exit 1
 fi
 
-# Bindings use focus events and transform-header, which need fzf >= 0.38.
-# Skip the check if the version string is unparseable rather than block.
-fzf_version=$(fzf --version 2>/dev/null | awk '{print $1}')
+# The dynamic header uses transform-header, which needs fzf >= 0.40.
+# Newer versions unlock extra polish (see build_fzf_theme); the version
+# is parsed once here.  If the version string is unparseable, skip the
+# check rather than block.
+FZF_MINOR=0
+fzf_version=$(fzf --version 2>/dev/null | awk '{print $1}') || true
 IFS=. read -r fzf_major fzf_minor _ <<< "$fzf_version"
 if [[ "${fzf_major:-}" =~ ^[0-9]+$ && "${fzf_minor:-}" =~ ^[0-9]+$ ]]; then
-  if [ "$fzf_major" -eq 0 ] && [ "$fzf_minor" -lt 38 ]; then
-    echo "interdimux: fzf >= 0.38 is required (found $fzf_version)" >&2
+  if [ "$fzf_major" -eq 0 ] && [ "$fzf_minor" -lt 40 ]; then
+    echo "interdimux: fzf >= 0.40 is required (found $fzf_version)" >&2
     exit 1
   fi
+  FZF_MINOR="$fzf_minor"
+  [ "$fzf_major" -gt 0 ] && FZF_MINOR=999
 fi
+
+# True when fzf is at least 0.<arg>
+fzf_ge() { [ "$FZF_MINOR" -ge "$1" ]; }
 
 if [ -z "${TMUX:-}" ]; then
   echo "interdimux: not running inside tmux" >&2
   exit 1
 fi
 
+# tmux version as major*100+minor (3.4 → 304); unparseable builds
+# (e.g. "master") are assumed modern.
+TMUX_VNUM=999
+tmux_vstr=$(tmux -V 2>/dev/null || true)
+if [[ "$tmux_vstr" =~ ([0-9]+)\.([0-9]+) ]]; then
+  TMUX_VNUM=$(( BASH_REMATCH[1] * 100 + BASH_REMATCH[2] ))
+fi
+
+# True when tmux is at least major*100+minor
+tmux_ge() { [ "$TMUX_VNUM" -ge "$1" ]; }
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-
-SHOW_FULL_COMMAND="${INTERDIMUX_SHOW_FULL_COMMAND:-on}"
-SHOW_GIT_BRANCH="${INTERDIMUX_SHOW_GIT_BRANCH:-on}"
 
 # Read a config value: env override → tmux option → default.
 get_opt() {
@@ -61,6 +77,13 @@ get_opt() {
   printf '%s' "${v:-$default}"
 }
 
+SHOW_PREVIEW=$(get_opt "${INTERDIMUX_SHOW_PREVIEW:-}" @interdimux-show-preview on)
+SHOW_FULL_COMMAND=$(get_opt "${INTERDIMUX_SHOW_FULL_COMMAND:-}" @interdimux-show-full-command on)
+SHOW_GIT_BRANCH=$(get_opt "${INTERDIMUX_SHOW_GIT_BRANCH:-}" @interdimux-show-git-branch on)
+POPUP_WIDTH=$(get_opt "${INTERDIMUX_POPUP_WIDTH:-}" @interdimux-popup-width 80%)
+POPUP_HEIGHT=$(get_opt "${INTERDIMUX_POPUP_HEIGHT:-}" @interdimux-popup-height 75%)
+ORDER=$(get_opt "${INTERDIMUX_ORDER:-}" @interdimux-order mru)
+FZF_USER_OPTS=$(get_opt "${INTERDIMUX_FZF_OPTS:-}" @interdimux-fzf-opts "")
 RECENT_LIMIT=$(get_opt "${INTERDIMUX_RECENT_LIMIT:-}" @interdimux-recent-limit 10)
 SCAN_DEPTH=$(get_opt "${INTERDIMUX_SCAN_DEPTH:-}" @interdimux-scan-depth 3)
 USE_ZOXIDE=$(get_opt "${INTERDIMUX_USE_ZOXIDE:-}" @interdimux-use-zoxide on)
@@ -81,16 +104,69 @@ DIM_CMD=$'\033[38;5;173m'   # amber for commands
 DIM_SSH=$'\033[38;5;109m'   # #87afaf — muted blue for SSH hosts
 DIM_EDIT=$'\033[38;5;150m'  # #afd787 — muted green for editor files
 DIM_GIT=$'\033[38;5;140m'   # #af87d7 — muted purple for git branches
+DIM_TREE=$'\033[38;5;240m'  # grey for tree glyphs
+RED=$'\033[38;5;167m'       # muted red for destructive accents
+BOLD_RED=$'\033[1;38;5;167m'
+GREEN=$'\033[38;5;150m'     # success marks
 MARKER_COLOR=$'\033[1;38;5;173m' # bold amber for *
+
+# Popup borders inherit the user's popup-border-style/-lines options;
+# only destructive modes override the frame colour.
+POPUP_BORDER_DANGER='colour167'  # muted red — kill / destructive modes
+POPUP_TITLE_STYLE='#[bold]'      # style delta only, keeps the user's border colours
 
 # Column separator (dim pipe)
 SEP="${DIM_SEP}│${RST}"
 
-# Shared fzf theme — applied to all pickers for consistency
-FZF_THEME=(
-  --ansi
-  --reverse
-)
+# Header hint builder: amber key + dim label pairs
+hint() {
+  local out="" k l
+  while [ $# -ge 2 ]; do
+    k="$1" l="$2"
+    shift 2
+    out+=$'\033[38;5;173m'"${k}"$'\033[0m\033[2m '"${l}"$'\033[0m'
+    [ $# -ge 2 ] && out+="  "
+  done
+  printf '%s' "$out"
+}
+
+# fzf chrome colours matched to the in-list palette
+FZF_COLORS='--color=hl:180,hl+:215:bold,fg+:223,bg+:236,prompt:173,pointer:173,marker:150,spinner:173,info:240,header:246,border:238,separator:238,scrollbar:238,label:180,preview-label:180,gutter:-1,query:223'
+
+# Shared fzf theme — applied to all pickers for consistency.  Built once,
+# tiered by fzf version so old installs keep a working (plainer) UI.
+FZF_THEME=()
+build_fzf_theme() {
+  local info=inline
+  fzf_ge 42 && info=inline-right
+  FZF_THEME=(
+    --ansi
+    --reverse
+    --cycle
+    --info="$info"
+    --pointer='▌'
+    --ellipsis='…'
+    --tabstop=1
+    "$FZF_COLORS"
+  )
+  fzf_ge 52 && FZF_THEME+=(--highlight-line)
+  # 0.66 made the gutter a visible bar by default (and gutter:-1 no
+  # longer hides it) — blank it so the pointer marks the current line
+  fzf_ge 66 && FZF_THEME+=(--gutter=' ')
+  # User passthrough (@interdimux-fzf-opts), appended last so user colors
+  # win; structural flags (delimiter/nth/binds) are added per-picker.
+  if [ -n "$FZF_USER_OPTS" ]; then
+    local -a _user=()
+    # Unparseable user opts (e.g. an unbalanced quote in .tmux.conf) are
+    # dropped rather than allowed to kill every entry point under set -e.
+    # shellcheck disable=SC2086  # word-splitting the option string is the contract
+    if ! eval "_user=($FZF_USER_OPTS)" 2>/dev/null; then
+      _user=()
+    fi
+    FZF_THEME+=(${_user[@]+"${_user[@]}"})
+  fi
+}
+build_fzf_theme
 
 # ---------------------------------------------------------------------------
 # Directory picker: project detection & history
@@ -411,10 +487,12 @@ full_command() {
 
 # Resolve the command string to display for a pane.
 resolve_command() {
-  local short_cmd="$1" pid="$2"
+  # tabs sanitized out: the command lands in a tab-delimited row field
+  local short_cmd="${1//$'\t'/ }" pid="$2"
   if [ "$SHOW_FULL_COMMAND" = "on" ]; then
     local fcmd
     fcmd=$(full_command "$pid")
+    fcmd="${fcmd//$'\t'/ }"
     fcmd="${fcmd#"${fcmd%%[![:space:]]*}"}"
     fcmd="${fcmd%"${fcmd##*[![:space:]]}"}"
     [ -n "$fcmd" ] && { printf '%s' "$fcmd"; return; }
@@ -559,12 +637,74 @@ format_command() {
 # Display helpers
 # ---------------------------------------------------------------------------
 
-# Pad a string to a target display width using character count
+# Pad (or truncate with …) a string to a target display width using
+# character count
 dpad() {
   local str="$1" width="$2"
+  if [ "${#str}" -gt "$width" ] && [ "$width" -gt 1 ]; then
+    str="${str:0:width-1}…"
+  fi
   printf '%s' "$str"
   local pad=$(( width - ${#str} ))
   [ "$pad" -gt 0 ] && printf '%*s' "$pad" ""
+}
+
+# Row-field builder: accumulate colored chunks while tracking the plain
+# (uncolored) character count, so padding stays correct around ANSI codes.
+FLD="" FLD_LEN=0
+fld_reset() { FLD="" FLD_LEN=0; }
+fld_add() { FLD+="$1"; FLD_LEN=$(( FLD_LEN + $2 )); }
+fld_pad() {
+  local pad=$(( $1 - FLD_LEN )) _sp
+  if [ "$pad" -gt 0 ]; then
+    printf -v _sp '%*s' "$pad" ''
+    FLD+="$_sp"
+  fi
+  FLD_LEN="$1"
+}
+
+# Compact age of an epoch timestamp ("now", "5m", "2h", "3d", "1w");
+# sets REPLY (empty for missing/zero values).
+NOW_EPOCH=$(date +%s)
+age_of() {
+  REPLY=""
+  local t="${1:-0}" d
+  [[ "$t" =~ ^[0-9]+$ ]] || return 0
+  [ "$t" -eq 0 ] && return 0
+  d=$(( NOW_EPOCH - t ))
+  if   [ "$d" -lt 0 ];      then return 0
+  elif [ "$d" -lt 90 ];     then REPLY="now"
+  elif [ "$d" -lt 3600 ];   then REPLY="$(( d / 60 ))m"
+  elif [ "$d" -lt 86400 ];  then REPLY="$(( d / 3600 ))h"
+  elif [ "$d" -lt 604800 ]; then REPLY="$(( d / 86400 ))d"
+  else                           REPLY="$(( d / 604800 ))w"
+  fi
+}
+
+# Terminal width of the popup tty (falls back to 80 without a tty,
+# e.g. in tests/CI)
+term_cols() {
+  local dims cols=80
+  if dims=$({ stty size </dev/tty; } 2>/dev/null); then
+    cols="${dims#* }"
+  fi
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  printf '%s' "$cols"
+}
+
+# Column widths for the navigator tree, derived from the popup width
+# (minus the preview share when the preview starts visible)
+IDENT_W=24 PATH_W=24 BADGE_W=14
+compute_widths() {
+  local avail
+  avail=$(term_cols)
+  [ "$SHOW_PREVIEW" = "on" ] && avail=$(( avail / 2 ))
+  avail=$(( avail - 8 ))
+  if   [ "$avail" -ge 88 ]; then IDENT_W=28 PATH_W=32 BADGE_W=16
+  elif [ "$avail" -ge 64 ]; then IDENT_W=24 PATH_W=24 BADGE_W=14
+  elif [ "$avail" -ge 48 ]; then IDENT_W=20 PATH_W=18 BADGE_W=10
+  else                           IDENT_W=18 PATH_W=14 BADGE_W=0
+  fi
 }
 
 # Trim a path to fit within max_width display columns.
@@ -609,6 +749,12 @@ trim_path() {
     fi
   done
 
+  # A single component can exceed the budget on its own — truncate it
+  # so the row's columns don't shift.
+  if [ "${#result}" -gt "$budget" ] && [ "$budget" -gt 1 ]; then
+    result="${result:0:budget-1}…"
+  fi
+
   printf '%s' "${prefix}${ellipsis}${result}"
 }
 
@@ -616,19 +762,57 @@ trim_path() {
 # Gather targets (tree layout)
 # ---------------------------------------------------------------------------
 #
-# Output format (tab-delimited):
-#   SPEC <TAB> DISPLAY
+# Output format (tab-delimited, constant 4 fields):
+#   IDENTITY <TAB> CONTEXT <TAB> COMMAND <TAB> SPEC
+#
+# The SPEC sits in the LAST field so that fzf's --nth indexes are the
+# same whether they are computed against the original or the
+# --with-nth-transformed line (semantics differ across fzf versions).
+# Match scope is restricted to IDENTITY + COMMAND; CONTEXT carries the
+# path, git badge, flags, and session metadata, which are display-only.
 #
 # SPEC uses printable ":" delimiter (parsed right-to-left):
 #   S:session_name
 #   W:session_name:window_index
 #   P:session_name:window_index:pane_index
 
+# Path + git badge + window flag glyphs, padded into the CONTEXT column.
+# Args: path zoomed bell activity
+build_ctx_field() {
+  local path="$1" zoomed="$2" bell="$3" activity="$4"
+  local disp gbranch badge blen
+  fld_reset
+  disp="${path/#$HOME/\~}"
+  disp="${disp//$'\t'/ }"   # tabs are the field delimiter
+  disp=$(trim_path "$disp" "$PATH_W")
+  fld_add "${SEP} " 2
+  fld_add "${DIM_PATH}${disp}${RST}" "${#disp}"
+  fld_pad $(( PATH_W + 2 ))
+  if [ "$BADGE_W" -gt 0 ]; then
+    badge="" blen=0
+    gbranch=$(get_git_branch "$path")
+    if [ -n "$gbranch" ]; then
+      [ "${#gbranch}" -gt $(( BADGE_W - 2 )) ] && gbranch="${gbranch:0:BADGE_W-3}…"
+      badge=" ${DIM_GIT}‹${gbranch}›${RST}"
+      blen=$(( ${#gbranch} + 3 ))
+    fi
+    [ "$zoomed" = "1" ]   && { badge+=" ${BOLD_AMBER}Z${RST}"; blen=$((blen + 2)); }
+    [ "$bell" = "1" ]     && { badge+=" ${BOLD_RED}!${RST}";   blen=$((blen + 2)); }
+    [ "$activity" = "1" ] && { badge+=" ${DIM_SSH}#${RST}";    blen=$((blen + 2)); }
+    fld_add "$badge" "$blen"
+    fld_pad $(( PATH_W + 3 + BADGE_W ))
+  fi
+}
+
 gather_targets() {
-  local current_session current_window current_pane
-  current_session=$(tmux display-message -p '#S')
-  current_window=$(tmux display-message -p '#I')
-  current_pane=$(tmux display-message -p '#P')
+  # Current target: anchor to $TMUX_PANE when tmux provides it (popups
+  # and run-shell both do) — a bare display-message in a clientless
+  # context silently resolves to the most recently attached session.
+  local current_session current_window current_pane cur_raw
+  cur_raw=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "#S${US}#I${US}#P")
+  IFS="$US" read -r current_session current_window current_pane <<< "$cur_raw"
+
+  compute_widths
 
   # Build process table once (instead of per-pane pgrep+ps)
   [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
@@ -636,11 +820,33 @@ gather_targets() {
   # Bulk-fetch all data using unit separator as internal field delimiter
   local sessions_raw all_windows_raw all_panes_raw
   sessions_raw=$(tmux list-sessions \
-    -F "#{session_name}${US}#{session_windows}${US}#{?session_attached,attached,}")
+    -F "#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}${US}#{session_windows}${US}#{?session_attached,attached,}")
   all_windows_raw=$(tmux list-windows -a \
-    -F "#{session_name}${US}#{window_index}${US}#{window_name}${US}#{window_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_panes}${US}#{pane_pid}")
+    -F "#{session_name}${US}#{window_index}${US}#{window_name}${US}#{window_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_panes}${US}#{pane_pid}${US}#{window_zoomed_flag}#{window_bell_flag}#{window_activity_flag}")
   all_panes_raw=$(tmux list-panes -a \
     -F "#{session_name}${US}#{window_index}${US}#{pane_index}${US}#{pane_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{pane_pid}${US}#{window_panes}")
+
+  # MRU ordering: most recently attended sessions first (last-attached,
+  # falling back to activity for never-attached sessions); the current
+  # session moves to the END so the top row is the previous session —
+  # Enter with an empty query toggles back to it.  --cycle makes the
+  # current session's windows one ↑ away.
+  if [ "$ORDER" = "mru" ]; then
+    local sorted current_line="" other_lines="" line sn_check
+    sorted=$(printf '%s\n' "$sessions_raw" | sort -t"$US" -k1,1nr)
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      sn_check="${line#*"$US"}"
+      sn_check="${sn_check%%"$US"*}"
+      if [ "$sn_check" = "$current_session" ]; then
+        current_line="$line"
+      else
+        other_lines+="${line}"$'\n'
+      fi
+    done <<< "$sorted"
+    sessions_raw="${other_lines}${current_line}"
+    sessions_raw="${sessions_raw%$'\n'}"
+  fi
 
   # Build lookup: windows grouped by session name
   declare -A windows_by_session=()
@@ -664,22 +870,35 @@ gather_targets() {
     fi
   done <<< "$all_panes_raw"
 
-  # Iterate sessions in list-sessions order
-  local marker flags session_windows win_count wi
-  local wmarker wpath_raw raw_cmd cmd_formatted git_badge gbranch padded_id padded_path
-  local pane_data pane_count pi
-  local pmarker ppath_raw
+  local sla sname swins sattach marker meta age sdisp pfx_cap
+  local session_windows win_count wi branch_glyph cont idname maxid ident ctx
+  local wmarker raw_cmd cmd_formatted wflags
+  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
 
-  while IFS="$US" read -r sname swins sattach; do
+  while IFS="$US" read -r sla sname swins sattach; do
+    [ -z "$sname" ] && continue
     marker=" "
     [ "$sname" = "$current_session" ] && marker="${MARKER_COLOR}*${RST}"
 
-    flags=""
-    [ -n "$sattach" ] && flags=" ${DIM}[a]${RST}"
+    # Session row: identity | meta | (empty command) | spec.  Tabs in
+    # names would break the field contract — display them as spaces.
+    # The name is capped so the row never exceeds the identity column
+    # (4 = marker + space + ▸ + space).
+    sdisp="${sname//$'\t'/ }"
+    [ "${#sdisp}" -gt $(( IDENT_W - 4 )) ] && sdisp="${sdisp:0:IDENT_W-5}…"
+    fld_reset
+    fld_add "$marker" 1
+    fld_add " ${DIM_TREE}▸${RST} " 3
+    fld_add "${BOLD}${sdisp}${RST}" "${#sdisp}"
+    fld_pad "$IDENT_W"
+    ident="$FLD"
 
-    printf 'S:%s\t%s%s %s %s%s  %s(%s wins)%s%s\n' \
-      "$sname" \
-      "$BOLD" "$RST" "$marker" "$BOLD" "$sname" "$DIM" "$swins" "$RST" "$flags"
+    age_of "$sla"; age="$REPLY"
+    meta="${DIM}${swins} win${RST}"
+    [ -n "$sattach" ] && meta+=" ${DIM_EDIT}●${RST}"
+    [ -n "$age" ] && meta+=" ${DIM}${age}${RST}"
+
+    printf '%s\t%s\t\tS:%s\n' "$ident" "$meta" "$sname"
 
     session_windows="${windows_by_session[$sname]:-}"
     [ -z "$session_windows" ] && continue
@@ -687,32 +906,49 @@ gather_targets() {
     win_count=$(printf '%s\n' "$session_windows" | wc -l)
     win_count=${win_count// /}
 
+    # Session-name prefix on child rows keeps filtered rows identifiable
+    # and makes compound queries ("proj edit") work.  The cap is derived
+    # from IDENT_W so child rows can't overflow the identity column:
+    # window rows spend 6 columns on marker/glyphs + the id, pane rows 7
+    # + "w.p" (12 covers both with 2-digit indexes).
+    pfx_cap=$(( IDENT_W - 12 ))
+    [ "$pfx_cap" -gt 14 ] && pfx_cap=14
+    [ "${#sdisp}" -gt "$pfx_cap" ] && sdisp="${sdisp:0:pfx_cap-1}…"
+
     wi=0
-    while IFS="$US" read -r _sn widx wname _wact wcmd wpath wpanes wpid; do
+    while IFS="$US" read -r _sn widx wname _wact wcmd wpath wpanes wpid wflags; do
       wi=$((wi + 1))
+      branch_glyph='├─'
+      cont='│'
+      if [ "$wi" -eq "$win_count" ]; then
+        branch_glyph='└─'
+        cont=' '
+      fi
 
       wmarker=" "
       [ "$sname" = "$current_session" ] && [ "$widx" = "$current_window" ] && wmarker="${MARKER_COLOR}*${RST}"
 
-      wpath_raw="$wpath"
-      wpath="${wpath/#$HOME/\~}"
-      wpath=$(trim_path "$wpath" 22)
+      idname="${widx}:${wname//$'\t'/ }"
+      fld_reset
+      fld_add "$wmarker" 1
+      fld_add " ${DIM_TREE}${branch_glyph}${RST} " 4
+      fld_add "${DIM}${sdisp}${RST} " $(( ${#sdisp} + 1 ))
+      maxid=$(( IDENT_W - FLD_LEN ))
+      if [ "$maxid" -gt 2 ] && [ "${#idname}" -gt "$maxid" ]; then
+        idname="${idname:0:maxid-1}…"
+      fi
+      fld_add "$idname" "${#idname}"
+      fld_pad "$IDENT_W"
+      ident="$FLD"
+
+      build_ctx_field "$wpath" "${wflags:0:1}" "${wflags:1:1}" "${wflags:2:1}"
+      ctx="$FLD"
 
       raw_cmd=$(resolve_command "$wcmd" "$wpid")
       cmd_formatted=$(format_command "$raw_cmd")
 
-      git_badge=""
-      gbranch=$(get_git_branch "$wpath_raw")
-      [ -n "$gbranch" ] && git_badge=" ${DIM_GIT}‹${gbranch}›${RST}"
-
-      padded_id=$(dpad "$widx:$wname" 14)
-      padded_path=$(dpad "$wpath" 22)
-
-      printf 'W:%s:%s\t    %s %s %s %s%s%s %s %s%s\n' \
-        "$sname" "$widx" \
-        "$wmarker" "$padded_id" \
-        "$SEP" "$DIM_PATH" "$padded_path" "$RST" \
-        "$SEP" "$cmd_formatted" "$git_badge"
+      printf '%s\t%s\t%s\tW:%s:%s\n' \
+        "$ident" "$ctx" "$cmd_formatted" "$sname" "$widx"
 
       # Panes (only for multi-pane windows)
       if [ "$wpanes" -gt 1 ]; then
@@ -725,29 +961,36 @@ gather_targets() {
 
         while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2; do
           pi=$((pi + 1))
+          pglyph='├╴'
+          [ "$pi" -eq "$pane_count" ] && pglyph='└╴'
 
           pmarker=" "
           [ "$sname" = "$current_session" ] && [ "$widx" = "$current_window" ] && [ "$pidx" = "$current_pane" ] && pmarker="${MARKER_COLOR}*${RST}"
 
-          ppath_raw="$ppath"
-          ppath="${ppath/#$HOME/\~}"
-          ppath=$(trim_path "$ppath" 22)
+          # Identity budget: 7 glyph columns + "sdisp widx." + pidx.
+          # Multi-digit indexes can push past IDENT_W — shorten the
+          # (dim) session prefix, never the pane id itself.
+          pdisp="$sdisp"
+          pover=$(( 9 + ${#pdisp} + ${#widx} + ${#pidx} - IDENT_W ))
+          if [ "$pover" -gt 0 ] && [ "${#pdisp}" -gt $(( pover + 1 )) ]; then
+            pdisp="${pdisp:0:${#pdisp}-pover-1}…"
+          fi
+          pprefix="${pdisp} ${widx}."
+          fld_reset
+          fld_add "$pmarker" 1
+          fld_add " ${DIM_TREE}${cont} ${pglyph}${RST} " 6
+          fld_add "${DIM}${pprefix}${RST}${pidx}" $(( ${#pprefix} + ${#pidx} ))
+          fld_pad "$IDENT_W"
+          ident="$FLD"
+
+          build_ctx_field "$ppath" "" "" ""
+          ctx="$FLD"
 
           raw_cmd=$(resolve_command "$pcmd" "$ppid")
           cmd_formatted=$(format_command "$raw_cmd")
 
-          git_badge=""
-          gbranch=$(get_git_branch "$ppath_raw")
-          [ -n "$gbranch" ] && git_badge=" ${DIM_GIT}‹${gbranch}›${RST}"
-
-          padded_id=$(dpad ".$pidx" 12)
-          padded_path=$(dpad "$ppath" 22)
-
-          printf 'P:%s:%s:%s\t      %s %s %s %s%s%s %s %s%s\n' \
-            "$sname" "$widx" "$pidx" \
-            "$pmarker" "$padded_id" \
-            "$SEP" "$DIM_PATH" "$padded_path" "$RST" \
-            "$SEP" "$cmd_formatted" "$git_badge"
+          printf '%s\t%s\t%s\tP:%s:%s:%s\n' \
+            "$ident" "$ctx" "$cmd_formatted" "$sname" "$widx" "$pidx"
         done <<< "$pane_data"
       fi
     done <<< "$session_windows"
@@ -757,6 +1000,37 @@ gather_targets() {
 # ---------------------------------------------------------------------------
 # Preview command (called by fzf --preview)
 # ---------------------------------------------------------------------------
+
+# Rule line sized to the preview pane
+preview_rule() {
+  local w="${FZF_PREVIEW_COLUMNS:-60}" label="${1:-}" bar
+  [[ "$w" =~ ^[0-9]+$ ]] || w=60
+  [ "$w" -gt 2 ] && w=$(( w - 2 ))
+  printf -v bar '%*s' "$w" ''
+  bar="${bar// /─}"
+  if [ -n "$label" ]; then
+    local rest=$(( w - ${#label} - 4 ))
+    [ "$rest" -lt 0 ] && rest=0
+    printf '\033[38;5;240m── \033[38;5;180m%s \033[38;5;240m%s\033[0m\n' \
+      "$label" "${bar:0:rest}"
+  else
+    printf '\033[38;5;240m%s\033[0m\n' "$bar"
+  fi
+}
+
+# Print captured pane content with trailing blank lines removed
+print_capture() {
+  local content="$1" last
+  while [ -n "$content" ]; do
+    last="${content##*$'\n'}"
+    case "$last" in
+      *[![:space:]]*) break ;;
+    esac
+    [ "$last" = "$content" ] && { content=""; break; }
+    content="${content%$'\n'*}"
+  done
+  [ -n "$content" ] && printf '%s\n' "$content"
+}
 
 if [ "${1:-}" = "--preview" ]; then
   set +e
@@ -768,24 +1042,45 @@ if [ "${1:-}" = "--preview" ]; then
 
   case "$SPEC_TYPE" in
     S)
-      printf '\033[1;38;5;173m%s\033[0m\n\n' "$SPEC_SESSION"
+      # Trailing colon: resolves the session to its active pane (a bare
+      # "=name" is not a valid pane target on newer tmux)
+      info=$(tmux display-message -p -t "=${SPEC_SESSION}:" \
+        "#{session_windows}${US}#{?session_attached,attached,detached}" 2>/dev/null)
+      IFS="$US" read -r s_wins s_att <<< "$info"
+      printf '\033[1;38;5;173m▸ %s\033[0m  \033[2m%s win · %s\033[0m\n' \
+        "$SPEC_SESSION" "${s_wins:-?}" "${s_att:-}"
+      preview_rule
       tmux list-windows -t "=$SPEC_SESSION" \
         -F "#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}" 2>/dev/null | \
       while IFS="$US" read -r wid wcmd wpath wact wpanes; do
         marker=" "
-        [ "$wact" = "1" ] && marker="*"
+        [ "$wact" = "1" ] && marker="${MARKER_COLOR}*${RST}"
         wpath="${wpath/#$HOME/\~}"
-        printf ' %s \033[1m%-14s\033[0m \033[38;5;173m%-16s\033[0m \033[38;5;180m%s\033[0m' \
-          "$marker" "$wid" "$wcmd" "$wpath"
+        printf ' %s %s%s%s %s%s%s %s%s%s' \
+          "$marker" "$BOLD" "$(dpad "$wid" 16)" "$RST" \
+          "$DIM_CMD" "$(dpad "$wcmd" 14)" "$RST" \
+          "$DIM_PATH" "$wpath" "$RST"
         [ "$wpanes" -gt 1 ] && printf '  \033[2m(%s panes)\033[0m' "$wpanes"
         printf '\n'
       done
       echo ""
-      printf '\033[2m── active pane ──\033[0m\n'
-      tmux capture-pane -t "=$SPEC_SESSION" -p -e -S -30 2>/dev/null || echo "(no active pane)"
+      preview_rule "active pane"
+      print_capture "$(tmux capture-pane -t "=${SPEC_SESSION}:" -p -e -S -30 2>/dev/null)" || echo "(no active pane)"
       ;;
     *)
-      tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null || echo "(cannot capture pane)"
+      info=$(tmux display-message -p -t "$target" \
+        "#{pane_current_command}${US}#{pane_current_path}" 2>/dev/null)
+      IFS="$US" read -r p_cmd p_path <<< "$info"
+      p_path="${p_path/#$HOME/\~}"
+      if [ "$SPEC_TYPE" = "W" ]; then
+        printf '\033[1;38;5;173m%s:%s\033[0m' "$SPEC_SESSION" "$SPEC_WIDX"
+      else
+        printf '\033[1;38;5;173m%s:%s.%s\033[0m' "$SPEC_SESSION" "$SPEC_WIDX" "$SPEC_PIDX"
+      fi
+      printf '  \033[38;5;173m%s\033[0m \033[2m·\033[0m \033[38;5;180m%s\033[0m\n' \
+        "${p_cmd:-?}" "${p_path:-?}"
+      preview_rule
+      print_capture "$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)" || echo "(cannot capture pane)"
       ;;
   esac
   exit 0
@@ -837,7 +1132,8 @@ if [ "${1:-}" = "--dirs-preview" ]; then
     fi
   done
 
-  printf '\n\033[2m── contents ──\033[0m\n'
+  echo ""
+  preview_rule "contents"
   ls -1p "$dir" 2>/dev/null | head -20
 
   exit 0
@@ -855,8 +1151,11 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --deep) mode="deep"; query="${2:-}"; shift 2 ;;
-      --scan) mode="scan"; query="${2:-}"; shift 2 ;;
+      # shift defensively: "shift 2" with one argument left shifts
+      # nothing (and this loop runs under set +e), which would spin
+      # forever on a trailing --deep/--scan
+      --deep) mode="deep"; query="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+      --scan) mode="scan"; query="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
       *) shift ;;
     esac
   done
@@ -869,26 +1168,39 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
   declare -A seen=()
 
+  # Path column width derived from the popup (list pane is ~60% with the
+  # 40% preview open)
+  DIRS_PATH_W=$(( $(term_cols) * 55 / 100 - 10 ))
+  [ "$DIRS_PATH_W" -lt 28 ] && DIRS_PATH_W=28
+  [ "$DIRS_PATH_W" -gt 64 ] && DIRS_PATH_W=64
+
+  # Output format (tab-delimited, 3 fields): DISPLAY <TAB> BADGE <TAB> PATH
+  # The path spec sits last (same reasoning as gather_targets); the badge
+  # column is excluded from fzf match scope.
   emit_dir() {
     local dir="$1" tier="$2"
+    # A tab in the path can't be represented in the tab-delimited row
+    # (the selection would resolve to the post-tab fragment) — skip it
+    case "$dir" in *$'\t'*) return ;; esac
     [[ -v "seen[$dir]" ]] && return
     seen["$dir"]=1
     local display_path="${dir/#$HOME/\~}"
+    display_path=$(trim_path "$display_path" "$DIRS_PATH_W")
     case "$tier" in
       recent)
-        printf '%s\t  %s★%s  %-40s %s(recent)%s\n' \
-          "$dir" "$BOLD_AMBER" "$RST" "$display_path" "$DIM" "$RST"
+        printf '  %s★%s  %s\t\t%s\n' \
+          "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" "$dir"
         ;;
       project)
         detect_project_type "$dir"
         local type_badge=""
-        [ -n "$REPLY" ] && type_badge=" ${DIM}${REPLY}${RST}"
-        printf '%s\t  \033[38;5;150m◆\033[0m  %-40s%s\n' \
-          "$dir" "$display_path" "$type_badge"
+        [ -n "$REPLY" ] && type_badge="${DIM}${REPLY}${RST}"
+        printf '  \033[38;5;150m◆\033[0m  %s\t%s\t%s\n' \
+          "$(dpad "$display_path" "$DIRS_PATH_W")" "$type_badge" "$dir"
         ;;
       dir)
-        printf '%s\t  %s·%s  %s\n' \
-          "$dir" "$DIM" "$RST" "$display_path"
+        printf '  %s·%s  %s\t\t%s\n' \
+          "$DIM" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" "$dir"
         ;;
     esac
   }
@@ -1068,14 +1380,172 @@ if [ "${1:-}" = "--session-name-for" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Dialogs (drawn on the popup tty while fzf is suspended by execute)
+# ---------------------------------------------------------------------------
+
+DLG_ROWS=24 DLG_COLS=80
+DLG_TOP=0 DLG_LEFT=0 DLG_W=0 DLG_H=0
+
+# The user's configured popup border (option defaults if unset)
+popup_user_lines() {
+  local l
+  l=$(tmux show-option -gv popup-border-lines 2>/dev/null) || l=""
+  printf '%s' "${l:-single}"
+}
+popup_user_style() {
+  local s
+  s=$(tmux show-option -gv popup-border-style 2>/dev/null) || s=""
+  printf '%s' "${s:-default}"
+}
+
+# The user's border style with the frame colour swapped to the danger
+# red (later attributes win in tmux styles, so bg/attrs are preserved)
+danger_style() {
+  local base
+  base=$(popup_user_style)
+  case "$base" in
+    default) printf 'fg=%s' "$POPUP_BORDER_DANGER" ;;
+    *)       printf '%s,fg=%s' "$base" "$POPUP_BORDER_DANGER" ;;
+  esac
+}
+
+# Repaint the live popup frame: "danger" for destructive prompts, "user"
+# to restore the configured border.  tmux >= 3.6 modifies the running
+# popup; 3.3–3.5 silently ignore the call; older tmux rejects the flags,
+# so gate on 3.3.  Lines and title must be re-sent on every repaint: a
+# partial display-popup on >= 3.6 replaces omitted properties with
+# defaults (-T absent means title "", not "keep") — INTERDIMUX_TITLE is
+# forwarded into the popup by --launch.
+popup_accent() {
+  tmux_ge 303 || return 0
+  local style
+  if [ "$1" = "danger" ]; then style=$(danger_style); else style=$(popup_user_style); fi
+  local -a t=()
+  [ -n "${INTERDIMUX_TITLE:-}" ] && t=(-T "${POPUP_TITLE_STYLE}${INTERDIMUX_TITLE}")
+  tmux display-popup -b "$(popup_user_lines)" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
+}
+
+# dialog_open ACCENT TITLE [BODY...] — clear the screen and draw a
+# centered rounded box.  Body rows are pre-colored strings whose plain
+# length must fit; the row below the body is reserved for hint/status.
+dialog_open() {
+  local accent="$1" title="$2"
+  shift 2
+  local dims line w
+  DLG_ROWS=24 DLG_COLS=80
+  if [ -c "$tty_in" ] && dims=$({ stty size <"$tty_in"; } 2>/dev/null); then
+    DLG_ROWS="${dims%% *}" DLG_COLS="${dims#* }"
+  fi
+  w=$(( ${#title} + 10 ))
+  for line in "$@"; do
+    [ $(( ${#line} + 8 )) -gt "$w" ] && w=$(( ${#line} + 8 ))
+  done
+  [ "$w" -lt 44 ] && w=44
+  [ "$w" -gt $(( DLG_COLS - 2 )) ] && w=$(( DLG_COLS - 2 ))
+  DLG_W="$w"
+  DLG_H=$(( $# + 5 ))   # top border, blank, body…, blank, hint, bottom border
+  DLG_TOP=$(( (DLG_ROWS - DLG_H) / 2 ))
+  [ "$DLG_TOP" -lt 1 ] && DLG_TOP=1
+  DLG_LEFT=$(( (DLG_COLS - DLG_W) / 2 ))
+  [ "$DLG_LEFT" -lt 1 ] && DLG_LEFT=1
+  [ "${#title}" -gt $(( DLG_W - 6 )) ] && title="${title:0:DLG_W-7}…"
+
+  local hbar sp i r
+  printf -v hbar '%*s' $(( DLG_W - 2 )) ''
+  hbar="${hbar// /─}"
+  printf -v sp '%*s' $(( DLG_W - 2 )) ''
+
+  {
+    printf '\033[2J\033[H\033[?25l'
+    printf '\033[%d;%dH%s╭%s╮%s' "$DLG_TOP" "$DLG_LEFT" "$accent" "$hbar" "$RST"
+    for (( i = 1; i < DLG_H - 1; i++ )); do
+      printf '\033[%d;%dH%s│%s%s%s│%s' \
+        $(( DLG_TOP + i )) "$DLG_LEFT" "$accent" "$RST" "$sp" "$accent" "$RST"
+    done
+    printf '\033[%d;%dH%s╰%s╯%s' $(( DLG_TOP + DLG_H - 1 )) "$DLG_LEFT" "$accent" "$hbar" "$RST"
+    printf '\033[%d;%dH%s %s %s' "$DLG_TOP" $(( DLG_LEFT + 2 )) "${accent}${BOLD}" "$title" "$RST"
+    r=$(( DLG_TOP + 2 ))
+    for line in "$@"; do
+      printf '\033[%d;%dH%s' "$r" $(( DLG_LEFT + 4 )) "$line"
+      r=$(( r + 1 ))
+    done
+  } >"$tty_out"
+}
+
+# Write a hint/status line on the reserved row inside the box
+dialog_status() {
+  local text="$1" sp
+  local r=$(( DLG_TOP + DLG_H - 2 ))
+  printf -v sp '%*s' $(( DLG_W - 8 )) ''
+  printf '\033[%d;%dH%s\033[%d;%dH%s' \
+    "$r" $(( DLG_LEFT + 4 )) "$sp" \
+    "$r" $(( DLG_LEFT + 4 )) "$text" >"$tty_out"
+}
+
+dialog_close() {
+  printf '\033[?25h' >"$tty_out"
+}
+
+# Drain pending input (only on a real tty — a test fixture file would
+# be consumed by the read loop)
+drain_input() {
+  [ -c "$tty_in" ] || return 0
+  while IFS= read -rsn1 -t 0.01 _ <"$tty_in"; do :; done
+}
+
+# confirm_dialog ACCENT TITLE [BODY...] → 0 when confirmed with y/Y
+confirm_dialog() {
+  local accent="$1" title="$2"
+  shift 2
+  dialog_open "$accent" "$title" "$@"
+  dialog_status "$(hint y confirm n/esc cancel)"
+  drain_input
+  local key=""
+  IFS= read -rsn1 key <"$tty_in" 2>/dev/null
+  if [ "$key" = $'\x1b' ]; then
+    drain_input   # swallow escape-sequence tails (arrow keys, etc.)
+    return 1
+  fi
+  [[ "$key" =~ ^[yY]$ ]]
+}
+
+# input_dialog ACCENT TITLE PROMPT INITIAL — line editor inside the box
+# (readline with the current value prefilled on a real tty); sets REPLY,
+# empty means cancelled
+input_dialog() {
+  local accent="$1" title="$2" prompt="$3" initial="$4"
+  dialog_open "$accent" "$title" ""
+  dialog_status "${DIM}enter apply · empty input cancels${RST}"
+  local irow=$(( DLG_TOP + 2 ))
+  printf '\033[%d;%dH%s%s%s\033[?25h' \
+    "$irow" $(( DLG_LEFT + 4 )) "$accent" "$prompt" "$RST" >"$tty_out"
+  printf '\033[%d;%dH' "$irow" $(( DLG_LEFT + 4 + ${#prompt} )) >"$tty_out"
+  drain_input
+  REPLY=""
+  if [ -n "$initial" ]; then
+    IFS= read -e -r -i "$initial" REPLY <"$tty_in" 2>"$tty_out"
+  else
+    IFS= read -e -r REPLY <"$tty_in" 2>"$tty_out"
+  fi
+}
+
+# Brief informational dialog
+info_flash() {
+  dialog_open "$1" "$2" "${3:-}"
+  sleep 0.9
+  dialog_close
+}
+
+# ---------------------------------------------------------------------------
 # Actions (called by fzf keybindings via execute)
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--action" ]; then
   set +e
   action="$2"
-  spec="$3"
+  spec="${3:-}"
   spec="${spec%%	*}"
+  [ -z "$spec" ] && exit 0
   parse_spec "$spec"
   target=$(spec_target)
   label=$(spec_label)
@@ -1086,82 +1556,103 @@ if [ "${1:-}" = "--action" ]; then
 
   case "$action" in
     kill)
-      printf '\n  \033[1;31mKill %s?\033[0m\n\n  Press [y] to confirm, any other key to cancel: ' "$label" >"$tty_out"
-      read -rsn1 confirm <"$tty_in"
-      echo >"$tty_out"
-      if [[ "$confirm" =~ ^[yY]$ ]]; then
+      popup_accent danger
+      if confirm_dialog "$BOLD_RED" "Kill ${label}?" "This cannot be undone."; then
         case "$SPEC_TYPE" in
-          S) tmux kill-session -t "$target" 2>/dev/null ;;
+          S)
+            # Destroying a session detaches its clients (default
+            # detach-on-destroy), ejecting the user from tmux even when
+            # other sessions exist — hop them to the next MRU session
+            # first so the stay-open kill workflow survives.
+            fallback=$(tmux list-sessions -F "#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}" 2>/dev/null \
+              | sort -t "$US" -k1,1nr | cut -d "$US" -f2- \
+              | grep -vxF -- "$SPEC_SESSION" | head -1)
+            if [ -n "$fallback" ]; then
+              while IFS= read -r c; do
+                [ -n "$c" ] && tmux switch-client -c "$c" -t "=${fallback}:" 2>/dev/null
+              done < <(tmux list-clients -F '#{client_name}' -t "$target" 2>/dev/null)
+            fi
+            tmux kill-session -t "$target" 2>/dev/null
+            ;;
           W) tmux kill-window  -t "$target" 2>/dev/null ;;
           P) tmux kill-pane    -t "$target" 2>/dev/null ;;
         esac
         if [ $? -eq 0 ]; then
-          printf '\n  \033[32mDone.\033[0m\n' >"$tty_out"
+          dialog_status "${GREEN}✓ killed${RST}"
         else
-          printf '\n  \033[31mFailed to kill %s.\033[0m\n' "$label" >"$tty_out"
+          dialog_status "${RED}✗ failed to kill ${label}${RST}"
         fi
-        sleep 0.5
+        sleep 0.35
       fi
+      # Kill mode keeps its standing danger frame; other modes restore
+      # the user's configured border
+      if [ "${INTERDIMUX_MODE:-switch}" = "kill" ]; then
+        popup_accent danger
+      else
+        popup_accent user
+      fi
+      dialog_close
       ;;
 
     rename)
       if [ "$SPEC_TYPE" = "P" ]; then
-        printf '\n  Panes cannot be renamed.\n' >"$tty_out"
-        sleep 1
+        info_flash "$BOLD_AMBER" "Rename" "Panes cannot be renamed."
         exit 0
       fi
-      printf '\n  \033[1mRename %s\033[0m\n\n  New name: ' "$label" >"$tty_out"
-      read -r new_name <"$tty_in"
-      if [ -n "$new_name" ]; then
+      current_name=""
+      case "$SPEC_TYPE" in
+        # display-message -t wants a pane target: a bare "=name" is not
+        # valid on newer tmux (expands empty) — use the "=name:" form
+        S) current_name=$(tmux display-message -p -t "=${SPEC_SESSION}:" '#{session_name}' 2>/dev/null) ;;
+        W) current_name=$(tmux display-message -p -t "$target" '#{window_name}' 2>/dev/null) ;;
+      esac
+      input_dialog "$BOLD_AMBER" "Rename ${label}" "❯ " "$current_name"
+      new_name="$REPLY"
+      if [ -n "$new_name" ] && [ "$new_name" != "$current_name" ]; then
         case "$SPEC_TYPE" in
           S) tmux rename-session -t "$target" "$new_name" 2>/dev/null ;;
           W) tmux rename-window  -t "$target" "$new_name" 2>/dev/null ;;
         esac
         if [ $? -eq 0 ]; then
-          printf '\n  \033[32mRenamed to: %s\033[0m\n' "$new_name" >"$tty_out"
+          dialog_status "${GREEN}✓ renamed to ${new_name}${RST}"
         else
-          printf '\n  \033[31mFailed to rename.\033[0m\n' >"$tty_out"
+          dialog_status "${RED}✗ failed to rename${RST}"
         fi
-        sleep 0.5
+        sleep 0.35
       fi
+      dialog_close
       ;;
 
     zoom)
+      # Bound via execute-silent (no terminal handover) — errors go to
+      # the tmux status line instead of a dialog.
       if [ "$SPEC_TYPE" != "P" ]; then
-        printf '\n  Only panes can be zoomed.\n' >"$tty_out"
-        sleep 1
+        tmux display-message "interdimux: only panes can be zoomed" 2>/dev/null
         exit 0
       fi
-      if tmux resize-pane -Z -t "$target" 2>/dev/null; then
-        printf '\n  \033[32mToggled zoom on %s.\033[0m\n' "$label" >"$tty_out"
-      else
-        printf '\n  \033[31mFailed to toggle zoom.\033[0m\n' >"$tty_out"
-      fi
-      sleep 0.4
+      tmux resize-pane -Z -t "$target" 2>/dev/null || \
+        tmux display-message "interdimux: failed to toggle zoom" 2>/dev/null
       ;;
 
     detach)
       if [ "$SPEC_TYPE" != "S" ]; then
-        printf '\n  Only sessions can be detached.\n' >"$tty_out"
-        sleep 1
+        info_flash "$BOLD_AMBER" "Detach" "Only sessions can be detached."
         exit 0
       fi
-      printf '\n  \033[1mDetach all clients from %s?\033[0m\n\n  Press [y] to confirm: ' "$label" >"$tty_out"
-      read -rsn1 confirm <"$tty_in"
-      echo >"$tty_out"
-      if [[ "$confirm" =~ ^[yY]$ ]]; then
+      if confirm_dialog "$BOLD_AMBER" "Detach clients from ${label}?"; then
         if tmux detach-client -s "$target" 2>/dev/null; then
-          printf '\n  \033[32mDetached clients from %s.\033[0m\n' "$label" >"$tty_out"
+          dialog_status "${GREEN}✓ detached${RST}"
         else
-          printf '\n  \033[31mFailed to detach.\033[0m\n' >"$tty_out"
+          dialog_status "${RED}✗ failed to detach${RST}"
         fi
-        sleep 0.5
+        sleep 0.35
       fi
+      dialog_close
       ;;
 
     send)
-      printf '\n  \033[1mSend keys to %s\033[0m\n\n  Command: ' "$label" >"$tty_out"
-      read -r send_cmd <"$tty_in"
+      input_dialog "$BOLD_AMBER" "Send keys to ${label}" "❯ " ""
+      send_cmd="$REPLY"
       if [ -n "$send_cmd" ]; then
         # Build list of pane targets to send to
         send_targets=()
@@ -1193,42 +1684,43 @@ if [ "${1:-}" = "--action" ]; then
         done
 
         if [ "$failed" -eq 0 ]; then
-          printf '\n  \033[32mSent to %d pane(s) in %s.\033[0m\n' "$sent" "$label" >"$tty_out"
+          dialog_status "${GREEN}✓ sent to ${sent} pane(s)${RST}"
         else
-          printf '\n  \033[33mSent to %d pane(s), %d failed in %s.\033[0m\n' "$sent" "$failed" "$label" >"$tty_out"
+          dialog_status "${RED}✗ sent to ${sent} pane(s), ${failed} failed${RST}"
         fi
-        sleep 0.5
+        sleep 0.35
       fi
+      dialog_close
       ;;
 
     swap)
-      printf '\n  \033[1mSwap %s with…\033[0m\n' "$label" >"$tty_out"
-      sleep 0.3
-
-      # Call gather_targets directly (subprocess would hit set -euo issues)
-      swap_list=$(gather_targets)
-
       case "$SPEC_TYPE" in
-        W) swap_list=$(printf '%s\n' "$swap_list" | grep "^W:" || true) ;;
-        P) swap_list=$(printf '%s\n' "$swap_list" | grep "^P:" || true) ;;
+        W|P) ;;
         *)
-          printf '\n  Only windows and panes can be swapped.\n' >"$tty_out"
-          sleep 1
+          info_flash "$BOLD_AMBER" "Swap" "Only windows and panes can be swapped."
           exit 0
           ;;
       esac
 
-      [ -z "$swap_list" ] && { printf '\n  No valid swap targets.\n' >"$tty_out"; sleep 1; exit 0; }
+      # Call gather_targets directly (subprocess would hit set -euo issues)
+      swap_list=$(gather_targets)
+      case "$SPEC_TYPE" in
+        W) swap_list=$(printf '%s\n' "$swap_list" | grep $'\tW:' || true) ;;
+        P) swap_list=$(printf '%s\n' "$swap_list" | grep $'\tP:' || true) ;;
+      esac
+      [ -z "$swap_list" ] && { info_flash "$BOLD_AMBER" "Swap" "No valid swap targets."; exit 0; }
 
+      printf '\033[2J\033[H' >"$tty_out"
       dest=$(printf '%s\n' "$swap_list" | fzf \
         "${FZF_THEME[@]}" \
         --delimiter=$'\t' \
-        --with-nth=2 \
+        --with-nth=1..3 \
+        --nth=1,3 \
         --prompt='swap with ❯ ' \
-        --header='Select swap destination (ESC to cancel)' \
+        --header="$(hint enter 'swap destination' esc cancel)" \
       ) || exit 0
 
-      dest_spec="${dest%%	*}"
+      dest_spec="${dest##*	}"
       parse_spec "$dest_spec"
       dest_target=$(spec_target)
 
@@ -1240,13 +1732,23 @@ if [ "${1:-}" = "--action" ]; then
         P) tmux swap-pane   -s "$src_target" -t "$dest_target" 2>/dev/null ;;
       esac
 
-      if [ $? -eq 0 ]; then
-        printf '\n  \033[32mSwapped.\033[0m\n' >"$tty_out"
-      else
-        printf '\n  \033[31mSwap failed.\033[0m\n' >"$tty_out"
+      if [ $? -ne 0 ]; then
+        tmux display-message "interdimux: swap failed" 2>/dev/null
       fi
-      sleep 0.4
       ;;
+  esac
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Directory picker header (called by fzf transform-header)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--dirs-header" ]; then
+  case "${2:-default}" in
+    deep)   printf '%s%s\n' "$(hint '🔎 deep search' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
+    browse) printf '%s%s\n' "$(hint '⤷ browsing' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
+    *)      hint enter create ^f 'deep search' ^g 'browse into' ^r reset esc cancel; echo ;;
   esac
   exit 0
 fi
@@ -1254,39 +1756,56 @@ fi
 # ---------------------------------------------------------------------------
 # New session from directory (ctrl-o)
 # ---------------------------------------------------------------------------
+#
+# Exits 0 after creating/switching, non-zero when cancelled (the
+# navigator's ctrl-o binding uses this to decide whether to reopen).
 
 if [ "${1:-}" = "--dirs" ]; then
   set +e
 
-  dirs_header='enter=create  ^f=deep search  ^g=browse into  ^r=reset  esc=cancel'
-
-  # Optional live deep search: re-scan as the query changes
-  dirs_live_bind=()
+  # Optional live deep search: re-scan as the query changes.  The
+  # scanner is the matcher then — fzf's own filtering is disabled, since
+  # it would re-filter against the trimmed *display* path and hide rows
+  # whose matching text was elided into "…/".
+  dirs_extra=()
+  ctrl_f_extra=""
   if [ "$DIRS_LIVE" = "on" ]; then
-    dirs_live_bind+=(--bind="change:reload:sleep 0.1; bash '$SCRIPT_PATH' --dirs-list --deep {q}")
+    dirs_extra+=(--disabled)
+    dirs_extra+=(--bind="change:reload:sleep 0.1; bash '$SCRIPT_PATH' --dirs-list --deep {q}")
+  else
+    # Same display-path pitfall on ctrl-f: clear the query once the deep
+    # results load, so none of them are pre-hidden by the text that
+    # produced them (the header keeps showing what was searched)
+    ctrl_f_extra="+clear-query"
   fi
+  fzf_ge 61 && dirs_extra+=(--ghost='directory name or path')
 
   selected=$(bash "$SCRIPT_PATH" --dirs-list | fzf \
     "${FZF_THEME[@]}" \
     --no-sort \
     --delimiter=$'\t' \
-    --with-nth=2 \
+    --with-nth=1..2 \
+    --nth=1 \
     --prompt='new session ❯ ' \
-    --header="$dirs_header" \
-    --preview="bash '$SCRIPT_PATH' --dirs-preview {1}" \
-    --preview-window="right:40%:nowrap" \
-    --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-header(echo 'deep search: '{q}'  ^r=reset  esc=cancel')" \
-    --bind="ctrl-g:reload(bash '$SCRIPT_PATH' --dirs-list --scan {1})+transform-header(echo 'browsing: '{1}'  ^r=reset  esc=cancel')" \
-    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-header(echo '$dirs_header')" \
-    ${dirs_live_bind[@]+"${dirs_live_bind[@]}"} \
-  ) || exit 0
+    --header="$(bash "$SCRIPT_PATH" --dirs-header)" \
+    --preview="bash '$SCRIPT_PATH' --dirs-preview {-1}" \
+    --preview-window="right,40%,border-left,nowrap" \
+    --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-header(bash '$SCRIPT_PATH' --dirs-header deep {q})${ctrl_f_extra}" \
+    --bind="ctrl-g:reload(bash '$SCRIPT_PATH' --dirs-list --scan {-1})+transform-header(bash '$SCRIPT_PATH' --dirs-header browse {-1})" \
+    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-header(bash '$SCRIPT_PATH' --dirs-header)" \
+    ${dirs_extra[@]+"${dirs_extra[@]}"} \
+  ) || exit 1
 
-  dir_path="${selected%%	*}"
+  dir_path="${selected##*	}"
   dir_path="${dir_path%/}"
+  [ -z "$dir_path" ] && exit 1
   # Physical path, so comparisons match finder output (which resolves symlinks)
   dir_path=$(cd "$dir_path" 2>/dev/null && pwd -P || echo "$dir_path")
 
   record_recent_dir "$dir_path"
+  # Feed the switch back into zoxide so its frecency learns from
+  # navigator usage too
+  command -v zoxide >/dev/null 2>&1 && zoxide add "$dir_path" 2>/dev/null
 
   session_name=$(resolve_session_name "$dir_path")
 
@@ -1314,41 +1833,198 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--header-for" ]; then
-  spec="$2"
+  spec="${2:-}"
   spec="${spec%%	*}"
   type="${spec%%:*}"
+  scope_hint=()
+  fzf_ge 58 && scope_hint=('^]' scope)
   case "$type" in
-    S) echo "enter=switch  ^x=kill  ^e=rename  ^d=detach  ^o=new  ^r=reload  ^/=preview" ;;
-    W) echo "enter=switch  ^x=kill  ^e=rename  ^s=swap  ^o=new  ^r=reload  ^/=preview" ;;
-    P) echo "enter=switch  ^x=kill  ^z=zoom  ^s=swap  ^t=send  ^r=reload  ^/=preview" ;;
-    *)  echo "enter=switch  ^x=kill  ^e=rename  ^o=new  ^r=reload  ^/=preview" ;;
+    S) hint enter switch ^x kill ^e rename ^d detach ^o new ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
+    W) hint enter switch ^x kill ^e rename ^s swap ^o new ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
+    P) hint enter switch ^x kill ^z zoom ^s swap ^t send ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
+    *) hint enter switch ^x kill ^e rename ^o new ^r reload ^/ preview ;;
+  esac
+  echo
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Match-scope prompt (called by fzf change-nth:transform-prompt, >= 0.58)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--scope-prompt" ]; then
+  case "${FZF_NTH:-}" in
+    1)     echo 'name ❯ ' ;;
+    2)     echo 'path ❯ ' ;;
+    3)     echo 'cmd ❯ ' ;;
+    1,2,3) echo 'all ❯ ' ;;
+    *)     echo '❯ ' ;;
   esac
   exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Popup launcher — single source of popup chrome (border, title, size)
+# ---------------------------------------------------------------------------
+
+# Script path with single quotes escaped, for embedding in tmux command
+# strings
+sq_script() { printf '%s' "${SCRIPT_PATH//\'/\'\\\'\'}"; }
+
+# Resolved options forwarded into the popup, so the navigator and every
+# fzf-spawned subprocess (header/preview/reload, which run on each
+# cursor move) skip the tmux option round-trips.
+env_fwd_vars() {
+  ENV_FWD=(
+    "INTERDIMUX_SHOW_PREVIEW=$SHOW_PREVIEW"
+    "INTERDIMUX_SHOW_FULL_COMMAND=$SHOW_FULL_COMMAND"
+    "INTERDIMUX_SHOW_GIT_BRANCH=$SHOW_GIT_BRANCH"
+    "INTERDIMUX_POPUP_WIDTH=$POPUP_WIDTH"
+    "INTERDIMUX_POPUP_HEIGHT=$POPUP_HEIGHT"
+    "INTERDIMUX_ORDER=$ORDER"
+    "INTERDIMUX_FZF_OPTS=$FZF_USER_OPTS"
+    "INTERDIMUX_RECENT_LIMIT=$RECENT_LIMIT"
+    "INTERDIMUX_SCAN_DEPTH=$SCAN_DEPTH"
+    "INTERDIMUX_USE_ZOXIDE=$USE_ZOXIDE"
+    "INTERDIMUX_DIRS_LIVE=$DIRS_LIVE"
+    "INTERDIMUX_PROJECT_MARKERS=$EXTRA_MARKERS"
+  )
+}
+
+# On tmux >= 3.3 the vars ride in as display-popup -e flags — no shell
+# parsing at all, so a fish/dash default-shell can't break them.
+env_fwd_flags() {
+  local kv
+  ENV_FWD_FLAGS=()
+  env_fwd_vars
+  for kv in "${ENV_FWD[@]}"; do ENV_FWD_FLAGS+=(-e "$kv"); done
+}
+
+# tmux 3.2 fallback (no -e): an `env` prefix on the popup command — a
+# plain command word, so it also survives non-POSIX job shells.
+build_env_fwd() {
+  local kv out="env"
+  env_fwd_vars
+  for kv in "${ENV_FWD[@]}"; do out+=" $(printf '%q' "$kv")"; done
+  printf '%s' "$out"
+}
+
+if [ "${1:-}" = "--launch" ]; then
+  set +e
+  mode="${2:-switch}"
+
+  title=' interdimux '
+  case "$mode" in
+    kill)   title=' interdimux · kill ' ;;
+    rename) title=' interdimux · rename ' ;;
+    zoom)   title=' interdimux · zoom ' ;;
+    swap)   title=' interdimux · swap ' ;;
+    detach) title=' interdimux · detach ' ;;
+    send)   title=' interdimux · send keys ' ;;
+    dirs)   title=' interdimux · new session ' ;;
+  esac
+
+  sp=$(sq_script)
+  chrome=()
+  if tmux_ge 303; then
+    # Border style/lines are left to the user's popup-border-* options;
+    # only destructive modes recolour the frame
+    chrome=(-T "${POPUP_TITLE_STYLE}${title}")
+    [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
+    # Popups don't inherit TMUX_PANE — forward it (run-shell sets it for
+    # this process) so current-target detection is exact even with
+    # multiple attached clients
+    [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
+    env_fwd_flags
+    chrome+=("${ENV_FWD_FLAGS[@]}")
+    # The title rides along so popup_accent can re-send it (a style-only
+    # repaint on >= 3.6 would otherwise erase it)
+    chrome+=(-e "INTERDIMUX_TITLE=$title")
+    case "$mode" in
+      # --dirs exits non-zero on cancel (the navigator's ctrl-o resume
+      # contract); as a standalone popup that would bubble up through
+      # display-popup to run-shell as a "returned 1" status message —
+      # absorb it here
+      dirs)   chrome+=(-e "INTERDIMUX_MODE=dirs"); cmd="bash '$sp' --dirs || true" ;;
+      switch) cmd="bash '$sp'" ;;
+      *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="bash '$sp'" ;;
+    esac
+  else
+    env_fwd=$(build_env_fwd)
+    case "$mode" in
+      dirs)   cmd="$env_fwd bash '$sp' --dirs || true" ;;
+      switch) cmd="$env_fwd bash '$sp'" ;;
+      *)      cmd="$env_fwd INTERDIMUX_MODE=$mode bash '$sp'" ;;
+    esac
+  fi
+
+  exec tmux display-popup -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
+    ${chrome[@]+"${chrome[@]}"} -E "$cmd"
 fi
 
 # ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
 
+# Entry point for the prefix+g binding: a native styled menu on
+# tmux >= 3.4, otherwise a compact fzf menu in a popup.
+if [ "${1:-}" = "--dashboard-launch" ]; then
+  set +e
+  sp=$(sq_script)
+
+  if tmux_ge 304; then
+    # Menu item commands are re-parsed by tmux's command parser when
+    # selected: inside its double-quoted token, \ " $ are escapes and
+    # run-shell format-expands #{...} — escape those layers on top of
+    # the shell quoting so exotic install paths survive.
+    menu_sp="$sp"
+    menu_sp="${menu_sp//\\/\\\\}"
+    menu_sp="${menu_sp//\"/\\\"}"
+    menu_sp="${menu_sp//\$/\\\$}"
+    # quoted pattern: a bare # in ${var//#/…} is the match-at-start anchor
+    menu_sp="${menu_sp//'#'/##}"
+    tmux display-menu -x C -y C \
+      -T '#[align=centre,bold] interdimux ' \
+      -H 'bg=colour173,fg=colour235,bold' \
+      'Switch'      s "run-shell -b \"bash '$menu_sp' --launch switch\"" \
+      'New session' n "run-shell -b \"bash '$menu_sp' --launch dirs\"" \
+      '' \
+      'Rename'      r "run-shell -b \"bash '$menu_sp' --launch rename\"" \
+      'Kill'        k "run-shell -b \"bash '$menu_sp' --launch kill\"" \
+      'Swap'        w "run-shell -b \"bash '$menu_sp' --launch swap\"" \
+      'Zoom'        z "run-shell -b \"bash '$menu_sp' --launch zoom\"" \
+      '' \
+      'Detach'      d "run-shell -b \"bash '$menu_sp' --launch detach\"" \
+      'Send keys'   t "run-shell -b \"bash '$menu_sp' --launch send\""
+  else
+    chrome=()
+    cmd="$(build_env_fwd) bash '$sp' --dashboard"
+    if tmux_ge 303; then
+      chrome=(-T "${POPUP_TITLE_STYLE} interdimux ")
+      [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
+      env_fwd_flags
+      chrome+=("${ENV_FWD_FLAGS[@]}")
+      cmd="bash '$sp' --dashboard"
+    fi
+    tmux display-popup -w 64 -h 17 ${chrome[@]+"${chrome[@]}"} \
+      -E "$cmd"
+  fi
+  exit 0
+fi
+
+# fzf fallback menu (tmux < 3.4)
 if [ "${1:-}" = "--dashboard" ]; then
   set +e
-  PW="${INTERDIMUX_POPUP_WIDTH:-80%}"
-  PH="${INTERDIMUX_POPUP_HEIGHT:-75%}"
 
-  ENV_FWD="INTERDIMUX_SHOW_PREVIEW=${INTERDIMUX_SHOW_PREVIEW:-on}"
-  ENV_FWD+=" INTERDIMUX_SHOW_FULL_COMMAND=${INTERDIMUX_SHOW_FULL_COMMAND:-on}"
-  ENV_FWD+=" INTERDIMUX_SHOW_GIT_BRANCH=${INTERDIMUX_SHOW_GIT_BRANCH:-on}"
-  ENV_FWD+=" INTERDIMUX_POPUP_WIDTH=$PW INTERDIMUX_POPUP_HEIGHT=$PH"
-
-  items=$(printf '%s\t  \033[1;38;5;173m%-16s\033[0m \033[2m%s\033[0m\n' \
+  items=$(printf '%s\t  \033[1;38;5;173m%-14s\033[0m \033[2m%s\033[0m\n' \
     "switch" "Switch"       "Navigate & jump to target" \
-    "new"    "New Session"  "Create session from directory" \
+    "dirs"   "New session"  "Create session from directory" \
     "rename" "Rename"       "Rename a session or window" \
     "kill"   "Kill"         "Remove sessions, windows, or panes" \
     "zoom"   "Zoom"         "Toggle pane zoom" \
     "swap"   "Swap"         "Swap windows or panes" \
     "detach" "Detach"       "Detach clients from session" \
-    "send"   "Send Keys"    "Send a command to a pane")
+    "send"   "Send keys"    "Send a command to a pane")
 
   choice=$(printf '%s\n' "$items" | fzf \
     "${FZF_THEME[@]}" \
@@ -1357,47 +2033,33 @@ if [ "${1:-}" = "--dashboard" ]; then
     --delimiter=$'\t' \
     --with-nth=2 \
     --prompt='interdimux ❯ ' \
-    --header='' \
+    --header="$(hint enter select esc quit)" \
   ) || exit 0
 
   action="${choice%%	*}"
 
-  # Launch the selected tool in a new full-size popup via run-shell -b
-  # (can't nest popups, so this runs asynchronously after dashboard closes)
-  launch() {
-    tmux run-shell -b "tmux popup -w '$PW' -h '$PH' -E '$ENV_FWD $1'"
-  }
-
-  case "$action" in
-    switch) launch "bash '${SCRIPT_PATH}'" ;;
-    new)    launch "bash '${SCRIPT_PATH}' --dirs" ;;
-    rename) launch "INTERDIMUX_MODE=rename bash '${SCRIPT_PATH}'" ;;
-    kill)   launch "INTERDIMUX_MODE=kill bash '${SCRIPT_PATH}'" ;;
-    zoom)   launch "INTERDIMUX_MODE=zoom bash '${SCRIPT_PATH}'" ;;
-    swap)   launch "INTERDIMUX_MODE=swap bash '${SCRIPT_PATH}'" ;;
-    detach) launch "INTERDIMUX_MODE=detach bash '${SCRIPT_PATH}'" ;;
-    send)   launch "INTERDIMUX_MODE=send bash '${SCRIPT_PATH}'" ;;
-  esac
+  # Launch the selected tool in a new popup via run-shell -b (popups
+  # can't nest, so this runs after the dashboard popup closes)
+  tmux run-shell -b "bash '$(sq_script)' --launch $action"
   exit 0
 fi
 
 # ---------------------------------------------------------------------------
 # Main — navigator loop
 # ---------------------------------------------------------------------------
+#
+# Actions run via execute(...)+reload(...) so fzf stays open with its
+# query, cursor, and preview state intact (no restart flash).  The only
+# restart path is ctrl-o: a cancelled dir picker signals via RESUME_FILE
+# so the navigator reopens; a successful create/switch leaves it closed.
 
 INTERDIMUX_MODE="${INTERDIMUX_MODE:-switch}"
 
-# Temp file to signal "run action then restart fzf"
 RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX")
 trap 'rm -f "$RESUME_FILE"' EXIT
 
-# Helper: build an fzf --bind that executes an action, signals resume, and aborts.
-_action_bind() {
-  local key="$1" action_cmd="$2"
-  fzf_opts+=(
-    --bind="$key:execute($action_cmd)+execute-silent(echo resume > '$RESUME_FILE')+abort"
-  )
-}
+LIST_CMD="bash '$SCRIPT_PATH' --list"
+ACTION_CMD="bash '$SCRIPT_PATH' --action"
 
 while true; do
   : > "$RESUME_FILE"
@@ -1406,86 +2068,137 @@ while true; do
   fzf_opts=(
     "${FZF_THEME[@]}"
     --delimiter=$'\t'
-    --with-nth=2
-    --tiebreak=length,begin,index
-    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --list)"
+    --with-nth=1..3
+    --nth=1,3
+    --tiebreak=chunk,begin,index
+    --bind='change:first'
+    --bind="ctrl-r:reload($LIST_CMD)"
   )
 
   case "$INTERDIMUX_MODE" in
     kill)
-      fzf_opts+=(--prompt='interdimux kill ❯ ' --header='enter=kill  ctrl-r=reload  esc=quit')
-      _action_bind "enter" "bash '$SCRIPT_PATH' --action kill {1}"
+      fzf_opts+=(
+        --prompt='kill ❯ '
+        --header="$(hint enter kill ^r reload esc quit)"
+        --bind="enter:execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
+      )
       ;;
     rename)
-      fzf_opts+=(--prompt='interdimux rename ❯ ' --header='enter=rename  ctrl-r=reload  esc=quit')
-      _action_bind "enter" "bash '$SCRIPT_PATH' --action rename {1}"
+      fzf_opts+=(
+        --prompt='rename ❯ '
+        --header="$(hint enter rename ^r reload esc quit)"
+        --bind="enter:execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
+      )
       ;;
     zoom)
       fzf_opts+=(
-        --prompt='interdimux zoom ❯ '
-        --header='enter=toggle zoom  ctrl-r=reload  esc=quit'
-        --bind="enter:execute-silent(bash '$SCRIPT_PATH' --action zoom {1})+execute-silent(echo resume > '$RESUME_FILE')+abort"
+        --prompt='zoom ❯ '
+        --header="$(hint enter 'toggle zoom' ^r reload esc quit)"
+        --bind="enter:execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
       )
       ;;
     swap)
-      fzf_opts+=(--prompt='interdimux swap ❯ ' --header='enter=swap  ctrl-r=reload  esc=quit')
-      _action_bind "enter" "bash '$SCRIPT_PATH' --action swap {1}"
+      fzf_opts+=(
+        --prompt='swap ❯ '
+        --header="$(hint enter swap ^r reload esc quit)"
+        --bind="enter:execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
+      )
       ;;
     detach)
-      fzf_opts+=(--prompt='interdimux detach ❯ ' --header='enter=detach  ctrl-r=reload  esc=quit')
-      _action_bind "enter" "bash '$SCRIPT_PATH' --action detach {1}"
+      fzf_opts+=(
+        --prompt='detach ❯ '
+        --header="$(hint enter detach ^r reload esc quit)"
+        --bind="enter:execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
+      )
       ;;
     send)
-      fzf_opts+=(--prompt='interdimux send ❯ ' --header='enter=send keys  ctrl-r=reload  esc=quit')
-      _action_bind "enter" "bash '$SCRIPT_PATH' --action send {1}"
+      fzf_opts+=(
+        --prompt='send ❯ '
+        --header="$(hint enter 'send keys' ^r reload esc quit)"
+        --bind="enter:execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
+      )
       ;;
     *)
       fzf_opts+=(
-        --prompt='interdimux ❯ '
-        --header='enter=switch  ^x=kill  ^e=rename  ^o=new  ^r=reload  ^/=preview'
-        --bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {1})"
-        --bind="ctrl-z:execute-silent(bash '$SCRIPT_PATH' --action zoom {1})+execute-silent(echo resume > '$RESUME_FILE')+abort"
+        --prompt='❯ '
+        --print-query
+        --header="$(hint enter switch ^x kill ^e rename ^o new ^r reload ^/ preview)"
+        --bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {-1})"
+        --bind="ctrl-x:execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
+        --bind="ctrl-e:execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
+        --bind="ctrl-z:execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
+        --bind="ctrl-s:execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
+        --bind="ctrl-d:execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
+        --bind="ctrl-t:execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
+        --bind="ctrl-o:execute(bash '$SCRIPT_PATH' --dirs || echo resume > '$RESUME_FILE')+abort"
         --bind='ctrl-/:toggle-preview'
       )
-      _action_bind "ctrl-x" "bash '$SCRIPT_PATH' --action kill {1}"
-      _action_bind "ctrl-e" "bash '$SCRIPT_PATH' --action rename {1}"
-      _action_bind "ctrl-o" "bash '$SCRIPT_PATH' --dirs"
-      _action_bind "ctrl-s" "bash '$SCRIPT_PATH' --action swap {1}"
-      _action_bind "ctrl-d" "bash '$SCRIPT_PATH' --action detach {1}"
-      _action_bind "ctrl-t" "bash '$SCRIPT_PATH' --action send {1}"
+      fzf_ge 58 && fzf_opts+=(
+        --bind="ctrl-]:change-nth(1|2|3|1,2,3|1,3)+transform-prompt(bash '$SCRIPT_PATH' --scope-prompt)"
+      )
+      fzf_ge 61 && fzf_opts+=(--ghost='session · window · pane')
       ;;
   esac
 
-  if [ "${INTERDIMUX_SHOW_PREVIEW:-on}" = "on" ]; then
+  if [ "$SHOW_PREVIEW" = "on" ]; then
     fzf_opts+=(
-      --preview="bash '$SCRIPT_PATH' --preview {1}"
-      --preview-window="right:50%:nowrap"
+      --preview="bash '$SCRIPT_PATH' --preview {-1}"
+      --preview-window="right,50%,border-left,nowrap"
     )
   fi
 
   set +e
-  selection=$(gather_targets | fzf "${fzf_opts[@]}")
+  out=$(gather_targets | fzf "${fzf_opts[@]}")
   fzf_rc=$?
   set -e
 
-  # Action requested a restart — loop back
+  # ctrl-o cancelled the dir picker — reopen the navigator
   [ -s "$RESUME_FILE" ] && continue
 
-  # Esc/ctrl-c or empty selection — exit
-  if [ "$fzf_rc" -ne 0 ] || [ -z "$selection" ]; then
+  # Action modes stay open via execute+reload; reaching here means quit
+  [ "$INTERDIMUX_MODE" != "switch" ] && exit 0
+
+  # Switch mode emits the query first (--print-query), then the selection
+  mapfile -t out_lines <<< "$out"
+  query="${out_lines[0]:-}"
+  selection="${out_lines[1]:-}"
+
+  if [ "$fzf_rc" -eq 0 ] && [ -n "$selection" ]; then
+    spec="${selection##*	}"
+    parse_spec "$spec"
+    target=$(spec_target)
+    tmux switch-client -t "$target" 2>/dev/null || \
+      tmux display-message "interdimux: $(spec_label) no longer exists"
     exit 0
   fi
 
-  # Action modes use execute+abort (always resume), so reaching here
-  # in a non-switch mode means something unexpected — just exit
-  [ "$INTERDIMUX_MODE" != "switch" ] && exit 0
+  # Find-or-create: Enter on a query that matched nothing creates a
+  # session named after it (resolved as a path, then via zoxide, then
+  # under $HOME)
+  if [ "$fzf_rc" -eq 1 ] && [ -n "$query" ]; then
+    # set -e is live here: every fallible assignment below must be
+    # defused (a zoxide miss exits 1 and would kill the script mid-flow)
+    dir=""
+    session_name=""
+    expanded="${query/#\~/$HOME}"
+    if [ -d "$expanded" ] && dir=$(cd "$expanded" 2>/dev/null && pwd -P); then
+      session_name=$(resolve_session_name "$dir")
+    else
+      dir=""
+      if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
+        dir=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
+      fi
+      [ -d "$dir" ] || dir="$HOME"
+      session_name=$(printf '%s' "$query" | tr '.: /' '----')
+    fi
+    [ -z "$session_name" ] && exit 0
+    if ! tmux has-session -t "=$session_name" 2>/dev/null; then
+      tmux new-session -d -s "$session_name" -c "$dir" 2>/dev/null || true
+      if [ "$dir" != "$HOME" ]; then record_recent_dir "$dir" || true; fi
+    fi
+    tmux switch-client -t "=$session_name" 2>/dev/null || true
+    exit 0
+  fi
 
-  # Switch to selected target
-  spec="${selection%%	*}"
-  parse_spec "$spec"
-  target=$(spec_target)
-
-  tmux switch-client -t "$target" 2>/dev/null || \
-    tmux display-message "interdimux: $(spec_label) no longer exists"
   exit 0
 done

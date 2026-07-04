@@ -64,9 +64,9 @@ dirs_list() {
     | sed $'s/\x1b\\[[0-9;]*m//g'
 }
 
-# First tab-separated field (the spec/path column) of each line
+# Last tab-separated field (the spec/path column) of each line
 specs() {
-  cut -f1
+  cut -f3
 }
 
 # ---------------------------------------------------------------------------
