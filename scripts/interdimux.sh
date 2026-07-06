@@ -91,47 +91,96 @@ DIRS_LIVE=$(get_opt "${INTERDIMUX_DIRS_LIVE:-}" @interdimux-dirs-live-search off
 EXTRA_MARKERS=$(get_opt "${INTERDIMUX_PROJECT_MARKERS:-}" @interdimux-project-markers "")
 
 # ---------------------------------------------------------------------------
-# Colors — warm palette
+# Colours — configurable palette
 # ---------------------------------------------------------------------------
+#
+# Every colour is a tmux option (env INTERDIMUX_COLOR_* → @interdimux-color-*
+# → built-in default).  A value is a hex "#rrggbb", a 256-colour index, or
+# "-1"/"default" (inherit the terminal).  The built-in defaults reproduce the
+# original warm palette; a generator (e.g. interdotensional) can feed theme
+# hexes over them to re-colour interdimux with the rest of the environment.
 
 RST=$'\033[0m'
 DIM=$'\033[2m'
 BOLD=$'\033[1m'
-BOLD_AMBER=$'\033[1;38;5;173m'  # #d7875f — warm amber accent
-DIM_SEP=$'\033[2;37m'       # dim white for separator
-DIM_PATH=$'\033[38;5;180m'  # #d7af87 — warm muted gold for paths
-DIM_CMD=$'\033[38;5;173m'   # amber for commands
-DIM_SSH=$'\033[38;5;109m'   # #87afaf — muted blue for SSH hosts
-DIM_EDIT=$'\033[38;5;150m'  # #afd787 — muted green for editor files
-DIM_GIT=$'\033[38;5;140m'   # #af87d7 — muted purple for git branches
-DIM_TREE=$'\033[38;5;240m'  # grey for tree glyphs
-RED=$'\033[38;5;167m'       # muted red for destructive accents
-BOLD_RED=$'\033[1;38;5;167m'
-GREEN=$'\033[38;5;150m'     # success marks
-MARKER_COLOR=$'\033[1;38;5;173m' # bold amber for *
 
-# Popup borders inherit the user's popup-border-style/-lines options;
-# only destructive modes override the frame colour.
-POPUP_BORDER_DANGER='colour167'  # muted red — kill / destructive modes
-POPUP_TITLE_STYLE='#[bold]'      # style delta only, keeps the user's border colours
+COLOR_ACCENT=$(get_opt "${INTERDIMUX_COLOR_ACCENT:-}" @interdimux-color-accent 173)
+COLOR_PATH=$(get_opt "${INTERDIMUX_COLOR_PATH:-}" @interdimux-color-path 180)
+COLOR_GIT=$(get_opt "${INTERDIMUX_COLOR_GIT:-}" @interdimux-color-git 140)
+COLOR_SSH=$(get_opt "${INTERDIMUX_COLOR_SSH:-}" @interdimux-color-ssh 109)
+COLOR_EDITOR=$(get_opt "${INTERDIMUX_COLOR_EDITOR:-}" @interdimux-color-editor 150)
+COLOR_SUCCESS=$(get_opt "${INTERDIMUX_COLOR_SUCCESS:-}" @interdimux-color-success 150)
+COLOR_DANGER=$(get_opt "${INTERDIMUX_COLOR_DANGER:-}" @interdimux-color-danger 167)
+COLOR_TREE=$(get_opt "${INTERDIMUX_COLOR_TREE:-}" @interdimux-color-tree 240)
+COLOR_SEPARATOR=$(get_opt "${INTERDIMUX_COLOR_SEPARATOR:-}" @interdimux-color-separator 245)
+COLOR_QUERY=$(get_opt "${INTERDIMUX_COLOR_QUERY:-}" @interdimux-color-query 223)
+COLOR_MATCH_CURRENT=$(get_opt "${INTERDIMUX_COLOR_MATCH_CURRENT:-}" @interdimux-color-match-current 215)
+COLOR_CURRENT_BG=$(get_opt "${INTERDIMUX_COLOR_CURRENT_BG:-}" @interdimux-color-current-bg 236)
+COLOR_HEADER=$(get_opt "${INTERDIMUX_COLOR_HEADER:-}" @interdimux-color-header 246)
+COLOR_BORDER=$(get_opt "${INTERDIMUX_COLOR_BORDER:-}" @interdimux-color-border 238)
+COLOR_MENU_SEL_FG=$(get_opt "${INTERDIMUX_COLOR_MENU_SEL_FG:-}" @interdimux-color-menu-sel-fg 235)
 
-# Column separator (dim pipe)
-SEP="${DIM_SEP}│${RST}"
+# Render a configured colour into the escape/style each sink needs.
+#   sgr_of  "#rrggbb" -> "38;2;r;g;b"   "NNN" -> "38;5;NNN"   -1/empty -> ""
+sgr_of() {
+  case "$1" in
+    '#'??????) printf '38;2;%d;%d;%d' "$((16#${1:1:2}))" "$((16#${1:3:2}))" "$((16#${1:5:2}))" ;;
+    ''|-1|default|*[!0-9]*) : ;;
+    *) printf '38;5;%s' "$1" ;;
+  esac
+}
+esc()  { local s; s=$(sgr_of "$1"); [ -n "$s" ] && printf '\033[%sm' "$s"; }  # coloured
+escb() { local s; s=$(sgr_of "$1"); printf '\033[1%sm' "${s:+;$s}"; }         # bold+coloured
+# tmux style value (-S/-H): hex and -1 pass through; a bare index needs "colour"
+tmux_color() {
+  case "$1" in
+    '#'*|-1|default|*[!0-9]*) printf '%s' "$1" ;;
+    *) printf 'colour%s' "$1" ;;
+  esac
+}
 
-# Header hint builder: amber key + dim label pairs
+# fzf --color chrome, rebuilt from the palette (fzf accepts hex/index/-1 as-is)
+build_fzf_colors() {
+  FZF_COLORS="--color=hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,fg+:${COLOR_QUERY},bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
+}
+
+# Resolve the palette into the escapes/vars used across the script.
+set_palette() {
+  DIM_CMD=$(esc "$COLOR_ACCENT")
+  BOLD_AMBER=$(escb "$COLOR_ACCENT")
+  MARKER_COLOR=$(escb "$COLOR_ACCENT")
+  ACCENT_ESC=$(esc "$COLOR_ACCENT")
+  DIM_PATH=$(esc "$COLOR_PATH")
+  DIM_SSH=$(esc "$COLOR_SSH")
+  DIM_EDIT=$(esc "$COLOR_EDITOR")
+  DIM_GIT=$(esc "$COLOR_GIT")
+  DIM_TREE=$(esc "$COLOR_TREE")
+  DIM_SEP=$(esc "$COLOR_SEPARATOR")
+  GREEN=$(esc "$COLOR_SUCCESS")
+  RED=$(esc "$COLOR_DANGER")
+  BOLD_RED=$(escb "$COLOR_DANGER")
+  SEP="${DIM_SEP}│${RST}"
+  POPUP_BORDER_DANGER=$(tmux_color "$COLOR_DANGER")
+  MENU_SEL_BG=$(tmux_color "$COLOR_ACCENT")
+  MENU_SEL_FG=$(tmux_color "$COLOR_MENU_SEL_FG")
+  build_fzf_colors
+}
+set_palette
+
+# Title style is a bold delta only — keeps the user's popup border colours.
+POPUP_TITLE_STYLE='#[bold]'
+
+# Header hint builder: accent key + dim label pairs
 hint() {
   local out="" k l
   while [ $# -ge 2 ]; do
     k="$1" l="$2"
     shift 2
-    out+=$'\033[38;5;173m'"${k}"$'\033[0m\033[2m '"${l}"$'\033[0m'
+    out+="${ACCENT_ESC}${k}"$'\033[0m\033[2m '"${l}"$'\033[0m'
     [ $# -ge 2 ] && out+="  "
   done
   printf '%s' "$out"
 }
-
-# fzf chrome colours matched to the in-list palette
-FZF_COLORS='--color=hl:180,hl+:215:bold,fg+:223,bg+:236,prompt:173,pointer:173,marker:150,spinner:173,info:240,header:246,border:238,separator:238,scrollbar:238,label:180,preview-label:180,gutter:-1,query:223'
 
 # Shared fzf theme — applied to all pickers for consistency.  Built once,
 # tiered by fzf version so old installs keep a working (plainer) UI.
@@ -1011,10 +1060,10 @@ preview_rule() {
   if [ -n "$label" ]; then
     local rest=$(( w - ${#label} - 4 ))
     [ "$rest" -lt 0 ] && rest=0
-    printf '\033[38;5;240m── \033[38;5;180m%s \033[38;5;240m%s\033[0m\n' \
+    printf "${DIM_TREE}── ${DIM_PATH}%s ${DIM_TREE}%s${RST}\n" \
       "$label" "${bar:0:rest}"
   else
-    printf '\033[38;5;240m%s\033[0m\n' "$bar"
+    printf "${DIM_TREE}%s${RST}\n" "$bar"
   fi
 }
 
@@ -1047,7 +1096,7 @@ if [ "${1:-}" = "--preview" ]; then
       info=$(tmux display-message -p -t "=${SPEC_SESSION}:" \
         "#{session_windows}${US}#{?session_attached,attached,detached}" 2>/dev/null)
       IFS="$US" read -r s_wins s_att <<< "$info"
-      printf '\033[1;38;5;173m▸ %s\033[0m  \033[2m%s win · %s\033[0m\n' \
+      printf "${BOLD_AMBER}▸ %s${RST}  ${DIM}%s win · %s${RST}\n" \
         "$SPEC_SESSION" "${s_wins:-?}" "${s_att:-}"
       preview_rule
       tmux list-windows -t "=$SPEC_SESSION" \
@@ -1073,11 +1122,11 @@ if [ "${1:-}" = "--preview" ]; then
       IFS="$US" read -r p_cmd p_path <<< "$info"
       p_path="${p_path/#$HOME/\~}"
       if [ "$SPEC_TYPE" = "W" ]; then
-        printf '\033[1;38;5;173m%s:%s\033[0m' "$SPEC_SESSION" "$SPEC_WIDX"
+        printf "${BOLD_AMBER}%s:%s${RST}" "$SPEC_SESSION" "$SPEC_WIDX"
       else
-        printf '\033[1;38;5;173m%s:%s.%s\033[0m' "$SPEC_SESSION" "$SPEC_WIDX" "$SPEC_PIDX"
+        printf "${BOLD_AMBER}%s:%s.%s${RST}" "$SPEC_SESSION" "$SPEC_WIDX" "$SPEC_PIDX"
       fi
-      printf '  \033[38;5;173m%s\033[0m \033[2m·\033[0m \033[38;5;180m%s\033[0m\n' \
+      printf "  ${DIM_CMD}%s${RST} ${DIM}·${RST} ${DIM_PATH}%s${RST}\n" \
         "${p_cmd:-?}" "${p_path:-?}"
       preview_rule
       print_capture "$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)" || echo "(cannot capture pane)"
@@ -1096,28 +1145,28 @@ if [ "${1:-}" = "--dirs-preview" ]; then
   [ -d "$dir" ] || { echo "(directory not found)"; exit 0; }
 
   display_path="${dir/#$HOME/\~}"
-  printf '\033[1;38;5;173m%s\033[0m\n' "$(basename "$dir")"
+  printf "${BOLD_AMBER}%s${RST}\n" "$(basename "$dir")"
   printf '\033[2m%s\033[0m\n\n' "$display_path"
 
   detect_project_type "$dir"
-  [ -n "$REPLY" ] && printf '  \033[38;5;150mType:\033[0m %s\n' "$REPLY"
+  [ -n "$REPLY" ] && printf "  ${GREEN}Type:${RST} %s\n" "$REPLY"
 
   if [ -d "$dir/.git" ]; then
     head_file="$dir/.git/HEAD"
     if [ -f "$head_file" ]; then
       read -r head_content < "$head_file" 2>/dev/null || head_content=""
       case "$head_content" in
-        "ref: refs/heads/"*) printf '  \033[38;5;140mBranch:\033[0m %s\n' "${head_content#ref: refs/heads/}" ;;
-        ?*) printf '  \033[38;5;140mBranch:\033[0m @%s\n' "${head_content:0:7}" ;;
+        "ref: refs/heads/"*) printf "  ${DIM_GIT}Branch:${RST} %s\n" "${head_content#ref: refs/heads/}" ;;
+        ?*) printf "  ${DIM_GIT}Branch:${RST} @%s\n" "${head_content:0:7}" ;;
       esac
     fi
 
     last_commit=$(git -C "$dir" --no-optional-locks log -1 --oneline 2>/dev/null || true)
-    [ -n "$last_commit" ] && printf '  \033[38;5;180mCommit:\033[0m %s\n' "$last_commit"
+    [ -n "$last_commit" ] && printf "  ${DIM_PATH}Commit:${RST} %s\n" "$last_commit"
 
     changed=$(git -C "$dir" --no-optional-locks status --porcelain 2>/dev/null | head -200 | wc -l | tr -d ' ')
     [ "$changed" -eq 200 ] && changed="200+"
-    [ "$changed" != "0" ] && printf '  \033[38;5;173mChanges:\033[0m %s files\n' "$changed"
+    [ "$changed" != "0" ] && printf "  ${DIM_CMD}Changes:${RST} %s files\n" "$changed"
   fi
 
   for readme in README.md README.rst README.txt README; do
@@ -1195,7 +1244,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         detect_project_type "$dir"
         local type_badge=""
         [ -n "$REPLY" ] && type_badge="${DIM}${REPLY}${RST}"
-        printf '  \033[38;5;150m◆\033[0m  %s\t%s\t%s\n' \
+        printf "  ${GREEN}◆${RST}  %s\t%s\t%s\n" \
           "$(dpad "$display_path" "$DIRS_PATH_W")" "$type_badge" "$dir"
         ;;
       dir)
@@ -1888,6 +1937,21 @@ env_fwd_vars() {
     "INTERDIMUX_USE_ZOXIDE=$USE_ZOXIDE"
     "INTERDIMUX_DIRS_LIVE=$DIRS_LIVE"
     "INTERDIMUX_PROJECT_MARKERS=$EXTRA_MARKERS"
+    "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
+    "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
+    "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
+    "INTERDIMUX_COLOR_SSH=$COLOR_SSH"
+    "INTERDIMUX_COLOR_EDITOR=$COLOR_EDITOR"
+    "INTERDIMUX_COLOR_SUCCESS=$COLOR_SUCCESS"
+    "INTERDIMUX_COLOR_DANGER=$COLOR_DANGER"
+    "INTERDIMUX_COLOR_TREE=$COLOR_TREE"
+    "INTERDIMUX_COLOR_SEPARATOR=$COLOR_SEPARATOR"
+    "INTERDIMUX_COLOR_QUERY=$COLOR_QUERY"
+    "INTERDIMUX_COLOR_MATCH_CURRENT=$COLOR_MATCH_CURRENT"
+    "INTERDIMUX_COLOR_CURRENT_BG=$COLOR_CURRENT_BG"
+    "INTERDIMUX_COLOR_HEADER=$COLOR_HEADER"
+    "INTERDIMUX_COLOR_BORDER=$COLOR_BORDER"
+    "INTERDIMUX_COLOR_MENU_SEL_FG=$COLOR_MENU_SEL_FG"
   )
 }
 
@@ -1985,7 +2049,7 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     menu_sp="${menu_sp//'#'/##}"
     tmux display-menu -x C -y C \
       -T '#[align=centre,bold] interdimux ' \
-      -H 'bg=colour173,fg=colour235,bold' \
+      -H "bg=${MENU_SEL_BG},fg=${MENU_SEL_FG},bold" \
       'Switch'      s "run-shell -b \"bash '$menu_sp' --launch switch\"" \
       'New session' n "run-shell -b \"bash '$menu_sp' --launch dirs\"" \
       '' \
@@ -2016,7 +2080,7 @@ fi
 if [ "${1:-}" = "--dashboard" ]; then
   set +e
 
-  items=$(printf '%s\t  \033[1;38;5;173m%-14s\033[0m \033[2m%s\033[0m\n' \
+  items=$(printf "%s\t  ${BOLD_AMBER}%-14s${RST} ${DIM}%s${RST}\n" \
     "switch" "Switch"       "Navigate & jump to target" \
     "dirs"   "New session"  "Create session from directory" \
     "rename" "Rename"       "Rename a session or window" \

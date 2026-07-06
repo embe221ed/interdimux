@@ -234,6 +234,37 @@ set -g @interdimux-dirs-live-search 'off'
 set -g @interdimux-project-markers 'Move.toml:deno.json'
 ```
 
+### Colors
+
+Every color is a tmux option. A value is a hex `#rrggbb`, a 256-color
+index, or `-1` / `default` (inherit the terminal). The defaults reproduce
+the built-in warm palette, so you only set what you want to change. Hex
+values render as truecolor and need an RGB-capable terminal (`$COLORTERM`
+= `truecolor`); the index defaults work everywhere.
+
+```tmux
+set -g @interdimux-color-accent  '#e78a4e'  # commands, marker, hint keys, prompt, titles
+set -g @interdimux-color-path    '#d8a657'  # paths, fzf match highlight
+set -g @interdimux-color-git     '#d3869b'  # ‹branch› badge
+set -g @interdimux-color-ssh     '#7daea3'  # ssh host, activity flag
+set -g @interdimux-color-editor  '#a9b665'  # editor filename
+set -g @interdimux-color-success '#a9b665'  # ✓ marks, project-dir ◆
+set -g @interdimux-color-danger  '#ea6962'  # kill accents, bell flag, danger border
+set -g @interdimux-color-tree    '#6b665f'  # tree glyphs, fzf info
+set -g @interdimux-color-separator '#504945' # the │ column separator
+set -g @interdimux-color-query   '#ddc7a1'  # typed query text
+set -g @interdimux-color-match-current '#e78a4e' # highlight on the current row
+set -g @interdimux-color-current-bg '#32302f'    # current-line background
+set -g @interdimux-color-header  '#8d877d'  # fzf header text
+set -g @interdimux-color-border  '#504945'  # fzf borders / scrollbar
+set -g @interdimux-color-menu-sel-fg '#282828'   # dashboard menu selection text
+```
+
+These pair with the popup border, which inherits your
+`popup-border-style` / `popup-border-lines`. If you generate your dotfiles
+with a theming tool, emit these options from your palette so interdimux
+re-themes (light or dark) alongside the rest of your setup.
+
 ## TODO
 - [ ] implement plugins system to define custom actions
   - [ ] once implemented, convert current actions to plugins system

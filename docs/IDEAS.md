@@ -42,9 +42,9 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 
 | # | Idea | Effort | Notes |
 |---|------|--------|-------|
-| 19 | **Light-background palette** — the typed query (223) and match highlights (180) are ~1.3:1 contrast on light terminals, and row colors are baked into the emitted ANSI so `@interdimux-fzf-opts` can't fix them. Add `@interdimux-theme dark\|light\|ansi`, factor colors into `set_palette()`. | M | — |
-| 20 | **Honor `NO_COLOR` / `TERM=dumb`** — blank the 256-color vars (keep bold/dim; the NO_COLOR spec permits non-color styling), `--color=bw` for fzf. | S | — |
-| 21 | **Fix `DIM_SEP`** — the `│` separators are dim-*white* (invisible on light, inconsistent on dark where structural glyphs are grey 238/240). Use `38;5;245`. | S | — |
+| 19 | ✅ **Done** — **Configurable palette.** Every color is now an `@interdimux-color-*` option (hex / 256-index / `-1`) resolved through `set_palette()`; the built-in defaults reproduce the warm dark look. Light themes come from *feeding* those options (e.g. via interdotensional's per-theme config), which reconfigures the row ANSI that `@interdimux-fzf-opts` couldn't reach. | M | — |
+| 20 | **Honor `NO_COLOR` / `TERM=dumb`** — blank the color vars (keep bold/dim; the NO_COLOR spec permits non-color styling), `--color=bw` for fzf. Still open: the palette is configurable but not auto-blanked. | S | — |
+| 21 | ✅ **Done** — `separator` default changed from dim-white `2;37` to grey `245`, and is now the `@interdimux-color-separator` option. | S | — |
 
 ## 4. Robustness & speed (arguably bugs)
 
