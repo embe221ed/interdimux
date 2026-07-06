@@ -268,6 +268,7 @@ re-themes (light or dark) alongside the rest of your setup.
 ## TODO
 - [ ] implement plugins system to define custom actions
   - [ ] once implemented, convert current actions to plugins system
+- [x] fix issue with input popup (e.g. for rename) - rendered popup breaks once all characters are removed
 
 See [docs/IDEAS.md](docs/IDEAS.md) for the researched UX/UI improvement
 backlog (prioritized, with effort estimates and fzf/tmux version gates).

@@ -1619,24 +1619,103 @@ confirm_dialog() {
   [[ "$key" =~ ^[yY]$ ]]
 }
 
-# input_dialog ACCENT TITLE PROMPT INITIAL — line editor inside the box
-# (readline with the current value prefilled on a real tty); sets REPLY,
-# empty means cancelled
+# input_dialog ACCENT TITLE PROMPT INITIAL — a single-line text editor drawn
+# inside the dialog box.  Sets REPLY (empty = cancelled).
+#
+# Hand-rolled instead of `read -e`: readline owns the whole physical terminal
+# line (column 0 → terminal width) and knows nothing about the box, so it
+# erased the right border on backspace and snapped the cursor to column 0 once
+# the field emptied.  This editor only ever repaints the field region between
+# the prompt and the right border, so the frame can't be corrupted, and it
+# scrolls horizontally rather than wrapping through the border on long input.
+# Runs under the --action handler's `set +e`, so bare (( … )) tests are safe.
 input_dialog() {
   local accent="$1" title="$2" prompt="$3" initial="$4"
   dialog_open "$accent" "$title" ""
-  dialog_status "${DIM}enter apply · empty input cancels${RST}"
+  dialog_status "${DIM}enter apply · esc cancel${RST}"
+
   local irow=$(( DLG_TOP + 2 ))
+  local col_prompt=$(( DLG_LEFT + 4 ))
+  local field_start=$(( col_prompt + ${#prompt} ))
+  local field_end=$(( DLG_LEFT + DLG_W - 3 ))   # one-column gutter before the border
+  local field_w=$(( field_end - field_start + 1 ))
+  [ "$field_w" -lt 1 ] && field_w=1
+
+  # The prompt is static — draw it once; the loop only repaints the field.
   printf '\033[%d;%dH%s%s%s\033[?25h' \
-    "$irow" $(( DLG_LEFT + 4 )) "$accent" "$prompt" "$RST" >"$tty_out"
-  printf '\033[%d;%dH' "$irow" $(( DLG_LEFT + 4 + ${#prompt} )) >"$tty_out"
+    "$irow" "$col_prompt" "$accent" "$prompt" "$RST" >"$tty_out"
+
+  local buf="$initial" pos=${#initial} scroll=0
   drain_input
-  REPLY=""
-  if [ -n "$initial" ]; then
-    IFS= read -e -r -i "$initial" REPLY <"$tty_in" 2>"$tty_out"
-  else
-    IFS= read -e -r REPLY <"$tty_in" 2>"$tty_out"
+
+  # Read the input source through ONE fd.  Re-opening `<"$tty_in"` per read
+  # works for a tty (each open reads the next queued key) but rewinds a regular
+  # file to offset 0 every time — an infinite loop when input comes from a
+  # fixture file (tests) or any non-tty.  A single fd advances for both.
+  local ifd; exec {ifd}<"$tty_in"
+  # On a real terminal, edit in raw/no-echo mode for the duration so fast keys
+  # arriving between reads aren't echoed over the box, and Ctrl-C cancels
+  # cleanly (delivered as a byte, not SIGINT).  Skipped for non-ttys.
+  local saved_stty=""
+  if [ -c "$tty_in" ]; then
+    saved_stty=$(stty -g <"$tty_in" 2>/dev/null) || saved_stty=""
+    [ -n "$saved_stty" ] && stty -echo -icanon -isig min 1 time 0 <"$tty_in" 2>/dev/null
   fi
+
+  local c c2 c3 c4 vis pad len
+  while true; do
+    len=${#buf}
+    (( pos < scroll )) && scroll=$pos
+    (( pos - scroll >= field_w )) && scroll=$(( pos - field_w + 1 ))
+    (( scroll < 0 )) && scroll=0
+    vis="${buf:scroll:field_w}"
+    printf -v pad '%*s' $(( field_w - ${#vis} )) ''
+    # repaint the field and place the cursor; nothing is written outside
+    # [field_start, field_end], so the borders are never touched
+    printf '\033[%d;%dH%s%s\033[%d;%dH' \
+      "$irow" "$field_start" "$vis" "$pad" \
+      "$irow" $(( field_start + pos - scroll )) >"$tty_out"
+
+    IFS= read -rsN1 -u "$ifd" c || c=$'\n'   # EOF → accept what we have
+    case "$c" in
+      $'\n'|$'\r') break ;;                                  # accept
+      $'\x1b')                                               # ESC: a sequence, or lone → cancel
+        if IFS= read -rsN1 -t 0.05 -u "$ifd" c2 && [[ "$c2" == '[' || "$c2" == 'O' ]]; then
+          IFS= read -rsN1 -t 0.05 -u "$ifd" c3
+          case "$c3" in
+            D) (( pos > 0 ))   && pos=$(( pos - 1 )) ;;      # left
+            C) (( pos < len )) && pos=$(( pos + 1 )) ;;      # right
+            H) pos=0 ;;
+            F) pos=$len ;;
+            [0-9])
+              IFS= read -rsN1 -t 0.05 -u "$ifd" c4          # swallow the trailing '~'
+              case "$c3" in
+                1|7) pos=0 ;;
+                4|8) pos=$len ;;
+                3) (( pos < len )) && buf="${buf:0:pos}${buf:pos+1}" ;;   # delete
+              esac ;;
+          esac
+        else
+          buf=""; break                                      # lone ESC → cancel
+        fi ;;
+      $'\x7f'|$'\x08') (( pos > 0 )) && { buf="${buf:0:pos-1}${buf:pos}"; pos=$(( pos - 1 )); } ;;
+      $'\x03') buf=""; break ;;                              # Ctrl-C → cancel
+      $'\x01') pos=0 ;;                                       # Ctrl-A → start
+      $'\x05') pos=$len ;;                                    # Ctrl-E → end
+      $'\x15') buf="${buf:pos}"; pos=0 ;;                     # Ctrl-U → delete to start
+      $'\x0b') buf="${buf:0:pos}" ;;                          # Ctrl-K → delete to end
+      $'\x17')                                                # Ctrl-W → delete word before cursor
+        local l="${buf:0:pos}" r="${buf:pos}"
+        while [ -n "$l" ] && [ "${l: -1}" = ' ' ]; do l="${l%?}"; done
+        while [ -n "$l" ] && [ "${l: -1}" != ' ' ]; do l="${l%?}"; done
+        buf="$l$r"; pos=${#l} ;;
+      *) [[ -n "$c" && "$c" != [[:cntrl:]] ]] && { buf="${buf:0:pos}$c${buf:pos}"; pos=$(( pos + 1 )); } ;;
+    esac
+  done
+
+  [ -n "$saved_stty" ] && stty "$saved_stty" <"$tty_in" 2>/dev/null
+  exec {ifd}<&-
+  REPLY="$buf"
 }
 
 # Brief informational dialog
