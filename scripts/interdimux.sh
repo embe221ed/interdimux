@@ -31,15 +31,22 @@ fi
 # is parsed once here.  If the version string is unparseable, skip the
 # check rather than block.
 FZF_MINOR=0
-fzf_version=$(fzf --version 2>/dev/null | awk '{print $1}') || true
-IFS=. read -r fzf_major fzf_minor _ <<< "$fzf_version"
-if [[ "${fzf_major:-}" =~ ^[0-9]+$ && "${fzf_minor:-}" =~ ^[0-9]+$ ]]; then
-  if [ "$fzf_major" -eq 0 ] && [ "$fzf_minor" -lt 40 ]; then
-    echo "interdimux: fzf >= 0.40 is required (found $fzf_version)" >&2
-    exit 1
+if [[ "${INTERDIMUX_FZF_MINOR:-}" =~ ^[0-9]+$ ]]; then
+  # Forwarded by the launcher (env_fwd) — skip the fzf --version fork+exec
+  # (~100ms under load) that would otherwise run on every child callback
+  # (preview/header/reload).
+  FZF_MINOR="$INTERDIMUX_FZF_MINOR"
+else
+  fzf_version=$(fzf --version 2>/dev/null | awk '{print $1}') || true
+  IFS=. read -r fzf_major fzf_minor _ <<< "$fzf_version"
+  if [[ "${fzf_major:-}" =~ ^[0-9]+$ && "${fzf_minor:-}" =~ ^[0-9]+$ ]]; then
+    if [ "$fzf_major" -eq 0 ] && [ "$fzf_minor" -lt 40 ]; then
+      echo "interdimux: fzf >= 0.40 is required (found $fzf_version)" >&2
+      exit 1
+    fi
+    FZF_MINOR="$fzf_minor"
+    [ "$fzf_major" -gt 0 ] && FZF_MINOR=999
   fi
-  FZF_MINOR="$fzf_minor"
-  [ "$fzf_major" -gt 0 ] && FZF_MINOR=999
 fi
 
 # True when fzf is at least 0.<arg>
@@ -52,10 +59,14 @@ fi
 
 # tmux version as major*100+minor (3.4 → 304); unparseable builds
 # (e.g. "master") are assumed modern.
-TMUX_VNUM=999
-tmux_vstr=$(tmux -V 2>/dev/null || true)
-if [[ "$tmux_vstr" =~ ([0-9]+)\.([0-9]+) ]]; then
-  TMUX_VNUM=$(( BASH_REMATCH[1] * 100 + BASH_REMATCH[2] ))
+if [[ "${INTERDIMUX_TMUX_VNUM:-}" =~ ^[0-9]+$ ]]; then
+  TMUX_VNUM="$INTERDIMUX_TMUX_VNUM"   # forwarded by the launcher (env_fwd)
+else
+  TMUX_VNUM=999
+  tmux_vstr=$(tmux -V 2>/dev/null || true)
+  if [[ "$tmux_vstr" =~ ([0-9]+)\.([0-9]+) ]]; then
+    TMUX_VNUM=$(( BASH_REMATCH[1] * 100 + BASH_REMATCH[2] ))
+  fi
 fi
 
 # True when tmux is at least major*100+minor
@@ -120,22 +131,27 @@ COLOR_HEADER=$(get_opt "${INTERDIMUX_COLOR_HEADER:-}" @interdimux-color-header 2
 COLOR_BORDER=$(get_opt "${INTERDIMUX_COLOR_BORDER:-}" @interdimux-color-border 238)
 COLOR_MENU_SEL_FG=$(get_opt "${INTERDIMUX_COLOR_MENU_SEL_FG:-}" @interdimux-color-menu-sel-fg 235)
 
-# Render a configured colour into the escape/style each sink needs.
+# Render a configured colour into the escape/style each sink needs.  These set
+# REPLY instead of printing: set_palette runs on every script invocation (each
+# fzf callback re-execs the script), so a $(…) subshell per colour is pure
+# overhead — ~30 forks that cost ~1s under load.
 #   sgr_of  "#rrggbb" -> "38;2;r;g;b"   "NNN" -> "38;5;NNN"   -1/empty -> ""
 sgr_of() {
   case "$1" in
-    '#'??????) printf '38;2;%d;%d;%d' "$((16#${1:1:2}))" "$((16#${1:3:2}))" "$((16#${1:5:2}))" ;;
-    ''|-1|default|*[!0-9]*) : ;;
-    *) printf '38;5;%s' "$1" ;;
+    '#'??????) REPLY="38;2;$((16#${1:1:2}));$((16#${1:3:2}));$((16#${1:5:2}))" ;;
+    ''|-1|default|*[!0-9]*) REPLY="" ;;
+    *) REPLY="38;5;$1" ;;
   esac
 }
-esc()  { local s; s=$(sgr_of "$1"); [ -n "$s" ] && printf '\033[%sm' "$s"; }  # coloured
-escb() { local s; s=$(sgr_of "$1"); printf '\033[1%sm' "${s:+;$s}"; }         # bold+coloured
+# esc/escb set REPLY to the SGR escape.  The trailing test/assignment always
+# yields status 0 so they are safe as bare calls under set -e.
+esc()  { sgr_of "$1"; [ -z "$REPLY" ] || REPLY=$'\033['"$REPLY"'m'; }  # coloured
+escb() { sgr_of "$1"; REPLY=$'\033[1'"${REPLY:+;$REPLY}"'m'; }         # bold+coloured
 # tmux style value (-S/-H): hex and -1 pass through; a bare index needs "colour"
 tmux_color() {
   case "$1" in
-    '#'*|-1|default|*[!0-9]*) printf '%s' "$1" ;;
-    *) printf 'colour%s' "$1" ;;
+    '#'*|-1|default|*[!0-9]*) REPLY="$1" ;;
+    *) REPLY="colour$1" ;;
   esac
 }
 
@@ -146,23 +162,23 @@ build_fzf_colors() {
 
 # Resolve the palette into the escapes/vars used across the script.
 set_palette() {
-  DIM_CMD=$(esc "$COLOR_ACCENT")
-  BOLD_AMBER=$(escb "$COLOR_ACCENT")
-  MARKER_COLOR=$(escb "$COLOR_ACCENT")
-  ACCENT_ESC=$(esc "$COLOR_ACCENT")
-  DIM_PATH=$(esc "$COLOR_PATH")
-  DIM_SSH=$(esc "$COLOR_SSH")
-  DIM_EDIT=$(esc "$COLOR_EDITOR")
-  DIM_GIT=$(esc "$COLOR_GIT")
-  DIM_TREE=$(esc "$COLOR_TREE")
-  DIM_SEP=$(esc "$COLOR_SEPARATOR")
-  GREEN=$(esc "$COLOR_SUCCESS")
-  RED=$(esc "$COLOR_DANGER")
-  BOLD_RED=$(escb "$COLOR_DANGER")
+  esc  "$COLOR_ACCENT";            DIM_CMD="$REPLY"
+  escb "$COLOR_ACCENT";            BOLD_AMBER="$REPLY"
+  escb "$COLOR_ACCENT";            MARKER_COLOR="$REPLY"
+  esc  "$COLOR_ACCENT";            ACCENT_ESC="$REPLY"
+  esc  "$COLOR_PATH";              DIM_PATH="$REPLY"
+  esc  "$COLOR_SSH";               DIM_SSH="$REPLY"
+  esc  "$COLOR_EDITOR";            DIM_EDIT="$REPLY"
+  esc  "$COLOR_GIT";               DIM_GIT="$REPLY"
+  esc  "$COLOR_TREE";              DIM_TREE="$REPLY"
+  esc  "$COLOR_SEPARATOR";         DIM_SEP="$REPLY"
+  esc  "$COLOR_SUCCESS";           GREEN="$REPLY"
+  esc  "$COLOR_DANGER";            RED="$REPLY"
+  escb "$COLOR_DANGER";            BOLD_RED="$REPLY"
   SEP="${DIM_SEP}│${RST}"
-  POPUP_BORDER_DANGER=$(tmux_color "$COLOR_DANGER")
-  MENU_SEL_BG=$(tmux_color "$COLOR_ACCENT")
-  MENU_SEL_FG=$(tmux_color "$COLOR_MENU_SEL_FG")
+  tmux_color "$COLOR_DANGER";      POPUP_BORDER_DANGER="$REPLY"
+  tmux_color "$COLOR_ACCENT";      MENU_SEL_BG="$REPLY"
+  tmux_color "$COLOR_MENU_SEL_FG"; MENU_SEL_FG="$REPLY"
   build_fzf_colors
 }
 set_palette
@@ -525,28 +541,28 @@ full_command() {
     local children="${PS_CHILDREN[$pid]:-}"
     if [ -n "$children" ]; then
       local child="${children%% *}"
-      printf '%s' "${PS_ARGS[$child]:-}"
+      REPLY="${PS_ARGS[$child]:-}"
       return
     fi
   fi
 
   # Not a shell (or shell has no children) — use as-is
-  printf '%s' "$args"
+  REPLY="$args"
 }
 
-# Resolve the command string to display for a pane.
+# Resolve the command string to display for a pane.  Sets REPLY.
 resolve_command() {
   # tabs sanitized out: the command lands in a tab-delimited row field
   local short_cmd="${1//$'\t'/ }" pid="$2"
   if [ "$SHOW_FULL_COMMAND" = "on" ]; then
     local fcmd
-    fcmd=$(full_command "$pid")
+    full_command "$pid"; fcmd="$REPLY"
     fcmd="${fcmd//$'\t'/ }"
     fcmd="${fcmd#"${fcmd%%[![:space:]]*}"}"
     fcmd="${fcmd%"${fcmd##*[![:space:]]}"}"
-    [ -n "$fcmd" ] && { printf '%s' "$fcmd"; return; }
+    [ -n "$fcmd" ] && { REPLY="$fcmd"; return; }
   fi
-  printf '%s' "$short_cmd"
+  REPLY="$short_cmd"
 }
 
 # ---------------------------------------------------------------------------
@@ -557,12 +573,13 @@ declare -A GIT_BRANCH_CACHE=()
 
 get_git_branch() {
   local dir="$1"
+  REPLY=""
   [ "$SHOW_GIT_BRANCH" != "on" ] && return
   [ -z "$dir" ] && return
 
   local _cache_key="$dir"
   if [[ -v "GIT_BRANCH_CACHE[$_cache_key]" ]]; then
-    printf '%s' "${GIT_BRANCH_CACHE[$_cache_key]}"
+    REPLY="${GIT_BRANCH_CACHE[$_cache_key]}"
     return
   fi
 
@@ -593,7 +610,7 @@ get_git_branch() {
         *) branch="@${head_content:0:7}" ;;
       esac
       GIT_BRANCH_CACHE["$_cache_key"]="$branch"
-      printf '%s' "$branch"
+      REPLY="$branch"
       return
     fi
     d="${d%/*}"
@@ -616,6 +633,7 @@ EDITOR_FLAGS_WITH_VALUE='^-[uUsSpc]$|^--cmd$|^--listen$'
 
 format_command() {
   local cmd_str="$1"
+  REPLY=""                       # reset: callers read REPLY after a bare call
   [ -z "$cmd_str" ] && return
   local cmd_name="${cmd_str%% *}"
   local cmd_base="${cmd_name##*/}"
@@ -645,7 +663,7 @@ format_command() {
       done
       if [ -n "$host" ]; then
         [[ "$old_set" != *f* ]] && set +f
-        printf '%s%s %s%s%s' "$DIM_CMD" "$cmd_base" "$DIM_SSH" "$host" "$RST"
+        printf -v REPLY '%s%s %s%s%s' "$DIM_CMD" "$cmd_base" "$DIM_SSH" "$host" "$RST"
         return
       fi
       ;;
@@ -673,13 +691,13 @@ format_command() {
     if [ -n "$file" ]; then
       local fname="${file##*/}"
       [[ "$old_set" != *f* ]] && set +f
-      printf '%s%s %s%s%s' "$DIM_CMD" "$cmd_base" "$DIM_EDIT" "$fname" "$RST"
+      printf -v REPLY '%s%s %s%s%s' "$DIM_CMD" "$cmd_base" "$DIM_EDIT" "$fname" "$RST"
       return
     fi
   fi
 
   [[ "$old_set" != *f* ]] && set +f
-  printf '%s%s%s' "$DIM_CMD" "$cmd_str" "$RST"
+  printf -v REPLY '%s%s%s' "$DIM_CMD" "$cmd_str" "$RST"
 }
 
 # ---------------------------------------------------------------------------
@@ -756,11 +774,12 @@ compute_widths() {
   fi
 }
 
-# Trim a path to fit within max_width display columns.
+# Trim a path to fit within max_width display columns.  Sets REPLY (no
+# subprocess) — called once per window and per pane in the gather hot loop.
 trim_path() {
   local path="$1" max_width="$2"
 
-  [ "${#path}" -le "$max_width" ] && { printf '%s' "$path"; return; }
+  [ "${#path}" -le "$max_width" ] && { REPLY="$path"; return; }
 
   local prefix=""
   # shellcheck disable=SC2088  # literal "~/" match is intentional
@@ -804,7 +823,7 @@ trim_path() {
     result="${result:0:budget-1}…"
   fi
 
-  printf '%s' "${prefix}${ellipsis}${result}"
+  REPLY="${prefix}${ellipsis}${result}"
 }
 
 # ---------------------------------------------------------------------------
@@ -833,13 +852,13 @@ build_ctx_field() {
   fld_reset
   disp="${path/#$HOME/\~}"
   disp="${disp//$'\t'/ }"   # tabs are the field delimiter
-  disp=$(trim_path "$disp" "$PATH_W")
+  trim_path "$disp" "$PATH_W"; disp="$REPLY"
   fld_add "${SEP} " 2
   fld_add "${DIM_PATH}${disp}${RST}" "${#disp}"
   fld_pad $(( PATH_W + 2 ))
   if [ "$BADGE_W" -gt 0 ]; then
     badge="" blen=0
-    gbranch=$(get_git_branch "$path")
+    get_git_branch "$path"; gbranch="$REPLY"
     if [ -n "$gbranch" ]; then
       [ "${#gbranch}" -gt $(( BADGE_W - 2 )) ] && gbranch="${gbranch:0:BADGE_W-3}…"
       badge=" ${DIM_GIT}‹${gbranch}›${RST}"
@@ -952,8 +971,10 @@ gather_targets() {
     session_windows="${windows_by_session[$sname]:-}"
     [ -z "$session_windows" ] && continue
 
-    win_count=$(printf '%s\n' "$session_windows" | wc -l)
-    win_count=${win_count// /}
+    # Pure-bash line count (no fork/pipe): entries are '\n'-joined, no trailer,
+    # so the window count is (number of embedded newlines) + 1.
+    win_count="${session_windows//[!$'\n']/}"
+    win_count=$(( ${#win_count} + 1 ))
 
     # Session-name prefix on child rows keeps filtered rows identifiable
     # and makes compound queries ("proj edit") work.  The cap is derived
@@ -993,8 +1014,8 @@ gather_targets() {
       build_ctx_field "$wpath" "${wflags:0:1}" "${wflags:1:1}" "${wflags:2:1}"
       ctx="$FLD"
 
-      raw_cmd=$(resolve_command "$wcmd" "$wpid")
-      cmd_formatted=$(format_command "$raw_cmd")
+      resolve_command "$wcmd" "$wpid"; raw_cmd="$REPLY"
+      format_command "$raw_cmd"; cmd_formatted="$REPLY"
 
       printf '%s\t%s\t%s\tW:%s:%s\n' \
         "$ident" "$ctx" "$cmd_formatted" "$sname" "$widx"
@@ -1004,8 +1025,8 @@ gather_targets() {
         pane_data="${panes_by_window[${sname}${US}${widx}]:-}"
         [ -z "$pane_data" ] && continue
 
-        pane_count=$(printf '%s\n' "$pane_data" | wc -l)
-        pane_count=${pane_count// /}
+        pane_count="${pane_data//[!$'\n']/}"
+        pane_count=$(( ${#pane_count} + 1 ))
         pi=0
 
         while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2; do
@@ -1035,8 +1056,8 @@ gather_targets() {
           build_ctx_field "$ppath" "" "" ""
           ctx="$FLD"
 
-          raw_cmd=$(resolve_command "$pcmd" "$ppid")
-          cmd_formatted=$(format_command "$raw_cmd")
+          resolve_command "$pcmd" "$ppid"; raw_cmd="$REPLY"
+          format_command "$raw_cmd"; cmd_formatted="$REPLY"
 
           printf '%s\t%s\t%s\tP:%s:%s:%s\n' \
             "$ident" "$ctx" "$cmd_formatted" "$sname" "$widx" "$pidx"
@@ -1234,7 +1255,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
     [[ -v "seen[$dir]" ]] && return
     seen["$dir"]=1
     local display_path="${dir/#$HOME/\~}"
-    display_path=$(trim_path "$display_path" "$DIRS_PATH_W")
+    trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
     case "$tier" in
       recent)
         printf '  %s★%s  %s\t\t%s\n' \
@@ -1952,6 +1973,8 @@ env_fwd_vars() {
     "INTERDIMUX_COLOR_HEADER=$COLOR_HEADER"
     "INTERDIMUX_COLOR_BORDER=$COLOR_BORDER"
     "INTERDIMUX_COLOR_MENU_SEL_FG=$COLOR_MENU_SEL_FG"
+    "INTERDIMUX_FZF_MINOR=$FZF_MINOR"
+    "INTERDIMUX_TMUX_VNUM=$TMUX_VNUM"
   )
 }
 
