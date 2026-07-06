@@ -182,7 +182,8 @@ time."** The navigator's `focus:transform-header(bash '$SCRIPT_PATH' --header-fo
 (`scripts/interdimux.sh:2190`) forks a fresh bash **and blocks the UI** on every cursor move.
 Measured `--header-for` under load: **435 ms – 1.1 s** *per move*.
 
-Two ways out (pick one):
+Two ways out — **2b was chosen** (it keeps the per-type hints; a static footer would flatten
+them into one bar and show every key for every row type):
 
 - **2a (recommended, and it's IDEAS #4) — static footer, no subprocess.** Move the key hints
   to a static `--footer` (fzf ≥ 0.63) or a plain literal `--header` set once. The per-row
@@ -198,6 +199,12 @@ Prefer `change-header(LITERAL)` over `transform-header(cmd)` anywhere the value 
 known — a literal spawns **no** subprocess.
 
 **Impact:** this is the change that makes *scrolling* feel instant. **Risk:** low.
+
+> ✅ **Done** (2b). `focus:transform-header` → `focus:bg-cancel+bg-transform-header` on
+> fzf ≥ 0.63 (synchronous fallback retained below the gate). Verified live by driving arrow
+> keys through a real fzf in a tmux pane: the header renders the correct per-type hints
+> (session → `detach`, window → `swap`, pane → `zoom`/`send`) and updates asynchronously
+> without blocking navigation. `bg-cancel` coalesces rapid scrolling. `tests/*.sh` pass.
 
 ---
 

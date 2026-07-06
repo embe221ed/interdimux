@@ -2210,7 +2210,6 @@ while true; do
         --prompt='❯ '
         --print-query
         --header="$(hint enter switch ^x kill ^e rename ^o new ^r reload ^/ preview)"
-        --bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {-1})"
         --bind="ctrl-x:execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
         --bind="ctrl-e:execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
         --bind="ctrl-z:execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
@@ -2220,6 +2219,17 @@ while true; do
         --bind="ctrl-o:execute(bash '$SCRIPT_PATH' --dirs || echo resume > '$RESUME_FILE')+abort"
         --bind='ctrl-/:toggle-preview'
       )
+      # Per-row header hints.  A focus bind runs SYNCHRONOUSLY — the fzf man
+      # page warns it "can make the interface sluggish" — and this one re-execs
+      # the script on every cursor move.  On fzf >= 0.63 use the async bg-
+      # variant so navigation never blocks (the header just updates a beat
+      # later); bg-cancel coalesces rapid scrolling so fast movement doesn't
+      # pile up header processes.  Older fzf keeps the synchronous bind.
+      if fzf_ge 63; then
+        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-header(bash '$SCRIPT_PATH' --header-for {-1})")
+      else
+        fzf_opts+=(--bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {-1})")
+      fi
       fzf_ge 58 && fzf_opts+=(
         --bind="ctrl-]:change-nth(1|2|3|1,2,3|1,3)+transform-prompt(bash '$SCRIPT_PATH' --scope-prompt)"
       )
