@@ -14,8 +14,15 @@ set -euo pipefail
 
 US=$'\x1f'  # Unit separator — safe field delimiter for tmux data parsing
 
-# Script path — computed once, used by fzf bindings to call back into this script
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+# Script path — used by fzf bindings to call back into this script.  Built
+# without forks (the old dirname/basename/pwd subshells ran on every
+# invocation).  Real launches already pass an absolute path; a relative one is
+# anchored to $PWD.  It only re-invokes this script, so an unresolved symlink
+# path is fine.
+case "${BASH_SOURCE[0]}" in
+  /*) SCRIPT_PATH="${BASH_SOURCE[0]}" ;;
+  *)  SCRIPT_PATH="$PWD/${BASH_SOURCE[0]}" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Preflight
@@ -76,30 +83,63 @@ tmux_ge() { [ "$TMUX_VNUM" -ge "$1" ]; }
 # Config
 # ---------------------------------------------------------------------------
 
-# Read a config value: env override → tmux option → default.
-get_opt() {
-  local env_val="$1" opt_name="$2" default="$3"
-  if [ -n "$env_val" ]; then
-    printf '%s' "$env_val"
-    return
-  fi
-  local v
-  v=$(tmux show-option -gqv "$opt_name" 2>/dev/null || true)
-  printf '%s' "${v:-$default}"
+# Config resolution.  get_opt sets the named variable via a nameref (no
+# subshell): env override → the one-shot tmux options dump → default.  It is
+# called 27× at top level on every invocation, so the old VAR=$(get_opt …)
+# form cost 27 subshell forks per run (warm) plus 27 `tmux` execs (cold).
+#
+# load_tmux_opts resolves every @interdimux-* option in ONE display-message
+# via format expansion — raw, unquoted values, split on US.  Children receive
+# every value through the env, so they never trigger the dump.  Keep OPT_NAMES
+# in sync with the get_opt calls below (a missing name falls back to default).
+OPT_NAMES=(
+  show-preview show-full-command show-git-branch popup-width popup-height
+  order fzf-opts recent-limit scan-depth use-zoxide dirs-live-search
+  project-markers color-accent color-path color-git color-ssh color-editor
+  color-success color-danger color-tree color-separator color-query
+  color-match-current color-current-bg color-header color-border color-menu-sel-fg
+)
+declare -A TMUX_OPTS=()
+_tmux_opts_loaded=0
+load_tmux_opts() {
+  [ "$_tmux_opts_loaded" = 1 ] && return 0
+  _tmux_opts_loaded=1
+  local fmt="" name raw
+  local -a vals
+  for name in "${OPT_NAMES[@]}"; do
+    [ -n "$fmt" ] && fmt+="$US"
+    fmt+="#{@interdimux-$name}"
+  done
+  raw=$(tmux display-message -p "$fmt" 2>/dev/null) || return 0
+  IFS="$US" read -r -a vals <<< "$raw"
+  local i=0
+  for name in "${OPT_NAMES[@]}"; do
+    TMUX_OPTS["@interdimux-$name"]="${vals[i]:-}"
+    i=$((i + 1))
+  done
 }
 
-SHOW_PREVIEW=$(get_opt "${INTERDIMUX_SHOW_PREVIEW:-}" @interdimux-show-preview on)
-SHOW_FULL_COMMAND=$(get_opt "${INTERDIMUX_SHOW_FULL_COMMAND:-}" @interdimux-show-full-command on)
-SHOW_GIT_BRANCH=$(get_opt "${INTERDIMUX_SHOW_GIT_BRANCH:-}" @interdimux-show-git-branch on)
-POPUP_WIDTH=$(get_opt "${INTERDIMUX_POPUP_WIDTH:-}" @interdimux-popup-width 80%)
-POPUP_HEIGHT=$(get_opt "${INTERDIMUX_POPUP_HEIGHT:-}" @interdimux-popup-height 75%)
-ORDER=$(get_opt "${INTERDIMUX_ORDER:-}" @interdimux-order mru)
-FZF_USER_OPTS=$(get_opt "${INTERDIMUX_FZF_OPTS:-}" @interdimux-fzf-opts "")
-RECENT_LIMIT=$(get_opt "${INTERDIMUX_RECENT_LIMIT:-}" @interdimux-recent-limit 10)
-SCAN_DEPTH=$(get_opt "${INTERDIMUX_SCAN_DEPTH:-}" @interdimux-scan-depth 3)
-USE_ZOXIDE=$(get_opt "${INTERDIMUX_USE_ZOXIDE:-}" @interdimux-use-zoxide on)
-DIRS_LIVE=$(get_opt "${INTERDIMUX_DIRS_LIVE:-}" @interdimux-dirs-live-search off)
-EXTRA_MARKERS=$(get_opt "${INTERDIMUX_PROJECT_MARKERS:-}" @interdimux-project-markers "")
+get_opt() {
+  local -n _gv="$1"
+  local env_val="$2" opt_name="$3" default="$4"
+  if [ -n "$env_val" ]; then _gv="$env_val"; return 0; fi
+  load_tmux_opts
+  local v="${TMUX_OPTS[$opt_name]:-}"
+  _gv="${v:-$default}"
+}
+
+get_opt SHOW_PREVIEW      "${INTERDIMUX_SHOW_PREVIEW:-}"      @interdimux-show-preview      on
+get_opt SHOW_FULL_COMMAND "${INTERDIMUX_SHOW_FULL_COMMAND:-}" @interdimux-show-full-command on
+get_opt SHOW_GIT_BRANCH   "${INTERDIMUX_SHOW_GIT_BRANCH:-}"   @interdimux-show-git-branch   on
+get_opt POPUP_WIDTH       "${INTERDIMUX_POPUP_WIDTH:-}"       @interdimux-popup-width       80%
+get_opt POPUP_HEIGHT      "${INTERDIMUX_POPUP_HEIGHT:-}"      @interdimux-popup-height      75%
+get_opt ORDER            "${INTERDIMUX_ORDER:-}"             @interdimux-order             mru
+get_opt FZF_USER_OPTS     "${INTERDIMUX_FZF_OPTS:-}"          @interdimux-fzf-opts          ""
+get_opt RECENT_LIMIT      "${INTERDIMUX_RECENT_LIMIT:-}"      @interdimux-recent-limit      10
+get_opt SCAN_DEPTH        "${INTERDIMUX_SCAN_DEPTH:-}"        @interdimux-scan-depth        3
+get_opt USE_ZOXIDE        "${INTERDIMUX_USE_ZOXIDE:-}"        @interdimux-use-zoxide        on
+get_opt DIRS_LIVE         "${INTERDIMUX_DIRS_LIVE:-}"         @interdimux-dirs-live-search  off
+get_opt EXTRA_MARKERS     "${INTERDIMUX_PROJECT_MARKERS:-}"   @interdimux-project-markers   ""
 
 # ---------------------------------------------------------------------------
 # Colours — configurable palette
@@ -115,21 +155,21 @@ RST=$'\033[0m'
 DIM=$'\033[2m'
 BOLD=$'\033[1m'
 
-COLOR_ACCENT=$(get_opt "${INTERDIMUX_COLOR_ACCENT:-}" @interdimux-color-accent 173)
-COLOR_PATH=$(get_opt "${INTERDIMUX_COLOR_PATH:-}" @interdimux-color-path 180)
-COLOR_GIT=$(get_opt "${INTERDIMUX_COLOR_GIT:-}" @interdimux-color-git 140)
-COLOR_SSH=$(get_opt "${INTERDIMUX_COLOR_SSH:-}" @interdimux-color-ssh 109)
-COLOR_EDITOR=$(get_opt "${INTERDIMUX_COLOR_EDITOR:-}" @interdimux-color-editor 150)
-COLOR_SUCCESS=$(get_opt "${INTERDIMUX_COLOR_SUCCESS:-}" @interdimux-color-success 150)
-COLOR_DANGER=$(get_opt "${INTERDIMUX_COLOR_DANGER:-}" @interdimux-color-danger 167)
-COLOR_TREE=$(get_opt "${INTERDIMUX_COLOR_TREE:-}" @interdimux-color-tree 240)
-COLOR_SEPARATOR=$(get_opt "${INTERDIMUX_COLOR_SEPARATOR:-}" @interdimux-color-separator 245)
-COLOR_QUERY=$(get_opt "${INTERDIMUX_COLOR_QUERY:-}" @interdimux-color-query 223)
-COLOR_MATCH_CURRENT=$(get_opt "${INTERDIMUX_COLOR_MATCH_CURRENT:-}" @interdimux-color-match-current 215)
-COLOR_CURRENT_BG=$(get_opt "${INTERDIMUX_COLOR_CURRENT_BG:-}" @interdimux-color-current-bg 236)
-COLOR_HEADER=$(get_opt "${INTERDIMUX_COLOR_HEADER:-}" @interdimux-color-header 246)
-COLOR_BORDER=$(get_opt "${INTERDIMUX_COLOR_BORDER:-}" @interdimux-color-border 238)
-COLOR_MENU_SEL_FG=$(get_opt "${INTERDIMUX_COLOR_MENU_SEL_FG:-}" @interdimux-color-menu-sel-fg 235)
+get_opt COLOR_ACCENT        "${INTERDIMUX_COLOR_ACCENT:-}"        @interdimux-color-accent        173
+get_opt COLOR_PATH          "${INTERDIMUX_COLOR_PATH:-}"          @interdimux-color-path          180
+get_opt COLOR_GIT           "${INTERDIMUX_COLOR_GIT:-}"           @interdimux-color-git           140
+get_opt COLOR_SSH           "${INTERDIMUX_COLOR_SSH:-}"           @interdimux-color-ssh           109
+get_opt COLOR_EDITOR        "${INTERDIMUX_COLOR_EDITOR:-}"        @interdimux-color-editor        150
+get_opt COLOR_SUCCESS       "${INTERDIMUX_COLOR_SUCCESS:-}"       @interdimux-color-success       150
+get_opt COLOR_DANGER        "${INTERDIMUX_COLOR_DANGER:-}"        @interdimux-color-danger        167
+get_opt COLOR_TREE          "${INTERDIMUX_COLOR_TREE:-}"          @interdimux-color-tree          240
+get_opt COLOR_SEPARATOR     "${INTERDIMUX_COLOR_SEPARATOR:-}"     @interdimux-color-separator     245
+get_opt COLOR_QUERY         "${INTERDIMUX_COLOR_QUERY:-}"         @interdimux-color-query         223
+get_opt COLOR_MATCH_CURRENT "${INTERDIMUX_COLOR_MATCH_CURRENT:-}" @interdimux-color-match-current 215
+get_opt COLOR_CURRENT_BG    "${INTERDIMUX_COLOR_CURRENT_BG:-}"    @interdimux-color-current-bg    236
+get_opt COLOR_HEADER        "${INTERDIMUX_COLOR_HEADER:-}"        @interdimux-color-header        246
+get_opt COLOR_BORDER        "${INTERDIMUX_COLOR_BORDER:-}"        @interdimux-color-border        238
+get_opt COLOR_MENU_SEL_FG   "${INTERDIMUX_COLOR_MENU_SEL_FG:-}"   @interdimux-color-menu-sel-fg   235
 
 # Render a configured colour into the escape/style each sink needs.  These set
 # REPLY instead of printing: set_palette runs on every script invocation (each
@@ -732,7 +772,7 @@ fld_pad() {
 
 # Compact age of an epoch timestamp ("now", "5m", "2h", "3d", "1w");
 # sets REPLY (empty for missing/zero values).
-NOW_EPOCH=$(date +%s)
+printf -v NOW_EPOCH '%(%s)T' -1   # current epoch, fork-free (bash >= 4.2)
 age_of() {
   REPLY=""
   local t="${1:-0}" d

@@ -126,6 +126,21 @@ truth), children read env.
 
 ## Tier 1 — cheap launch & cheap callbacks (structural, low risk)
 
+> ✅ **Done — config-resolution forks eliminated** (branch `perf/tier1-config-forks`). A
+> re-profile after Tier 0 + 2 found the dominant remaining cost was config resolution: all 27
+> options were read as `VAR=$(get_opt …)`, and that `$(…)` forked a subshell **even when the
+> value came from an env var**. Fixes shipped: (a) `get_opt` now sets its target via a
+> nameref — no subshell — resolving env → a **single** `tmux display-message` dump of every
+> `@interdimux-*` option (format expansion, raw values, split on `US`) → default; (b)
+> `SCRIPT_PATH` is built by param-expansion instead of `dirname`/`basename`/`cd&&pwd`
+> subshells; (c) `NOW_EPOCH` uses `printf '%(%s)T'` instead of `$(date)`. **Measured:** warm
+> fixed overhead `clone` **35 → 2**; cold `--scope-prompt` `clone` **95 → 11** / `execve`
+> **34 → 5** (27 `tmux` reads → 1); warm `--list` `clone` **46 → 13**. `--list` byte-identical
+> to `main` (warm *and* cold), the real navigator verified live, `tests/*.sh` pass.
+>
+> Still open below: **1.1** (early-dispatch) is now a minor cleanup; **1.3** (drop the
+> launcher bash) remains the biggest structural first-paint win.
+
 ### 1.1 — Early-dispatch the callback modes  ·  **M**
 
 Today the script runs all of preflight + config + `set_palette` + `build_fzf_theme` (lines
