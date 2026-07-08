@@ -25,15 +25,17 @@ A portal gun for your tmux sessions.
   prompts; rename pre-fills the current name with readline editing
 - Actions run in place — kill/rename/zoom/swap reload the list without
   restarting fzf, keeping your query and cursor
-- Live preview with a title line (target, command, path) and a window
-  summary for sessions (toggle with `Ctrl-/`)
+- Optional live preview with a title line (target, command, path) and a
+  window summary for sessions — off by default, toggle with `Ctrl-/`
 - Metadata: window count, attached marker `●`, last-used age, zoomed `Z` /
   bell `!` / activity `#` flags, current-target markers
 - Git branch display (`‹branch›` badge) with detached HEAD support
 - SSH-aware display: highlights `user@host` for SSH/mosh connections
 - Editor-aware display: highlights the filename for vim, nvim, emacs, etc.
 - Panes only shown for multi-pane windows (keeps the list clean)
-- Columns sized to the popup width; panes/windows aligned across the tree
+- Columns sized to the actual content (longest name / window / path) and
+  the popup width, so window names keep their space even under a long
+  session name; panes/windows stay aligned across the tree
 - Create new sessions from a directory picker
 - Dynamic context header — keybinding hints change based on selection type
 - Dedicated modes for kill, rename, zoom, swap, detach, and send operations
@@ -176,7 +178,8 @@ The preview shows project type, git branch/status/last commit, a README excerpt,
 - SSH connections show `user@host` highlighted in blue
 - Editors show the filename highlighted in green
 - Panes only shown for multi-pane windows
-- Column widths adapt to the popup width
+- Column widths adapt to the content and the popup width — the redundant
+  session prefix shrinks first, window names are protected last
 
 ## Configuration
 
@@ -193,8 +196,8 @@ set -g @interdimux-dashboard-key 'g'
 set -g @interdimux-popup-width '80%'
 set -g @interdimux-popup-height '75%'
 
-# Preview pane (default: on)
-set -g @interdimux-show-preview 'on'
+# Preview pane (default: off — toggle in-session with Ctrl-/)
+set -g @interdimux-show-preview 'off'
 
 # Show full command line with arguments (default: on)
 # Set to 'off' to show only the command name (faster for many panes)

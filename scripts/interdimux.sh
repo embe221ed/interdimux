@@ -128,7 +128,7 @@ get_opt() {
   _gv="${v:-$default}"
 }
 
-get_opt SHOW_PREVIEW      "${INTERDIMUX_SHOW_PREVIEW:-}"      @interdimux-show-preview      on
+get_opt SHOW_PREVIEW      "${INTERDIMUX_SHOW_PREVIEW:-}"      @interdimux-show-preview      off
 get_opt SHOW_FULL_COMMAND "${INTERDIMUX_SHOW_FULL_COMMAND:-}" @interdimux-show-full-command on
 get_opt SHOW_GIT_BRANCH   "${INTERDIMUX_SHOW_GIT_BRANCH:-}"   @interdimux-show-git-branch   on
 get_opt POPUP_WIDTH       "${INTERDIMUX_POPUP_WIDTH:-}"       @interdimux-popup-width       80%
@@ -799,19 +799,103 @@ term_cols() {
   printf '%s' "$cols"
 }
 
-# Column widths for the navigator tree, derived from the popup width
-# (minus the preview share when the preview starts visible)
-IDENT_W=24 PATH_W=24 BADGE_W=14
+# Column widths for the navigator tree.  Sized to the ACTUAL content
+# (longest session name / window name / path) so the important window
+# names are never starved by a long, redundant session prefix, then
+# squeezed to fit the popup width — the dim session prefix shrinks first,
+# the window name is protected last.  Measurement is fork-free (pure
+# parameter ops over the strings tmux already handed us), so this adds no
+# processes to the hot path.
+#
+#   IDENT_W = IDENT_OV + PFX_W + WIN_W
+#
+# where IDENT_OV covers the marker + tree-glyph columns, PFX_W is the
+# (redundant) session-name prefix carried on child rows, and WIN_W is the
+# protected window-name budget.
+IDENT_W=24 PATH_W=24 BADGE_W=16 PFX_W=14 WIN_W=12
+IDENT_OV=6            # marker(1) + " ├─ "(4) + the space after the prefix(1)
+CMD_MIN=12            # columns kept for the flowing (unpadded) command field
+WIDTH_GUTTER=8        # fzf pointer/marker/scrollbar overhead
+PFX_FLOOR=6  PFX_CEIL=16
+WIN_FLOOR=8  WIN_CEIL=40
+PATH_FLOOR=12 PATH_CEIL=44
+MAX_SESS=0 MAX_WIN=0 MAX_PATH=0
+
+# Longest session name, window identity ("index:name") and displayed
+# (~-substituted) path across every target.  Fork-free; reads the raw
+# tmux dumps gather_targets already fetched (visible via dynamic scope)
+# and sets the MAX_* globals.  Every (( … )) test sits on the LEFT of &&
+# (set-e-exempt); the explicit `return 0` keeps the function's own status
+# 0 — the trailing loop would otherwise propagate a false (( … )) and
+# abort a set -e caller of the bare call in gather_targets.
+measure_widths() {
+  MAX_SESS=0 MAX_WIN=0 MAX_PATH=0
+  local _sla sname _sw _sa _sn widx wname _wa _wc wpath _rest _pi _pa _pc ppath _pr il dp
+  while IFS="$US" read -r _sla sname _sw _sa; do
+    [ -z "$sname" ] && continue
+    (( ${#sname} > MAX_SESS )) && MAX_SESS=${#sname}
+  done <<< "$sessions_raw"
+  while IFS="$US" read -r _sn widx wname _wa _wc wpath _rest; do
+    [ -z "$_sn" ] && continue
+    il=$(( ${#widx} + 1 + ${#wname} ))
+    (( il > MAX_WIN )) && MAX_WIN=$il
+    dp="${wpath/#$HOME/\~}"
+    (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
+  done <<< "$all_windows_raw"
+  while IFS="$US" read -r _sn widx _pi _pa _pc ppath _pr; do
+    [ -z "$_sn" ] && continue
+    dp="${ppath/#$HOME/\~}"
+    (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
+  done <<< "$all_panes_raw"
+  return 0
+}
+
+# Turn the measured maxima into column widths that fit the popup width.
 compute_widths() {
   local avail
   avail=$(term_cols)
   [ "$SHOW_PREVIEW" = "on" ] && avail=$(( avail / 2 ))
-  avail=$(( avail - 8 ))
-  if   [ "$avail" -ge 88 ]; then IDENT_W=28 PATH_W=32 BADGE_W=16
-  elif [ "$avail" -ge 64 ]; then IDENT_W=24 PATH_W=24 BADGE_W=14
-  elif [ "$avail" -ge 48 ]; then IDENT_W=20 PATH_W=18 BADGE_W=10
-  else                           IDENT_W=18 PATH_W=14 BADGE_W=0
+  avail=$(( avail - WIDTH_GUTTER ))
+
+  # Content-sized, each clamped to a sane [floor, ceiling].
+  PFX_W=$MAX_SESS
+  (( PFX_W < PFX_FLOOR )) && PFX_W=$PFX_FLOOR
+  (( PFX_W > PFX_CEIL ))  && PFX_W=$PFX_CEIL
+  WIN_W=$MAX_WIN
+  (( WIN_W < WIN_FLOOR )) && WIN_W=$WIN_FLOOR
+  (( WIN_W > WIN_CEIL ))  && WIN_W=$WIN_CEIL
+  PATH_W=$MAX_PATH
+  (( PATH_W < PATH_FLOOR )) && PATH_W=$PATH_FLOOR
+  (( PATH_W > PATH_CEIL ))  && PATH_W=$PATH_CEIL
+
+  if   (( avail >= 72 )); then BADGE_W=16
+  elif (( avail >= 52 )); then BADGE_W=14
+  elif (( avail >= 40 )); then BADGE_W=10
+  else                         BADGE_W=0
   fi
+
+  IDENT_W=$(( IDENT_OV + PFX_W + WIN_W ))
+
+  # Squeeze to fit.  The dim session prefix is redundant (the full name is
+  # on the session header row), so it shrinks first; then the git badge —
+  # snapped straight to 0 in one step, never left at 1..3 which would make
+  # build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate; then the
+  # path; the window name is protected and shrinks last.  Any leftover
+  # deficit lands on the flowing COMMAND column, which fzf clips anyway.
+  local ctx_w need guard=0
+  while :; do
+    if (( BADGE_W > 0 )); then ctx_w=$(( PATH_W + 3 + BADGE_W ))
+    else                       ctx_w=$(( PATH_W + 2 )); fi
+    need=$(( IDENT_W + ctx_w + 2 + CMD_MIN ))
+    (( need <= avail )) && break
+    (( guard++ > 400 )) && break
+    if   (( PFX_W  > PFX_FLOOR  )); then PFX_W=$(( PFX_W - 1 ));  IDENT_W=$(( IDENT_W - 1 ))
+    elif (( BADGE_W > 0 ));         then BADGE_W=0
+    elif (( PATH_W > PATH_FLOOR )); then PATH_W=$(( PATH_W - 1 ))
+    elif (( WIN_W  > WIN_FLOOR  )); then WIN_W=$(( WIN_W - 1 ));  IDENT_W=$(( IDENT_W - 1 ))
+    else break
+    fi
+  done
 }
 
 # Trim a path to fit within max_width display columns.  Sets REPLY (no
@@ -920,8 +1004,6 @@ gather_targets() {
   cur_raw=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "#S${US}#I${US}#P")
   IFS="$US" read -r current_session current_window current_pane <<< "$cur_raw"
 
-  compute_widths
-
   # Build process table once (instead of per-pane pgrep+ps)
   [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
 
@@ -933,6 +1015,10 @@ gather_targets() {
     -F "#{session_name}${US}#{window_index}${US}#{window_name}${US}#{window_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_panes}${US}#{pane_pid}${US}#{window_zoomed_flag}#{window_bell_flag}#{window_activity_flag}")
   all_panes_raw=$(tmux list-panes -a \
     -F "#{session_name}${US}#{window_index}${US}#{pane_index}${US}#{pane_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{pane_pid}${US}#{window_panes}")
+
+  # Size the columns to the content we just fetched (fork-free).
+  measure_widths
+  compute_widths
 
   # MRU ordering: most recently attended sessions first (last-attached,
   # falling back to activity for never-attached sessions); the current
@@ -978,7 +1064,7 @@ gather_targets() {
     fi
   done <<< "$all_panes_raw"
 
-  local sla sname swins sattach marker meta age sdisp pfx_cap
+  local sla sname swins sattach marker meta age sdisp
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
   local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
@@ -1017,13 +1103,11 @@ gather_targets() {
     win_count=$(( ${#win_count} + 1 ))
 
     # Session-name prefix on child rows keeps filtered rows identifiable
-    # and makes compound queries ("proj edit") work.  The cap is derived
-    # from IDENT_W so child rows can't overflow the identity column:
-    # window rows spend 6 columns on marker/glyphs + the id, pane rows 7
-    # + "w.p" (12 covers both with 2-digit indexes).
-    pfx_cap=$(( IDENT_W - 12 ))
-    [ "$pfx_cap" -gt 14 ] && pfx_cap=14
-    [ "${#sdisp}" -gt "$pfx_cap" ] && sdisp="${sdisp:0:pfx_cap-1}…"
+    # and makes compound queries ("proj edit") work.  It is truncated to
+    # PFX_W — the redundant-prefix budget carved out of the identity
+    # column — so the window name (WIN_W) is never starved by a long
+    # session name.  The full name still shows on the session header row.
+    [ "${#sdisp}" -gt "$PFX_W" ] && sdisp="${sdisp:0:PFX_W-1}…"
 
     wi=0
     while IFS="$US" read -r _sn widx wname _wact wcmd wpath wpanes wpid wflags; do
