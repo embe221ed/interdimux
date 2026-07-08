@@ -2440,11 +2440,15 @@ while true; do
       ;;
   esac
 
+  # Always configure the preview command so ctrl-/ (toggle-preview) works;
+  # when preview is off it just starts hidden.  fzf's toggle-preview is a
+  # no-op when no --preview command is set, which is why a disabled preview
+  # could not be toggled back on.
+  fzf_opts+=(--preview="bash '$SCRIPT_PATH' --preview {-1}")
   if [ "$SHOW_PREVIEW" = "on" ]; then
-    fzf_opts+=(
-      --preview="bash '$SCRIPT_PATH' --preview {-1}"
-      --preview-window="right,50%,border-left,nowrap"
-    )
+    fzf_opts+=(--preview-window="right,50%,border-left,nowrap")
+  else
+    fzf_opts+=(--preview-window="right,50%,border-left,nowrap,hidden")
   fi
 
   set +e
