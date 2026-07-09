@@ -2280,7 +2280,7 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       'New session' n "run-shell -b \"bash '$menu_sp' --launch dirs\"" \
       '' \
       'Rename'      r "run-shell -b \"bash '$menu_sp' --launch rename\"" \
-      'Kill'        k "run-shell -b \"bash '$menu_sp' --launch kill\"" \
+      'Kill'        i "run-shell -b \"bash '$menu_sp' --launch kill\"" \
       'Swap'        w "run-shell -b \"bash '$menu_sp' --launch swap\"" \
       'Zoom'        z "run-shell -b \"bash '$menu_sp' --launch zoom\"" \
       '' \
