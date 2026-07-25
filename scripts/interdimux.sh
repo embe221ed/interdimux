@@ -24,6 +24,11 @@ case "${BASH_SOURCE[0]}" in
   *)  SCRIPT_PATH="$PWD/${BASH_SOURCE[0]}" ;;
 esac
 
+# Same path with single quotes escaped, for embedding in tmux command strings.
+# Precomputed because it never changes and every call site used to spend a
+# subshell on it.
+SQ_SCRIPT="${SCRIPT_PATH//\'/\'\\\'\'}"
+
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
@@ -44,7 +49,8 @@ if [[ "${INTERDIMUX_FZF_MINOR:-}" =~ ^[0-9]+$ ]]; then
   # (preview/header/reload).
   FZF_MINOR="$INTERDIMUX_FZF_MINOR"
 else
-  fzf_version=$(fzf --version 2>/dev/null | awk '{print $1}') || true
+  fzf_version=$(fzf --version 2>/dev/null) || true
+  fzf_version="${fzf_version%% *}"   # "0.74.0 (rev)" -> "0.74.0", no awk fork
   IFS=. read -r fzf_major fzf_minor _ <<< "$fzf_version"
   if [[ "${fzf_major:-}" =~ ^[0-9]+$ && "${fzf_minor:-}" =~ ^[0-9]+$ ]]; then
     if [ "$fzf_major" -eq 0 ] && [ "$fzf_minor" -lt 40 ]; then
@@ -919,6 +925,15 @@ age_of() {
 # Terminal width of the popup tty (falls back to 80 without a tty,
 # e.g. in tests/CI)
 term_cols() {
+  # fzf exports FZF_COLUMNS to the children it spawns (reload, preview,
+  # execute), so every ctrl-r reload can skip the stty fork.  It reads 0
+  # during fzf's own `start` event, hence the numeric guard rather than a
+  # bare emptiness test.  The initial launch-time gather has no fzf parent
+  # and still falls back to stty.
+  if [[ "${FZF_COLUMNS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s' "$FZF_COLUMNS"
+    return 0
+  fi
   local dims cols=80
   if dims=$({ stty size </dev/tty; } 2>/dev/null); then
     cols="${dims#* }"
@@ -2181,6 +2196,13 @@ if [ "${1:-}" = "--dirs" ]; then
   fi
   fzf_ge 61 && dirs_extra+=(--ghost='directory name or path')
 
+  # The default header is static and this process already has the builder —
+  # re-exec'ing the whole script for it cost ~18 ms of dead time before the
+  # picker could open.  (The ctrl-f/ctrl-g binds still call --dirs-header:
+  # theirs are per-mode and carry the live query.)
+  hint_r enter create ^f 'deep search' ^g 'browse into' ^r reset esc cancel
+  DIRS_HEADER="$REPLY"
+
   selected=$(bash "$SCRIPT_PATH" --dirs-list | fzf \
     "${FZF_THEME[@]}" \
     --no-sort \
@@ -2188,7 +2210,7 @@ if [ "${1:-}" = "--dirs" ]; then
     --with-nth=1..2 \
     --nth=1 \
     --prompt='new session ❯ ' \
-    --header="$(bash "$SCRIPT_PATH" --dirs-header)" \
+    --header="$DIRS_HEADER" \
     --preview="bash '$SCRIPT_PATH' --dirs-preview {-1}" \
     --preview-window="right,40%,border-left,nowrap" \
     --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-header(bash '$SCRIPT_PATH' --dirs-header deep {q})${ctrl_f_extra}" \
@@ -2270,7 +2292,7 @@ fi
 
 # Script path with single quotes escaped, for embedding in tmux command
 # strings
-sq_script() { printf '%s' "${SCRIPT_PATH//\'/\'\\\'\'}"; }
+# (SQ_SCRIPT is precomputed next to SCRIPT_PATH — see the top of the file.)
 
 # Resolved options forwarded into the popup, so the navigator and every
 # fzf-spawned subprocess (header/preview/reload, which run on each
@@ -2347,7 +2369,7 @@ if [ "${1:-}" = "--launch" ]; then
     dirs)   title=' interdimux · new session ' ;;
   esac
 
-  sp=$(sq_script)
+  sp="$SQ_SCRIPT"
   chrome=()
   if tmux_ge 303; then
     # Border style/lines are left to the user's popup-border-* options;
@@ -2393,7 +2415,7 @@ fi
 # tmux >= 3.4, otherwise a compact fzf menu in a popup.
 if [ "${1:-}" = "--dashboard-launch" ]; then
   set +e
-  sp=$(sq_script)
+  sp="$SQ_SCRIPT"
 
   if tmux_ge 304; then
     # Menu item commands are re-parsed by tmux's command parser when
@@ -2463,7 +2485,7 @@ if [ "${1:-}" = "--dashboard" ]; then
 
   # Launch the selected tool in a new popup via run-shell -b (popups
   # can't nest, so this runs after the dashboard popup closes)
-  tmux run-shell -b "bash '$(sq_script)' --launch $action"
+  tmux run-shell -b "bash '$SQ_SCRIPT' --launch $action"
   exit 0
 fi
 
@@ -2478,7 +2500,18 @@ fi
 
 INTERDIMUX_MODE="${INTERDIMUX_MODE:-switch}"
 
-RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX")
+# One-bit flag: "the dir picker was cancelled, so reopen the navigator".
+#
+# mktemp is a fork+exec (~5 ms) on the path to the first paint, so prefer a
+# name we can build in-process.  Only somewhere private, though: a predictable
+# name in a world- or group-writable /tmp can be pre-created as a symlink, and
+# the `: >` below would then truncate whatever it points at.  $XDG_RUNTIME_DIR
+# is per-user and 0700, which removes that race; anywhere else, pay for mktemp.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+  RESUME_FILE="$XDG_RUNTIME_DIR/interdimux-resume.$$"
+else
+  RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX")
+fi
 trap 'rm -f "$RESUME_FILE"' EXIT
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"
