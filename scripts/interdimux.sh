@@ -243,8 +243,11 @@ set_palette
 # Title style is a bold delta only — keeps the user's popup border colours.
 POPUP_TITLE_STYLE='#[bold]'
 
-# Header hint builder: accent key + dim label pairs
-hint() {
+# Header hint builder: accent key + dim label pairs.  hint_r sets REPLY so the
+# navigator can build all four per-row-type headers with no subshell at all
+# (they are handed to fzf as env vars for the focus bind — see below); hint
+# keeps the printing form for the handlers whose whole job is to emit one.
+hint_r() {
   local out="" k l
   while [ $# -ge 2 ]; do
     k="$1" l="$2"
@@ -252,8 +255,9 @@ hint() {
     out+="${ACCENT_ESC}${k}"$'\033[0m\033[2m '"${l}"$'\033[0m'
     [ $# -ge 2 ] && out+="  "
   done
-  printf '%s' "$out"
+  REPLY="$out"
 }
+hint() { hint_r "$@"; printf '%s' "$REPLY"; }
 
 # Shared fzf theme — applied to all pickers for consistency.  Built once,
 # tiered by fzf version so old installs keep a working (plainer) UI.
@@ -275,6 +279,11 @@ build_fzf_theme() {
   # 0.66 made the gutter a visible bar by default (and gutter:-1 no
   # longer hides it) — blank it so the pointer marks the current line
   fzf_ge 66 && FZF_THEME+=(--gutter=' ')
+  # fzf runs every child (preview, header, reload, execute) through
+  # `$SHELL -c`.  Pin a POSIX shell: it starts faster than an interactive
+  # user shell that sources rc files, and INLINE_CALLBACKS below emits
+  # POSIX `case` snippets that a fish $SHELL could not parse at all.
+  fzf_ge 51 && FZF_THEME+=(--with-shell='sh -c')
   # User passthrough (@interdimux-fzf-opts), appended last so user colors
   # win; structural flags (delimiter/nth/binds) are added per-picker.
   if [ -n "$FZF_USER_OPTS" ]; then
@@ -289,6 +298,23 @@ build_fzf_theme() {
   fi
 }
 build_fzf_theme
+
+# Whether the cheap fzf callbacks (per-row header, match-scope prompt) can be
+# answered by an inline POSIX snippet instead of re-exec'ing this script.  Both
+# only ever pick between strings this process already knows, so the re-exec was
+# pure overhead on every cursor move.
+#
+# Off when: fzf is too old for --with-shell (< 0.51), or the user set their own
+# --with-shell in @interdimux-fzf-opts — user opts are appended last and win, so
+# the snippet could land in a shell with no POSIX `case` (fish).  Either way the
+# --header-for / --scope-prompt handlers below remain as the fallback.
+INLINE_CALLBACKS=0
+if fzf_ge 51; then
+  case "$FZF_USER_OPTS" in
+    *--with-shell*) ;;
+    *) INLINE_CALLBACKS=1 ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Directory picker: project detection & history
@@ -2431,10 +2457,24 @@ while true; do
       )
       ;;
     *)
+      # The per-row header only ever picks between these four strings, and all
+      # four are known right here.  Export them so the focus bind can choose
+      # inline instead of re-exec'ing this script on every cursor move.
+      _scope_hint=()
+      fzf_ge 58 && _scope_hint=('^]' scope)
+      hint_r enter switch ^x kill ^e rename ^d detach ^o new ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
+      export INTERDIMUX_HDR_S="$REPLY"
+      hint_r enter switch ^x kill ^e rename ^s swap ^o new ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
+      export INTERDIMUX_HDR_W="$REPLY"
+      hint_r enter switch ^x kill ^z zoom ^s swap ^t send ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
+      export INTERDIMUX_HDR_P="$REPLY"
+      hint_r enter switch ^x kill ^e rename ^o new ^r reload ^/ preview
+      export INTERDIMUX_HDR_X="$REPLY"
+
       fzf_opts+=(
         --prompt='❯ '
         --print-query
-        --header="$(hint enter switch ^x kill ^e rename ^o new ^r reload ^/ preview)"
+        --header="$INTERDIMUX_HDR_X"
         --bind="ctrl-x:execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
         --bind="ctrl-e:execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
         --bind="ctrl-z:execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
@@ -2444,20 +2484,48 @@ while true; do
         --bind="ctrl-o:execute(bash '$SCRIPT_PATH' --dirs || echo resume > '$RESUME_FILE')+abort"
         --bind='ctrl-/:toggle-preview'
       )
-      # Per-row header hints.  A focus bind runs SYNCHRONOUSLY — the fzf man
-      # page warns it "can make the interface sluggish" — and this one re-execs
-      # the script on every cursor move.  On fzf >= 0.63 use the async bg-
-      # variant so navigation never blocks (the header just updates a beat
-      # later); bg-cancel coalesces rapid scrolling so fast movement doesn't
-      # pile up header processes.  Older fzf keeps the synchronous bind.
-      if fzf_ge 63; then
+      # Per-row header hints, once per cursor move.  A focus bind runs
+      # SYNCHRONOUSLY — the fzf man page warns it "can make the interface
+      # sluggish" — so on fzf >= 0.63 we use the async bg- variant and
+      # bg-cancel to coalesce rapid scrolling.
+      #
+      # The command itself is an inline `case` over the exported headers, which
+      # costs one ~1ms `sh -c` instead of re-parsing and re-executing this
+      # 2500-line script (~17ms) per move.  Notes on the two sharp edges:
+      #   * `_{-1}` — with an EMPTY result list fzf expands {-1} to *zero*
+      #     words, so a bare `case {-1} in` becomes `case in`: a syntax error
+      #     and a blank header.  The `_` prefix keeps the word present.
+      #   * `action:rest-of-string` rather than `action(...)` — the arms contain
+      #     `)`, which can terminate fzf's parenthesised argument parser.  This
+      #     form has no terminator, so it must come last in the `+` chain.
+      # fzf single-quotes the placeholder, so a spec can't inject shell.
+      _hdr_case='case _{-1} in'
+      _hdr_case+=' _S:*) printf "%s\n" "$INTERDIMUX_HDR_S";;'
+      _hdr_case+=' _W:*) printf "%s\n" "$INTERDIMUX_HDR_W";;'
+      _hdr_case+=' _P:*) printf "%s\n" "$INTERDIMUX_HDR_P";;'
+      _hdr_case+=' *) printf "%s\n" "$INTERDIMUX_HDR_X";; esac'
+      if [ "$INLINE_CALLBACKS" = 1 ] && fzf_ge 63; then
+        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-header:$_hdr_case")
+      elif [ "$INLINE_CALLBACKS" = 1 ]; then
+        fzf_opts+=(--bind="focus:transform-header:$_hdr_case")
+      elif fzf_ge 63; then
         fzf_opts+=(--bind="focus:bg-cancel+bg-transform-header(bash '$SCRIPT_PATH' --header-for {-1})")
       else
         fzf_opts+=(--bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {-1})")
       fi
-      fzf_ge 58 && fzf_opts+=(
-        --bind="ctrl-]:change-nth(1|2|3|1,2,3|1,3)+transform-prompt(bash '$SCRIPT_PATH' --scope-prompt)"
-      )
+      if fzf_ge 58; then
+        # Same treatment for the match-scope prompt: FZF_NTH already holds the
+        # NEW value when the transform runs, so the prompt is a pure lookup.
+        if [ "$INLINE_CALLBACKS" = 1 ]; then
+          _scope_case='case "${FZF_NTH:-}" in'
+          _scope_case+=' 1) printf "name ❯ \n";; 2) printf "path ❯ \n";;'
+          _scope_case+=' 3) printf "cmd ❯ \n";; 1,2,3) printf "all ❯ \n";;'
+          _scope_case+=' *) printf "❯ \n";; esac'
+          fzf_opts+=(--bind="ctrl-]:change-nth(1|2|3|1,2,3|1,3)+transform-prompt:$_scope_case")
+        else
+          fzf_opts+=(--bind="ctrl-]:change-nth(1|2|3|1,2,3|1,3)+transform-prompt(bash '$SCRIPT_PATH' --scope-prompt)")
+        fi
+      fi
       fzf_ge 61 && fzf_opts+=(--ghost='session · window · pane')
       ;;
   esac
