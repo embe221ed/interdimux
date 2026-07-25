@@ -246,6 +246,15 @@ keep POST bodies small — fzf ≤ 0.73.0 had an O(n²) body-accumulation stall)
 done, synchronous enrichment may already be fast enough that this is optional polish rather
 than required — measure after Tier 0 before committing to it.
 
+> ❌ **Rejected after Tier 5.** The whole premise was deferring the `ps` +
+> full-command enrichment, but the `/proc` resolver (Tier 5.3) removes that cost
+> *synchronously* for a fraction of the machinery — and the git-branch column was
+> measured to cost essentially nothing (`SHOW_GIT_BRANCH=off` came out at 231 ms
+> against a 220 ms reference — no change). There is little left to defer. Facts
+> worth keeping if it is ever revisited: the O(n²) POST stall is **fixed in fzf
+> 0.74**, `reload-sync` preserves query/cursor/match-count exactly, and
+> `/dev/tcp` + `FZF_API_KEY` is a zero-dependency authenticated transport.
+
 ---
 
 ## Tier 4 — optional: stale-while-revalidate list cache  ·  **M**
@@ -261,6 +270,13 @@ tmux-sessionx / tmux-fzf / `t` cache the list. interdimux's cost was never the t
 it was the forks, which Tier 0 removes. Cache only if profiling *after* Tier 0 still shows the
 gather itself (not forks) as the bottleneck. If you do, key freshness on a cheap tmux
 "generation" token (e.g. `#{session_activity}` maxima) rather than a blind TTL.
+
+> ❌ **Rejected after Tier 5.** Reading a cache is 1–2 ms against a gather that is
+> now ~90 ms to first row, so the ceiling is imperceptible — while the cost lands
+> on the picker's most reflexive interaction (open, Enter to hop back) as a
+> `switch-client` to a session that no longer exists. The proposed freshness token
+> is also unsound: `#{session_activity}` maxima do **not** change on a window
+> rename, a pane split, or a new window in an idle session.
 
 ---
 
@@ -284,6 +300,82 @@ gather itself (not forks) as the bottleneck. If you do, key freshness on a cheap
   data sources in the *live* fzf instead of relaunching; push filtering into tmux
   (`-f '#{!=:…}'`) instead of `grep`; do MRU sort in the pipeline + `--no-sort`; two-phase
   git enrichment over `--listen` + `reload-sync`.
+
+---
+
+## Tier 5 — what landed after re-profiling (branch `perf/tier2-first-paint`)
+
+A second measured pass, after Tiers 0/1/2b were in. Every item below is
+byte-compared against the previous `--list` on a 142-row bench with a
+ref-vs-ref control, and covered by tests.
+
+**Measured, 142 rows, quiet box (132 host processes), 13 reps interleaved:**
+
+| | before | after |
+|---|---|---|
+| `--list` time to first row | 152 ms | **90 ms** (−41%) |
+| `--list` total | 233 ms | 209 ms |
+| header callback, per cursor move | 20 ms | **1 ms** |
+
+First row is the metric that matters — fzf paints rows as they stream in.
+
+1. **The warm path did not exist for the default config.** `get_opt` tests
+   `[ -n "$env_val" ]`, so a forwarded-but-*empty* option was indistinguishable
+   from an unset one. `@interdimux-fzf-opts` and `@interdimux-project-markers`
+   both default to `""`, so every popup callback re-ran the tmux option dump —
+   Tier 1's warm path only ever worked for users who happened to set both.
+   Fixed with an `INTERDIMUX_OPTS_PRIMED=1` sentinel (2 clone + 2 execve → 0 + 1
+   per callback). `tests/test_config_fwd.sh` now enforces the contract the
+   sentinel depends on: a `get_opt`/`ENV_FWD` desync used to cost one wasted
+   fork, but with the sentinel it would *silently ignore the user's option*.
+
+2. **The two trivial per-keystroke callbacks are answered inline.** The focus
+   header and the ctrl-] scope prompt only ever pick between strings the
+   navigator already knows, so they are now `case` snippets in the fzf bind
+   (with `--with-shell='sh -c'`, fzf ≥ 0.51) instead of a script re-exec.
+   Three sharp edges, all covered by `tests/test_header_hints.sh`:
+   with an **empty result list** fzf expands `{-1}` to *zero words*, so a bare
+   `case {-1} in` becomes `case in` — a syntax error and a blank header (the
+   `_{-1}` sentinel fixes it); the `action:rest-of-string` form avoids `)` in a
+   case arm terminating fzf's argument parser; and fzf single-quotes the
+   placeholder, so a row spec cannot inject shell.
+
+3. **`ps -eo` is gone on Linux.** `build_process_table` forked `ps` and walked
+   every process on the host before the first row could emit. `/proc` reads
+   scale with pane count instead. Three traps, all covered by
+   `tests/test_full_command.sh`:
+   the "is this a shell?" test **must** come from the pane process's own argv —
+   tmux's `#{pane_current_command}` names the tty's *foreground* process group,
+   so gating on it inverts the test exactly when a command is running and every
+   busy pane renders as `-zsh` (a `sleep X &` test case does *not* catch this);
+   `/proc/<pid>/task/<pid>/children` has no trailing newline, so `read` assigns
+   and *then* reports EOF, meaning `|| children=""` wipes what it just read;
+   and `ps` was implicitly sanitizing argv — a raw newline splits a row and
+   detaches its SPEC field, a raw `\x1f` reaches an fzf-visible field.
+   `sanitize_args` reproduces `ps` byte-for-byte (NUL/newline → space, every
+   other non-printable → `?`). `INTERDIMUX_FORCE_PS=1` pins the old backend.
+
+4. **The last pre-`exec fzf` forks are gone**: `mktemp`, the `awk` in version
+   parsing, three `$(sq_script)` subshells, and the dir picker re-exec'ing the
+   whole script for a static header. `term_cols` prefers `$FZF_COLUMNS` so
+   reloads skip the `stty` fork (it reads 0 during fzf's `start` event, hence
+   the `^[1-9]` guard). `RESUME_FILE` only skips `mktemp` under
+   `$XDG_RUNTIME_DIR` — a predictable name in a world-writable `/tmp` could be
+   pre-created as a symlink that `: >` would then truncate.
+
+**Also fixed: the test suites were dead.** `tmux_cmd` started the private test
+server without `-f /dev/null`, so it inherited the developer's `~/.tmux.conf`;
+with `base-index 1` every `:0` target failed and `test_list_format.sh` /
+`test_send_keys.sh` aborted on the first command. Two of `test_list_format.sh`'s
+assertions also passed *vacuously* — "no malformed rows" is trivially true
+against zero rows — so a silently broken gather printed green ticks.
+
+**Still open**, in value order: **1.3** (static keybinding — the biggest
+remaining first-paint lever, but it changes semantics: `@interdimux-*` edits
+would need a plugin reload) and the gather-query batching (worth 12–17 ms, but
+the obvious `${var#*pat}` split is *quadratic* — 682 ms on a 35 KB dump — and a
+`\x1e` in a pane's cwd corrupts the field split). Tier 3 and Tier 4 are
+**rejected**, see below.
 
 ---
 
