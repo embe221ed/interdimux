@@ -103,6 +103,20 @@ declare -A TMUX_OPTS=()
 _tmux_opts_loaded=0
 load_tmux_opts() {
   [ "$_tmux_opts_loaded" = 1 ] && return 0
+  # The launcher resolved every option and forwarded all of them, so a child
+  # never needs the dump.  Without this, an option whose value is legitimately
+  # EMPTY (fzf-opts and project-markers both default to "") is indistinguishable
+  # from "not forwarded" in get_opt's -n test, and every popup callback --
+  # preview, focus header, reload, action -- paid a subshell plus a tmux
+  # round-trip.  In the default config that was every invocation.
+  #
+  # INTERDIMUX_OPTS_PRIMED is internal: it is only ever set via the
+  # display-popup -e flags built by env_fwd_vars.  Direct/cold invocations
+  # don't have it and still dump normally.
+  if [ "${INTERDIMUX_OPTS_PRIMED:-}" = 1 ]; then
+    _tmux_opts_loaded=1
+    return 0
+  fi
   _tmux_opts_loaded=1
   local fmt="" name raw
   local -a vals
@@ -110,7 +124,10 @@ load_tmux_opts() {
     [ -n "$fmt" ] && fmt+="$US"
     fmt+="#{@interdimux-$name}"
   done
-  raw=$(tmux display-message -p "$fmt" 2>/dev/null) || return 0
+  # Anchored to $TMUX_PANE for the same reason gather_targets is: @interdimux-*
+  # lookups are target-relative, so a bare display-message resolves session-local
+  # overrides against whichever session was most recently attached.
+  raw=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$fmt" 2>/dev/null) || return 0
   IFS="$US" read -r -a vals <<< "$raw"
   local i=0
   for name in "${OPT_NAMES[@]}"; do
@@ -2178,6 +2195,11 @@ env_fwd_vars() {
     "INTERDIMUX_COLOR_MENU_SEL_FG=$COLOR_MENU_SEL_FG"
     "INTERDIMUX_FZF_MINOR=$FZF_MINOR"
     "INTERDIMUX_TMUX_VNUM=$TMUX_VNUM"
+    # Tells the child that every option above was already resolved, so
+    # load_tmux_opts can skip its tmux round-trip even when a value is empty.
+    # Every get_opt env var MUST be forwarded above for this to be correct --
+    # tests/test_config_fwd.sh enforces that.
+    "INTERDIMUX_OPTS_PRIMED=1"
   )
 }
 
