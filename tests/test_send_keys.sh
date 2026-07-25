@@ -32,7 +32,9 @@ cleanup() {
 trap cleanup EXIT
 
 tmux_cmd() {
-  tmux -L "$SOCK" "$@"
+  # -f /dev/null: don't inherit the developer's ~/.tmux.conf (a user
+  # `base-index 1` breaks every ":0" target used below)
+  tmux -f /dev/null -L "$SOCK" "$@"
 }
 
 # Wait for a pane to contain a specific string (with timeout)

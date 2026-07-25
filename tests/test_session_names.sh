@@ -26,7 +26,8 @@ cleanup() {
 trap cleanup EXIT
 
 tmux_cmd() {
-  tmux -L "$SOCK" "$@"
+  # -f /dev/null: keep the test server hermetic (see test_list_format.sh)
+  tmux -f /dev/null -L "$SOCK" "$@"
 }
 
 report() {

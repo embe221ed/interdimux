@@ -29,8 +29,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# -f /dev/null: the test server must not inherit the developer's ~/.tmux.conf.
+# A user `base-index 1` makes every ":0" target below fail with "can't find
+# window: 0", which aborts the whole suite under set -e.
 tmux_cmd() {
-  tmux -L "$SOCK" "$@"
+  tmux -f /dev/null -L "$SOCK" "$@"
 }
 
 report() {
@@ -89,6 +92,20 @@ echo "interdimux --list format tests"
 echo
 
 out=$(run_list)
+
+# ---------------------------------------------------------------------------
+# Sanity: the structural checks below are "no BAD rows exist", which is
+# vacuously true when --list emits nothing at all.  Assert we actually got a
+# list first, so a silently-broken gather reports as a failure instead of
+# printing green ticks against zero rows.
+# ---------------------------------------------------------------------------
+
+row_count=$(printf '%s\n' "$out" | grep -c $'\t' || true)
+if [ "$row_count" -ge 8 ]; then
+  report "--list produced rows to check (got $row_count)" pass
+else
+  report "--list produced rows to check (got $row_count, expected >= 8)" fail
+fi
 
 # ---------------------------------------------------------------------------
 # Field structure
