@@ -591,18 +591,79 @@ spec_label() {
 }
 
 # ---------------------------------------------------------------------------
-# Process table (built once, used for full-command resolution)
+# Process lookup (for full-command resolution)
 # ---------------------------------------------------------------------------
+#
+# Two backends.  On Linux we read /proc directly, one lookup per pane: no
+# fork at all, and the cost scales with the number of panes rather than with
+# the number of processes on the host.  `ps -eo` had to be forked AND its
+# entire output walked before the first row could be emitted — 53-76 ms on a
+# busy box, the single largest item ahead of first paint.
+#
+# Everywhere else (macOS/BSD) keep the ps table.  /proc/<pid>/task/<pid>/children
+# needs CONFIG_PROC_CHILDREN (Linux >= 4.2), so probe rather than assume.
+# INTERDIMUX_FORCE_PS=1 pins the ps backend — an escape hatch if a kernel ever
+# disagrees, and how tests/test_full_command.sh proves the two agree.
+PROC_CMDLINE_OK=0
+if [ "${INTERDIMUX_FORCE_PS:-}" != 1 ] && [ -r "/proc/$$/task/$$/children" ]; then
+  PROC_CMDLINE_OK=1
+fi
 
 declare -A PS_CHILDREN=()
 declare -A PS_ARGS=()
 
 build_process_table() {
+  [ "$PROC_CMDLINE_OK" = 1 ] && return 0   # /proc backend needs no table
   local pid ppid args
   while read -r pid ppid args; do
     PS_ARGS[$pid]="$args"
     PS_CHILDREN[$ppid]+="$pid "
   done < <(ps -eo pid=,ppid=,args= 2>/dev/null)
+  return 0
+}
+
+# Render raw argv the way `ps args=` does, so both backends produce identical
+# rows: NUL and newline become a space, every other non-printable byte becomes
+# '?'.  This is not cosmetic.  ps was implicitly protecting the row contract —
+# a raw newline in argv would split the row in two, detaching its trailing SPEC
+# field, and a raw \x1f would reach an fzf-visible field.  The scan is guarded,
+# so the common (clean) case costs one pattern test.
+sanitize_args() {
+  REPLY="$1"
+  case "$REPLY" in
+    *[[:cntrl:]]*) ;;
+    *) return 0 ;;
+  esac
+  REPLY="${REPLY//$'\n'/ }"
+  local out="" i ch
+  for (( i = 0; i < ${#REPLY}; i++ )); do
+    ch="${REPLY:i:1}"
+    case "$ch" in
+      [[:cntrl:]]) out+='?' ;;
+      *)           out+="$ch" ;;
+    esac
+  done
+  REPLY="$out"
+  return 0
+}
+
+# Space-joined argv of a pid, ps-style.  REPLY is empty when the process is
+# gone — callers then fall back to tmux's own #{pane_current_command}, exactly
+# as they already did when a pid raced out of the ps snapshot.
+read_cmdline() {
+  REPLY=""
+  local pid="$1" a args=""
+  [ -n "$pid" ] || return 0     # an empty pid would read /proc/cmdline: the KERNEL boot line
+  # `read -r -d ''` rather than `mapfile -d ''`, which needs bash >= 4.4.
+  # 2>/dev/null must come BEFORE the input redirect: bash applies redirections
+  # left to right, so the other order still prints "No such file or directory"
+  # when the pid races away mid-gather.
+  while IFS= read -r -d '' a; do
+    args+="$a "
+  done 2>/dev/null < "/proc/$pid/cmdline"
+  [ -n "$args" ] || return 0
+  sanitize_args "${args% }"
+  return 0
 }
 
 # Known shells — used to decide whether to descend one level
@@ -613,24 +674,48 @@ SHELLS_PATTERN='^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$'
 # command the user typed).  Do NOT walk further — deeper children are
 # subprocesses of that command (LSPs, formatters, watchers, …) and
 # showing those is misleading.
+#
+# The shell test MUST come from the pane process's own argv.  tmux's
+# #{pane_current_command} names the pane tty's FOREGROUND process group, which
+# is the running command, not the shell — so gating on it inverts the test
+# exactly when a command is running and every busy pane renders as "-zsh".
 full_command() {
-  local pid="$1"
-  local args="${PS_ARGS[$pid]:-}"
+  local pid="$1" args children child
+
+  if [ "$PROC_CMDLINE_OK" = 1 ]; then
+    read_cmdline "$pid"; args="$REPLY"
+  else
+    args="${PS_ARGS[$pid]:-}"
+  fi
+
   local cmd_name="${args%% *}"
   cmd_name="${cmd_name##*/}"
 
   # If the pane process is a shell, look one level down
   if [[ "$cmd_name" =~ $SHELLS_PATTERN ]]; then
-    local children="${PS_CHILDREN[$pid]:-}"
+    if [ "$PROC_CMDLINE_OK" = 1 ]; then
+      children=""
+      # The children file has NO trailing newline, so `read` assigns the value
+      # and THEN reports EOF.  A `|| children=""` fallback here would wipe what
+      # it just read and silently disable child resolution for every pane.
+      { read -r children < "/proc/$pid/task/$pid/children"; } 2>/dev/null || :
+    else
+      children="${PS_CHILDREN[$pid]:-}"
+    fi
     if [ -n "$children" ]; then
-      local child="${children%% *}"
-      REPLY="${PS_ARGS[$child]:-}"
-      return
+      child="${children%% *}"
+      if [ "$PROC_CMDLINE_OK" = 1 ]; then
+        read_cmdline "$child"
+      else
+        REPLY="${PS_ARGS[$child]:-}"
+      fi
+      return 0
     fi
   fi
 
   # Not a shell (or shell has no children) — use as-is
   REPLY="$args"
+  return 0
 }
 
 # Resolve the command string to display for a pane.  Sets REPLY.
