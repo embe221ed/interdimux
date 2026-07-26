@@ -168,18 +168,39 @@ pub fn pane_ident(
             pdisp = String::new();
         }
     }
-    let pprefix = if pdisp.is_empty() {
+    let mut pprefix = if pdisp.is_empty() {
         format!("{}.", widx)
     } else {
         format!("{} {}.", pdisp, widx)
     };
-    let body = format!(
-        "{} {}{} {}{} {}{}{}{}",
-        marker, p.dim_tree, cont, pglyph, RST, DIM, pprefix, RST, pidx
-    );
     // marker(1) + " │ ├╴ "(6) = 7 cells before the prefix, matching bash's
     // fld_add "$pmarker" 1 + fld_add "..." 6
-    let plain = 7 + width(&pprefix) + width(pidx);
+    let mut pid = pidx.to_string();
+    let mut plain = 7 + width(&pprefix) + width(&pid);
+
+    // Dropping the prefix above is not a total guard: with it gone the bare
+    // indexes alone can still outrun the column, since ident's floor is
+    // IDENT_OV(6) + PFX_FLOOR(6) + WIN_FLOOR(8) = 20 and the two index strings
+    // can total 13+ cells.  Reachable only with a narrow popup AND a window
+    // index in the tens of millions (tmux caps it at INT_MAX) combined with a
+    // pane-base-index in the tens of thousands (tmux caps that at 65535), so
+    // this is about making the invariant total rather than about a case anyone
+    // will hit.  pad_to can only pad, so trim here: a shortened id beats a
+    // shifted column, and the SPEC field still carries both indexes exactly.
+    if plain > w.ident {
+        pid = truncate(&pid, w.ident.saturating_sub(7 + width(&pprefix)));
+        plain = 7 + width(&pprefix) + width(&pid);
+        if plain > w.ident {
+            pprefix = truncate(&pprefix, w.ident.saturating_sub(7));
+            pid = String::new();
+            plain = 7 + width(&pprefix);
+        }
+    }
+
+    let body = format!(
+        "{} {}{} {}{} {}{}{}{}",
+        marker, p.dim_tree, cont, pglyph, RST, DIM, pprefix, RST, pid
+    );
     pad_to(&body, plain, w.ident)
 }
 

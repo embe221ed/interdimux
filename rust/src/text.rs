@@ -7,12 +7,29 @@
 //! harness still validate the port; for wide characters this is simply correct
 //! where bash was not.
 
-use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 /// Terminal cells occupied by `s`.  Control characters count as zero, matching
 /// how a terminal actually renders them.
+///
+/// Measured over the WHOLE STRING, not summed per character.  A cluster's width
+/// is not the sum of its chars' widths, and the per-char sum was wrong in both
+/// directions.  Checked against tmux 3.7b's own grid (`printf` into a pane, then
+/// read `#{cursor_x}`), which is the authority here because tmux is what parses
+/// fzf's output into cells:
+///
+///     sequence           tmux   per-char   whole-string
+///     heart/check/keycap   2        1           2       (U+FE0F presentation)
+///     man-technologist     2        4           2       (ZWJ)
+///     family               2        8           2       (ZWJ x3)
+///     rocket/flag/CJK      =        =           =
+///
+/// So a window named with a VS16 symbol shifted every column to its right by one
+/// cell, and a ZWJ sequence by two the other way.  Plain wide emoji, flags, CJK
+/// and combining latin were already correct -- which is why the corpus, whose
+/// only emoji is a rocket, never caught it.
 pub fn width(s: &str) -> usize {
-    s.chars().map(|c| c.width().unwrap_or(0)).sum()
+    UnicodeWidthStr::width(s)
 }
 
 /// Truncate to at most `max` display cells, appending `…` when it had to cut.
@@ -25,18 +42,39 @@ pub fn truncate(s: &str, max: usize) -> String {
         return String::new();
     }
     let budget = max - 1; // room for the ellipsis
-    let mut out = String::new();
-    let mut w = 0;
-    for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
-        if w + cw > budget {
+
+    // Longest char-boundary prefix that fits, found by binary search over the
+    // boundaries and measured as a STRING each time.  Growing char by char and
+    // summing widths is what the old code did, and it cuts inside a cluster:
+    // "man + ZWJ" measures the same 2 cells as the whole "man-technologist", so
+    // the joiner looked free and was kept while the char after it was not.
+    //
+    // Prefix width is non-decreasing, so the search is sound; and since only
+    // measured-fitting prefixes are ever accepted, a pathological sequence can
+    // make the result shorter but never wider than the budget.
+    let bounds: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    let (mut lo, mut hi) = (0usize, bounds.len());
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if width(&s[..bounds[mid]]) <= budget {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    // Never strand a joiner or a variation selector on the ellipsis: cutting
+    // after the ZWJ left U+200D immediately before U+2026, which a terminal is
+    // free to render as anything.
+    let mut out = &s[..bounds[lo]];
+    while let Some(c) = out.chars().next_back() {
+        if matches!(c, '\u{200d}' | '\u{fe0f}' | '\u{fe0e}') {
+            out = &out[..out.len() - c.len_utf8()];
+        } else {
             break;
         }
-        out.push(c);
-        w += cw;
     }
-    out.push('…');
-    out
+    format!("{}…", out)
 }
 
 /// Pad `s` (whose visible width is `plain`) out to `target` cells.
@@ -151,6 +189,76 @@ mod tests {
         assert_eq!(truncate("abc", 8), "abc");
         // a wide char must not be split into half a cell
         assert_eq!(truncate("日本語", 4), "日…");
+    }
+
+    #[test]
+    fn emoji_presentation_and_zwj_sequences_measure_as_one_cluster() {
+        // every expectation here is tmux 3.7b's own cursor position; the old
+        // per-char sum gave 1, 1, 4 and 8 for the first four
+        assert_eq!(width("\u{2764}\u{fe0f}"), 2);
+        assert_eq!(width("1\u{fe0f}\u{20e3}"), 2);
+        assert_eq!(width("\u{1f468}\u{200d}\u{1f4bb}"), 2);
+        assert_eq!(
+            width("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}"),
+            2
+        );
+        // ...and the ones that were already right stay right
+        assert_eq!(width("\u{1f680}"), 2);
+        assert_eq!(width("\u{1f1f5}\u{1f1f1}"), 2);
+        assert_eq!(width("日本"), 4);
+        assert_eq!(width("a\u{301}a\u{301}"), 2);
+    }
+
+    #[test]
+    fn truncate_never_strands_a_joiner_on_the_ellipsis() {
+        // A complete "man + ZWJ + laptop" in the output is fine -- the joiner is
+        // part of the cluster.  What must never happen is a cut landing BETWEEN
+        // them, leaving U+200D immediately before U+2026, which a terminal is
+        // free to render as anything.  The old per-char code did exactly that:
+        // it charged 2 for the man, 0 for the joiner (so the joiner looked free
+        // and was kept) and then had no room for the laptop.
+        let s = "aaaaaaaaaaaa\u{1f468}\u{200d}\u{1f4bb}tail";
+        for max in 1..=20 {
+            let out = truncate(s, max);
+            let mut it = out.chars().rev();
+            if it.next() == Some('…') {
+                let before = it.next();
+                assert!(
+                    !matches!(before, Some('\u{200d}') | Some('\u{fe0f}') | Some('\u{fe0e}')),
+                    "max={} left a dangling {:?} before the ellipsis: {:?}",
+                    max,
+                    before,
+                    out
+                );
+            }
+            assert!(width(&out) <= max.max(1), "max={} gave {:?}", max, out);
+        }
+    }
+
+    #[test]
+    fn truncate_output_always_fits_its_budget() {
+        let samples = [
+            "plain-ascii-name",
+            "日本語のセッション",
+            "\u{2764}\u{fe0f}heart",
+            "\u{1f468}\u{200d}\u{1f4bb}dev",
+            "\u{1f1f5}\u{1f1f1}\u{1f1f5}\u{1f1f1}",
+            "a\u{301}combining",
+            "\u{1f680}\u{1f680}\u{1f680}",
+        ];
+        for s in samples {
+            for max in 0..24 {
+                let out = truncate(s, max);
+                assert!(
+                    width(&out) <= max.max(1),
+                    "truncate({:?}, {}) = {:?} is {} cells",
+                    s,
+                    max,
+                    out,
+                    width(&out)
+                );
+            }
+        }
     }
 
     #[test]

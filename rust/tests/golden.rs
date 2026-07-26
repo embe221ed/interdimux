@@ -147,6 +147,29 @@ fn hostile_input() {
     check("hostile", &[]);
 }
 
+/// Emoji whose CLUSTER width is not the sum of its characters' widths: a VS16
+/// presentation sequence (per-char 1, drawn 2), a ZWJ pair (per-char 4, drawn 2),
+/// a four-person family (per-char 8, drawn 2) and a keycap.  The pre-existing
+/// `cjk` fixture uses a rocket, which per-char measurement already gets right —
+/// so nothing in the corpus exercised this until now.
+#[test]
+fn emoji_clusters() {
+    check("emoji", &[]);
+}
+
+/// Indexes at tmux's own ceilings: window index near INT_MAX, pane index at the
+/// pane-base-index limit of 65535.  Together they are wider than the identity
+/// column's floor even after the session prefix has been dropped, so the pane
+/// rows used to run past every other row — pad_to can only pad.
+///
+/// 52 columns specifically: measured, the identity column is 24 cells at >= 60
+/// and everything fits, but 20 cells at <= 56, where `7 + "2147483000." + "65535"`
+/// = 23 overflows.  Without the clamp this dump renders 20/20/20/23/23.
+#[test]
+fn indexes_at_tmux_ceilings() {
+    check("bigindex", &[("INTERDIMUX_COLS", "52")]);
+}
+
 #[test]
 fn empty_server_renders_nothing() {
     let out = render(&std::fs::read_to_string(corpus_dir().join("empty.dump")).unwrap(), &[]);
@@ -161,7 +184,7 @@ fn sessions_without_windows() {
 /// Layout must hold at every width, not just the one the goldens pin.
 #[test]
 fn every_row_keeps_the_four_field_contract() {
-    let dumps = ["basic", "cjk", "hostile", "sessions-only"];
+    let dumps = ["basic", "cjk", "hostile", "emoji", "bigindex", "sessions-only"];
     for case in dumps {
         let dump = std::fs::read_to_string(corpus_dir().join(format!("{}.dump", case))).unwrap();
         for cols in [40, 60, 80, 100, 120, 160, 200, 300] {
@@ -187,7 +210,7 @@ fn every_row_keeps_the_four_field_contract() {
 /// \x1f is the internal tmux field delimiter and must never reach fzf.
 #[test]
 fn the_unit_separator_never_reaches_a_rendered_row() {
-    for case in ["basic", "cjk", "hostile"] {
+    for case in ["basic", "cjk", "hostile", "emoji"] {
         let dump = std::fs::read_to_string(corpus_dir().join(format!("{}.dump", case))).unwrap();
         let out = render(&dump, &[]);
         assert!(!out.contains('\u{1f}'), "{}: US leaked into the output", case);
@@ -234,6 +257,14 @@ fn malformed_input_never_panics() {
 /// row's identity column occupies the SAME number of terminal cells. This is
 /// what bash cannot guarantee — it pads by character count, so one CJK name
 /// silently shifts every column on that row.
+///
+/// The oracle here is deliberately NOT the renderer's own `text::width`. It used
+/// to be the identical expression — a per-char `UnicodeWidthChar` sum — which
+/// made this test a tautology: it could not fail for any input the renderer
+/// measured wrongly, and it duly passed while VS16 and ZWJ names shifted every
+/// column to their right. Measuring by grapheme cluster is an independent
+/// method, and it is the one that agrees with tmux's grid (verified against
+/// `#{cursor_x}` on tmux 3.7b).
 #[test]
 fn identity_columns_all_have_equal_display_width() {
     fn visible_width(s: &str) -> usize {
@@ -243,11 +274,55 @@ fn identity_columns_all_have_equal_display_width() {
         for c in s.chars() {
             if esc { if c == 'm' { esc = false } } else if c == '\x1b' { esc = true } else { out.push(c) }
         }
-        out.chars().map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+        // Independent of text::width: this walks clusters with its own rules and
+        // only ever asks unicode-width for a single char's width.  Verified
+        // against tmux 3.7b's `#{cursor_x}` on heart/check/keycap (2), ZWJ (2),
+        // family (2), flag (2), rocket (2), CJK (4), combining latin (2), ascii.
+        let ch: Vec<char> = out.chars().collect();
+        let uw = |c: char| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        let is_ri = |c: char| ('\u{1f1e6}'..='\u{1f1ff}').contains(&c);
+        let is_mark = |c: char| {
+            ('\u{0300}'..='\u{036f}').contains(&c)
+                || matches!(c, '\u{fe0f}' | '\u{fe0e}' | '\u{20e3}')
+        };
+        let mut cells = 0usize;
+        let mut i = 0usize;
+        while i < ch.len() {
+            let mut w = uw(ch[i]);
+            let mut j = i + 1;
+            // two regional indicators are one flag
+            if is_ri(ch[i]) && j < ch.len() && is_ri(ch[j]) {
+                j += 1;
+                w = 2;
+            }
+            loop {
+                if j >= ch.len() {
+                    break;
+                }
+                if is_mark(ch[j]) {
+                    // U+FE0F requests emoji presentation, which is always wide
+                    if ch[j] == '\u{fe0f}' {
+                        w = w.max(2);
+                    }
+                    j += 1;
+                } else if ch[j] == '\u{200d}' && j + 1 < ch.len() {
+                    j += 2; // the joiner and whatever it joins stay in the cluster
+                    w = w.max(2);
+                } else {
+                    break;
+                }
+            }
+            cells += w;
+            i = j;
+        }
+        cells
     }
-    for case in ["basic", "cjk", "hostile"] {
+    for case in ["basic", "cjk", "hostile", "emoji", "bigindex"] {
         let dump = std::fs::read_to_string(corpus_dir().join(format!("{}.dump", case))).unwrap();
-        for cols in [60, 80, 120, 200] {
+        // 52 is not decoration: the pane-id clamp only engages once the squeeze
+        // loop has driven the identity column to its floor, which happens below
+        // 60.  Sweeping only the wide widths would miss it entirely.
+        for cols in [52, 60, 80, 120, 200] {
             let out = render(&dump, &[("INTERDIMUX_COLS", &cols.to_string())]);
             let widths: Vec<usize> = out
                 .lines()
