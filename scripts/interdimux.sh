@@ -29,6 +29,26 @@ esac
 # subshell on it.
 SQ_SCRIPT="${SCRIPT_PATH//\'/\'\\\'\'}"
 
+# The Rust core ("imux").  When present it renders the whole list — the part
+# that was ~181 ms of in-process bash — in ~2 ms.  Everything below stays as the
+# fallback, so the plugin works unchanged without it.
+#
+# Only an explicit path or the in-repo build is accepted; no bare PATH lookup,
+# because "imux" is a short name that could plausibly be something else.  Set
+# INTERDIMUX_BIN (or @interdimux-binary) to use a binary installed elsewhere.
+# INTERDIMUX_USE_RUST=off forces the bash renderer, which is how the parity
+# tests compare the two.
+IMUX_BIN=""
+if [ "${INTERDIMUX_USE_RUST:-on}" != "off" ]; then
+  _imux_repo="${SCRIPT_PATH%/scripts/*}"
+  for _c in "${INTERDIMUX_BIN:-}" \
+            "$_imux_repo/rust/target/release/imux" \
+            "$_imux_repo/bin/imux"; do
+    if [ -n "$_c" ] && [ -x "$_c" ]; then IMUX_BIN="$_c"; break; fi
+  done
+  unset _c _imux_repo
+fi
+
 # ---------------------------------------------------------------------------
 # Option table
 # ---------------------------------------------------------------------------
@@ -1525,6 +1545,52 @@ gather_targets() {
     all_panes_raw=$(tmux list-panes -a -F "$_pfmt")
   fi
   IFS="$US" read -r current_session current_window current_pane <<< "$cur_raw"
+
+  # Hand the whole render to the Rust core when it is available.  This is the
+  # part that was ~181 ms of in-process bash (measure_widths + grouping + emit);
+  # the binary does it in ~2 ms.  bash keeps the tmux plumbing so the socket
+  # handling lives in exactly one place, and keeps its own renderer below as the
+  # fallback for anyone without the binary.
+  # The binary resolves full commands from /proc only — it has no ps backend.
+  # Where /proc is unavailable (macOS/BSD) or has been forced off, bash renders
+  # instead, because bash still carries the ps table.  Slower, but correct; the
+  # alternative would be silently downgrading those rows to the short command.
+  if [ -n "$IMUX_BIN" ] && { [ "$PROC_CMDLINE_OK" = 1 ] || [ "$SHOW_FULL_COMMAND" != "on" ]; }; then
+    # Pass every option EXPLICITLY rather than letting the binary re-derive
+    # defaults from the environment.  bash is the single owner of config
+    # resolution (env -> tmux options -> built-in default, see get_opt), and a
+    # binary that re-implemented those defaults would silently disagree with the
+    # fallback renderer whenever an option was left unset — which is exactly the
+    # parity bug this shape prevents.
+    INTERDIMUX_COLS="$(term_cols)" \
+    INTERDIMUX_NOW="$NOW_EPOCH" \
+    INTERDIMUX_SHOW_FULL_COMMAND="$SHOW_FULL_COMMAND" \
+    INTERDIMUX_SHOW_GIT_BRANCH="$SHOW_GIT_BRANCH" \
+    INTERDIMUX_SHOW_PREVIEW="$SHOW_PREVIEW" \
+    INTERDIMUX_ORDER="$ORDER" \
+    INTERDIMUX_SHOW_DIRS="$SHOW_DIRS" \
+    INTERDIMUX_DIRS_LIMIT="$DIRS_LIMIT" \
+    INTERDIMUX_RECENT_LIMIT="$RECENT_LIMIT" \
+    INTERDIMUX_USE_ZOXIDE="$USE_ZOXIDE" \
+    INTERDIMUX_COLOR_ACCENT="$COLOR_ACCENT" \
+    INTERDIMUX_COLOR_PATH="$COLOR_PATH" \
+    INTERDIMUX_COLOR_GIT="$COLOR_GIT" \
+    INTERDIMUX_COLOR_SSH="$COLOR_SSH" \
+    INTERDIMUX_COLOR_EDITOR="$COLOR_EDITOR" \
+    INTERDIMUX_COLOR_DANGER="$COLOR_DANGER" \
+    INTERDIMUX_COLOR_TREE="$COLOR_TREE" \
+    INTERDIMUX_COLOR_SEPARATOR="$COLOR_SEPARATOR" \
+    "$IMUX_BIN" gather <<IMUX_SECTIONS
+${sessions_raw}
+$RS
+${all_windows_raw}
+$RS
+${all_panes_raw}
+$RS
+${cur_raw}
+IMUX_SECTIONS
+    return 0
+  fi
 
   # Size the columns to the content we just fetched (fork-free).
   measure_widths
