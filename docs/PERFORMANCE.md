@@ -313,11 +313,17 @@ ref-vs-ref control, and covered by tests.
 
 | | before | after |
 |---|---|---|
-| `--list` time to first row | 152 ms | **90 ms** (−41%) |
-| `--list` total | 233 ms | 209 ms |
+| `--list` time to first row | 146 ms | **78 ms** (−47%) |
+| `--list` total | 237 ms | 195 ms |
 | header callback, per cursor move | 20 ms | **1 ms** |
+| keypress → navigator bash | 45 ms | **12 ms** |
 
-First row is the metric that matters — fzf paints rows as they stream in.
+First row is the metric that matters — fzf paints rows as they stream in. The
+two launch legs compose: `prefix+f` now reaches a painting fzf in roughly the
+time the old code took just to *start* the launcher.
+
+Process accounting for one warm `--list`, before → after: **5 tmux execs → 1**,
+plus `ps` gone entirely.
 
 1. **The warm path did not exist for the default config.** `get_opt` tests
    `[ -n "$env_val" ]`, so a forwarded-but-*empty* option was indistinguishable
@@ -370,12 +376,48 @@ with `base-index 1` every `:0` target failed and `test_list_format.sh` /
 assertions also passed *vacuously* — "no malformed rows" is trivially true
 against zero rows — so a silently broken gather printed green ticks.
 
-**Still open**, in value order: **1.3** (static keybinding — the biggest
-remaining first-paint lever, but it changes semantics: `@interdimux-*` edits
-would need a plugin reload) and the gather-query batching (worth 12–17 ms, but
-the obvious `${var#*pat}` split is *quadratic* — 682 ms on a 35 KB dump — and a
-`\x1e` in a pane's cwd corrupts the field split). Tier 3 and Tier 4 are
-**rejected**, see below.
+5. **`prefix+f` is bound straight to `display-popup`** (Tier 1.3). The old path
+   forked `/bin/sh`, ran a full bash that resolved config it then discarded, and
+   `exec`'d `display-popup` — a client round-trip — before the navigator bash
+   even started. `run-shell -bC` runs the popup *in the server*, with no shell:
+   **keypress → navigator bash 45 ms → 12 ms**.
+   Values ride as tmux **format references**, not baked literals, so
+   `@interdimux-*` edits still apply on the next open — there is no staleness and
+   no reload step. That only works because the sentinel (5.1) makes an empty
+   forwarded value mean "use the built-in default".
+   Three traps, covered by `tests/test_bind_keys.sh`, which fires a *real*
+   prefix+f through a nested client (`send-keys` writes to a pane's pty and can
+   never trigger a key binding):
+   every value needs **`#{q:}`**, because the expanded text is re-lexed by tmux's
+   command parser and a raw `#{@x}` holding a `"` kills the binding outright —
+   silently, with `prefix+f` simply doing nothing;
+   **`#{?@x,…}` cannot test emptiness**, because tmux format truthiness treats the
+   string `"0"` as false, so `color-tree 0` and `recent-limit 0` would be replaced
+   by defaults (use `#{==:…,}`);
+   and `TMUX_PANE` must be injected as `#{pane_id}` — a popup natively exports its
+   *own* pane id, which resolves to an empty target and silently kills both the
+   current-row marker and MRU's move-current-to-end.
+   `--bind-keys` dispatches **before** the preflight on purpose: if `fzf` is not on
+   the tmux server's `PATH` (common — it is often only on `PATH` via a shell rc)
+   the preflight exits 1, and doing that at plugin load would leave the user with
+   *no bindings at all*.
+
+6. **The four gather queries are one tmux invocation.** Each separate invocation
+   costs ~5–6 ms of connect/teardown ahead of the first row.
+   The obvious implementation is a trap in two ways: splitting the combined
+   output with `${var#*RS}` is **quadratic** in the offset (682 ms on a 35 KB
+   dump — far worse than the round-trips it replaces), so this word-splits on
+   `IFS=RS`; and while tmux rejects RS in session and window *names*, a pane's
+   **cwd can contain one**, which shifts every later section and silently
+   truncates a path *and* drops the current-row marker. The split is accepted
+   only when it yields exactly four sections. Command order matters too: tmux
+   aborts the rest of a command list on failure, so the one fallible query (the
+   current-target lookup, which depends on `$TMUX_PANE` still existing) goes
+   **last**. `INTERDIMUX_NO_BATCH=1` forces the old path.
+
+**Deliberately not done:** replacing the MRU `printf | sort` with a pure-bash
+insertion sort. It wins below ~35 sessions but is 9× slower at 100 and 65× at
+300, to save a ~5 ms fork. Tier 3 and Tier 4 are **rejected**, see below.
 
 ---
 
