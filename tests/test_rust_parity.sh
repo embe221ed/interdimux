@@ -123,6 +123,24 @@ for cols in 80 120 200; do
   run_case "width ${cols} cols + preview" INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_PREVIEW=on FZF_COLUMNS="$cols"
 done
 
+# --- failure modes: the binary must never turn into an empty picker ---------
+broken="$TMPD/broken"; printf '#!/bin/sh\nexit 7\n' > "$broken"; chmod +x "$broken"
+silent="$TMPD/silent"; printf '#!/bin/sh\nexit 0\n' > "$silent"; chmod +x "$silent"
+want=$(INTERDIMUX_USE_RUST=off INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null | wc -l)
+got_b=$(INTERDIMUX_BIN="$broken" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null | wc -l)
+got_s=$(INTERDIMUX_BIN="$silent" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null | wc -l)
+[ "$got_b" = "$want" ] && report "a failing binary falls back to bash ($got_b rows)" pass \
+                       || report "a failing binary falls back to bash (got $got_b, want $want)" fail
+[ "$got_s" = "$want" ] && report "a silent binary falls back to bash ($got_s rows)" pass \
+                       || report "a silent binary falls back to bash (got $got_s, want $want)" fail
+
+# A pane cwd is arbitrary bytes on Linux; invalid UTF-8 must degrade one path,
+# not blank the whole list.
+bad=$(printf 'a\x1fb\x1f1\x1f\n\x1e\n\x1e\n\x1e\n' | "$BIN" gather 2>/dev/null | wc -l)
+badu=$(printf 'a\x1fb\x1f1\x1f\xff\xfe\n\x1e\n\x1e\n\x1e\n' | "$BIN" gather 2>/dev/null | wc -l)
+[ "$badu" = "$bad" ] && report "invalid UTF-8 input still renders its row" pass \
+                     || report "invalid UTF-8 input still renders its row (got $badu, want $bad)" fail
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then

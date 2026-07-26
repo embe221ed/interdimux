@@ -82,9 +82,18 @@ fn main() {
 /// single batched query, so this binary never shells out to tmux itself — which
 /// keeps it testable and keeps the socket plumbing in one place.
 fn read_sections() -> Vec<String> {
-    let mut buf = String::new();
-    io::Read::read_to_string(&mut io::stdin(), &mut buf).ok();
-    buf.split('\u{1e}').map(|s| s.trim_matches('\n').to_string()).collect()
+    // Read BYTES, not a String.  A pane's cwd is arbitrary bytes on Linux, so
+    // read_to_string() errors on the first non-UTF-8 path — and swallowing that
+    // error yields an empty list, i.e. a silently blank picker.  Lossy decoding
+    // degrades one filename to U+FFFD instead of losing every row.
+    let mut buf = Vec::new();
+    if io::Read::read_to_end(&mut io::stdin(), &mut buf).is_err() {
+        std::process::exit(1); // let bash fall back rather than print nothing
+    }
+    String::from_utf8_lossy(&buf)
+        .split('\u{1e}')
+        .map(|s| s.trim_matches('\n').to_string())
+        .collect()
 }
 
 fn gather() {

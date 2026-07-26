@@ -1558,29 +1558,33 @@ gather_targets() {
   if [ -n "$IMUX_BIN" ] && { [ "$PROC_CMDLINE_OK" = 1 ] || [ "$SHOW_FULL_COMMAND" != "on" ]; }; then
     # Pass every option EXPLICITLY rather than letting the binary re-derive
     # defaults from the environment.  bash is the single owner of config
-    # resolution (env -> tmux options -> built-in default, see get_opt), and a
+    # resolution (env -> tmux option -> built-in default, see get_opt), and a
     # binary that re-implemented those defaults would silently disagree with the
-    # fallback renderer whenever an option was left unset — which is exactly the
-    # parity bug this shape prevents.
-    INTERDIMUX_COLS="$(term_cols)" \
-    INTERDIMUX_NOW="$NOW_EPOCH" \
-    INTERDIMUX_SHOW_FULL_COMMAND="$SHOW_FULL_COMMAND" \
-    INTERDIMUX_SHOW_GIT_BRANCH="$SHOW_GIT_BRANCH" \
-    INTERDIMUX_SHOW_PREVIEW="$SHOW_PREVIEW" \
-    INTERDIMUX_ORDER="$ORDER" \
-    INTERDIMUX_SHOW_DIRS="$SHOW_DIRS" \
-    INTERDIMUX_DIRS_LIMIT="$DIRS_LIMIT" \
-    INTERDIMUX_RECENT_LIMIT="$RECENT_LIMIT" \
-    INTERDIMUX_USE_ZOXIDE="$USE_ZOXIDE" \
-    INTERDIMUX_COLOR_ACCENT="$COLOR_ACCENT" \
-    INTERDIMUX_COLOR_PATH="$COLOR_PATH" \
-    INTERDIMUX_COLOR_GIT="$COLOR_GIT" \
-    INTERDIMUX_COLOR_SSH="$COLOR_SSH" \
-    INTERDIMUX_COLOR_EDITOR="$COLOR_EDITOR" \
-    INTERDIMUX_COLOR_DANGER="$COLOR_DANGER" \
-    INTERDIMUX_COLOR_TREE="$COLOR_TREE" \
-    INTERDIMUX_COLOR_SEPARATOR="$COLOR_SEPARATOR" \
-    "$IMUX_BIN" gather <<IMUX_SECTIONS
+    # fallback renderer whenever an option was left unset.
+    #
+    # The assignments live INSIDE the substitution on purpose: written as a
+    # `VAR=v \ _imux_out=$(...)` prefix chain, bash parses the lot as a list of
+    # assignments with NO command, so the binary would run without any of them.
+    _imux_out=$(
+      INTERDIMUX_COLS="$(term_cols)" \
+      INTERDIMUX_NOW="$NOW_EPOCH" \
+      INTERDIMUX_SHOW_FULL_COMMAND="$SHOW_FULL_COMMAND" \
+      INTERDIMUX_SHOW_GIT_BRANCH="$SHOW_GIT_BRANCH" \
+      INTERDIMUX_SHOW_PREVIEW="$SHOW_PREVIEW" \
+      INTERDIMUX_ORDER="$ORDER" \
+      INTERDIMUX_SHOW_DIRS="$SHOW_DIRS" \
+      INTERDIMUX_DIRS_LIMIT="$DIRS_LIMIT" \
+      INTERDIMUX_RECENT_LIMIT="$RECENT_LIMIT" \
+      INTERDIMUX_USE_ZOXIDE="$USE_ZOXIDE" \
+      INTERDIMUX_COLOR_ACCENT="$COLOR_ACCENT" \
+      INTERDIMUX_COLOR_PATH="$COLOR_PATH" \
+      INTERDIMUX_COLOR_GIT="$COLOR_GIT" \
+      INTERDIMUX_COLOR_SSH="$COLOR_SSH" \
+      INTERDIMUX_COLOR_EDITOR="$COLOR_EDITOR" \
+      INTERDIMUX_COLOR_DANGER="$COLOR_DANGER" \
+      INTERDIMUX_COLOR_TREE="$COLOR_TREE" \
+      INTERDIMUX_COLOR_SEPARATOR="$COLOR_SEPARATOR" \
+      "$IMUX_BIN" gather <<IMUX_SECTIONS
 ${sessions_raw}
 $RS
 ${all_windows_raw}
@@ -1589,7 +1593,14 @@ ${all_panes_raw}
 $RS
 ${cur_raw}
 IMUX_SECTIONS
-    return 0
+    ) || _imux_out=""
+    # A failed or empty render must fall through to the bash renderer, never be
+    # mistaken for "there is nothing to show".  Capturing costs ~2ms (the binary
+    # renders the whole list in about that) and buys a safe failure mode.
+    if [ -n "$_imux_out" ]; then
+      printf '%s\n' "$_imux_out"
+      return 0
+    fi
   fi
 
   # Size the columns to the content we just fetched (fork-free).
