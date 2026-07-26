@@ -3103,13 +3103,26 @@ if [ "${1:-}" = "--action" ]; then
       esac
       [ -z "$swap_list" ] && { info_flash "$BOLD_AMBER" "Swap" "No valid swap targets."; exit 0; }
 
+      # Name the SOURCE in the prompt.  The destination list looks exactly like
+      # the navigator's, so a picker headed only "swap with ❯" gave no way to
+      # tell which of the two ends you had already chosen -- and swapping the
+      # wrong pair is not obviously wrong until you look for the window you
+      # meant to move.  parse_spec already ran on "$spec" for the type check
+      # above, so the label is free.
+      # Re-parse first: gather_targets ran in between, and the code below already
+      # re-parses "$spec" for the same reason before computing src_target.
+      parse_spec "$spec"
+      _swap_src=$(spec_label)
+      # A session name can contain a newline, which a prompt cannot.
+      _swap_src="${_swap_src//$'\n'/ }"
+
       printf '\033[2J\033[H' >"$tty_out"
       dest=$(printf '%s\n' "$swap_list" | fzf \
         "${FZF_THEME[@]}" \
         --delimiter=$'\t' \
         --with-nth=1..3 \
         --nth=1,3 \
-        --prompt='swap with ❯ ' \
+        --prompt="swap $_swap_src with ❯ " \
         --header="$(hint enter 'swap destination' esc cancel)" \
       ) || exit 0
 
@@ -3172,6 +3185,25 @@ if [ "${1:-}" = "--dirs" ]; then
     ctrl_f_extra="+clear-query"
   fi
   fzf_ge 61 && dirs_extra+=(--ghost='directory name or path')
+
+  # Empty state (IDEAS #28).  A fruitless deep search leaves a blank panel with
+  # no visible way out: the list is gone and nothing says that ^r puts the
+  # default view back.
+  #
+  # The PROMPT carries it, not the header: ^f and ^g already own the header via
+  # transform-header, and a `result` bind restoring a default would clobber the
+  # "deep search"/"browse" header they had just set.  The prompt is unowned, and
+  # it is where the eye already is while typing.
+  #
+  # ONE bind on `result`, dispatching on the count -- not a `zero` bind plus a
+  # `result` bind.  Both events fire when the list empties, and `result` runs
+  # last: the pair rendered the message and then immediately overwrote it, so
+  # nothing was visible at all (verified in a real pty before this was changed).
+  #
+  # FZF_MATCH_COUNT needs fzf >= 0.51, the same floor as the inline callbacks.
+  if fzf_ge 51; then
+    dirs_extra+=(--bind="result:transform-prompt:[ \"\${FZF_MATCH_COUNT:-1}\" -eq 0 ] && printf '%s' '∅ nothing matched · ^r resets ❯ ' || printf '%s' 'new session ❯ '")
+  fi
 
   # The default header is static and this process already has the builder —
   # re-exec'ing the whole script for it cost ~18 ms of dead time before the

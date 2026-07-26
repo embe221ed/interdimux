@@ -162,6 +162,9 @@ By default the configured project directories (see `@interdimux-project-dirs`) a
 | `Ctrl-r` | Reset to the default view |
 | `Esc` | Cancel |
 
+When a query matches nothing the prompt says so and points at `Ctrl-r`, so a
+fruitless deep search is not a blank panel with no visible way back.
+
 The preview shows project type, git branch/status/last commit, a README excerpt, and the directory contents. Session names are derived from the directory basename; when two projects share a basename, the new session is disambiguated with the parent directory name.
 
 ### Tree display

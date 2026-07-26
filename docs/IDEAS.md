@@ -55,8 +55,8 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 | 24 | ✅ **Done** (better than proposed) — `ps -eo` is gone entirely on Linux; full commands come from `/proc` per pane, so the cost scales with pane count instead of host process count. `ps` remains the macOS/BSD fallback. See PERFORMANCE.md Tier 5. | S | — |
 | 25 | ✅ **Done** — both ride in via the popup's `-e` flags (Tier 0.3), and the per-cursor-move header no longer re-execs the script at all (Tier 5.2). | S | — |
 | 26 | ✅ **Done** — **Stale widths after ctrl-/ toggle** — rows stay truncated for preview-on while half the popup is blank; track live preview state in a temp file, reload with corrected widths. | M | — |
-| 27 | *(partly done)* **Consistent keys across modes** — the ctrl-] cycle's fifth state (`1,3`) is labelled now, and the dir picker marks directories that already have a session. Still open: ctrl-/ and ctrl-] are dead in action modes, and the swap destination picker has no preview and never shows the swap source (put it in the prompt). | S | — |
-| 28 | **Dir-picker empty states** — a fruitless deep search shows a blank panel with no visible way back; bind `zero:` to "∅ nothing matched — ^r resets". | S | fzf ≥ 0.40 |
+| 27 | *(mostly done)* **Consistent keys across modes** — the ctrl-] cycle's fifth state (`1,3`) is labelled, the dir picker marks directories that already have a session, and the swap picker names its source in the prompt. Still open: ctrl-/ and ctrl-] are dead in action modes, and the swap destination picker has no preview. | S | — |
+| 28 | ✅ **Done** — the PROMPT carries it, not the header (^f/^g own the header via transform-header). One `result` bind dispatching on `FZF_MATCH_COUNT`, not a `zero` + `result` pair: both events fire when the list empties and `result` runs last, so the pair rendered the message and immediately overwrote it. | S | fzf ≥ 0.51 |
 
 ## 4b. Landed from the reliability hunt
 

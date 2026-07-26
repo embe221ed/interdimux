@@ -87,10 +87,15 @@ wait_settled() {
   local i out
   for i in $(seq 1 200); do
     out=$(bash "$SCRIPT" --list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' '{print $3}')
-    # every pane we set up should have reached its final command
+    # every pane we set up should have reached its final command.  The `weird`
+    # one needs its own check: it is a /bin/sh wrapper that execs the sleeper,
+    # so until the exec lands the resolver correctly reports the wrapper shell —
+    # observed as "control chars are sanitized ps-style (got 'bash')", failing
+    # only inside a full-suite run.  Its interpreter name is the tell.
     if printf '%s' "$out" | grep -q 'sleep 600' \
        && printf '%s' "$out" | grep -q 'sleep 601' \
        && printf '%s' "$out" | grep -q 'sleep 602' \
+       && { [ -z "$SLEEPER" ] || printf '%s' "$out" | grep -q "${SLEEPER%% *}"; } \
        && ! printf '%s' "$out" | grep -q 'pyenv\|rehash'; then
       return 0
     fi
