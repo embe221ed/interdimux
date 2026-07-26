@@ -1285,11 +1285,34 @@ measure_widths() {
   return 0
 }
 
+
+# The live preview state ("on"/"off").  ctrl-/ writes the new value to
+# $INTERDIMUX_PREVIEW_STATE so a reload child can size its columns for the
+# geometry the user is actually looking at.
+live_preview_state() {
+  local st="$SHOW_PREVIEW"
+  if [ -n "${INTERDIMUX_PREVIEW_STATE:-}" ] && [ -s "${INTERDIMUX_PREVIEW_STATE}" ]; then
+    # `|| st=...` here would be a bug: the file has no trailing newline, so
+    # read assigns the value and THEN reports EOF, and the fallback would wipe
+    # what it just read.  Same trap as the /proc children file.
+    { read -r st < "$INTERDIMUX_PREVIEW_STATE"; } 2>/dev/null || :
+  fi
+  printf '%s' "$st"
+}
+
 # Turn the measured maxima into column widths that fit the popup width.
 compute_widths() {
   local avail
   avail=$(term_cols)
-  [ "$SHOW_PREVIEW" = "on" ] && avail=$(( avail / 2 ))
+  # The live preview state, not the configured one: ctrl-/ toggles the preview
+  # after launch, and fzf reports the FULL terminal width in FZF_COLUMNS either
+  # way (verified), so without this the rows stay sized for the old geometry and
+  # fzf just clips them with an ellipsis.  That is IDEAS #26.
+  local _pv="$SHOW_PREVIEW"
+  if [ -n "${INTERDIMUX_PREVIEW_STATE:-}" ] && [ -s "${INTERDIMUX_PREVIEW_STATE}" ]; then
+    { read -r _pv < "$INTERDIMUX_PREVIEW_STATE"; } 2>/dev/null || :
+  fi
+  [ "$_pv" = "on" ] && avail=$(( avail / 2 ))
   avail=$(( avail - WIDTH_GUTTER ))
 
   # Content-sized, each clamped to a sane [floor, ceiling].
@@ -1570,7 +1593,7 @@ gather_targets() {
       INTERDIMUX_NOW="$NOW_EPOCH" \
       INTERDIMUX_SHOW_FULL_COMMAND="$SHOW_FULL_COMMAND" \
       INTERDIMUX_SHOW_GIT_BRANCH="$SHOW_GIT_BRANCH" \
-      INTERDIMUX_SHOW_PREVIEW="$SHOW_PREVIEW" \
+      INTERDIMUX_SHOW_PREVIEW="$(live_preview_state)" \
       INTERDIMUX_ORDER="$ORDER" \
       INTERDIMUX_SHOW_DIRS="$SHOW_DIRS" \
       INTERDIMUX_DIRS_LIMIT="$DIRS_LIMIT" \
@@ -3133,7 +3156,10 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNT
 else
   RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX")
 fi
-trap 'rm -f "$RESUME_FILE"' EXIT
+PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
+printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null || PREVIEW_STATE_FILE=""
+export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
+trap 'rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE"' EXIT
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"
 ACTION_CMD="bash '$SCRIPT_PATH' --action"
@@ -3152,47 +3178,69 @@ while true; do
     --bind="ctrl-r:reload($LIST_CMD)"
   )
 
+
+  # Cursor stability across the execute+reload cycle every action performs.
+  # --id-nth keys rows by their SPEC (field 4), so after a reload the cursor
+  # stays on the same TARGET rather than the same row number — which in kill
+  # mode is the difference between confirming what you meant and confirming
+  # whatever slid into that position.
+  #
+  # Deliberately WITHOUT --track: --track arms trackBlocked, which DISCARDS
+  # every keystroke except abort while a reload is in flight
+  # (fzf src/terminal.go:6821-6827), and that window is widest right after the
+  # popup opens.  --id-nth alone never blocks.
+  fzf_ge 71 && fzf_opts+=(--id-nth=4)
+
+
+  # fzf 0.74's `wait` defers the remaining actions of a binding until any
+  # in-flight search/load completes, and QUEUES them (unlike --track's
+  # trackBlocked, which discards).  Every action here runs execute+reload, so
+  # without it a fast second keypress acts on a row the reload has already
+  # removed — verified upstream that a plain enter:accept mid-refresh returns an
+  # already-deleted row.  Empty on older fzf, where the binds are unchanged.
+  _wait=""
+  fzf_ge 74 && _wait="wait+"
   case "$INTERDIMUX_MODE" in
     kill)
       fzf_opts+=(
         --prompt='kill ❯ '
         --header="$(hint enter kill ^r reload esc quit)"
-        --bind="enter:execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
       )
       ;;
     rename)
       fzf_opts+=(
         --prompt='rename ❯ '
         --header="$(hint enter rename ^r reload esc quit)"
-        --bind="enter:execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
       )
       ;;
     zoom)
       fzf_opts+=(
         --prompt='zoom ❯ '
         --header="$(hint enter 'toggle zoom' ^r reload esc quit)"
-        --bind="enter:execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
+        --bind="enter:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
       )
       ;;
     swap)
       fzf_opts+=(
         --prompt='swap ❯ '
         --header="$(hint enter swap ^r reload esc quit)"
-        --bind="enter:execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
       )
       ;;
     detach)
       fzf_opts+=(
         --prompt='detach ❯ '
         --header="$(hint enter detach ^r reload esc quit)"
-        --bind="enter:execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
       )
       ;;
     send)
       fzf_opts+=(
         --prompt='send ❯ '
         --header="$(hint enter 'send keys' ^r reload esc quit)"
-        --bind="enter:execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
       )
       ;;
     *)
@@ -3216,14 +3264,20 @@ while true; do
         --prompt='❯ '
         --print-query
         --header="$INTERDIMUX_HDR_X"
-        --bind="ctrl-x:execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
-        --bind="ctrl-e:execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
-        --bind="ctrl-z:execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
-        --bind="ctrl-s:execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
-        --bind="ctrl-d:execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
-        --bind="ctrl-t:execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
+        --bind="ctrl-x:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
+        --bind="ctrl-e:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
+        --bind="ctrl-z:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
+        --bind="ctrl-s:${_wait}execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
+        --bind="ctrl-d:${_wait}execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
+        --bind="ctrl-t:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
         --bind="ctrl-o:execute(bash '$SCRIPT_PATH' --dirs || echo resume > '$RESUME_FILE')+abort"
-        --bind='ctrl-/:toggle-preview'
+        # Column widths are computed against the space actually available, so
+        # toggling the preview or resizing the popup invalidates them: without
+        # the reload the rows stay sized for the old geometry (IDEAS #26).
+        # A reload used to cost ~195ms, which is why this was deferred; it is
+        # ~25ms now.
+        --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload($LIST_CMD)"
+        --bind='resize:reload('"$LIST_CMD"')'
       )
       # Per-row header hints, once per cursor move.  A focus bind runs
       # SYNCHRONOUSLY — the fzf man page warns it "can make the interface

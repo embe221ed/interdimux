@@ -82,11 +82,28 @@ sleep 0.5
 
 # Attach (then detach) a real client to alpha, then bravo — this is the
 # only reliable way to advance #{session_last_attached} headlessly.
+# Wait for the CONDITION, not a fixed duration: these sleeps were tuned on an
+# idle box and flake under load (observed: MRU asserted "bravo charlie alpha"
+# because the attach had not landed yet).  Polling makes the suite deterministic
+# regardless of how busy the machine is.
 visit() {
+  local before after i
+  before=$(tmux_cmd display-message -p -t "=$1:" '#{session_last_attached}' 2>/dev/null || echo 0)
   tmux_cmd send-keys -t "=driver:0" "TMUX= tmux -L '$SOCK' attach -t '=$1'" Enter
-  sleep 1.2
+  # the attach has happened once last_attached advances
+  for i in $(seq 1 100); do
+    after=$(tmux_cmd display-message -p -t "=$1:" '#{session_last_attached}' 2>/dev/null || echo 0)
+    [ "$after" != "$before" ] && [ "${after:-0}" -gt 0 ] && break
+    sleep 0.1
+  done
+  # ...and give the clock a full second, since last_attached has 1s resolution
+  # and equal timestamps would make the MRU sort order ambiguous
+  sleep 1
   tmux_cmd detach-client -s "=$1" 2>/dev/null || true
-  sleep 0.3
+  for i in $(seq 1 50); do
+    tmux_cmd list-clients -t "=$1" 2>/dev/null | grep -q . || break
+    sleep 0.1
+  done
 }
 visit alpha
 visit bravo
