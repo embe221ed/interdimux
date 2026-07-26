@@ -2262,28 +2262,48 @@ fi
 # $HOME.  Factored out of the navigator's accept path so raw mode can invoke it
 # from inside fzf (see the `zero`/enter transform below), where there is no exit
 # code to signal "nothing matched".
-# Sets REPLY to the session name; prints nothing.
-create_from_query() {
-  local query="$1" dir="" session_name="" expanded
-  REPLY=""
+# What a query WOULD become.  Sets CREATE_DIR / CREATE_NAME / CREATE_SRC;
+# returns 1 when the query cannot produce a session at all.
+#
+# One resolver for both the header and the accept, because they used to derive
+# the name independently and disagreed: describe_create did a plain
+# `basename | tr`, while the accept went through resolve_session_name, which
+# DISAMBIGUATES against existing sessions.  With a session "api" already open at
+# ~/work/api, typing ~/other/api showed "create api" and created "other-api".
+# The header is the only thing telling the user what Enter does, so it has to be
+# derived from the same code that does it.
+resolve_create_target() {
+  local query="$1" expanded
+  CREATE_DIR=""; CREATE_NAME=""; CREATE_SRC=""
   [ -n "$query" ] || return 1
   expanded="${query/#\~/$HOME}"
-  if [ -d "$expanded" ] && dir=$(cd "$expanded" 2>/dev/null && pwd -P); then
-    session_name=$(resolve_session_name "$dir")
+  if [ -d "$expanded" ] && CREATE_DIR=$(cd "$expanded" 2>/dev/null && pwd -P); then
+    CREATE_SRC="path"
+    # the PHYSICAL path, so a symlinked query names the session after where it
+    # actually lands -- describe_create used the unresolved one
+    CREATE_NAME=$(resolve_session_name "$CREATE_DIR")
   else
-    dir=""
+    CREATE_DIR=""
     if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
-      dir=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
+      CREATE_DIR=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
     fi
-    [ -d "$dir" ] || dir="$HOME"
-    session_name=$(printf '%s' "$query" | tr '.: /' '----')
+    if [ -d "$CREATE_DIR" ]; then CREATE_SRC="zoxide"; else CREATE_DIR="$HOME"; CREATE_SRC="home"; fi
+    CREATE_NAME=$(printf '%s' "$query" | tr '.: /' '----')
   fi
-  [ -n "$session_name" ] || return 1
-  if ! tmux has-session -t "=$session_name" 2>/dev/null; then
-    record_dir_use "$dir"
+  [ -n "$CREATE_NAME" ] || return 1
+  return 0
+}
+
+# Sets REPLY to the session name; prints nothing.
+create_from_query() {
+  local query="$1"
+  REPLY=""
+  resolve_create_target "$query" || return 1
+  if ! tmux has-session -t "=$CREATE_NAME" 2>/dev/null; then
+    record_dir_use "$CREATE_DIR"
   fi
-  connect_dir "$dir" "$session_name" || return 1
-  REPLY="$session_name"
+  connect_dir "$CREATE_DIR" "$CREATE_NAME" || return 1
+  REPLY="$CREATE_NAME"
   return 0
 }
 
@@ -2291,23 +2311,20 @@ create_from_query() {
 # the zero-match header so the feature stops being invisible (IDEAS #1) and a
 # typo cannot silently create junk.
 describe_create() {
-  local query="$1" dir="" expanded name src
+  local query="$1" verb
   REPLY=""
-  [ -n "$query" ] || return 0
-  expanded="${query/#\~/$HOME}"
-  if [ -d "$expanded" ]; then
-    dir="$expanded"; src="path"
-    name=$(basename "$dir" | tr '.:' '-')
+  resolve_create_target "$query" || return 0
+  # "switch to", not "create", when the name already exists -- that is what
+  # connect_dir does, and promising a new session it will not make is the same
+  # class of lie as naming the wrong one.
+  if tmux has-session -t "=$CREATE_NAME" 2>/dev/null; then
+    verb="switch to"
   else
-    if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
-      dir=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
-    fi
-    if [ -d "$dir" ]; then src="zoxide"; else dir="$HOME"; src="home"; fi
-    name=$(printf '%s' "$query" | tr '.: /' '----')
+    verb="create"
   fi
-  printf -v REPLY '%screate%s%s %s%s %sin %s%s %s(%s)%s' \
-    "$ACCENT_ESC" "$RST" "$DIM" "$RST$ACCENT_ESC$name" "$RST" \
-    "$DIM" "$RST$DIM${dir/#$HOME/\~}" "$RST" "$DIM" "$src" "$RST"
+  printf -v REPLY '%s%s%s%s %s%s %sin %s%s %s(%s)%s' \
+    "$ACCENT_ESC" "$verb" "$RST" "$DIM" "$RST$ACCENT_ESC$CREATE_NAME" "$RST" \
+    "$DIM" "$RST$DIM${CREATE_DIR/#$HOME/\~}" "$RST" "$DIM" "$CREATE_SRC" "$RST"
   return 0
 }
 
