@@ -50,8 +50,8 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 
 | # | Idea | Effort | Notes |
 |---|------|--------|-------|
-| 22 | **Interrupt-safe dialogs** — Ctrl-C mid-dialog leaves the border stuck red and the cursor hidden; add an EXIT/INT trap in `--action`. Make rename cancellable with Esc (today: ctrl-u + Enter only). | S | — |
-| 23 | **Surface real failure reasons** — capture tmux stderr instead of discarding: "✗ session names cannot contain `.` or `:`" beats "✗ failed to rename". Pre-validate rename input. | S | — |
+| 22 | ✅ **Done** — **Interrupt-safe dialogs** — Ctrl-C mid-dialog leaves the border stuck red and the cursor hidden; add an EXIT/INT trap in `--action`. Make rename cancellable with Esc (today: ctrl-u + Enter only). | S | — |
+| 23 | ✅ **Done** — **Surface real failure reasons** — capture tmux stderr instead of discarding: "✗ session names cannot contain `.` or `:`" beats "✗ failed to rename". Pre-validate rename input. | S | — |
 | 24 | ✅ **Done** (better than proposed) — `ps -eo` is gone entirely on Linux; full commands come from `/proc` per pane, so the cost scales with pane count instead of host process count. `ps` remains the macOS/BSD fallback. See PERFORMANCE.md Tier 5. | S | — |
 | 25 | ✅ **Done** — both ride in via the popup's `-e` flags (Tier 0.3), and the per-cursor-move header no longer re-execs the script at all (Tier 5.2). | S | — |
 | 26 | ✅ **Done** — **Stale widths after ctrl-/ toggle** — rows stay truncated for preview-on while half the popup is blank; track live preview state in a temp file, reload with corrected widths. | M | — |

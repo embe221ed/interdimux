@@ -2599,6 +2599,9 @@ input_dialog() {
   local saved_stty=""
   if [ -c "$tty_in" ]; then
     saved_stty=$(stty -g <"$tty_in" 2>/dev/null) || saved_stty=""
+    # published so the --action INT/EXIT trap can restore the terminal even if
+    # we are killed between here and the restore below
+    _saved_stty_global="$saved_stty"
     [ -n "$saved_stty" ] && stty -echo -icanon -isig min 1 time 0 <"$tty_in" 2>/dev/null
   fi
 
@@ -2654,6 +2657,7 @@ input_dialog() {
   done
 
   [ -n "$saved_stty" ] && stty "$saved_stty" <"$tty_in" 2>/dev/null
+  _saved_stty_global=""
   exec {ifd}<&-
   REPLY="$buf"
 }
@@ -2692,6 +2696,27 @@ if [ "${1:-}" = "--action" ]; then
   # /dev/tty for interactive I/O; overridable for testing
   tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
   tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
+
+  # A dialog hides the cursor and, in kill mode, recolours the popup border red.
+  # Ctrl-C used to abandon both: the user was returned to the list with an
+  # invisible cursor behind a permanently red frame, and the only way out was to
+  # close the popup.  Restore unconditionally, on interrupt AND on any exit path
+  # (IDEAS #22).  input_dialog also puts the terminal in raw mode, so the saved
+  # stty settings are restored here too if it did not get the chance.
+  _action_cleanup() {
+    [ -n "${_saved_stty_global:-}" ] && stty "$_saved_stty_global" <"$tty_in" 2>/dev/null
+    # >> not >: on a real tty either works, but INTERDIMUX_TTY_OUT can be a
+    # regular file (that is how the dialogs are tested), and > TRUNCATES it —
+    # silently destroying everything the dialog drew.
+    printf '\033[?25h' >>"$tty_out" 2>/dev/null
+    if [ "${INTERDIMUX_MODE:-switch}" = "kill" ]; then
+      popup_accent danger
+    else
+      popup_accent user
+    fi
+  }
+  trap '_action_cleanup; exit 130' INT TERM
+  trap '_action_cleanup' EXIT
 
   case "$action" in
     kill)
@@ -2748,14 +2773,21 @@ if [ "${1:-}" = "--action" ]; then
       input_dialog "$BOLD_AMBER" "Rename ${label}" "❯ " "$current_name"
       new_name="$REPLY"
       if [ -n "$new_name" ] && [ "$new_name" != "$current_name" ]; then
+        # Capture tmux's own message instead of discarding it: "session names
+        # cannot contain '.' or ':'" tells the user what to do, where
+        # "failed to rename" leaves them guessing (IDEAS #23).
+        _err=""
         case "$SPEC_TYPE" in
-          S) tmux rename-session -t "$target" "$new_name" 2>/dev/null ;;
-          W) tmux rename-window  -t "$target" "$new_name" 2>/dev/null ;;
+          S) _err=$(tmux rename-session -t "$target" "$new_name" 2>&1) ;;
+          W) _err=$(tmux rename-window  -t "$target" "$new_name" 2>&1) ;;
         esac
         if [ $? -eq 0 ]; then
           dialog_status "${GREEN}✓ renamed to ${new_name}${RST}"
         else
-          dialog_status "${RED}✗ failed to rename${RST}"
+          _err="${_err//$'\n'/ }"
+          [ "${#_err}" -gt $(( DLG_W - 12 )) ] && _err="${_err:0:DLG_W-13}…"
+          dialog_status "${RED}✗ ${_err:-failed to rename}${RST}"
+          sleep 0.9
         fi
         sleep 0.35
       fi
