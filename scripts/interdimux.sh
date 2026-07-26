@@ -234,6 +234,27 @@ fi
 # True when tmux is at least major*100+minor
 tmux_ge() { [ "$TMUX_VNUM" -ge "$1" ]; }
 
+# POSIX shell quoting.  Sets REPLY to a form that any POSIX sh reproduces
+# verbatim: wrap in single quotes, and end/escape/reopen around each embedded
+# single quote.
+#
+# NOT `printf %q`.  Bash's %q reaches for ANSI-C quoting the moment a control
+# character appears — `echo a<TAB>b` becomes `echo\ a$'\t'b` — and every string
+# built here is executed by some OTHER shell: at replays the job body under
+# /bin/sh, and tmux runs `run-shell` and popup commands the same way.  On this
+# box /bin/sh is dash, which has no $'...' at all and reads it as a literal '$'
+# followed by a quoted string.  Verified: dash ran the %q form above and printed
+# `echo a$\tb`, so a scheduled command containing a tab or a newline delivered
+# the wrong text.
+#
+# Known limitation: fish cannot parse '\'' either (its only in-quote escapes are
+# \' and \\).  This is strictly better than %q there too, and every shell that
+# actually runs these strings is POSIX.
+shq() {
+  local s="$1"
+  REPLY="'${s//\'/\'\\\'\'}'"
+}
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -2298,17 +2319,25 @@ sched_resolve() {
 # ignored.
 sched_job_body() {
   local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
+  # POSIX quoting, not %q: atd replays this body under /bin/sh.  See shq().
+  local q_logdir q_log q_sock q_want q_pane q_keys
+  shq "$SCHED_LOGDIR"; q_logdir="$REPLY"
+  shq "$SCHED_LOG";    q_log="$REPLY"
+  shq "$sock";         q_sock="$REPLY"
+  shq "$srvpid";       q_want="$REPLY"
+  shq "$pane";         q_pane="$REPLY"
+  shq "$keys";         q_keys="$REPLY"
   printf '%s\n' \
     "# imux:v1 pane=${pane} target=${label} desc=$(printf '%s' "$keys" | tr '\n' ' ')" \
     "# atd tries to MAIL a job's output.  With no MTA installed that output is" \
     "# destroyed and leaves only 'Exec failed for mail command' in the journal --" \
     "# which reads exactly like 'my job never ran'.  Log instead of discarding." \
-    "mkdir -p $(printf '%q' "$SCHED_LOGDIR") 2>/dev/null" \
-    "exec >>$(printf '%q' "$SCHED_LOG") 2>&1" \
+    "mkdir -p ${q_logdir} 2>/dev/null" \
+    "exec >>${q_log} 2>&1" \
     "echo \"== \$(date '+%Y-%m-%d %H:%M:%S') firing for ${label} (${pane})\"" \
-    "sock=$(printf '%q' "$sock")" \
-    "want=$(printf '%q' "$srvpid")" \
-    "pane=$(printf '%q' "$pane")" \
+    "sock=${q_sock}" \
+    "want=${q_want}" \
+    "pane=${q_pane}" \
     "got=\$(tmux -S \"\$sock\" display-message -p '#{pid}' 2>/dev/null) || exit 0" \
     "if [ \"\$got\" != \"\$want\" ]; then" \
     "  # the server restarted: pane ids have been recycled and \$pane may now" \
@@ -2316,7 +2345,7 @@ sched_job_body() {
     "  tmux -S \"\$sock\" display-message 'interdimux: scheduled keys skipped (tmux restarted)' 2>/dev/null" \
     "  exit 0" \
     "fi" \
-    "tmux -S \"\$sock\" send-keys -t \"\$pane\" -- $(printf '%q' "$keys") 2>/dev/null || exit 0" \
+    "tmux -S \"\$sock\" send-keys -t \"\$pane\" -- ${q_keys} 2>/dev/null || exit 0" \
     "tmux -S \"\$sock\" send-keys -t \"\$pane\" Enter 2>/dev/null"
 }
 
@@ -2343,8 +2372,12 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
     # substituted text is not re-quoted, so a pane title could inject shell.
     # '##' is tmux's escape for a literal '#'.
     _rs_keys="${_keys//\#/##}"
+    # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
+    shq "$SCHED_SOCK"; _q_sock="$REPLY"
+    shq "$SCHED_PANE"; _q_pane="$REPLY"
+    shq "$_rs_keys";   _q_keys="$REPLY"
     tmux run-shell -b -d "$_when" \
-      "tmux -S $(printf '%q' "$SCHED_SOCK") send-keys -t $(printf '%q' "$SCHED_PANE") -- $(printf '%q' "$_rs_keys") && tmux -S $(printf '%q' "$SCHED_SOCK") send-keys -t $(printf '%q' "$SCHED_PANE") Enter" \
+      "tmux -S $_q_sock send-keys -t $_q_pane -- $_q_keys && tmux -S $_q_sock send-keys -t $_q_pane Enter" \
       2>/dev/null \
       && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
       || { echo "interdimux: could not schedule" >&2; exit 1; }
@@ -3130,7 +3163,10 @@ env_fwd_flags() {
 build_env_fwd() {
   local kv out="env"
   env_fwd_vars
-  for kv in "${ENV_FWD[@]}"; do out+=" $(printf '%q' "$kv")"; done
+  # POSIX quoting, not %q — the popup command is run by a job shell we do not
+  # control, and an option value may hold a newline (@interdimux-startup-command
+  # is multi-line by design).  See shq().
+  for kv in "${ENV_FWD[@]}"; do shq "$kv"; out+=" $REPLY"; done
   printf '%s' "$out"
 }
 

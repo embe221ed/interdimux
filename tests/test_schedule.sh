@@ -22,8 +22,10 @@ PASS=0
 FAIL=0
 ERRORS=""
 SUBMITTED=()
+TMPD_SCHED="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-sched.XXXXXX")"
 
 cleanup() {
+  rm -rf "$TMPD_SCHED"
   for j in ${SUBMITTED[@]+"${SUBMITTED[@]}"}; do atrm "$j" 2>/dev/null || true; done
   tmux -L "$SOCK" kill-server 2>/dev/null || true
 }
@@ -172,6 +174,90 @@ case "$pane" in
   *'fmt-#H-and-#S'*) report "a scheduled command is not rewritten by tmux format expansion" pass ;;
   *) report "a scheduled command is not rewritten by tmux format expansion (got: $pane)" fail ;;
 esac
+
+# --- the job body is executed by /bin/sh, not by bash -----------------------------
+# `at` replays the body under a plain POSIX shell (dash here).  The body used to
+# be quoted with bash's printf %q, which switches to ANSI-C quoting the instant a
+# control character appears: `echo a<TAB>b` became `echo\ a$'\t'b`, and dash --
+# which has no $'...' -- delivered the literal text `echo a$\tb` to the pane.
+#
+# Assert it behaviourally: run the real job body under dash with a `tmux` shim
+# that records what it was asked to send, and compare against the original.
+TRICKY="echo a$(printf '\t')b 'q' \$HOME"
+# XDG_STATE_HOME so the job's log path points into the test dir, not the user's
+# real ~/.local/state -- the body bakes the absolute path in at submit time.
+out=$(XDG_STATE_HOME="$TMPD_SCHED/state" bash "$SCRIPT" --send-at "now + 1 hour" '=target:0' "$TRICKY" 2>&1) || true
+jid2=$(printf '%s' "$out" | grep -oE 'job [0-9]+' | head -1 | awk '{print $2}')
+if [ -n "$jid2" ]; then
+  SUBMITTED+=("$jid2")
+  body=$(at -c "$jid2" 2>/dev/null)
+  # the body is everything after at's environment preamble; the marker heredoc
+  # wrapper is at's own, so just take the imux:v1 header onwards
+  imux_body=$(printf '%s\n' "$body" | sed -n '/^# imux:v1 /,$p')
+
+  shimdir="$TMPD_SCHED/shim"; mkdir -p "$shimdir"
+  cat > "$shimdir/tmux" <<'SHIM'
+#!/bin/sh
+# invoked as: tmux -S <sock> <verb> ...
+shift 2            # past -S <sock>
+verb=$1; shift
+case "$verb" in
+  display-message) cat "$IMUX_SHIM_PID" ;;
+  send-keys)
+    shift 2        # past -t <pane>
+    [ "$1" = "--" ] && shift
+    [ "$1" = "Enter" ] || printf '%s' "$1" > "$IMUX_SHIM_SENT"
+    ;;
+esac
+SHIM
+  chmod +x "$shimdir/tmux"
+  printf '%s' "$(tmux -L "$SOCK" display-message -p '#{pid}')" > "$TMPD_SCHED/pid"
+  printf '%s\n' "$imux_body" > "$TMPD_SCHED/body.sh"
+
+  if dash -n "$TMPD_SCHED/body.sh" 2>/dev/null || sh -n "$TMPD_SCHED/body.sh" 2>/dev/null; then
+    report "the job body parses as POSIX sh" pass
+  else
+    report "the job body parses as POSIX sh" fail
+  fi
+
+  rm -f "$TMPD_SCHED/sent"
+  ( PATH="$shimdir:$PATH" IMUX_SHIM_PID="$TMPD_SCHED/pid" IMUX_SHIM_SENT="$TMPD_SCHED/sent" \
+      /bin/sh "$TMPD_SCHED/body.sh" ) >/dev/null 2>&1 || true
+  got=$(cat "$TMPD_SCHED/sent" 2>/dev/null || true)
+  if [ "$got" = "$TRICKY" ]; then
+    report "a command with a tab, a quote and a \$ survives /bin/sh verbatim" pass
+  else
+    report "a command with a tab, a quote and a \$ survives /bin/sh verbatim" fail
+    ERRORS+="    want: $(printf '%s' "$TRICKY" | cat -A)"$'\n'
+    ERRORS+="    got : $(printf '%s' "$got" | cat -A)"$'\n'
+  fi
+
+  # and the structural tell: no bash-only ANSI-C quoting anywhere in the body
+  if printf '%s' "$imux_body" | grep -q "\$'"; then
+    report "the job body contains no bash-only \$'...' quoting" fail
+  else
+    report "the job body contains no bash-only \$'...' quoting" pass
+  fi
+fi
+
+# --- and the same for the sub-minute path, which /bin/sh runs unconditionally ------
+# `tmux run-shell` hands its argument to /bin/sh, so this one was broken for
+# every user, not just those whose atd shell is dash.  Send into a pane running
+# `cat` rather than a shell: a TAB typed at a shell prompt triggers completion,
+# which would mangle the very character under test.
+tmux -L "$SOCK" new-window -d -t '=target:' -n catcher "cat > '$TMPD_SCHED/caught'"
+for _i in $(seq 1 50); do [ -e "$TMPD_SCHED/caught" ] && break; sleep 0.1; done
+TABBY="tab[$(printf '\t')]end"
+bash "$SCRIPT" --send-in 2 '=target:catcher' "$TABBY" >/dev/null 2>&1 || true
+for _i in $(seq 1 80); do grep -q 'end' "$TMPD_SCHED/caught" 2>/dev/null && break; sleep 0.1; done
+caught=$(head -1 "$TMPD_SCHED/caught" 2>/dev/null | tr -d '\r')
+if [ "$caught" = "$TABBY" ]; then
+  report "a sub-minute command with a tab survives run-shell's /bin/sh" pass
+else
+  report "a sub-minute command with a tab survives run-shell's /bin/sh" fail
+  ERRORS+="    want: $(printf '%s' "$TABBY" | cat -A)"$'\n'
+  ERRORS+="    got : $(printf '%s' "$caught" | cat -A)"$'\n'
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
