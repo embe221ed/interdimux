@@ -1261,24 +1261,69 @@ build_ctx_field() {
 }
 
 gather_targets() {
-  # Current target: anchor to $TMUX_PANE when tmux provides it (popups
-  # and run-shell both do) — a bare display-message in a clientless
-  # context silently resolves to the most recently attached session.
   local current_session current_window current_pane cur_raw
-  cur_raw=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "#S${US}#I${US}#P")
-  IFS="$US" read -r current_session current_window current_pane <<< "$cur_raw"
+  local sessions_raw all_windows_raw all_panes_raw
 
-  # Build process table once (instead of per-pane pgrep+ps)
+  # Build process table once (instead of per-pane pgrep+ps).  Started before
+  # the queries so a slow ps overlaps the tmux round-trip; on Linux this is a
+  # no-op (the /proc backend needs no table).
   [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
 
-  # Bulk-fetch all data using unit separator as internal field delimiter
-  local sessions_raw all_windows_raw all_panes_raw
-  sessions_raw=$(tmux list-sessions \
-    -F "#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}${US}#{session_windows}${US}#{?session_attached,attached,}")
-  all_windows_raw=$(tmux list-windows -a \
-    -F "#{session_name}${US}#{window_index}${US}#{window_name}${US}#{window_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_panes}${US}#{pane_pid}${US}#{window_zoomed_flag}#{window_bell_flag}#{window_activity_flag}")
-  all_panes_raw=$(tmux list-panes -a \
-    -F "#{session_name}${US}#{window_index}${US}#{pane_index}${US}#{pane_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{pane_pid}${US}#{window_panes}")
+  local _sfmt _wfmt _pfmt _curfmt
+  _sfmt="#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}${US}#{session_windows}${US}#{?session_attached,attached,}"
+  _wfmt="#{session_name}${US}#{window_index}${US}#{window_name}${US}#{window_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_panes}${US}#{pane_pid}${US}#{window_zoomed_flag}#{window_bell_flag}#{window_activity_flag}"
+  _pfmt="#{session_name}${US}#{window_index}${US}#{pane_index}${US}#{pane_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{pane_pid}${US}#{window_panes}"
+  _curfmt="#S${US}#I${US}#P"
+
+  # One tmux invocation instead of four.  A tmux client accepts a `;`-separated
+  # command list, and each round-trip costs ~5-6 ms of connect/teardown on top
+  # of the query itself — all of it ahead of the first emitted row.
+  #
+  # Sections are separated by RS (\x1e).  Note the ORDER: the only command here
+  # that can fail is the current-target lookup (a stale $TMUX_PANE), and tmux
+  # aborts the remainder of a command list on failure — so it goes LAST, where
+  # it cannot swallow the bulk data.
+  local _batched=0 _all RS=$'\x1e'
+  local -a _parts=()
+  if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+    _all=$(tmux \
+      list-sessions -F "$_sfmt" \; \
+      display-message -p "$RS" \; \
+      list-windows -a -F "$_wfmt" \; \
+      display-message -p "$RS" \; \
+      list-panes -a -F "$_pfmt" \; \
+      display-message -p "$RS" \; \
+      display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$_curfmt" 2>/dev/null)
+    # Split on RS by word-splitting, NOT by ${var#*pat}: the latter is
+    # quadratic in the offset and costs hundreds of ms on a large dump.
+    if [ -n "$_all" ]; then
+      set -f; IFS="$RS"; _parts=($_all); set +f; unset IFS
+    fi
+    # Exactly four sections, or something inside a field carried an RS of its
+    # own — a pane's cwd legitimately can (tmux only rejects RS in session and
+    # window NAMES).  An extra field shifts every subsequent section, which
+    # silently truncates a path AND drops the current-row marker, so fall back
+    # to separate queries rather than render something subtly wrong.
+    [ "${#_parts[@]}" -eq 4 ] && _batched=1
+  fi
+
+  if [ "$_batched" = 1 ]; then
+    # display-message appends a newline before each RS, and each section after
+    # the first therefore starts with one.
+    sessions_raw="${_parts[0]%$'\n'}"
+    all_windows_raw="${_parts[1]#$'\n'}"; all_windows_raw="${all_windows_raw%$'\n'}"
+    all_panes_raw="${_parts[2]#$'\n'}";   all_panes_raw="${all_panes_raw%$'\n'}"
+    cur_raw="${_parts[3]#$'\n'}"
+  else
+    # Current target: anchor to $TMUX_PANE when tmux provides it (popups
+    # and run-shell both do) — a bare display-message in a clientless
+    # context silently resolves to the most recently attached session.
+    cur_raw=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$_curfmt")
+    sessions_raw=$(tmux list-sessions -F "$_sfmt")
+    all_windows_raw=$(tmux list-windows -a -F "$_wfmt")
+    all_panes_raw=$(tmux list-panes -a -F "$_pfmt")
+  fi
+  IFS="$US" read -r current_session current_window current_pane <<< "$cur_raw"
 
   # Size the columns to the content we just fetched (fork-free).
   measure_widths
