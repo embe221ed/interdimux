@@ -29,6 +29,17 @@ esac
 # subshell on it.
 SQ_SCRIPT="${SCRIPT_PATH//\'/\'\\\'\'}"
 
+# The same again, with '#' doubled, for embedding in anything tmux FORMAT-EXPANDS
+# — which `run-shell` does to its argument, with or without -C.  An install path
+# containing a '#' (`~/dev/#scratch/interdimux`) otherwise has that character and
+# whatever follows it eaten at keypress: `#f`, `#S` and friends are formats, so
+# prefix+f silently ran a command for a path that does not exist, or nothing at
+# all.  '##' is tmux's escape and collapses back to a single '#'.
+#
+# The quoted pattern matters: in ${var//#/…} a bare '#' is the match-at-start
+# anchor, not a literal.
+SQ_SCRIPT_FMT="${SQ_SCRIPT//'#'/##}"
+
 # The Rust core ("imux").  When present it renders the whole list — the part
 # that was ~181 ms of in-process bash — in ~2 ms.  Everything below stays as the
 # fallback, so the plugin works unchanged without it.
@@ -121,11 +132,11 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_dash=$(tmux show-option -gqv @interdimux-dashboard-key 2>/dev/null); _bk_dash="${_bk_dash:-g}"
 
   # The dashboard is not the hot path — it keeps the simple launcher.
-  tmux bind-key "$_bk_dash" run-shell -b "bash '$SQ_SCRIPT' --dashboard-launch"
+  tmux bind-key "$_bk_dash" run-shell -b "bash '$SQ_SCRIPT_FMT' --dashboard-launch"
 
   # run-shell -C needs tmux >= 3.4; below it, keep the original binding.
   if [ "$_bk_tvnum" -lt 304 ]; then
-    tmux bind-key "$_bk_nav" run-shell -b "bash '$SQ_SCRIPT' --launch switch"
+    tmux bind-key "$_bk_nav" run-shell -b "bash '$SQ_SCRIPT_FMT' --launch switch"
     exit 0
   fi
 
@@ -174,7 +185,7 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # -T is NOT #{q:}-quoted: rs_quote would double the '#' and '##[' does not
   # collapse back before '[', so the popup would show a literal "#[bold]".
   tmux bind-key "$_bk_nav" run-shell -bC \
-    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold] interdimux \"$_bk_env -E \"bash '$SQ_SCRIPT'\""
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold] interdimux \"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
 
@@ -3268,12 +3279,15 @@ if [ "${1:-}" = "--doctor" ]; then
     && _ok "at is installed (--send-at / --send-in beyond a minute)" \
     || _warn "at is not installed — only sub-minute --send-in works (tmux's own timer)"
 
-  # Paths.  A quote breaks the single-quoted command strings the bindings are
-  # built from; a '#' is eaten by tmux format expansion in run-shell -C.
+  # A '#' is handled (SQ_SCRIPT_FMT doubles it, so tmux's format expansion gives
+  # the path back).  A single quote is NOT: verified by driving a real key press
+  # from such a path, the popup never opened -- tmux's command parser re-escapes
+  # the '\'' sequence and the shell then sees a different string.  Report it
+  # rather than pretend, because the symptom is a key that does nothing at all.
   case "$SCRIPT_PATH" in
-    *'#'*) _bad "the install path contains '#': $SCRIPT_PATH"
-           _note "tmux format-expands run-shell arguments, so prefix+f would silently do nothing" ;;
-    *"'"*) _bad "the install path contains a single quote: $SCRIPT_PATH" ;;
+    *"'"*) _bad "the install path contains a single quote: $SCRIPT_PATH"
+           _note "the key bindings cannot survive it — move the install somewhere without one" ;;
+    *'#'*) _ok "install path contains '#', which is escaped for tmux format expansion" ;;
     *)     _ok "install path is safe to embed in a key binding" ;;
   esac
 
@@ -3461,12 +3475,10 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     # selected: inside its double-quoted token, \ " $ are escapes and
     # run-shell format-expands #{...} — escape those layers on top of
     # the shell quoting so exotic install paths survive.
-    menu_sp="$sp"
+    menu_sp="$SQ_SCRIPT_FMT"
     menu_sp="${menu_sp//\\/\\\\}"
     menu_sp="${menu_sp//\"/\\\"}"
     menu_sp="${menu_sp//\$/\\\$}"
-    # quoted pattern: a bare # in ${var//#/…} is the match-at-start anchor
-    menu_sp="${menu_sp//'#'/##}"
     tmux display-menu -x C -y C \
       -T '#[align=centre,bold] interdimux ' \
       -H "bg=${MENU_SEL_BG},fg=${MENU_SEL_FG},bold" \
@@ -3524,7 +3536,7 @@ if [ "${1:-}" = "--dashboard" ]; then
 
   # Launch the selected tool in a new popup via run-shell -b (popups
   # can't nest, so this runs after the dashboard popup closes)
-  tmux run-shell -b "bash '$SQ_SCRIPT' --launch $action"
+  tmux run-shell -b "bash '$SQ_SCRIPT_FMT' --launch $action"
   exit 0
 fi
 

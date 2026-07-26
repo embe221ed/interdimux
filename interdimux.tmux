@@ -17,8 +17,15 @@ if ! bash "$SCRIPT" --bind-keys 2>/dev/null; then
   dashboard_key=$(tmux show-option -gqv @interdimux-dashboard-key)
   dashboard_key="${dashboard_key:-g}"
 
+  # run-shell FORMAT-EXPANDS its argument, so a '#' in the install path is eaten
+  # at keypress ('#f' and '#S' are formats) and the binding silently does
+  # nothing.  '##' is tmux's escape.  The quoted pattern is required: a bare '#'
+  # in ${var//#/…} is the match-at-start anchor.
+  sq="${SCRIPT//\'/\'\\\'\'}"
+  fmt="${sq//'#'/##}"
+
   tmux bind-key "$interdimux_key" run-shell -b \
-    "bash '$SCRIPT' --launch switch"
+    "bash '$fmt' --launch switch"
   tmux bind-key "$dashboard_key" run-shell -b \
-    "bash '$SCRIPT' --dashboard-launch"
+    "bash '$fmt' --dashboard-launch"
 fi

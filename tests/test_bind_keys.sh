@@ -106,6 +106,63 @@ ck "every option in OPT_MAP is forwarded" \
    "$(grep -c '^INTERDIMUX_' "$OUT")" \
    "$(( $(grep -c '"' <<< "$(sed -n '/^OPT_MAP=(/,/^)/p' "$REPO/scripts/interdimux.sh" | grep -o '"[a-z-]*:[A-Z_]*"')" ) + 4 ))"
 
+# --- an install path containing '#' ---------------------------------------------
+# run-shell FORMAT-EXPANDS its argument, so a '#' in the install path is read as
+# the start of a format.  Measured against tmux 3.7b, which sequences actually
+# get eaten:
+#
+#   .../we#ird/x     -> unchanged        (#i is not a format; tmux leaves it)
+#   .../tmp#1/x      -> unchanged
+#   .../w#[bold]/x   -> unchanged        (a style, re-emitted verbatim here)
+#   .../we#Sird/x    -> .../we<session>ird/x
+#   .../#Hx/x        -> .../<hostname>x/x
+#   .../w#{pane_id}/x-> .../w%0/x
+#
+# So it needs a '#' followed by a format character -- narrower than "any '#'",
+# but silent when it hits: prefix+f runs a path that does not exist and nothing
+# is reported anywhere.  The directory below uses '#S' deliberately; '#ird'
+# would pass with or without the fix and prove nothing.
+HASHD="$TMPD/we#Sird dir"
+mkdir -p "$HASHD"
+OUT2="$TMPD/env2.txt"
+{
+  head -1 "$REPO/scripts/interdimux.sh"
+  printf 'if [ $# -eq 0 ]; then env | grep -E "^(INTERDIMUX_|TMUX_PANE=)" | sort > %q; exit 0; fi\n' "$OUT2"
+  tail -n +2 "$REPO/scripts/interdimux.sh"
+} > "$HASHD/probe.sh"
+chmod +x "$HASHD/probe.sh"
+
+bash "$HASHD/probe.sh" --bind-keys || { echo "--bind-keys failed from a # path"; exit 1; }
+
+# The stored binding must survive tmux's OWN format expansion back to the real
+# path -- expand it here rather than inferring from the literal text.
+for _k_what in "f:--launch switch or a popup" "g:--dashboard-launch"; do
+  _k="${_k_what%%:*}"
+  _stored=$("$T" -L "$SOCK" list-keys -T prefix 2>/dev/null \
+            | awk -v k="$_k" '$2=="-T" && $3=="prefix" && $4==k' \
+            | sed 's/^[^"]*"//; s/"$//')
+  _expanded=$("$T" -L "$SOCK" display-message -p "$_stored" 2>/dev/null)
+  case "$_expanded" in
+    *"$HASHD/probe.sh"*) PASS=$((PASS + 1))
+      printf '  \033[32m\xe2\x9c\x93\033[0m %s\n' "prefix+$_k survives tmux format expansion from a '#' path" ;;
+    *) FAIL=$((FAIL + 1))
+      printf '  \033[31m\xe2\x9c\x97\033[0m %s\n' "prefix+$_k survives tmux format expansion from a '#' path"
+      ERRORS+="  FAIL: prefix+$_k from a '#' path"$'\n'"        want to contain: [$HASHD/probe.sh]"$'\n'"        expanded to    : [$_expanded]"$'\n' ;;
+  esac
+done
+
+# ...and end to end: a real key press must actually reach the popup.
+"$T" -L "$OUTER" send-keys -t '=drv:' C-b
+sleep 0.6
+"$T" -L "$OUTER" send-keys -t '=drv:' f
+sleep 3.5
+if [ -s "$OUT2" ]; then
+  PASS=$((PASS + 1)); printf '  \033[32m\xe2\x9c\x93\033[0m %s\n' "prefix+f actually opens the popup from a '#' path"
+else
+  FAIL=$((FAIL + 1)); printf '  \033[31m\xe2\x9c\x97\033[0m %s\n' "prefix+f actually opens the popup from a '#' path"
+  ERRORS+="  FAIL: the popup never ran from a '#' install path"$'\n'
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
