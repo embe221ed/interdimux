@@ -813,15 +813,24 @@ emit_sorted_tiers() {
 # Since session names may contain ":", we parse indices from the right
 # (indices are always plain numbers).
 
-SPEC_TYPE="" SPEC_SESSION="" SPEC_WIDX="" SPEC_PIDX=""
+SPEC_TYPE="" SPEC_SESSION="" SPEC_WIDX="" SPEC_PIDX="" SPEC_DIR=""
 
 parse_spec() {
   local spec="$1"
   SPEC_TYPE="${spec%%:*}"
   local rest="${spec#*:}"
+  SPEC_DIR=""
   case "$SPEC_TYPE" in
     S)
       SPEC_SESSION="$rest"
+      SPEC_WIDX=""
+      SPEC_PIDX=""
+      ;;
+    D)
+      # A directory row: the remainder is an absolute path, which may itself
+      # contain ':' — take it whole rather than parsing from the right.
+      SPEC_DIR="$rest"
+      SPEC_SESSION=""
       SPEC_WIDX=""
       SPEC_PIDX=""
       ;;
@@ -845,6 +854,7 @@ spec_target() {
     S) printf '%s' "=$SPEC_SESSION" ;;
     W) printf '%s' "=$SPEC_SESSION:$SPEC_WIDX" ;;
     P) printf '%s' "=$SPEC_SESSION:$SPEC_WIDX.$SPEC_PIDX" ;;
+    D) printf '%s' "$SPEC_DIR" ;;
   esac
 }
 
@@ -854,6 +864,7 @@ spec_label() {
     S) printf '%s' "session '$SPEC_SESSION'" ;;
     W) printf '%s' "window '$SPEC_SESSION:$SPEC_WIDX'" ;;
     P) printf '%s' "pane '$SPEC_SESSION:$SPEC_WIDX.$SPEC_PIDX'" ;;
+    D) printf '%s' "directory '$SPEC_DIR'" ;;
   esac
 }
 
@@ -1400,6 +1411,56 @@ build_ctx_field() {
   fi
 }
 
+# Directory rows (IDEAS #14, the "one-list" model).
+#
+# Emitted AFTER every tmux row, which matters twice over: fzf appends streamed
+# rows as they arrive, so the tmux tree still paints at the same moment it
+# always did; and the column widths are already fixed by then, so a long
+# directory path can never widen the tree's columns.
+#
+# Sources are only the cheap ones — the recent list and zoxide (~3-5 ms
+# combined).  Filesystem scanning stays behind ctrl-o, where the user has asked
+# for it.  SESSION_DIRS holds the cwd of each session's active window, so a
+# directory that already has a session is not offered again.
+emit_dir_rows() {
+  [ "$SHOW_DIRS" = "on" ] || return 0
+  [[ "$DIRS_LIMIT" =~ ^[0-9]+$ ]] || return 0
+  [ "$DIRS_LIMIT" -gt 0 ] || return 0
+
+  local d disp base ident ctx type_badge n=0
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    # A tab would break the 4-field row contract; a session already covers it
+    case "$d" in *$'\t'*) continue ;; esac
+    [[ -v "SESSION_DIRS[$d]" ]] && continue
+
+    base="${d##*/}"
+    [ -n "$base" ] || base="$d"
+    base="${base//$'\t'/ }"
+    [ "${#base}" -gt $(( IDENT_W - 4 )) ] && base="${base:0:IDENT_W-5}…"
+
+    fld_reset
+    fld_add " " 1
+    fld_add " ${DIM_TREE}+${RST} " 3
+    fld_add "${DIM}${base}${RST}" "${#base}"
+    fld_pad "$IDENT_W"
+    ident="$FLD"
+
+    build_ctx_field "$d" "" "" ""
+    ctx="$FLD"
+
+    detect_project_type "$d"
+    type_badge=""
+    [ -n "$REPLY" ] && type_badge="${DIM}${REPLY}${RST}"
+
+    printf '%s\t%s\t%s\tD:%s\n' "$ident" "$ctx" "$type_badge" "$d"
+
+    n=$((n + 1))
+    [ "$n" -ge "$DIRS_LIMIT" ] && break
+  done < <(load_recent_dirs)
+  return 0
+}
+
 gather_targets() {
   local current_session current_window current_pane cur_raw
   local sessions_raw all_windows_raw all_panes_raw
@@ -1490,6 +1551,10 @@ gather_targets() {
     sessions_raw="${other_lines}${current_line}"
     sessions_raw="${sessions_raw%$'\n'}"
   fi
+
+  # cwd of each session's active window — emit_dir_rows uses it to skip
+  # directories that already have a session.
+  declare -A SESSION_DIRS=()
 
   # Build lookup: windows grouped by session name
   declare -A windows_by_session=()
@@ -1584,6 +1649,8 @@ gather_targets() {
       fld_pad "$IDENT_W"
       ident="$FLD"
 
+      [ "$_wact" = "1" ] && [ -n "$wpath" ] && SESSION_DIRS["$wpath"]=1
+
       build_ctx_field "$wpath" "${wflags:0:1}" "${wflags:1:1}" "${wflags:2:1}"
       ctx="$FLD"
 
@@ -1638,6 +1705,8 @@ gather_targets() {
       fi
     done <<< "$session_windows"
   done <<< "$sessions_raw"
+
+  emit_dir_rows
 }
 
 # ---------------------------------------------------------------------------
@@ -1680,6 +1749,11 @@ if [ "${1:-}" = "--preview" ]; then
   spec="$2"
   spec="${spec%%	*}"
   parse_spec "$spec"
+
+  # Directory rows preview the directory itself, not a tmux target.
+  if [ "$SPEC_TYPE" = "D" ]; then
+    exec bash "$SCRIPT_PATH" --dirs-preview "$SPEC_DIR"
+  fi
 
   target=$(spec_target)
 
@@ -2288,6 +2362,16 @@ if [ "${1:-}" = "--action" ]; then
   target=$(spec_target)
   label=$(spec_label)
 
+  # Every action below operates on a live tmux target; a directory row has none.
+  if [ "$SPEC_TYPE" = "D" ]; then
+    tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
+    case "$action" in
+      zoom) tmux display-message "interdimux: $label is not a tmux target" 2>/dev/null ;;
+      *)    info_flash "$BOLD_AMBER" "Not applicable" "That row is a directory, not a session." ;;
+    esac
+    exit 0
+  fi
+
   # /dev/tty for interactive I/O; overridable for testing
   tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
   tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
@@ -2576,6 +2660,7 @@ if [ "${1:-}" = "--header-for" ]; then
     S) hint enter switch ^x kill ^e rename ^d detach ^o new ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
     W) hint enter switch ^x kill ^e rename ^s swap ^o new ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
     P) hint enter switch ^x kill ^z zoom ^s swap ^t send ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
+    D) hint enter open ^o new ^r reload ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
     *) hint enter switch ^x kill ^e rename ^o new ^r reload ^/ preview ;;
   esac
   echo
@@ -2901,6 +2986,8 @@ while true; do
       export INTERDIMUX_HDR_W="$REPLY"
       hint_r enter switch ^x kill ^z zoom ^s swap ^t send ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
       export INTERDIMUX_HDR_P="$REPLY"
+      hint_r enter open ^o new ^r reload ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
+      export INTERDIMUX_HDR_D="$REPLY"
       hint_r enter switch ^x kill ^e rename ^o new ^r reload ^/ preview
       export INTERDIMUX_HDR_X="$REPLY"
 
@@ -2936,6 +3023,7 @@ while true; do
       _hdr_case+=' _S:*) printf "%s\n" "$INTERDIMUX_HDR_S";;'
       _hdr_case+=' _W:*) printf "%s\n" "$INTERDIMUX_HDR_W";;'
       _hdr_case+=' _P:*) printf "%s\n" "$INTERDIMUX_HDR_P";;'
+      _hdr_case+=' _D:*) printf "%s\n" "$INTERDIMUX_HDR_D";;'
       _hdr_case+=' *) printf "%s\n" "$INTERDIMUX_HDR_X";; esac'
       if [ "$INLINE_CALLBACKS" = 1 ] && fzf_ge 63; then
         fzf_opts+=(--bind="focus:bg-cancel+bg-transform-header:$_hdr_case")
@@ -2993,6 +3081,18 @@ while true; do
   if [ "$fzf_rc" -eq 0 ] && [ -n "$selection" ]; then
     spec="${selection##*	}"
     parse_spec "$spec"
+    # A directory row has no session yet — Enter means "open it", which is the
+    # whole point of listing dirs inline (IDEAS #14).
+    if [ "$SPEC_TYPE" = "D" ]; then
+      if [ -d "$SPEC_DIR" ]; then
+        record_dir_use "$SPEC_DIR"
+        connect_dir "$SPEC_DIR" || \
+          tmux display-message "interdimux: could not open $SPEC_DIR"
+      else
+        tmux display-message "interdimux: $(spec_label) no longer exists"
+      fi
+      exit 0
+    fi
     target=$(spec_target)
     tmux switch-client -t "$target" 2>/dev/null || \
       tmux display-message "interdimux: $(spec_label) no longer exists"

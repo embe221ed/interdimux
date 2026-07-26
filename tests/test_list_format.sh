@@ -50,8 +50,11 @@ report() {
 
 # Run --list inside the test server from charlie's pane (making charlie
 # the "current" session), ANSI codes stripped.
+# Dir rows (IDEAS #14) come from the developer's own recent-dirs/zoxide, which
+# would make this suite depend on the machine it runs on.  This file tests the
+# tmux TREE format; tests/test_one_list.sh owns the D: rows.
 run_list() {
-  local extra_env="${1:-}"
+  local extra_env="INTERDIMUX_SHOW_DIRS=off ${1:-}"
   tmux_cmd run-shell -t "=charlie:0" \
     "$extra_env bash '$SCRIPT' --list > '$OUT_FILE'" 2>/dev/null || true
   sed $'s/\x1b\\[[0-9;]*m//g' "$OUT_FILE"
@@ -118,11 +121,11 @@ else
   report "every row has exactly 4 tab-separated fields" fail
 fi
 
-bad_specs=$(printf '%s\n' "$out" | awk -F'\t' '$4 !~ /^[SWP]:/ { print }')
+bad_specs=$(printf '%s\n' "$out" | awk -F'\t' '$4 !~ /^[SWPD]:/ { print }')
 if [ -z "$bad_specs" ]; then
-  report "every row ends with a S:/W:/P: spec field" pass
+  report "every row ends with a S:/W:/P:/D: spec field" pass
 else
-  report "every row ends with a S:/W:/P: spec field" fail
+  report "every row ends with a S:/W:/P:/D: spec field" fail
 fi
 
 # ---------------------------------------------------------------------------

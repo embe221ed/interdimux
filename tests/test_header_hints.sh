@@ -40,7 +40,7 @@ echo
 # From the navigator:             "      hint_r enter switch ... ${_scope_hint...}"
 norm() { sed -e 's/\${[_a-zA-Z]*scope_hint\[@\][^}]*}[^ ]*//' -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//'; }
 
-for pair in "S:HDR_S" "W:HDR_W" "P:HDR_P"; do
+for pair in "S:HDR_S" "W:HDR_W" "P:HDR_P" "D:HDR_D"; do
   t="${pair%%:*}" ; label="${pair#*:}"
   from_handler=$(grep -E "^ *$t\) hint " "$SCRIPT" | head -1 | sed -e "s/^ *$t) hint //" -e 's/ *;;$//' | norm)
   from_nav=$(grep -A1 -E "^ *hint_r .*" "$SCRIPT" | grep -B1 "INTERDIMUX_$label=" | head -1 \
@@ -72,15 +72,17 @@ export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307
 export INTERDIMUX_HDR_S="$(bash "$SCRIPT" --header-for 'S:x')"
 export INTERDIMUX_HDR_W="$(bash "$SCRIPT" --header-for 'W:x:0')"
 export INTERDIMUX_HDR_P="$(bash "$SCRIPT" --header-for 'P:x:0:1')"
+export INTERDIMUX_HDR_D="$(bash "$SCRIPT" --header-for 'D:/tmp/x')"
 export INTERDIMUX_HDR_X="$(bash "$SCRIPT" --header-for '')"
 
 hdr_case='case _SUBJECT in'
 hdr_case+=' _S:*) printf "%s\n" "$INTERDIMUX_HDR_S";;'
 hdr_case+=' _W:*) printf "%s\n" "$INTERDIMUX_HDR_W";;'
 hdr_case+=' _P:*) printf "%s\n" "$INTERDIMUX_HDR_P";;'
+hdr_case+=' _D:*) printf "%s\n" "$INTERDIMUX_HDR_D";;'
 hdr_case+=' *) printf "%s\n" "$INTERDIMUX_HDR_X";; esac'
 
-for spec in "S:alpha" "W:alpha:0" "P:alpha:0:1" "D:dir" "S:it's odd" "S:has space" 'S:$(touch /tmp/imux_pwned)'; do
+for spec in "S:alpha" "W:alpha:0" "P:alpha:0:1" "D:/tmp/some/dir" "Q:other" "S:it's odd" "S:has space" 'S:$(touch /tmp/imux_pwned)'; do
   want=$(bash "$SCRIPT" --header-for "$spec")
   # fzf single-quotes the placeholder; printf %q is the closest stand-in
   got=$(sh -c "${hdr_case/_SUBJECT/_$(printf '%q' "$spec")}")
