@@ -141,7 +141,18 @@ if tmux -L "$SOCK" capture-pane -t '=alpha:' -p 2>/dev/null | grep -q 'ONELIST_H
 else
   report "opening a D: row hydrates the new session" fail
 fi
-# ...and it now has a session, so it must drop out of the directory rows
+# ...and it now has a session, so it must drop out of the directory rows.
+#
+# Dedup keys on the cwd tmux reports for each session's ACTIVE window, and tmux
+# derives that from /proc at query time — under a loaded box it can still be
+# reporting the server's cwd for a pane whose shell has only just been forked.
+# Wait for that precondition explicitly, so a slow box fails the wait (with the
+# cwds printed) instead of silently failing the dedup assertion.
+wait_for "tmux to report alpha's cwd" sh -c \
+  "tmux -L '$SOCK' list-windows -a -F '#{?window_active,#{pane_current_path},}' \
+     | grep -qx '$TMPD/alpha'" \
+  || ERRORS+="    cwds: $(tmux -L "$SOCK" list-windows -a -F '#{session_name}=#{pane_current_path}' | tr '\n' ' ')"$'\n'
+
 if bash "$SCRIPT" --list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' '{print $4}' \
      | grep -qx "D:$TMPD/alpha"; then
   report "an opened directory drops out of the D: rows" fail

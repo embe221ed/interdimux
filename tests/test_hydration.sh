@@ -117,8 +117,19 @@ else
 fi
 
 # --- 6. an EXISTING session is switched to, not re-hydrated -------------------
+# Clear the pane first, so any marker seen afterwards can only have been sent
+# again.  WAIT for the clear to land instead of sleeping: under load `clear` had
+# not run within the old fixed 1 s, leaving the first hydration's output on
+# screen and failing this as a spurious "ran again".
 tmux -L "$SOCK" send-keys -t '=projalpha:' 'clear' Enter 2>/dev/null || true
-sleep 1
+cleared=0
+for _i in $(seq 1 100); do
+  [ "$(marker_in projalpha | grep -c 'HYDRATED_ALPHA' || true)" -eq 0 ] && { cleared=1; break; }
+  sleep 0.1
+done
+if [ "$cleared" != 1 ]; then
+  report "the pane could be cleared before re-connecting (precondition)" fail
+fi
 run_connect "$proj" >/dev/null 2>&1 || true
 sleep 1.5
 n=$(marker_in projalpha | grep -c 'HYDRATED_ALPHA' || true)

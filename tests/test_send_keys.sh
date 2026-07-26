@@ -209,7 +209,9 @@ test_send_window_single_pane
 test_send_session
 test_send_no_leak
 
-printf '\n  \033[1m%d passed, %d failed\033[0m\n\n' "$PASS" "$FAIL"
+# same "Results: N passed, N failed" line as every other suite, so the runner
+# can total them up instead of special-casing this one
+printf '\nResults: %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"
 
 exit "$FAIL"

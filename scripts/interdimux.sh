@@ -2787,6 +2787,20 @@ if [ "${1:-}" = "--action" ]; then
       esac
       input_dialog "$BOLD_AMBER" "Rename ${label}" "❯ " "$current_name"
       new_name="$REPLY"
+      # tmux splits a target at the FIRST ':', so a name containing one makes
+      # the session permanently unreachable from this picker: parse_spec is
+      # careful to parse indices from the right, but spec_target still emits
+      # "=name:idx" and tmux resolves that against the wrong thing.  tmux itself
+      # accepts the rename, so refuse it here rather than create a session the
+      # user cannot get back to.  ('.' is fine — "=my.app:0" parses correctly.)
+      case "$new_name" in
+        *:*)
+          dialog_status "${RED}✗ a name cannot contain ':' (tmux splits targets there)${RST}"
+          sleep 1.2
+          dialog_close
+          exit 0
+          ;;
+      esac
       if [ -n "$new_name" ] && [ "$new_name" != "$current_name" ]; then
         # Capture tmux's own message instead of discarding it: "session names
         # cannot contain '.' or ':'" tells the user what to do, where
@@ -3288,6 +3302,11 @@ ACTION_CMD="bash '$SCRIPT_PATH' --action"
 
 while true; do
   : > "$RESUME_FILE"
+  # Re-seed each iteration: the loop restarts fzf using the STATIC $SHOW_PREVIEW
+  # to choose --preview-window …hidden, while compute_widths reads the file.
+  # ctrl-o -> Esc re-enters the loop, so without this the two go permanently out
+  # of phase and rows are sized for a preview that is not shown.
+  [ -n "$PREVIEW_STATE_FILE" ] && printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null
 
   # shellcheck disable=SC2054  # commas are part of a single fzf argument
   fzf_opts=(
@@ -3445,6 +3464,7 @@ while true; do
         fi
       fi
       fzf_ge 61 && fzf_opts+=(--ghost='session · window · pane')
+      _raw_on=0
 
       # Raw mode (fzf >= 0.74): non-matching rows stay on screen, dimmed,
       # instead of vanishing.  This is what fixes the tree collapsing as you
@@ -3457,11 +3477,25 @@ while true; do
       # So find-or-create cannot key off the exit code any more — the enter bind
       # dispatches on $FZF_MATCH_COUNT and performs the create inside fzf.
       if [ "$RAW_MODE" = "on" ] && fzf_ge 74; then
+        _raw_on=1
         fzf_opts+=(
           --raw
-          --color="nomatch:${COLOR_TREE}"
+          # :strip:dim, not a bare colour — setting a colour REPLACES fzf's
+          # default dim attribute, and because every row is pre-coloured with
+          # --ansi the non-matching rows kept nearly all their colour and the
+          # dimming barely showed.  strip removes the row's own SGR runs.
+          --color="nomatch:${COLOR_TREE}:strip:dim"
+          # fzf has a SECOND gutter option that only applies in raw mode;
+          # blanking just --gutter left a stray ▖ on every non-current row.
+          --gutter-raw=' '
           --bind="enter:transform:[ \"\${FZF_MATCH_COUNT:-0}\" -eq 0 ] && echo 'execute(bash \"$SQ_SCRIPT\" --create-from-query {q})+abort' || echo accept"
         )
+      fi
+
+      # Raw mode still needs the cursor moved even when the inline header
+      # snippets are unavailable (old fzf, or a user-supplied --with-shell).
+      if [ "$_raw_on" = 1 ] && [ "$INLINE_CALLBACKS" != 1 ]; then
+        fzf_opts+=(--bind='result:best')
       fi
 
       # Announce find-or-create in the zero-match state (IDEAS #1).  Without it
@@ -3485,10 +3519,21 @@ while true; do
         # (it consults zoxide and the filesystem), and `result` fires on every
         # keystroke.
         _hdr_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hdr_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
+        # `best` FIRST, and only on `result`: in raw mode every row stays
+        # displayed, so nothing moves the cursor onto a match and
+        # `--bind=change:first` actively pins it to row 1 — filter, press ctrl-x,
+        # and you kill whatever happened to be at the top.  Verified: with --raw,
+        # typing "delta" left the cursor on "alpha" under change:first AND under
+        # change:best (which fires before the search completes); result:best
+        # lands on "delta".
+        # It must be chained here rather than bound separately, because fzf's
+        # last --bind for an event replaces the earlier one.
+        _res_pre=""
+        [ "$_raw_on" = 1 ] && _res_pre="best+"
         if fzf_ge 63; then
-          fzf_opts+=(--bind="result:bg-cancel+bg-transform-header:$_hdr_bind")
+          fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-header:$_hdr_bind")
         else
-          fzf_opts+=(--bind="result:transform-header:$_hdr_bind")
+          fzf_opts+=(--bind="result:${_res_pre}transform-header:$_hdr_bind")
         fi
       fi
       ;;

@@ -46,19 +46,27 @@ sleep 1
 # The dialogs draw with absolute cursor positioning and write with `>`, so each
 # call truncates a plain file and only the last survives.  Render into a REAL
 # pane instead and read the screen — which is also what the user actually sees.
-run_rename() { # $1 = new name -> prints the rendered screen
-  local newname="$1" in="$TMPD/in"
+run_rename()    { run_rename_on 'one' "$1"; }
+run_rename_on() { # $1 = session, $2 = new name -> prints the rendered screen
+  local sess="$1" newname="$2" in="$TMPD/in"
   printf '\025%s\n' "$newname" > "$in"     # ^U then the name then Enter
-  tmux -L "$SOCK" kill-window -t '=one:dlg' 2>/dev/null || true
+  tmux -L "$SOCK" kill-window -t "=$sess:dlg" 2>/dev/null || true
   local wid
-  wid=$(tmux -L "$SOCK" new-window -d -P -F '#{window_id}' -t '=one:' -n dlg \
+  wid=$(tmux -L "$SOCK" new-window -d -P -F '#{window_id}' -t "=$sess:" -n dlg \
     "env INTERDIMUX_TTY_IN='$in' INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 \
          INTERDIMUX_TMUX_VNUM=307 TMUX_PANE='$TMUX_PANE' \
-         bash '$SCRIPT' --action rename 'S:one'; sleep 3" 2>/dev/null) || return 0
-  sleep 2.5
-  # by WINDOW ID, not by session:name — a successful rename changes the session
-  # name out from under us mid-flight, and the id is stable
-  tmux -L "$SOCK" capture-pane -t "$wid" -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r' || true
+         bash '$SCRIPT' --action rename \"S:$sess\"; sleep 3" 2>/dev/null) || return 0
+  # Poll for the dialog to actually render rather than guessing a duration —
+  # under load a fixed sleep samples an empty screen and the assertion fails for
+  # the wrong reason.  Capture by WINDOW ID, not session:name: a successful
+  # rename changes the session name out from under us mid-flight.
+  local i out=""
+  for i in $(seq 1 60); do
+    out=$(tmux -L "$SOCK" capture-pane -t "$wid" -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r' || true)
+    printf '%s' "$out" | grep -q '╭' && break
+    sleep 0.1
+  done
+  printf '%s' "$out"
 }
 
 # --- #23: the real reason, not a generic failure -------------------------------
@@ -143,6 +151,29 @@ grep -q 'rename-window  -t "$target" -- "$new_name"' "$SCRIPT" || _dash_ok=0
 grep -q 'send-keys -t "$t" -- "$send_cmd"' "$SCRIPT" || _dash_ok=0
 [ "$_dash_ok" = 1 ] && report "user text is passed after -- so a leading dash is not a flag" pass \
                     || report "user text is passed after -- so a leading dash is not a flag" fail
+
+# A ':' in a session name makes the session permanently unreachable from the
+# picker: tmux splits a target at the FIRST ':', so spec_target's "=name:idx"
+# resolves against the wrong thing.  tmux itself ACCEPTS such a rename, so the
+# dialog has to refuse it.  (Verified: a session named "has:colon" exists but
+# `-t '=has:colon:'` resolves to empty.)
+# NOTE: an earlier test renames "one" to "renamed-ok", so this needs its own
+# session — targeting a session that no longer exists made run_rename return
+# empty and the assertion fail for the wrong reason.
+tmux -L "$SOCK" new-session -d -s colonsrc -x 100 -y 30
+for _i in $(seq 1 50); do tmux -L "$SOCK" has-session -t '=colonsrc' 2>/dev/null && break; sleep 0.1; done
+out=$(run_rename_on 'colonsrc' 'no:good')
+if printf '%s' "$out" | grep -q "cannot contain"; then
+  report "a rename to a name containing ':' is refused with a reason" pass
+else
+  report "a rename to a name containing ':' is refused with a reason" fail
+  ERRORS+="    drew: $(printf '%s' "$out" | tr -s ' ' | tail -c 160)"$'\n'
+fi
+if tmux -L "$SOCK" has-session -t '=no:good' 2>/dev/null; then
+  report "...and no unreachable session was created" fail
+else
+  report "...and no unreachable session was created" pass
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
