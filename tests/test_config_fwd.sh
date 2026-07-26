@@ -51,9 +51,16 @@ mapfile -t GETOPT_OPTS < <(grep -E '^[[:space:]]*get_opt ' "$SCRIPT" \
 mapfile -t FWD_ENV < <(sed -n '/^env_fwd_vars()/,/^}/p' "$SCRIPT" \
   | grep -oE '"INTERDIMUX_[A-Z_]+=' | grep -oE 'INTERDIMUX_[A-Z_]+' | sort -u)
 
-# Option names covered by the one-shot dump
-mapfile -t OPT_NAMES < <(sed -n '/^OPT_NAMES=(/,/^)/p' "$SCRIPT" \
-  | sed -e 's/^OPT_NAMES=(//' -e 's/)$//' | tr ' ' '\n' | grep -E '^[a-z-]+$' | sort -u)
+# Option names covered by the one-shot dump (derived from OPT_MAP)
+mapfile -t OPT_NAMES < <(sed -n '/^OPT_MAP=(/,/^)/p' "$SCRIPT" \
+  | grep -oE '"[a-z-]+:[A-Z_]+"' | sed -e 's/^"//' -e 's/:.*$//' | sort -u)
+
+# Env suffixes OPT_MAP claims to feed -- this is what --bind-keys emits, so a
+# name here that get_opt does not read means the baked binding silently drops
+# the user's option.
+mapfile -t MAP_ENV < <(sed -n '/^OPT_MAP=(/,/^)/p' "$SCRIPT" \
+  | grep -oE '"[a-z-]+:[A-Z_]+"' | sed -e 's/^.*://' -e 's/"$//' \
+  | sed 's/^/INTERDIMUX_/' | sort -u)
 
 has() { local n="$1"; shift; local x; for x in "$@"; do [ "$x" = "$n" ] && return 0; done; return 1; }
 
@@ -83,6 +90,16 @@ if [ -z "$missing_opt" ]; then
   report "every get_opt option is covered by OPT_NAMES" pass
 else
   report "every get_opt option is covered by OPT_NAMES (missing:$missing_opt)" fail
+fi
+
+missing_map=""
+for e in ${GETOPT_ENV[@]+"${GETOPT_ENV[@]}"}; do
+  has "$e" ${MAP_ENV[@]+"${MAP_ENV[@]}"} || missing_map+=" $e"
+done
+if [ -z "$missing_map" ]; then
+  report "OPT_MAP feeds every get_opt env var (used by --bind-keys)" pass
+else
+  report "OPT_MAP feeds every get_opt env var (missing:$missing_map)" fail
 fi
 
 # The sentinel itself must be forwarded, or the whole warm path is dead again.

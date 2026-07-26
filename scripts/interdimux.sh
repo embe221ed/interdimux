@@ -30,6 +30,132 @@ esac
 SQ_SCRIPT="${SCRIPT_PATH//\'/\'\\\'\'}"
 
 # ---------------------------------------------------------------------------
+# Option table
+# ---------------------------------------------------------------------------
+
+# OPT_MAP is the single source of truth for "which option feeds which env var".
+# Three consumers read it: the dump below, env_fwd_vars (popup -e flags), and
+# --bind-keys (the baked prefix+f binding).  The env suffix is NOT always the
+# option name with dashes swapped — fzf-opts feeds INTERDIMUX_FZF_OPTS,
+# dirs-live-search feeds INTERDIMUX_DIRS_LIVE — which is exactly the kind of
+# mismatch that silently drops a user's setting once the OPTS_PRIMED sentinel
+# stops the child from re-reading tmux.  tests/test_config_fwd.sh cross-checks
+# this table against the get_opt calls.
+OPT_MAP=(
+  "show-preview:SHOW_PREVIEW"           "show-full-command:SHOW_FULL_COMMAND"
+  "show-git-branch:SHOW_GIT_BRANCH"     "popup-width:POPUP_WIDTH"
+  "popup-height:POPUP_HEIGHT"           "order:ORDER"
+  "fzf-opts:FZF_OPTS"                   "recent-limit:RECENT_LIMIT"
+  "scan-depth:SCAN_DEPTH"               "use-zoxide:USE_ZOXIDE"
+  "dirs-live-search:DIRS_LIVE"          "project-markers:PROJECT_MARKERS"
+  "color-accent:COLOR_ACCENT"           "color-path:COLOR_PATH"
+  "color-git:COLOR_GIT"                 "color-ssh:COLOR_SSH"
+  "color-editor:COLOR_EDITOR"           "color-success:COLOR_SUCCESS"
+  "color-danger:COLOR_DANGER"           "color-tree:COLOR_TREE"
+  "color-separator:COLOR_SEPARATOR"     "color-query:COLOR_QUERY"
+  "color-match-current:COLOR_MATCH_CURRENT" "color-current-bg:COLOR_CURRENT_BG"
+  "color-header:COLOR_HEADER"           "color-border:COLOR_BORDER"
+  "color-menu-sel-fg:COLOR_MENU_SEL_FG"
+)
+OPT_NAMES=()
+for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
+unset _m
+
+# ---------------------------------------------------------------------------
+# Key bindings (called once by interdimux.tmux at plugin load)
+# ---------------------------------------------------------------------------
+#
+# Binds prefix+f STRAIGHT to display-popup, so opening the picker costs no
+# shell at all.  The old path was: run-shell -b forks /bin/sh, which starts a
+# full bash on this 2500-line script, which resolves config it then throws
+# away, and finally execs `tmux display-popup` — a client round-trip — before
+# the real navigator bash even starts.  Measured ~40 ms of pure launcher
+# overhead per open, and it scaled badly under load.
+#
+# `run-shell -bC` is the vehicle: -C runs the command IN THE SERVER (no shell),
+# and run-shell format-expands its argument at keypress in the pressing
+# client's context.  display-popup does NOT format-expand its own -e or
+# shell-command, so the wrapper is required rather than a direct
+# `bind-key … display-popup`.
+#
+# Values are forwarded as FORMAT REFERENCES, not baked literals, so runtime
+# `set -g @interdimux-*` changes take effect on the very next open — no plugin
+# reload, no staleness.
+#
+# This handler deliberately runs BEFORE the preflight below.  If fzf is missing
+# from the tmux server's PATH (common: fzf is often only on PATH via a shell
+# rc), the preflight exits 1 — and doing that here would leave the user with NO
+# BINDINGS AT ALL, which is far worse than a popup that reports the error.
+if [ "${1:-}" = "--bind-keys" ]; then
+  set +e
+
+  _bk_tvnum=999
+  _bk_vstr=$(tmux -V 2>/dev/null)
+  [[ "$_bk_vstr" =~ ([0-9]+)\.([0-9]+) ]] && \
+    _bk_tvnum=$(( BASH_REMATCH[1] * 100 + BASH_REMATCH[2] ))
+
+  _bk_nav=$(tmux show-option -gqv @interdimux-key 2>/dev/null);           _bk_nav="${_bk_nav:-f}"
+  _bk_dash=$(tmux show-option -gqv @interdimux-dashboard-key 2>/dev/null); _bk_dash="${_bk_dash:-g}"
+
+  # The dashboard is not the hot path — it keeps the simple launcher.
+  tmux bind-key "$_bk_dash" run-shell -b "bash '$SQ_SCRIPT' --dashboard-launch"
+
+  # run-shell -C needs tmux >= 3.4; below it, keep the original binding.
+  if [ "$_bk_tvnum" -lt 304 ]; then
+    tmux bind-key "$_bk_nav" run-shell -b "bash '$SQ_SCRIPT' --launch switch"
+    exit 0
+  fi
+
+  # fzf's minor version cannot come from a tmux format, so bake it as an
+  # integer.  If fzf isn't visible from here, omit it and let the popup child
+  # probe for itself rather than baking a wrong value.
+  _bk_fzf=""
+  _bk_fv=$(fzf --version 2>/dev/null); _bk_fv="${_bk_fv%% *}"
+  IFS=. read -r _bk_fmaj _bk_fmin _ <<< "$_bk_fv"
+  if [[ "${_bk_fmaj:-}" =~ ^[0-9]+$ && "${_bk_fmin:-}" =~ ^[0-9]+$ ]]; then
+    _bk_fzf="$_bk_fmin"
+    [ "$_bk_fmaj" -gt 0 ] && _bk_fzf=999
+  fi
+
+  # #{q:…} on every value is mandatory, not defensive: the expanded text is
+  # re-lexed by tmux's command parser, so a bare #{@interdimux-x} whose value
+  # contains a double quote either loses its quoting or kills the binding
+  # outright — silently, with prefix+f simply doing nothing.
+  #
+  # An unset option expands to "", which get_opt's -n test skips, landing on
+  # the built-in default.  That is correct ONLY because INTERDIMUX_OPTS_PRIMED
+  # also stops the child re-reading tmux; the two go together.
+  _bk_env=""
+  for _m in "${OPT_MAP[@]}"; do
+    _bk_env+=" -e \"INTERDIMUX_${_m#*:}=#{q:@interdimux-${_m%%:*}}\""
+  done
+  unset _m
+  _bk_env+=" -e \"INTERDIMUX_OPTS_PRIMED=1\""
+  # A popup natively exports TMUX_PANE as its OWN pane id, which resolves to an
+  # empty target — current-row marker and MRU's move-current-to-end both break,
+  # silently.  #{pane_id} is the pressing client's pane.
+  _bk_env+=" -e \"TMUX_PANE=#{pane_id}\""
+  _bk_env+=" -e \"INTERDIMUX_TMUX_VNUM=$_bk_tvnum\""
+  [ -n "$_bk_fzf" ] && _bk_env+=" -e \"INTERDIMUX_FZF_MINOR=$_bk_fzf\""
+  # popup_accent re-sends -T on every repaint, and on tmux >= 3.6 a partial
+  # display-popup resets omitted properties — without this the title vanishes
+  # after the ctrl-x kill confirm.
+  _bk_env+=" -e \"INTERDIMUX_TITLE= interdimux \""
+
+  # #{?…,…,…} treats the string "0" as FALSE, so it cannot be used as an
+  # emptiness test — #{==:…,} can.  (Width/height can't legitimately be 0, but
+  # the same idiom is wrong for colour-tree 0 or recent-limit 0.)
+  _bk_w='#{?#{==:#{@interdimux-popup-width},},80%,#{@interdimux-popup-width}}'
+  _bk_h='#{?#{==:#{@interdimux-popup-height},},75%,#{@interdimux-popup-height}}'
+
+  # -T is NOT #{q:}-quoted: rs_quote would double the '#' and '##[' does not
+  # collapse back before '[', so the popup would show a literal "#[bold]".
+  tmux bind-key "$_bk_nav" run-shell -bC \
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold] interdimux \"$_bk_env -E \"bash '$SQ_SCRIPT'\""
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
 
@@ -96,15 +222,10 @@ tmux_ge() { [ "$TMUX_VNUM" -ge "$1" ]; }
 #
 # load_tmux_opts resolves every @interdimux-* option in ONE display-message
 # via format expansion — raw, unquoted values, split on US.  Children receive
-# every value through the env, so they never trigger the dump.  Keep OPT_NAMES
-# in sync with the get_opt calls below (a missing name falls back to default).
-OPT_NAMES=(
-  show-preview show-full-command show-git-branch popup-width popup-height
-  order fzf-opts recent-limit scan-depth use-zoxide dirs-live-search
-  project-markers color-accent color-path color-git color-ssh color-editor
-  color-success color-danger color-tree color-separator color-query
-  color-match-current color-current-bg color-header color-border color-menu-sel-fg
-)
+# every value through the env, so they never trigger the dump.
+#
+# (OPT_MAP / OPT_NAMES are defined near the top of the file — they must be
+# available before the preflight, because --bind-keys runs ahead of it.)
 declare -A TMUX_OPTS=()
 _tmux_opts_loaded=0
 load_tmux_opts() {
