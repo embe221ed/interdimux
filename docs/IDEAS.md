@@ -55,8 +55,32 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 | 24 | ✅ **Done** (better than proposed) — `ps -eo` is gone entirely on Linux; full commands come from `/proc` per pane, so the cost scales with pane count instead of host process count. `ps` remains the macOS/BSD fallback. See PERFORMANCE.md Tier 5. | S | — |
 | 25 | ✅ **Done** — both ride in via the popup's `-e` flags (Tier 0.3), and the per-cursor-move header no longer re-execs the script at all (Tier 5.2). | S | — |
 | 26 | ✅ **Done** — **Stale widths after ctrl-/ toggle** — rows stay truncated for preview-on while half the popup is blank; track live preview state in a temp file, reload with corrected widths. | M | — |
-| 27 | **Consistent keys across modes** — ctrl-/ and ctrl-] are dead in action modes; the swap destination picker has no preview and never shows the swap source (put it in the prompt). | S | — |
+| 27 | *(partly done)* **Consistent keys across modes** — the ctrl-] cycle's fifth state (`1,3`) is labelled now, and the dir picker marks directories that already have a session. Still open: ctrl-/ and ctrl-] are dead in action modes, and the swap destination picker has no preview and never shows the swap source (put it in the prompt). | S | — |
 | 28 | **Dir-picker empty states** — a fruitless deep search shows a blank panel with no visible way back; bind `zero:` to "∅ nothing matched — ^r resets". | S | fzf ≥ 0.40 |
+
+## 4b. Landed from the reliability hunt
+
+Found by adversarial review and each reproduced before being fixed. Listed
+because the *class* is what is worth remembering, not the individual line.
+
+| Bug | Class | How it presented |
+|---|---|---|
+| Scheduled commands quoted with bash `printf %q`, executed by `/bin/sh` | wrong shell | `at -c` shows the job starts `#!/bin/sh`, and `run-shell` hands its argument to `/bin/sh` too. dash has no `$'…'`, so a tab or newline in a scheduled command arrived as literal `$\t`. Fixed by `shq()`, POSIX single-quote escaping, everywhere a string is built for another shell. |
+| A `#` in the install path killed the key bindings | format expansion | `run-shell` format-expands its argument, so `…/we#Sird/…` became `…/we<session>ird/…` and prefix+f silently ran a path that does not exist. Needs a `#` followed by a *format character* — `#ird` and `#1` are safe. |
+| The directory picker dropped an early accept | `pipefail` | `sel=$(--dirs-list \| fzf) \|\| exit 1` with a slow streaming producer: accept before the scan finishes, the producer takes SIGPIPE, and pipefail reports 141 instead of fzf's 0. Same shape the navigator was already guarded against. |
+| The zero-match header named a session Enter would not create | duplicated logic | `describe_create` and `create_from_query` derived the name independently, so with "api" open at `~/work/api`, typing `~/other/api` announced "create api" and created "other-api". |
+| Emoji clusters measured per character | wrong oracle | `❤️` counted 1 cell but drew 2; `👨‍💻` counted 4 and drew 2. **The golden test that guards alignment used the same expression as the code**, so it could not fail. |
+| A junk `@interdimux-recent-limit` printed errors onto the popup | unvalidated option | `[ "$count" -ge "lots" ]` → "integer expression expected", painted over the list. A junk `dirs-limit` made the Rust renderer drop every directory row. |
+| An unwritable `$XDG_DATA_HOME` printed three errors onto the popup | best-effort not enforced | `mkdir`, `mktemp` and `echo > ""` all complained. Remembering a directory is a convenience; it must not cost the switch. |
+| Dialogs overran a short popup | escapes counted as width | `${#text}` counts SGR bytes, so a coloured message that "fit" wrapped and overwrote the bottom border. |
+
+Two recurring lessons, both of which cost real time here:
+
+1. **A test that measures with the code's own expression proves nothing.** The
+   alignment invariant passed for months while emoji shifted every column.
+2. **A fixed sleep is a load-dependent assertion.** Four suites passed alone
+   and failed in a batch; every one was a `sleep` that should have been a
+   poll for the condition the test actually depended on.
 
 ## 5. Nice-to-haves
 
@@ -73,7 +97,7 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 - **Preview title in the border label** (S) — `transform-preview-label` frees two lines of preview body; no gate (0.37 < floor).
 - **Jump mode** (S) — `ctrl-j` + label letter = two-keystroke hop to any visible row (`jump:accept`); no tmux picker exposes this.
 - **Live auto-refresh** (S, fzf ≥ 0.73) — `every(4)` + `FZF_IDLE_TIME` guard; safe once cursor tracking (#2) lands. Use `reload-sync` (not `reload`) so the swap preserves query/viewport, and `--id-nth` **without** `--track` — see the warning on #2; a periodic refresh with `--track` would drop keystrokes every tick.
-- **CJK/emoji display-width handling** (M) — pure-bash wide-char width for names so wide chars stop shifting columns.
+- ~~**CJK/emoji display-width handling**~~ — done in the Rust core (cluster-aware `UnicodeWidthStr`, verified against tmux's own grid). Not backported to the frozen bash renderer.
 - **`--info-command`** (S, fzf ≥ 0.54) — show `12/24 · mru` so the active ordering is visible.
 - **Red Kill entry in the dashboard menu** (S) — `#[fg=colour167]Kill`, matching the danger vocabulary elsewhere.
 - **Pluggable dir preview command** (S) — `@interdimux-dirs-preview-cmd 'eza -la {}'` for the listing body.

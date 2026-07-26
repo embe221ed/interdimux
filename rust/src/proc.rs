@@ -73,6 +73,14 @@ impl Resolver {
             return v.clone();
         }
         let raw = fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or_default();
+        // Empty argv elements are DROPPED, which is a deliberate divergence from
+        // both `ps args=` and the bash backend (it appends "$a " for every
+        // segment, empty ones included).  A process with an empty argv element
+        // renders `a  b` there and `a b` here.  The run of blank cells is noise
+        // in a one-line command column, the bash renderer is frozen, and the
+        // parity harness only compares real argv, so this is the better output
+        // rather than an oversight.  Note the trailing NUL every /proc/cmdline
+        // carries would otherwise add a stray space to EVERY command.
         let joined = raw
             .split(|b| *b == 0)
             .filter(|s| !s.is_empty())
