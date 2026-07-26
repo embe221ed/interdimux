@@ -767,7 +767,7 @@ hydrate_session() {
   local line
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
-    tmux send-keys -t "$target" "$line" Enter 2>/dev/null || true
+    tmux send-keys -t "$target" -- "$line" Enter 2>/dev/null || true
   done <<< "$cmd"
   return 0
 }
@@ -2337,8 +2337,14 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
   # but tmux can.  Caveat, verified: a pending run-shell -d does NOT keep the
   # server alive — if the last session closes, the job is lost silently.
   if [ "$_mode" = "--send-in" ] && [[ "$_when" =~ ^[0-9]+$ ]] && [ "$_when" -lt 60 ]; then
+    # run-shell FORMAT-EXPANDS its argument before /bin/sh ever sees it, so a
+    # '#H' or '#{...}' in the user's command is substituted by tmux — verified:
+    # "echo host-is-#H" arrived as "echo host-is-krootabulon".  Worse, the
+    # substituted text is not re-quoted, so a pane title could inject shell.
+    # '##' is tmux's escape for a literal '#'.
+    _rs_keys="${_keys//\#/##}"
     tmux run-shell -b -d "$_when" \
-      "tmux -S $(printf '%q' "$SCHED_SOCK") send-keys -t $(printf '%q' "$SCHED_PANE") -- $(printf '%q' "$_keys") && tmux -S $(printf '%q' "$SCHED_SOCK") send-keys -t $(printf '%q' "$SCHED_PANE") Enter" \
+      "tmux -S $(printf '%q' "$SCHED_SOCK") send-keys -t $(printf '%q' "$SCHED_PANE") -- $(printf '%q' "$_rs_keys") && tmux -S $(printf '%q' "$SCHED_SOCK") send-keys -t $(printf '%q' "$SCHED_PANE") Enter" \
       2>/dev/null \
       && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
       || { echo "interdimux: could not schedule" >&2; exit 1; }
@@ -2683,19 +2689,21 @@ if [ "${1:-}" = "--action" ]; then
   target=$(spec_target)
   label=$(spec_label)
 
+  # /dev/tty for interactive I/O; overridable for testing.  Both must be set
+  # BEFORE the directory-row branch below: it calls info_flash -> dialog_open,
+  # which reads $tty_in, and under set -u an unbound variable kills the process
+  # outright — `set +e` does not protect against that.
+  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
+  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
+
   # Every action below operates on a live tmux target; a directory row has none.
   if [ "$SPEC_TYPE" = "D" ]; then
-    tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
     case "$action" in
       zoom) tmux display-message "interdimux: $label is not a tmux target" 2>/dev/null ;;
       *)    info_flash "$BOLD_AMBER" "Not applicable" "That row is a directory, not a session." ;;
     esac
     exit 0
   fi
-
-  # /dev/tty for interactive I/O; overridable for testing
-  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
-  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
 
   # A dialog hides the cursor and, in kill mode, recolours the popup border red.
   # Ctrl-C used to abandon both: the user was returned to the list with an
@@ -2709,10 +2717,17 @@ if [ "${1:-}" = "--action" ]; then
     # regular file (that is how the dialogs are tested), and > TRUNCATES it —
     # silently destroying everything the dialog drew.
     printf '\033[?25h' >>"$tty_out" 2>/dev/null
-    if [ "${INTERDIMUX_MODE:-switch}" = "kill" ]; then
-      popup_accent danger
-    else
-      popup_accent user
+    # Only touch the border when we are actually INSIDE a popup.  popup_accent
+    # issues `display-popup` with no -E: in a popup that repaints it, but with a
+    # client attached and no popup open tmux OPENS one running the default
+    # shell, and blocks until someone dismisses it.  INTERDIMUX_TITLE is set
+    # only by the popup launcher, so it is the marker for "we are in one".
+    if [ -n "${INTERDIMUX_TITLE:-}" ]; then
+      if [ "${INTERDIMUX_MODE:-switch}" = "kill" ]; then
+        popup_accent danger
+      else
+        popup_accent user
+      fi
     fi
   }
   trap '_action_cleanup; exit 130' INT TERM
@@ -2778,8 +2793,8 @@ if [ "${1:-}" = "--action" ]; then
         # "failed to rename" leaves them guessing (IDEAS #23).
         _err=""
         case "$SPEC_TYPE" in
-          S) _err=$(tmux rename-session -t "$target" "$new_name" 2>&1) ;;
-          W) _err=$(tmux rename-window  -t "$target" "$new_name" 2>&1) ;;
+          S) _err=$(tmux rename-session -t "$target" -- "$new_name" 2>&1) ;;
+          W) _err=$(tmux rename-window  -t "$target" -- "$new_name" 2>&1) ;;
         esac
         if [ $? -eq 0 ]; then
           dialog_status "${GREEN}✓ renamed to ${new_name}${RST}"
@@ -2847,7 +2862,8 @@ if [ "${1:-}" = "--action" ]; then
 
         sent=0 failed=0
         for t in "${send_targets[@]}"; do
-          if tmux send-keys -t "$t" "$send_cmd" Enter 2>/dev/null; then
+          # -- so a command starting with '-' is not parsed as a flag
+          if tmux send-keys -t "$t" -- "$send_cmd" Enter 2>/dev/null; then
             sent=$((sent + 1))
           else
             failed=$((failed + 1))
@@ -3490,8 +3506,21 @@ while true; do
   fi
 
   set +e
+  # pipefail is on, so `gather | fzf` reports the RIGHTMOST non-zero status: if
+  # the user accepts while rows are still streaming, fzf exits 0 but the
+  # producer dies of SIGPIPE and fzf_rc became 141 — neither the switch branch
+  # (0) nor find-or-create (1) ran, so the popup just closed and did nothing.
+  # Take fzf's own status from PIPESTATUS instead.
+  # pipefail off for THIS pipeline only.  With it on, `gather | fzf` reports the
+  # rightmost non-zero status: accept while rows are still streaming and fzf
+  # exits 0 but the producer dies of SIGPIPE, so the status became 141 —
+  # matching neither the switch branch (0) nor find-or-create (1), and the popup
+  # just closed having done nothing.  (PIPESTATUS is no help here: inside a
+  # command substitution it describes the substitution, not the inner pipeline.)
+  set +o pipefail
   out=$(gather_targets | fzf "${fzf_opts[@]}")
   fzf_rc=$?
+  set -o pipefail
   set -e
 
   # ctrl-o cancelled the dir picker — reopen the navigator

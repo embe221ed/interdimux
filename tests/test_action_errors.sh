@@ -112,6 +112,38 @@ printf '%s' "$_cleanup_body" | grep -q 'stty' \
   && report "cleanup restores the terminal mode input_dialog changed" pass \
   || report "cleanup restores the terminal mode input_dialog changed" fail
 
+# --- regressions from the reliability hunt -------------------------------------
+
+# Every action except zoom used to die with "tty_in: unbound variable" on a
+# directory row, because the D: early-exit set only tty_out and set -u kills the
+# process at the first read of the unbound one.  D: rows are on by default, so
+# ctrl-x on one was an instant, silent death.
+out=$(timeout 10 bash "$SCRIPT" --action kill 'D:/tmp' 2>&1) || true
+if printf '%s' "$out" | grep -q 'unbound variable'; then
+  report "an action on a directory row does not die on an unbound variable" fail
+else
+  report "an action on a directory row does not die on an unbound variable" pass
+fi
+
+# The cleanup trap calls popup_accent, which issues `display-popup` with no -E.
+# Inside a popup that repaints it; with a client attached and NO popup open tmux
+# OPENS one and blocks until a human dismisses it -- so every --action run
+# outside a popup hung forever.
+timeout 10 bash "$SCRIPT" --action zoom "P:one:0.0" >/dev/null 2>&1
+if [ $? -eq 124 ]; then
+  report "an action outside a popup does not hang" fail
+else
+  report "an action outside a popup does not hang" pass
+fi
+
+# tmux parses a leading '-' as a flag unless -- separates it.
+_dash_ok=1
+grep -q 'rename-session -t "$target" -- "$new_name"' "$SCRIPT" || _dash_ok=0
+grep -q 'rename-window  -t "$target" -- "$new_name"' "$SCRIPT" || _dash_ok=0
+grep -q 'send-keys -t "$t" -- "$send_cmd"' "$SCRIPT" || _dash_ok=0
+[ "$_dash_ok" = 1 ] && report "user text is passed after -- so a leading dash is not a flag" pass \
+                    || report "user text is passed after -- so a leading dash is not a flag" fail
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

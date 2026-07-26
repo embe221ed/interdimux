@@ -161,10 +161,18 @@ else
   report "the sub-minute job actually delivered the keys" fail
 fi
 
+# --- run-shell FORMAT-EXPANDS its argument -------------------------------------
+# Verified: "echo host-is-#H" arrived in the pane as "echo host-is-<hostname>".
+# tmux rewrote the user's command, and because the substituted text is not
+# re-quoted, a value like a pane title could inject shell.  '##' is the escape.
+out=$(bash "$SCRIPT" --send-in 2 '=target:0' 'echo fmt-#H-and-#S' 2>&1) || true
+sleep 4
+pane=$(tmux -L "$SOCK" capture-pane -t '=target:0' -p 2>/dev/null | grep -m1 'fmt-' || true)
+case "$pane" in
+  *'fmt-#H-and-#S'*) report "a scheduled command is not rewritten by tmux format expansion" pass ;;
+  *) report "a scheduled command is not rewritten by tmux format expansion (got: $pane)" fail ;;
+esac
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
-if [ "$FAIL" -gt 0 ]; then
-  echo
-  printf '%s' "$ERRORS"
-  exit 1
-fi
+if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi
