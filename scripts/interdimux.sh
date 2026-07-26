@@ -56,6 +56,8 @@ OPT_MAP=(
   "color-match-current:COLOR_MATCH_CURRENT" "color-current-bg:COLOR_CURRENT_BG"
   "color-header:COLOR_HEADER"           "color-border:COLOR_BORDER"
   "color-menu-sel-fg:COLOR_MENU_SEL_FG"
+  "startup-command:STARTUP_COMMAND"  "hydrate:HYDRATE"
+  "show-dirs:SHOW_DIRS"              "dirs-limit:DIRS_LIMIT"
 )
 OPT_NAMES=()
 for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
@@ -284,6 +286,10 @@ get_opt SCAN_DEPTH        "${INTERDIMUX_SCAN_DEPTH:-}"        @interdimux-scan-d
 get_opt USE_ZOXIDE        "${INTERDIMUX_USE_ZOXIDE:-}"        @interdimux-use-zoxide        on
 get_opt DIRS_LIVE         "${INTERDIMUX_DIRS_LIVE:-}"         @interdimux-dirs-live-search  off
 get_opt EXTRA_MARKERS     "${INTERDIMUX_PROJECT_MARKERS:-}"   @interdimux-project-markers   ""
+get_opt STARTUP_COMMAND   "${INTERDIMUX_STARTUP_COMMAND:-}"  @interdimux-startup-command   ""
+get_opt HYDRATE           "${INTERDIMUX_HYDRATE:-}"          @interdimux-hydrate           on
+get_opt SHOW_DIRS         "${INTERDIMUX_SHOW_DIRS:-}"        @interdimux-show-dirs         on
+get_opt DIRS_LIMIT        "${INTERDIMUX_DIRS_LIMIT:-}"       @interdimux-dirs-limit        15
 
 # ---------------------------------------------------------------------------
 # Colours — configurable palette
@@ -645,6 +651,140 @@ resolve_session_name() {
     fi
   fi
   printf '%s' "$session_name"
+}
+
+# ---------------------------------------------------------------------------
+# Session hydration — run a per-project startup command in a new session
+# ---------------------------------------------------------------------------
+#
+# Resolution order, first match wins:
+#   1. ~/.config/interdimux/startup.conf   "<glob><whitespace><command>"
+#   2. a .interdimux-startup file in the directory itself (contents = command)
+#   3. @interdimux-startup-command          (global fallback)
+#
+# Delivery is `send-keys`, deliberately, and not the pane's initial command.
+# sesh shipped exec-based delivery in v2.26.0 and reverted it wholesale in
+# v2.26.2: baking the command into the pane loses the prompt echo and the shell
+# history entry, reparents the pane into a fresh shell when the command exits,
+# and double-initialises the shell (breaking gitstatus/p10k).  send-keys keeps
+# the command an ordinary thing the user typed.
+
+# The startup command for DIR, or empty.  Sets REPLY.
+resolve_startup_command() {
+  local dir="$1" conf="${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/startup.conf"
+  REPLY=""
+
+  # 1. glob table.  Patterns are matched against the absolute path; the first
+  #    matching line wins, so put specific patterns above general ones.
+  if [ -f "$conf" ]; then
+    local line pat cmd
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in ''|'#'*) continue ;; esac
+      pat="${line%%[[:space:]]*}"
+      cmd="${line#"$pat"}"
+      cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+      [ -n "$pat" ] && [ -n "$cmd" ] || continue
+      # shellcheck disable=SC2254  # the pattern is a glob by design
+      case "$dir" in $pat) REPLY="$cmd"; return 0 ;; esac
+    done < "$conf"
+  fi
+
+  # 2. per-project file (a .tmux-sessionizer-style drop-in, but read as text
+  #    rather than executed, so it cannot silently run with the wrong cwd)
+  if [ -f "$dir/.interdimux-startup" ]; then
+    local content
+    content=$(< "$dir/.interdimux-startup") || content=""
+    content="${content#"${content%%[![:space:]]*}"}"
+    content="${content%"${content##*[![:space:]]}"}"
+    [ -n "$content" ] && { REPLY="$content"; return 0; }
+  fi
+
+  # 3. global default
+  [ -n "$STARTUP_COMMAND" ] && REPLY="$STARTUP_COMMAND"
+  return 0
+}
+
+# Block until a freshly created pane's shell is actually reading input.
+#
+# Measured caveat, so nobody over-trusts this: the pty line discipline already
+# buffers keystrokes, so sending into a shell with a 1.2 s rc still ran the
+# command correctly.  What the wait actually buys is (a) no raw pre-prompt echo
+# of the command before the shell draws its prompt, and (b) safety for rc files
+# that consume stdin themselves, which buffering does not survive.  It is cheap
+# insurance and a cosmetic fix, not a correctness fix for the common case.
+#
+# A shell mid-init usually has a child (pyenv/nvm/compinit), so "no children" is
+# a good readiness signal.  Bounded at ~2 s; degrades to a short sleep where
+# /proc is unavailable.
+wait_pane_ready() {
+  local target="$1" tries="${2:-40}" pid i children
+  if [ "$PROC_CMDLINE_OK" != 1 ]; then sleep 0.3; return 0; fi
+  pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 0
+  [ -n "$pid" ] || return 0
+  for (( i = 0; i < tries; i++ )); do
+    children=""
+    { read -r children < "/proc/$pid/task/$pid/children"; } 2>/dev/null || :
+    [ -z "${children// /}" ] && return 0
+    sleep 0.05
+  done
+  return 0
+}
+
+# Send the resolved startup command to a newly created session's first pane.
+hydrate_session() {
+  local name="$1" dir="$2"
+  [ "$HYDRATE" = "on" ] || return 0
+  resolve_startup_command "$dir"
+  local cmd="$REPLY"
+  [ -n "$cmd" ] || return 0
+
+  local target="=$name:"
+  wait_pane_ready "$target"
+  # One send-keys per line, so a multi-line .interdimux-startup behaves like
+  # typing each command in turn.
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    tmux send-keys -t "$target" "$line" Enter 2>/dev/null || true
+  done <<< "$cmd"
+  return 0
+}
+
+# connect_dir DIR [SESSION_NAME]
+#
+# The single "open a directory as a session" path: switch to the session for
+# DIR, creating (and hydrating) it first if it does not exist yet.  Both the
+# dir picker's accept and the navigator's find-or-create used to carry their own
+# slightly different copy of this; keeping one copy is what lets startup
+# commands run no matter which route created the session.
+#
+# DIR must already be an absolute, physical path.  SESSION_NAME is derived from
+# DIR when omitted (find-or-create passes its own, derived from the query).
+# Runs under `set -e` in the navigator, so every fallible step is defused.
+connect_dir() {
+  local dir="$1" name="${2:-}"
+  [ -n "$name" ] || name=$(resolve_session_name "$dir")
+  [ -n "$name" ] || return 1
+
+  if ! tmux has-session -t "=$name" 2>/dev/null; then
+    tmux new-session -d -s "$name" -c "$dir" 2>/dev/null || return 1
+    hydrate_session "$name" "$dir"
+  fi
+  tmux switch-client -t "=$name" 2>/dev/null || true
+  REPLY="$name"
+  return 0
+}
+
+# Remember a directory across the sources that rank it: interdimux's own recent
+# list, and zoxide's frecency (so picking a dir here teaches `z` too).
+record_dir_use() {
+  local dir="$1"
+  [ -n "$dir" ] && [ "$dir" != "$HOME" ] || return 0
+  record_recent_dir "$dir" || true
+  if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
+    zoxide add "$dir" 2>/dev/null || true
+  fi
+  return 0
 }
 
 # Sort and emit arrays of dirs by tier (projects first, then others)
@@ -1875,6 +2015,22 @@ fi
 # Session name resolution (exposed for tests)
 # ---------------------------------------------------------------------------
 
+# Open a directory as a session (create + hydrate + switch, or just switch).
+# Exposed so it is bindable directly — `bind-key o run-shell -b "bash … \
+# --connect-dir ~/code/api"` — and so tests can exercise hydration without
+# driving a picker.
+if [ "${1:-}" = "--connect-dir" ]; then
+  set +e
+  cd_dir="${2:-}"
+  [ -n "$cd_dir" ] || { echo "interdimux: --connect-dir needs a directory" >&2; exit 1; }
+  [ -d "$cd_dir" ] || { echo "interdimux: no such directory: $cd_dir" >&2; exit 1; }
+  # Physical path, so it matches the finder output the dir picker produces
+  cd_dir=$(cd "$cd_dir" 2>/dev/null && pwd -P) || exit 1
+  record_dir_use "$cd_dir"
+  connect_dir "$cd_dir" || exit 1
+  exit 0
+fi
+
 if [ "${1:-}" = "--session-name-for" ]; then
   set +e
   resolve_session_name "$2"
@@ -2391,19 +2547,8 @@ if [ "${1:-}" = "--dirs" ]; then
   # Physical path, so comparisons match finder output (which resolves symlinks)
   dir_path=$(cd "$dir_path" 2>/dev/null && pwd -P || echo "$dir_path")
 
-  record_recent_dir "$dir_path"
-  # Feed the switch back into zoxide so its frecency learns from
-  # navigator usage too
-  command -v zoxide >/dev/null 2>&1 && zoxide add "$dir_path" 2>/dev/null
-
-  session_name=$(resolve_session_name "$dir_path")
-
-  if tmux has-session -t "=$session_name" 2>/dev/null; then
-    tmux switch-client -t "=$session_name"
-  else
-    tmux new-session -d -s "$session_name" -c "$dir_path"
-    tmux switch-client -t "=$session_name"
-  fi
+  record_dir_use "$dir_path"
+  connect_dir "$dir_path"
   exit 0
 fi
 
@@ -2477,6 +2622,10 @@ env_fwd_vars() {
     "INTERDIMUX_USE_ZOXIDE=$USE_ZOXIDE"
     "INTERDIMUX_DIRS_LIVE=$DIRS_LIVE"
     "INTERDIMUX_PROJECT_MARKERS=$EXTRA_MARKERS"
+    "INTERDIMUX_STARTUP_COMMAND=$STARTUP_COMMAND"
+    "INTERDIMUX_HYDRATE=$HYDRATE"
+    "INTERDIMUX_SHOW_DIRS=$SHOW_DIRS"
+    "INTERDIMUX_DIRS_LIMIT=$DIRS_LIMIT"
     "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
     "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
     "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
@@ -2871,10 +3020,9 @@ while true; do
     fi
     [ -z "$session_name" ] && exit 0
     if ! tmux has-session -t "=$session_name" 2>/dev/null; then
-      tmux new-session -d -s "$session_name" -c "$dir" 2>/dev/null || true
-      if [ "$dir" != "$HOME" ]; then record_recent_dir "$dir" || true; fi
+      record_dir_use "$dir"
     fi
-    tmux switch-client -t "=$session_name" 2>/dev/null || true
+    connect_dir "$dir" "$session_name" || true
     exit 0
   fi
 
