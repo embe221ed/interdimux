@@ -1272,7 +1272,15 @@ fld_pad() {
 
 # Compact age of an epoch timestamp ("now", "5m", "2h", "3d", "1w");
 # sets REPLY (empty for missing/zero values).
-printf -v NOW_EPOCH '%(%s)T' -1   # current epoch, fork-free (bash >= 4.2)
+# The clock, injectable via INTERDIMUX_NOW.  Without a seam, any test that
+# compares two renders is at the mercy of a second boundary falling between
+# them: the batching test runs `--list` twice and diffs the output, and under
+# load one run said "2s" where the other said "3s".  Same seam as
+# INTERDIMUX_NO_BATCH and INTERDIMUX_TTY_IN.
+case "${INTERDIMUX_NOW:-}" in
+  ''|*[!0-9]*) printf -v NOW_EPOCH '%(%s)T' -1 ;;  # fork-free (bash >= 4.2)
+  *)           NOW_EPOCH="$INTERDIMUX_NOW" ;;
+esac
 age_of() {
   REPLY=""
   local t="${1:-0}" d
@@ -3172,6 +3180,22 @@ if [ "${1:-}" = "--dirs" ]; then
   hint_r enter create ^f 'deep search' ^g 'browse into' ^r reset esc cancel
   DIRS_HEADER="$REPLY"
 
+  # pipefail off for THIS pipeline only, exactly as the navigator's
+  # `gather_targets | fzf` needs it.  --dirs-list is a slow STREAMING producer --
+  # a filesystem scan, measured at 76 ms with the default config and 4.85 s
+  # against a 1500-directory tree -- so accepting a row before the scan finishes
+  # closes the pipe under it and it dies with SIGPIPE.  Verified:
+  # `--dirs-list | head -1` leaves PIPESTATUS "141 0".  With pipefail on, the
+  # substitution reports that 141 rather than fzf's 0, `|| exit 1` reads it as a
+  # cancel, and the directory the user just picked is silently never opened.
+  #
+  # PIPESTATUS is no help here: inside a command substitution it describes the
+  # substitution, not the inner pipeline, and ${PIPESTATUS[1]} is fatal under
+  # `set -u`.
+  #
+  # Restoring AFTER the `|| exit 1` is deliberate: the cancel path leaves the
+  # process, and the enclosing --dirs block already runs under `set +e`.
+  set +o pipefail
   selected=$(bash "$SCRIPT_PATH" --dirs-list | fzf \
     "${FZF_THEME[@]}" \
     --no-sort \
@@ -3187,6 +3211,7 @@ if [ "${1:-}" = "--dirs" ]; then
     --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-header(bash '$SCRIPT_PATH' --dirs-header)" \
     ${dirs_extra[@]+"${dirs_extra[@]}"} \
   ) || exit 1
+  set -o pipefail
 
   dir_path="${selected##*	}"
   dir_path="${dir_path%/}"

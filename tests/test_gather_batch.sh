@@ -50,6 +50,10 @@ export INTERDIMUX_SHOW_FULL_COMMAND=off INTERDIMUX_SHOW_GIT_BRANCH=off
 export INTERDIMUX_ORDER=mru INTERDIMUX_USE_ZOXIDE=off
 sleep 2
 
+# Pin the clock for both runs.  The age column is derived from it, so without
+# this the two renders disagree whenever a second boundary falls between them —
+# which is a property of when the test ran, not of batching.
+export INTERDIMUX_NOW=$(( $(date +%s) + 5 ))
 batched=$(bash "$SCRIPT" --list 2>/dev/null)
 separate=$(INTERDIMUX_NO_BATCH=1 bash "$SCRIPT" --list 2>/dev/null)
 
