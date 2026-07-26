@@ -2170,6 +2170,150 @@ fi
 # Exposed so it is bindable directly — `bind-key o run-shell -b "bash … \
 # --connect-dir ~/code/api"` — and so tests can exercise hydration without
 # driving a picker.
+# ---------------------------------------------------------------------------
+# Scheduled keys — send a command to a pane at a future time
+# ---------------------------------------------------------------------------
+#
+#   interdimux.sh --send-at "17:30"        <target> <command...>
+#   interdimux.sh --send-in 90             <target> <command...>
+#   interdimux.sh --sched-list
+#   interdimux.sh --sched-cancel <id>
+#
+# <target> is any tmux target ("%3", "mysess:1.0", "=name:") or "." for the
+# current pane.  It is resolved to a pane id NOW, so the job survives the pane
+# being renamed or moved.
+#
+# THE DANGEROUS PART, and why every job carries a guard: **pane ids are recycled
+# across a tmux server restart.**  Verified — schedule for session alpha's %0,
+# restart the server, and %0 is now some other session's pane; the keys land
+# there.  For a scheduled `make deploy` or `rm -rf build/` that is data loss, not
+# a cosmetic bug.  Each job therefore records the server pid at submit time and
+# refuses to fire if it no longer matches.
+#
+# Backends: `at` for >= 1 minute (it has a hard one-minute floor and silently
+# truncates seconds), and tmux's own `run-shell -b -d` below that.
+
+SCHED_LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/interdimux"
+SCHED_LOG="$SCHED_LOGDIR/scheduled.log"
+SCHED_QUEUE=i   # a dedicated at queue: bare `atq` lists EVERY queue and would
+                # mix in the user's own jobs.  Never uppercase — that switches
+                # to batch semantics that wait for a low load average.
+
+# Resolve a user-supplied target to a stable pane id, plus the socket and the
+# server pid the job will be validated against.  Sets SCHED_PANE/SOCK/SRVPID.
+sched_resolve() {
+  local target="$1"
+  [ "$target" = "." ] && target="${TMUX_PANE:-}"
+  local info
+  info=$(tmux display-message -p ${target:+-t "$target"} \
+        '#{pane_id}'"$US"'#{socket_path}'"$US"'#{pid}'"$US"'#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || return 1
+  IFS="$US" read -r SCHED_PANE SCHED_SOCK SCHED_SRVPID SCHED_LABEL <<< "$info"
+  [ -n "$SCHED_PANE" ] || return 1
+  return 0
+}
+
+# The script an at job runs.  Everything it needs is baked in: at snapshots the
+# submitting environment, so an inherited $TMUX would be a STALE pointer to a
+# possibly-dead server — the socket is passed explicitly and the inherited value
+# ignored.
+sched_job_body() {
+  local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
+  printf '%s\n' \
+    "# imux:v1 pane=${pane} target=${label} desc=$(printf '%s' "$keys" | tr '\n' ' ')" \
+    "# atd tries to MAIL a job's output.  With no MTA installed that output is" \
+    "# destroyed and leaves only 'Exec failed for mail command' in the journal --" \
+    "# which reads exactly like 'my job never ran'.  Log instead of discarding." \
+    "mkdir -p $(printf '%q' "$SCHED_LOGDIR") 2>/dev/null" \
+    "exec >>$(printf '%q' "$SCHED_LOG") 2>&1" \
+    "echo \"== \$(date '+%Y-%m-%d %H:%M:%S') firing for ${label} (${pane})\"" \
+    "sock=$(printf '%q' "$sock")" \
+    "want=$(printf '%q' "$srvpid")" \
+    "pane=$(printf '%q' "$pane")" \
+    "got=\$(tmux -S \"\$sock\" display-message -p '#{pid}' 2>/dev/null) || exit 0" \
+    "if [ \"\$got\" != \"\$want\" ]; then" \
+    "  # the server restarted: pane ids have been recycled and \$pane may now" \
+    "  # belong to a completely different session.  Refuse rather than misfire." \
+    "  tmux -S \"\$sock\" display-message 'interdimux: scheduled keys skipped (tmux restarted)' 2>/dev/null" \
+    "  exit 0" \
+    "fi" \
+    "tmux -S \"\$sock\" send-keys -t \"\$pane\" -- $(printf '%q' "$keys") 2>/dev/null || exit 0" \
+    "tmux -S \"\$sock\" send-keys -t \"\$pane\" Enter 2>/dev/null"
+}
+
+if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
+  set +e
+  _mode="$1"; _when="${2:-}"; _target="${3:-}"; shift 3 2>/dev/null || true
+  _keys="$*"
+  if [ -z "$_when" ] || [ -z "$_target" ] || [ -z "$_keys" ]; then
+    echo "interdimux: usage: $_mode <when> <target> <command...>" >&2
+    exit 2
+  fi
+  if ! sched_resolve "$_target"; then
+    echo "interdimux: no such target: $_target" >&2
+    exit 1
+  fi
+
+  # Sub-minute delays: at cannot express them (it truncates the seconds field),
+  # but tmux can.  Caveat, verified: a pending run-shell -d does NOT keep the
+  # server alive — if the last session closes, the job is lost silently.
+  if [ "$_mode" = "--send-in" ] && [[ "$_when" =~ ^[0-9]+$ ]] && [ "$_when" -lt 60 ]; then
+    tmux run-shell -b -d "$_when" \
+      "tmux -S $(printf '%q' "$SCHED_SOCK") send-keys -t $(printf '%q' "$SCHED_PANE") -- $(printf '%q' "$_keys") && tmux -S $(printf '%q' "$SCHED_SOCK") send-keys -t $(printf '%q' "$SCHED_PANE") Enter" \
+      2>/dev/null \
+      && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
+      || { echo "interdimux: could not schedule" >&2; exit 1; }
+    exit 0
+  fi
+
+  command -v at >/dev/null 2>&1 || { echo "interdimux: 'at' is not installed" >&2; exit 1; }
+  case "$_mode" in
+    --send-in) _spec="now + $_when minutes"; [[ "$_when" =~ ^[0-9]+$ ]] && _spec="now + $(( (_when + 59) / 60 )) minutes" ;;
+    *)         _spec="$_when" ;;
+  esac
+  # Submit from / : at bakes the submitting directory into the job and aborts
+  # with "Execution directory inaccessible" if it is gone by firing time.
+  _out=$(cd / && sched_job_body "$SCHED_PANE" "$SCHED_SOCK" "$SCHED_SRVPID" "$SCHED_LABEL" "$_keys" \
+         | at -M -q "$SCHED_QUEUE" $_spec 2>&1)
+  if [ $? -ne 0 ]; then
+    printf '%s\n' "$_out" >&2
+    echo "interdimux: at rejected the time spec '$_spec'" >&2
+    exit 1
+  fi
+  printf 'interdimux: %s -> %s (%s)\n' \
+    "$(printf '%s' "$_out" | sed -n 's/^job \([0-9]*\) at \(.*\)$/job \1 at \2/p' | head -1)" \
+    "$SCHED_LABEL" "$SCHED_PANE"
+  exit 0
+fi
+
+if [ "${1:-}" = "--sched-list" ]; then
+  set +e
+  command -v atq >/dev/null 2>&1 || { echo "interdimux: 'at' is not installed" >&2; exit 1; }
+  _n=0
+  while read -r _id _rest; do
+    [ -n "$_id" ] || continue
+    _n=$((_n + 1))
+    _desc=$(at -c "$_id" 2>/dev/null | sed -n 's/^# imux:v1 .*desc=//p' | head -1)
+    _tgt=$(at -c "$_id" 2>/dev/null | sed -n 's/^# imux:v1 pane=[^ ]* target=\([^ ]*\).*/\1/p' | head -1)
+    printf '%-6s %-30s %-22s %s\n' "$_id" "${_rest% i *}" "${_tgt:-?}" "${_desc:-?}"
+  done < <(atq -q "$SCHED_QUEUE" 2>/dev/null | sort -k2)
+  [ "$_n" -eq 0 ] && echo "interdimux: no scheduled keys"
+  exit 0
+fi
+
+if [ "${1:-}" = "--sched-cancel" ]; then
+  set +e
+  _id="${2:-}"
+  [ -n "$_id" ] || { echo "interdimux: usage: --sched-cancel <id>" >&2; exit 2; }
+  # Only ever cancel jobs from our own queue, so a mistyped id cannot delete
+  # one of the user's unrelated at jobs.
+  if ! atq -q "$SCHED_QUEUE" 2>/dev/null | awk '{print $1}' | grep -qx "$_id"; then
+    echo "interdimux: no scheduled job $_id (see --sched-list)" >&2
+    exit 1
+  fi
+  atrm "$_id" 2>/dev/null && echo "interdimux: cancelled job $_id"
+  exit 0
+fi
+
 if [ "${1:-}" = "--connect-dir" ]; then
   set +e
   cd_dir="${2:-}"

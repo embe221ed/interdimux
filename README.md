@@ -251,6 +251,41 @@ set -g @interdimux-hydrate 'on'
 set -g @interdimux-startup-command 'nvim .'
 ```
 
+### Scheduled keys
+
+Send a command to a pane at a future time.
+
+```sh
+# absolute or relative times — anything `at` understands
+interdimux.sh --send-at "17:30"          '=work:1.0'  'make deploy'
+interdimux.sh --send-at "now + 2 hours"  %5           'git pull'
+
+# --send-in takes seconds; under a minute it uses tmux's own timer,
+# because `at` has a hard one-minute floor
+interdimux.sh --send-in 30  .  'echo back from lunch'
+
+interdimux.sh --sched-list          # what's pending
+interdimux.sh --sched-cancel 42     # drop one
+```
+
+The target is any tmux target (`%5`, `work:1.0`, `=name:`) or `.` for the
+current pane, resolved to a pane id at submit time.
+
+**Jobs refuse to fire if the tmux server has restarted.** Pane ids are recycled,
+so `%0` after a restart is somebody else's pane — a scheduled `make deploy`
+landing there is data loss, not a cosmetic bug. Each job records the server pid
+and skips (with a message) rather than misfire.
+
+Two more things worth knowing. interdimux uses its own `at` queue, so
+`--sched-list` and `--sched-cancel` can never see or delete your unrelated `at`
+jobs. And job output goes to
+`~/.local/state/interdimux/scheduled.log` — `atd` mails it otherwise, which on a
+box with no MTA means it is destroyed and the job merely *looks* like it never
+ran.
+
+Sub-minute jobs use `run-shell -d`, which lives inside the tmux server: they are
+lost if the server exits. `at` jobs survive a reboot.
+
 ### Startup commands
 
 A session created by interdimux — from a directory row, from the `ctrl-o`
