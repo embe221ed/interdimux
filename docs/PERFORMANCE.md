@@ -421,6 +421,90 @@ insertion sort. It wins below ~35 sessions but is 9× slower at 100 and 65× at
 
 ---
 
+## Tier 6 — the cache and progressive-render question, answered with measurements
+
+Re-opened 2026-07-26 because the Tier 4 rejection below contains a self-contradiction
+("reading a cache is 1–2 ms against a ~90 ms gather, so the ceiling is imperceptible" — that
+describes the *largest* remaining win and calls it negligible). A full survey + prototype +
+adversarial verification pass followed. **Conclusion: do not build either.** The reasoning is
+worth keeping, because the magnitude argument really is on their side and someone will propose
+them again.
+
+### Where the time actually goes now
+
+Fetching is no longer the bottleneck — *formatting* is. Measured floors, same 136-row bench:
+
+| | time to first row |
+|---|---|
+| `cat` a prebuilt cache file | 2 ms |
+| bash reads that file and re-marks the current row | 8 ms |
+| the single batched tmux query alone, no formatting | 9 ms |
+| the real `--list` | 66 ms |
+
+Instrumented phase split of a 142-row `--list`: dispatch 11–13 ms → query ~19 ms →
+`measure_widths` **24 ms** → `compute_widths` 2 ms → MRU 6 ms → grouping 22 ms → **first row** →
+emit 135 ms. So ~181 ms of the ~223 ms total is in-process bash with no I/O at all, and
+emitting the first row *after* grouping costs +0 ms.
+
+### Why the cache is not worth it — scale, not correctness
+
+A working prototype was built and independently re-measured. It is genuinely fast and
+byte-identical; the problem is who benefits:
+
+| rows | first row now | with cache hit |
+|---|---|---|
+| 2 | 22 ms | 18 ms |
+| 27 | 32 ms | 22 ms |
+| 142 | 86 ms | 42 ms |
+| 479 | 270 ms | 99 ms |
+
+fzf suppresses all painting for the first **20 ms** (`initialDelay`, `src/constants.go:23`) and
+paints exactly once if the whole stream lands inside that window. On a normal-sized server the
+entire gather already fits there, so the cache buys nothing perceptible. It only pays from
+~100 rows up.
+
+Two defects also surfaced in verification, both fixable but both indicative of the complexity:
+two clients attached at the same width **permanently evict each other's cache** (0% hit rate,
+plus a wasted ~260 ms background refresh on every open) unless the cache key includes
+`$TMUX_PANE`; and a single pane whose cwd contains `\x1e` trips the batched-query fallback,
+which leaves the refresher firing on every close and throwing the result away.
+
+And the content is far more volatile than sesh's: interdimux rows are a screenshot of a live
+process table, so **rendered output changed on 9 of 10 samples taken 5 s apart** with only two
+busy panes (the command column, from the /proc resolver). An identity-only projection changed
+0 of 12 over 60 s. sesh's rows are static identity — that asymmetry, not the magnitude, is why
+its design does not port unchanged.
+
+### Why progressive rendering is worse, not better
+
+- deferring the command column: **+6 ms** first paint, and **−192 ms** on time-to-correct-list
+  (272 → 464 ms)
+- session-rows-first: 320 ms of a confidently wrong `18/18` match count
+- fzf has **no append action** — holding stdin open is the only true append, which the existing
+  `gather_targets | fzf` pipe already does. Progressive rendering here is either free (already
+  happening) or a regression.
+
+### The two levers to reach for first, if the picker ever feels slow at scale
+
+1. **Nested `#{S:#{W:#{P:…}}}` tree query.** One `display-message` returns the whole tree already
+   grouped and hierarchically ordered, with `loop_last_flag` for the tree glyphs. Measured
+   **19 ms vs 26 ms** for today's batched-4 form, 28% fewer bytes, and it deletes both grouping
+   loops (~22 ms). No staleness, no new machinery.
+2. **Digest-validated cache** — the only cache design worth building. `prefix+f` is already
+   `run-shell -bC "display-popup … -e … -E bash script"`, and `run-shell -C` format-expands *in
+   the server* at keypress, so a digest of everything rendered can ride in as one more `-e` var:
+   validation costs **zero tmux round-trips and zero forks**. Measured first row **6.2 ms** at
+   143 rows. Trap: `#{q:…}` escapes only a bare *variable* — `#{q:#{S:…}}` silently returns the
+   digest unescaped; escape per-variable inside the loop.
+
+### Rejected outright
+
+`awk` for the row renderer, and for a fused maxima+sort+grouping pass (17 ms → 5 ms): Debian and
+Ubuntu ship **mawk**, where `length("żółć")` is 8 and `substr` splits UTF-8 mid-character, so
+every padded column misaligns for non-ASCII names. Would need an explicit gawk dependency.
+
+---
+
 ## Suggested rollout
 
 1. **Tier 0 (0.1 + 0.2 + 0.3)** in one pass — pure fork removal, no gate, test-covered. This

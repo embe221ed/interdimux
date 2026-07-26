@@ -15,7 +15,7 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 | # | Idea | Effort | Notes |
 |---|------|--------|-------|
 | 1 | **Announce find-or-create in the zero-match state** — bind fzf's `zero:` event to a header like *"enter → create session 'api' in ~/code/api (zoxide)"* with the resolved name/dir. The feature is invisible today and typos create junk sessions silently. | S | fzf ≥ 0.40 |
-| 2 | **Cursor stability across reloads** — `--track --id-nth=-1`; the SPEC field is a stable identity. Today every execute+reload can silently move the cursor to a different target (dangerous in kill mode). | S | fzf ≥ 0.71 |
+| 2 | **Cursor stability across reloads** — `--id-nth=-1` **without `--track`**; the SPEC field is a stable identity. Today every execute+reload can silently move the cursor to a different target (dangerous in kill mode). ⚠️ **Do NOT add `--track`:** it arms `trackBlocked`, which *discards* every keystroke except abort while a reload is in flight (`fzf src/terminal.go:6821-6827`) — worst exactly when the popup has just opened (measured keystroke loss vs 0/20 lost with `--id-nth` alone). `--id-nth` on its own never blocks and still restores identity across `reload-sync`. Pair with `enter:wait+accept` (fzf ≥ 0.74) so Enter during an in-flight reload can't accept an already-killed row. | S | fzf ≥ 0.71 |
 | 3 | **Standalone `--last` toggle** — bindable (e.g. `prefix+L`) zero-UI switch to the previous session; recomputes MRU so it survives the last session being killed (tmux's built-in `switch-client -l` doesn't). | S | — |
 | 4 | **Footer hint bar** — move key hints to `--footer`; header becomes purely per-row context and hints stop jumping as focus moves. | S | fzf ≥ 0.63 |
 | 5 | **Responsive preview layout** — `--preview-window='right,50%,…,<90(up,40%,…)'` so narrow popups stack the preview below instead of starving both panes. | S | — |
@@ -72,7 +72,7 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 - **Column-title header row** (M, border needs fzf ≥ 0.59) — `--header-lines=1` pinned dim `TARGET │ PATH ‹BRANCH› CMD` labels; could also mark the active ctrl-] scope.
 - **Preview title in the border label** (S) — `transform-preview-label` frees two lines of preview body; no gate (0.37 < floor).
 - **Jump mode** (S) — `ctrl-j` + label letter = two-keystroke hop to any visible row (`jump:accept`); no tmux picker exposes this.
-- **Live auto-refresh** (S, fzf ≥ 0.73) — `every(4)` + `FZF_IDLE_TIME` guard; safe once cursor tracking (#2) lands.
+- **Live auto-refresh** (S, fzf ≥ 0.73) — `every(4)` + `FZF_IDLE_TIME` guard; safe once cursor tracking (#2) lands. Use `reload-sync` (not `reload`) so the swap preserves query/viewport, and `--id-nth` **without** `--track` — see the warning on #2; a periodic refresh with `--track` would drop keystrokes every tick.
 - **CJK/emoji display-width handling** (M) — pure-bash wide-char width for names so wide chars stop shifting columns.
 - **`--info-command`** (S, fzf ≥ 0.54) — show `12/24 · mru` so the active ordering is visible.
 - **Red Kill entry in the dashboard menu** (S) — `#[fg=colour167]Kill`, matching the danger vocabulary elsewhere.
