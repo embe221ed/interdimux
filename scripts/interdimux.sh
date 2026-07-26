@@ -78,6 +78,7 @@ OPT_MAP=(
   "color-menu-sel-fg:COLOR_MENU_SEL_FG"
   "startup-command:STARTUP_COMMAND"  "hydrate:HYDRATE"
   "show-dirs:SHOW_DIRS"              "dirs-limit:DIRS_LIMIT"
+  "raw:RAW"
 )
 OPT_NAMES=()
 for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
@@ -310,6 +311,7 @@ get_opt STARTUP_COMMAND   "${INTERDIMUX_STARTUP_COMMAND:-}"  @interdimux-startup
 get_opt HYDRATE           "${INTERDIMUX_HYDRATE:-}"          @interdimux-hydrate           on
 get_opt SHOW_DIRS         "${INTERDIMUX_SHOW_DIRS:-}"        @interdimux-show-dirs         on
 get_opt DIRS_LIMIT        "${INTERDIMUX_DIRS_LIMIT:-}"       @interdimux-dirs-limit        15
+get_opt RAW_MODE          "${INTERDIMUX_RAW:-}"              @interdimux-raw               on
 
 # ---------------------------------------------------------------------------
 # Colours — configurable palette
@@ -2193,6 +2195,61 @@ fi
 # Exposed so it is bindable directly — `bind-key o run-shell -b "bash … \
 # --connect-dir ~/code/api"` — and so tests can exercise hydration without
 # driving a picker.
+
+# Find-or-create: turn a query that matched nothing into a session.
+# The query is resolved as a path first, then through zoxide, then falls back to
+# $HOME.  Factored out of the navigator's accept path so raw mode can invoke it
+# from inside fzf (see the `zero`/enter transform below), where there is no exit
+# code to signal "nothing matched".
+# Sets REPLY to the session name; prints nothing.
+create_from_query() {
+  local query="$1" dir="" session_name="" expanded
+  REPLY=""
+  [ -n "$query" ] || return 1
+  expanded="${query/#\~/$HOME}"
+  if [ -d "$expanded" ] && dir=$(cd "$expanded" 2>/dev/null && pwd -P); then
+    session_name=$(resolve_session_name "$dir")
+  else
+    dir=""
+    if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
+      dir=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
+    fi
+    [ -d "$dir" ] || dir="$HOME"
+    session_name=$(printf '%s' "$query" | tr '.: /' '----')
+  fi
+  [ -n "$session_name" ] || return 1
+  if ! tmux has-session -t "=$session_name" 2>/dev/null; then
+    record_dir_use "$dir"
+  fi
+  connect_dir "$dir" "$session_name" || return 1
+  REPLY="$session_name"
+  return 0
+}
+
+# What find-or-create WOULD do for a query, as a human-readable string.  Used by
+# the zero-match header so the feature stops being invisible (IDEAS #1) and a
+# typo cannot silently create junk.
+describe_create() {
+  local query="$1" dir="" expanded name src
+  REPLY=""
+  [ -n "$query" ] || return 0
+  expanded="${query/#\~/$HOME}"
+  if [ -d "$expanded" ]; then
+    dir="$expanded"; src="path"
+    name=$(basename "$dir" | tr '.:' '-')
+  else
+    if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
+      dir=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
+    fi
+    if [ -d "$dir" ]; then src="zoxide"; else dir="$HOME"; src="home"; fi
+    name=$(printf '%s' "$query" | tr '.: /' '----')
+  fi
+  printf -v REPLY '%screate%s%s %s%s %sin %s%s %s(%s)%s' \
+    "$ACCENT_ESC" "$RST" "$DIM" "$RST$ACCENT_ESC$name" "$RST" \
+    "$DIM" "$RST$DIM${dir/#$HOME/\~}" "$RST" "$DIM" "$src" "$RST"
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Scheduled keys — send a command to a pane at a future time
 # ---------------------------------------------------------------------------
@@ -2334,6 +2391,22 @@ if [ "${1:-}" = "--sched-cancel" ]; then
     exit 1
   fi
   atrm "$_id" 2>/dev/null && echo "interdimux: cancelled job $_id"
+  exit 0
+fi
+
+if [ "${1:-}" = "--create-from-query" ]; then
+  set +e
+  create_from_query "${2:-}" || {
+    tmux display-message "interdimux: could not create a session from '${2:-}'" 2>/dev/null
+    exit 1
+  }
+  exit 0
+fi
+
+if [ "${1:-}" = "--describe-create" ]; then
+  set +e
+  describe_create "${2:-}"
+  printf '%s\n' "$REPLY"
   exit 0
 fi
 
@@ -2955,6 +3028,7 @@ env_fwd_vars() {
     "INTERDIMUX_HYDRATE=$HYDRATE"
     "INTERDIMUX_SHOW_DIRS=$SHOW_DIRS"
     "INTERDIMUX_DIRS_LIMIT=$DIRS_LIMIT"
+    "INTERDIMUX_RAW=$RAW_MODE"
     "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
     "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
     "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
@@ -3323,6 +3397,52 @@ while true; do
         fi
       fi
       fzf_ge 61 && fzf_opts+=(--ghost='session · window · pane')
+
+      # Raw mode (fzf >= 0.74): non-matching rows stay on screen, dimmed,
+      # instead of vanishing.  This is what fixes the tree collapsing as you
+      # type — filtering used to strip parent rows and leave orphaned '├─'
+      # glyphs pointing at nothing.  ctrl-n/ctrl-p hop between matches.
+      #
+      # It changes one thing that must be handled: with rows still displayed,
+      # Enter on a query that matches NOTHING returns rc=0 with whatever row the
+      # cursor is on, where plain fzf returns rc=1 and the query.  Verified.
+      # So find-or-create cannot key off the exit code any more — the enter bind
+      # dispatches on $FZF_MATCH_COUNT and performs the create inside fzf.
+      if [ "$RAW_MODE" = "on" ] && fzf_ge 74; then
+        fzf_opts+=(
+          --raw
+          --color="nomatch:${COLOR_TREE}"
+          --bind="enter:transform:[ \"\${FZF_MATCH_COUNT:-0}\" -eq 0 ] && echo 'execute(bash \"$SQ_SCRIPT\" --create-from-query {q})+abort' || echo accept"
+        )
+      fi
+
+      # Announce find-or-create in the zero-match state (IDEAS #1).  Without it
+      # the feature is invisible and a typo silently creates a junk session; now
+      # the header says exactly which session would be created, and where.
+      # The announcement is precomputed per-keystroke by the same inline-snippet
+      # trick the row header uses: describe_create needs zoxide and the
+      # filesystem, so it cannot be inlined, but `zero` only fires when the
+      # match count reaches 0 — not on every keystroke — so one process there is
+      # acceptable where one per cursor move would not be.
+      # The `focus` bind restores the normal per-row header as soon as matches
+      # come back, so no explicit restore bind is needed.
+      if [ "$INLINE_CALLBACKS" = 1 ]; then
+        # ONE bind owns the header on result changes, because two of them fight:
+        # a `zero` bind that announces the create, plus a `result` bind that
+        # restores the row header, means the result bind emits nothing at zero
+        # matches — and an empty transform-header CLEARS the header, wiping the
+        # announcement that `zero` just set.
+        #
+        # bg- so it never blocks typing: the create description has to shell out
+        # (it consults zoxide and the filesystem), and `result` fires on every
+        # keystroke.
+        _hdr_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hdr_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
+        if fzf_ge 63; then
+          fzf_opts+=(--bind="result:bg-cancel+bg-transform-header:$_hdr_bind")
+        else
+          fzf_opts+=(--bind="result:transform-header:$_hdr_bind")
+        fi
+      fi
       ;;
   esac
 
@@ -3378,26 +3498,7 @@ while true; do
   # session named after it (resolved as a path, then via zoxide, then
   # under $HOME)
   if [ "$fzf_rc" -eq 1 ] && [ -n "$query" ]; then
-    # set -e is live here: every fallible assignment below must be
-    # defused (a zoxide miss exits 1 and would kill the script mid-flow)
-    dir=""
-    session_name=""
-    expanded="${query/#\~/$HOME}"
-    if [ -d "$expanded" ] && dir=$(cd "$expanded" 2>/dev/null && pwd -P); then
-      session_name=$(resolve_session_name "$dir")
-    else
-      dir=""
-      if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
-        dir=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
-      fi
-      [ -d "$dir" ] || dir="$HOME"
-      session_name=$(printf '%s' "$query" | tr '.: /' '----')
-    fi
-    [ -z "$session_name" ] && exit 0
-    if ! tmux has-session -t "=$session_name" 2>/dev/null; then
-      record_dir_use "$dir"
-    fi
-    connect_dir "$dir" "$session_name" || true
+    create_from_query "$query" || true
     exit 0
   fi
 

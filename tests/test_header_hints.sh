@@ -82,6 +82,11 @@ hdr_case+=' _P:*) printf "%s\n" "$INTERDIMUX_HDR_P";;'
 hdr_case+=' _D:*) printf "%s\n" "$INTERDIMUX_HDR_D";;'
 hdr_case+=' *) printf "%s\n" "$INTERDIMUX_HDR_X";; esac'
 
+# Clear the injection marker BEFORE the run: a stale file from anything else on
+# the box (another test, a concurrent probe) would otherwise be reported as this
+# test failing, which is a false alarm that wastes real debugging time.
+rm -f /tmp/imux_pwned
+
 for spec in "S:alpha" "W:alpha:0" "P:alpha:0:1" "D:/tmp/some/dir" "Q:other" "S:it's odd" "S:has space" 'S:$(touch /tmp/imux_pwned)'; do
   want=$(bash "$SCRIPT" --header-for "$spec")
   # fzf single-quotes the placeholder; printf %q is the closest stand-in
@@ -127,10 +132,28 @@ for nth in 1 2 3 1,2,3 1,3 ""; do
   fi
 done
 
+
+# --- find-or-create announcement (IDEAS #1) -----------------------------------
+# The feature used to be invisible: you typed a name, nothing matched, and Enter
+# silently created a session — a typo made junk with no warning.
+out=$(bash "$SCRIPT" --describe-create 'brandnewthing' 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+case "$out" in
+  *create*brandnewthing*) report "--describe-create names the session it would create" pass ;;
+  *) report "--describe-create names the session it would create (got: $out)" fail ;;
+esac
+case "$out" in
+  *"(home)"*|*"(zoxide)"*|*"(path)"*) report "--describe-create says where it would create it" pass ;;
+  *) report "--describe-create says where it would create it (got: $out)" fail ;;
+esac
+out=$(bash "$SCRIPT" --describe-create '/tmp' 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+case "$out" in
+  *"(path)"*) report "an existing path is recognised as a path" pass ;;
+  *) report "an existing path is recognised as a path (got: $out)" fail ;;
+esac
+out=$(bash "$SCRIPT" --describe-create '' 2>/dev/null)
+[ -z "$out" ] && report "an empty query describes nothing" pass \
+              || report "an empty query describes nothing" fail
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
-if [ "$FAIL" -gt 0 ]; then
-  echo
-  printf '%s' "$ERRORS"
-  exit 1
-fi
+if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi
