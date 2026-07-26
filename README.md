@@ -235,6 +235,57 @@ set -g @interdimux-dirs-live-search 'off'
 # Colon-separated extra project markers, added to the built-in list
 # (.git, package.json, Cargo.toml, go.mod, ...)
 set -g @interdimux-project-markers 'Move.toml:deno.json'
+
+# Show recent/zoxide directories inline in the navigator as dim '+ name'
+# rows, so Enter opens a project whether or not it already has a session
+# (default: on).  They are listed after the tmux tree and never delay it.
+set -g @interdimux-show-dirs 'on'
+
+# How many directory rows to show (default: 15)
+set -g @interdimux-dirs-limit '15'
+
+# Run a startup command in sessions interdimux creates (default: on)
+set -g @interdimux-hydrate 'on'
+
+# Fallback startup command, used when nothing more specific matches
+set -g @interdimux-startup-command 'nvim .'
+```
+
+### Startup commands
+
+A session created by interdimux — from a directory row, from the `ctrl-o`
+picker, or by find-or-create — can run a command as soon as it opens.
+The first match wins:
+
+1. **`~/.config/interdimux/startup.conf`** — `<glob><whitespace><command>`,
+   one per line, `#` comments allowed. Put specific patterns first:
+
+   ```
+   ~/work/api*        make dev
+   ~/code/*-cli       cargo watch -x run
+   ~/notes            nvim index.md
+   ```
+
+2. **`.interdimux-startup`** in the directory itself — its contents are the
+   command. Multiple lines are sent as separate commands, so this doubles as a
+   small bootstrap script:
+
+   ```sh
+   nvim .
+   ```
+
+3. **`@interdimux-startup-command`** — the global fallback above.
+
+The command is delivered with `send-keys`, so it appears at the prompt and
+lands in your shell history exactly as if you had typed it. interdimux waits
+for the new shell to finish initialising first, so nothing is echoed before
+your prompt appears. Set `@interdimux-hydrate off` to disable.
+
+A directory can also be bound straight to a key, skipping the picker:
+
+```tmux
+bind-key C-a run-shell -b "bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh \
+  --connect-dir ~/code/api"
 ```
 
 ### Colors
