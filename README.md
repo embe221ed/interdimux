@@ -181,6 +181,29 @@ The preview shows project type, git branch/status/last commit, a README excerpt,
 - Column widths adapt to the content and the popup width — the redundant
   session prefix shrinks first, window names are protected last
 
+## Checking your setup
+
+```sh
+bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --doctor
+```
+
+Reports what tmux, fzf and interdimux itself can see: versions and the features
+they gate, whether the Rust helper is built, whether the key bindings are
+actually installed, whether the state directories are writable — and every
+`@interdimux-*` option you have set, with its value checked.
+
+That last part is the one worth running. tmux user options are free-form, so a
+mistyped name is not an error to tmux — the setting simply never applies, with
+nothing to tell you why:
+
+```
+✗ unknown option @interdimux-fzf-opt — did you mean @interdimux-fzf-opts?
+✗ @interdimux-order = 'recent' — expected 'mru' or 'index'
+✗ @interdimux-color-accent = '#ab' — a hex colour must be #rrggbb
+```
+
+Exits non-zero if anything is wrong, so it works in a health check.
+
 ## Configuration
 
 All options are set via tmux options in `~/.tmux.conf`:

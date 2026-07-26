@@ -334,6 +334,27 @@ get_opt SHOW_DIRS         "${INTERDIMUX_SHOW_DIRS:-}"        @interdimux-show-di
 get_opt DIRS_LIMIT        "${INTERDIMUX_DIRS_LIMIT:-}"       @interdimux-dirs-limit        15
 get_opt RAW_MODE          "${INTERDIMUX_RAW:-}"              @interdimux-raw               on
 
+# Numeric options reach `[ -ge ]`, `find -maxdepth` and arithmetic, so a junk
+# value is not a harmless no-op.  Verified: a non-numeric @interdimux-recent-limit
+# makes `[ "$count" -ge "$RECENT_LIMIT" ]` print "integer expression expected",
+# and that stderr is painted over the rendered list; a non-numeric
+# @interdimux-dirs-limit made the Rust renderer drop every directory row.
+# scan-depth is quieter -- bash arithmetic reads a bare word as an unset variable
+# and yields 0 rather than failing -- but it still has to be a number before the
+# clamp below compares it.  Fall back to the default rather than fail; --doctor
+# is where the user finds out they typed something wrong.
+#
+# `case`, not `[[ =~ ]]`: this runs on every popup open, including the hot path
+# (the static prefix+f binding hands raw option values straight to the navigator,
+# so there is no launcher left to validate them first).
+case "$RECENT_LIMIT" in ''|*[!0-9]*) RECENT_LIMIT=10 ;; esac
+case "$DIRS_LIMIT"   in ''|*[!0-9]*) DIRS_LIMIT=15   ;; esac
+case "$SCAN_DEPTH"   in ''|*[!0-9]*) SCAN_DEPTH=3    ;; esac
+# A deep scan is a footgun rather than a preference: `find -maxdepth 40` over
+# $HOME does not return within a popup's lifetime.
+[ "$SCAN_DEPTH" -gt 10 ] && SCAN_DEPTH=10
+case "$ORDER" in mru|index) ;; *) ORDER=mru ;; esac
+
 # ---------------------------------------------------------------------------
 # Colours — configurable palette
 # ---------------------------------------------------------------------------
@@ -561,17 +582,24 @@ load_recent_dirs() {
   fi
 }
 
+# Best-effort by design: remembering a directory is a convenience, and a
+# read-only or full $XDG_DATA_HOME must not cost the user the switch they asked
+# for.  Every step is silenced and bails out rather than propagating, because
+# this runs inside the navigator under `set -e` and its stderr goes straight
+# onto the popup, over the list.  (Observed with a 0500 data dir: mkdir and
+# mktemp each printed "Permission denied" across the rendered rows, then the
+# empty $tmp turned `echo > ""` into a third error.)
 record_recent_dir() {
   local dir="$1"
-  local dir_parent
-  dir_parent="$(dirname "$RECENT_DIRS_FILE")"
-  [ -d "$dir_parent" ] || mkdir -p "$dir_parent"
+  local dir_parent="${RECENT_DIRS_FILE%/*}"   # not `dirname`: this is a fork on every switch
+  [ -d "$dir_parent" ] || mkdir -p "$dir_parent" 2>/dev/null || return 0
 
   # Rebuild the file: new dir first, then surviving entries (pruning
   # duplicates and dirs that no longer exist), atomically replaced.
   local tmp d count=1
-  tmp=$(mktemp "$dir_parent/.recent_dirs.XXXXXX")
-  echo "$dir" > "$tmp"
+  tmp=$(mktemp "$dir_parent/.recent_dirs.XXXXXX" 2>/dev/null) || return 0
+  [ -n "$tmp" ] || return 0
+  if ! echo "$dir" > "$tmp" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
   if [ -f "$RECENT_DIRS_FILE" ]; then
     while IFS= read -r d; do
       [ "$d" = "$dir" ] && continue
@@ -581,7 +609,8 @@ record_recent_dir() {
       [ "$count" -ge 50 ] && break
     done < "$RECENT_DIRS_FILE"
   fi
-  mv -f "$tmp" "$RECENT_DIRS_FILE"
+  mv -f "$tmp" "$RECENT_DIRS_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
 }
 
 resolve_finder() {
@@ -3169,6 +3198,200 @@ build_env_fwd() {
   for kv in "${ENV_FWD[@]}"; do shq "$kv"; out+=" $REPLY"; done
   printf '%s' "$out"
 }
+
+# ---------------------------------------------------------------------------
+# --doctor — tell the user what is wrong instead of failing quietly
+# ---------------------------------------------------------------------------
+#
+# Everything here used to be a silent no-op or a mangled popup:
+#
+#   * a mistyped option name.  `@interdimux-fzf-opt` (no 's') is not an error
+#     to tmux -- user options are free-form -- so the setting simply never
+#     applied and the user had no way to tell.
+#   * an out-of-domain value.  `@interdimux-order 'recent'` fell through to mru,
+#     `@interdimux-show-preview 'true'` read as off.
+#   * a '#' anywhere in the install path.  The prefix+f binding is built with
+#     `run-shell -bC`, which FORMAT-EXPANDS its argument, so a '#' in the path
+#     is eaten at keypress and the binding silently opens nothing.
+#   * an unwritable state dir, which turns every recent-dir write into stderr
+#     noise painted over the popup.
+#
+# Deliberately NOT part of the startup path: the hot path already validates the
+# three numeric options it would otherwise crash on, and nothing else here is
+# worth a millisecond on every open.
+if [ "${1:-}" = "--doctor" ]; then
+  set +e
+  _doc_fail=0
+  _ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+  _warn() { printf '  \033[33m⚠\033[0m %s\n' "$1"; }
+  _bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; _doc_fail=1; }
+  _note() { printf '      \033[2m%s\033[0m\n' "$1"; }
+
+  printf '\033[1minterdimux doctor\033[0m\n\n\033[1menvironment\033[0m\n'
+
+  if [ "$TMUX_VNUM" -ge 304 ]; then
+    _ok "tmux $(tmux -V 2>/dev/null | awk '{print $2}') (fast prefix-key binding available)"
+  elif [ "$TMUX_VNUM" -ge 300 ]; then
+    _warn "tmux $(tmux -V 2>/dev/null | awk '{print $2}') — works, but opening the picker forks a shell first"
+    _note "tmux 3.4 adds run-shell -C, which binds the popup with no shell at all"
+  else
+    _bad "tmux $(tmux -V 2>/dev/null | awk '{print $2}') is older than 3.0"
+  fi
+
+  if command -v fzf >/dev/null 2>&1; then
+    if   [ "$FZF_MINOR" -ge 74 ]; then _ok "fzf $(fzf --version | awk '{print $1}') (raw filter mode available)"
+    elif [ "$FZF_MINOR" -ge 63 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.74 adds raw mode, which stops the tree collapsing as you type"
+    elif [ "$FZF_MINOR" -ge 61 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.63 adds background transforms, so headers update without blocking"
+    else _warn "fzf $(fzf --version | awk '{print $1}') — old, but supported"
+    fi
+  else
+    _bad "fzf is not on PATH"
+    _note "it must be on the PATH the TMUX SERVER inherited, not just your shell's"
+  fi
+
+  _repo="${SCRIPT_PATH%/scripts/*}"
+  if [ -n "${IMUX_BIN:-}" ] && [ -x "$IMUX_BIN" ]; then
+    if _v=$("$IMUX_BIN" --version 2>/dev/null) && [ -n "$_v" ]; then
+      _ok "$_v at $IMUX_BIN"
+    else
+      _bad "rust helper at $IMUX_BIN is present but does not run"
+      _note "rebuild with: (cd '$_repo/rust' && cargo build --release)"
+    fi
+  elif [ "${INTERDIMUX_USE_RUST:-on}" = off ]; then
+    _warn "rust helper disabled by INTERDIMUX_USE_RUST=off"
+  else
+    _warn "rust helper not found — falling back to the minimal bash renderer"
+    _note "build it with: (cd '$_repo/rust' && cargo build --release)"
+  fi
+
+  command -v at >/dev/null 2>&1 \
+    && _ok "at is installed (--send-at / --send-in beyond a minute)" \
+    || _warn "at is not installed — only sub-minute --send-in works (tmux's own timer)"
+
+  # Paths.  A quote breaks the single-quoted command strings the bindings are
+  # built from; a '#' is eaten by tmux format expansion in run-shell -C.
+  case "$SCRIPT_PATH" in
+    *'#'*) _bad "the install path contains '#': $SCRIPT_PATH"
+           _note "tmux format-expands run-shell arguments, so prefix+f would silently do nothing" ;;
+    *"'"*) _bad "the install path contains a single quote: $SCRIPT_PATH" ;;
+    *)     _ok "install path is safe to embed in a key binding" ;;
+  esac
+
+  for _d in "${XDG_DATA_HOME:-$HOME/.local/share}/interdimux" "$SCHED_LOGDIR"; do
+    if mkdir -p "$_d" 2>/dev/null && [ -w "$_d" ]; then
+      _ok "writable: $_d"
+    else
+      _bad "not writable: $_d"
+      _note "recent directories and the scheduled-keys log cannot be saved"
+    fi
+  done
+
+  # --- key bindings -----------------------------------------------------------
+  printf '\n\033[1mkey bindings\033[0m\n'
+  _k=$(tmux show-option -gqv @interdimux-key);           _k="${_k:-f}"
+  _dk=$(tmux show-option -gqv @interdimux-dashboard-key); _dk="${_dk:-g}"
+  # Read the table once and match the key column ourselves: `list-keys -T prefix
+  # <key>` prints nothing on tmux 3.7b, so filtering with it silently reports
+  # every binding as missing.
+  _keytable=$(tmux list-keys -T prefix 2>/dev/null)
+  if printf '%s' "$_keytable" | grep -q interdimux; then
+    for _pair in "$_k:navigator" "$_dk:dashboard"; do
+      _key="${_pair%%:*}"; _what="${_pair#*:}"
+      if printf '%s\n' "$_keytable" | awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k' \
+           | grep -q interdimux; then
+        _ok "prefix+$_key opens the $_what"
+      else
+        _bad "prefix+$_key is not bound to the $_what"
+        _note "reload the plugin, or run: bash '$SCRIPT_PATH' --bind-keys"
+      fi
+    done
+  else
+    _bad "no interdimux key bindings are installed"
+    _note "run: bash '$SCRIPT_PATH' --bind-keys"
+  fi
+
+  # --- options ----------------------------------------------------------------
+  printf '\n\033[1moptions\033[0m\n'
+  # Names the code understands but that are not in OPT_MAP: they are read
+  # directly rather than forwarded to the popup.
+  _known=("${OPT_NAMES[@]}" key dashboard-key binary project-dirs)
+
+  _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
+
+  # Longest-common-prefix suggestion.  Crude on purpose: the realistic typo is a
+  # dropped or doubled character, not an anagram.
+  _suggest() {
+    local want="$1" n i best="" bestlen=0 len
+    for n in "${_known[@]}"; do
+      len=0
+      for (( i = 0; i < ${#want} && i < ${#n}; i++ )); do
+        [ "${want:i:1}" = "${n:i:1}" ] || break
+        len=$((len + 1))
+      done
+      [ "$len" -gt "$bestlen" ] && { bestlen="$len"; best="$n"; }
+    done
+    [ "$bestlen" -ge 4 ] && REPLY="$best" || REPLY=""
+  }
+
+  # A value's domain, by option name.  Empty always means "unset, use default".
+  _check_value() { # $1 = name, $2 = value -> prints a complaint, or nothing
+    local n="$1" v="$2"
+    [ -n "$v" ] || return 0
+    case "$n" in
+      show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw)
+        case "$v" in on|off) ;; *) printf "expected 'on' or 'off'" ;; esac ;;
+      order)
+        case "$v" in mru|index) ;; *) printf "expected 'mru' or 'index'" ;; esac ;;
+      recent-limit|dirs-limit|scan-depth)
+        case "$v" in ''|*[!0-9]*) printf 'expected a whole number' ;; esac
+        [ "$n" = scan-depth ] && case "$v" in ''|*[!0-9]*) ;; *) [ "$v" -gt 10 ] && printf 'deeper than 10 will not finish inside a popup' ;; esac ;;
+      popup-width|popup-height)
+        case "$v" in *%) case "${v%\%}" in ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
+                     ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
+      color-*)
+        case "$v" in
+          default|-1) ;;
+          '#'*) [ "${#v}" -eq 7 ] || printf 'a hex colour must be #rrggbb' ;;
+          ''|*[!0-9]*) printf 'expected #rrggbb, a 0-255 index, or default' ;;
+          *) [ "$v" -le 255 ] || printf 'a colour index must be 0-255' ;;
+        esac ;;
+      key|dashboard-key)
+        [ "${#v}" -eq 1 ] || printf 'expected a single key' ;;
+      binary)
+        [ -x "$v" ] || printf 'not an executable file' ;;
+    esac
+  }
+
+  # Every @interdimux-* actually set, global and session scope.
+  _seen=0
+  while IFS= read -r _line; do
+    _name="${_line%% *}"; _name="${_name#@interdimux-}"
+    _val="${_line#* }"; [ "$_val" = "$_line" ] && _val=""
+    _val="${_val%\"}"; _val="${_val#\"}"
+    _seen=$((_seen + 1))
+    if ! _is_known "$_name"; then
+      _suggest "$_name"
+      if [ -n "$REPLY" ]; then
+        _bad "unknown option @interdimux-$_name — did you mean @interdimux-$REPLY?"
+      else
+        _bad "unknown option @interdimux-$_name"
+      fi
+      continue
+    fi
+    _why=$(_check_value "$_name" "$_val")
+    if [ -n "$_why" ]; then
+      _bad "@interdimux-$_name = '$_val' — $_why"
+    else
+      _ok "@interdimux-$_name = '$_val'"
+    fi
+  done < <( { tmux show-options -g 2>/dev/null; tmux show-options 2>/dev/null; } \
+            | grep '^@interdimux-' | sort -u )
+  [ "$_seen" = 0 ] && _note 'nothing set — every option is at its default'
+
+  printf '\n'
+  [ "$_doc_fail" = 1 ] && exit 1
+  exit 0
+fi
 
 if [ "${1:-}" = "--launch" ]; then
   set +e

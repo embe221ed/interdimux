@@ -295,14 +295,12 @@ fn gather() {
 
     // ---- directory rows (the one-list model) -------------------------------
     if env_is("INTERDIMUX_SHOW_DIRS", "on") {
-        // bash treats a malformed limit as "off" (emit_dir_rows returns early
-        // unless it matches ^[0-9]+$); silently substituting the default here
-        // made the two renderers disagree on how many rows to print.
-        let raw = env_or("INTERDIMUX_DIRS_LIMIT", "15");
-        let limit: usize = match raw.parse() {
-            Ok(n) => n,
-            Err(_) => return out_flush(&mut out),
-        };
+        // A malformed limit falls back to the default, matching bash: it now
+        // normalises the numeric options up front (a junk value used to make
+        // `[ -ge ]` print "integer expression expected" onto the popup), so
+        // "off" here would be the two renderers disagreeing again -- this time
+        // with the Rust one silently dropping every directory row.
+        let limit: usize = env_or("INTERDIMUX_DIRS_LIMIT", "15").parse().unwrap_or(15);
         let mut n = 0;
         for d in dirs::candidates() {
             if n >= limit {
