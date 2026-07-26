@@ -52,11 +52,16 @@ elif command -v perl >/dev/null 2>&1; then
   SLEEPER="perl -e \"sleep 600\""
 fi
 
-tmux_cmd new-session -d -s t -x 200 -y 40 -c "$SCRIPT_DIR"
+# Use a shell with NO rc files.  The developer's real rc runs children of its
+# own (pyenv-rehash here), and the resolver correctly reports THOSE as the
+# pane's command while init is in flight — so the test would be asserting
+# against the rc script, and under load it never settles at all.  This test is
+# about command resolution, not about anyone's shell setup.
+tmux_cmd new-session -d -s t -x 200 -y 40 -c "$SCRIPT_DIR" 'bash --norc --noprofile -i'
 tmux_cmd send-keys -t '=t:0' 'sleep 600' Enter                      # FOREGROUND
-tmux_cmd new-window -d -t '=t:' -n bg   -c "$SCRIPT_DIR"
+tmux_cmd new-window -d -t '=t:' -n bg   -c "$SCRIPT_DIR" 'bash --norc --noprofile -i' 
 tmux_cmd send-keys -t '=t:bg' 'sleep 601 &' Enter                   # backgrounded
-tmux_cmd new-window -d -t '=t:' -n idle -c "$SCRIPT_DIR"            # plain shell
+tmux_cmd new-window -d -t '=t:' -n idle -c "$SCRIPT_DIR" 'bash --norc --noprofile -i'  # plain shell
 tmux_cmd new-window -d -t '=t:' -n direct -c "$SCRIPT_DIR" 'sleep 602'   # no shell
 
 if [ -n "$SLEEPER" ]; then
@@ -72,7 +77,28 @@ export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=t:0' -F '#{pane_id}' | head 
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307
 export INTERDIMUX_SHOW_FULL_COMMAND=on INTERDIMUX_SHOW_GIT_BRANCH=off
 export INTERDIMUX_ORDER=index INTERDIMUX_USE_ZOXIDE=off
-sleep 4
+
+# Wait for the shells to finish initialising, not a fixed duration.  A shell
+# mid-rc has a child of its own (here: pyenv-rehash), and the resolver correctly
+# reports THAT as the pane's command — so sampling too early asserts against the
+# rc script instead of the command under test.  Observed failing only inside a
+# full-suite run, where the box is busiest.
+wait_settled() {
+  local i out
+  for i in $(seq 1 200); do
+    out=$(bash "$SCRIPT" --list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' '{print $3}')
+    # every pane we set up should have reached its final command
+    if printf '%s' "$out" | grep -q 'sleep 600' \
+       && printf '%s' "$out" | grep -q 'sleep 601' \
+       && printf '%s' "$out" | grep -q 'sleep 602' \
+       && ! printf '%s' "$out" | grep -q 'pyenv\|rehash'; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+wait_settled || echo "  (warning: panes did not settle; assertions may be flaky)" >&2
 
 out=$(bash "$SCRIPT" --list 2>/dev/null)
 plain=$(printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g')
@@ -99,8 +125,10 @@ case "$got" in
 esac
 
 got=$(cmd_for idle)
+# the pane runs an explicit no-rc shell, so the resolved command is its full
+# argv ("bash --norc --noprofile -i") rather than a bare "bash"
 case "$got" in
-  *sh) report "idle shell shows the shell itself" pass ;;
+  *bash*|*sh*) report "idle shell shows the shell itself" pass ;;
   *) report "idle shell shows the shell itself (got '$got')" fail ;;
 esac
 

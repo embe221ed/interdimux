@@ -30,6 +30,20 @@ report() {
   fi
 }
 
+# Wait for a CONDITION, not a duration.  Fixed sleeps were tuned on an idle box
+# and failed when the suite ran back-to-back with the others (observed: the D:
+# row assertion failing only inside a full-suite run, passing in isolation).
+wait_for() { # $1 = description, $2.. = a command that must succeed
+  local desc="$1"; shift
+  local i
+  for i in $(seq 1 150); do
+    "$@" >/dev/null 2>&1 && return 0
+    sleep 0.1
+  done
+  echo "  (timed out waiting for: $desc)" >&2
+  return 1
+}
+
 echo "interdimux one-list (directory row) tests"
 echo
 
@@ -47,7 +61,10 @@ export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=taken:0' -F '#{pane_id}' | h
 export XDG_DATA_HOME="$TMPD/data"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
 export INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_GIT_BRANCH=on
-sleep 2
+# the windows must exist before --list can be expected to show them
+wait_for "the bench windows" sh -c "[ \"\$(tmux -L '$SOCK' list-windows -a | wc -l)\" -ge 2 ]"
+# ...and --list must actually produce rows
+wait_for "--list to produce rows" sh -c "bash '$SCRIPT' --list 2>/dev/null | grep -q ."
 
 out=$(bash "$SCRIPT" --list 2>/dev/null)
 plain=$(printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g')
@@ -111,7 +128,9 @@ fi
 # --- Enter on a D: row creates, hydrates and switches ----------------------------
 printf 'echo ONELIST_HYDRATED\n' > "$TMPD/alpha/.interdimux-startup"
 bash "$SCRIPT" --connect-dir "$TMPD/alpha" >/dev/null 2>&1 || true
-sleep 2.5
+wait_for "the alpha session" tmux -L "$SOCK" has-session -t '=alpha'
+wait_for "alpha to be hydrated" sh -c \
+  "tmux -L '$SOCK' capture-pane -t '=alpha:' -p 2>/dev/null | grep -q ONELIST_HYDRATED"
 if tmux -L "$SOCK" has-session -t '=alpha' 2>/dev/null; then
   report "opening a D: row creates the session" pass
 else

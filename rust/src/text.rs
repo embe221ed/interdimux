@@ -109,7 +109,9 @@ pub fn age_of(ts: i64, now: i64) -> String {
     if ts <= 0 {
         return String::new();
     }
-    let d = now - ts;
+    // saturating: INTERDIMUX_NOW is parsed from the environment, and a hostile
+    // or absurd value overflowed (debug: panic; release: a wrapped nonsense age)
+    let d = now.saturating_sub(ts);
     if d < 0 {
         String::new()
     } else if d < 90 {

@@ -6,6 +6,7 @@
 //! reach any of the four fields.
 
 use crate::git::GitCache;
+use crate::proc::sanitize;
 use crate::palette::{Palette, BOLD, DIM, RST};
 use crate::text::{pad_to, tildify, trim_path, truncate, width};
 use crate::widths::Widths;
@@ -22,7 +23,12 @@ pub fn ctx_field(
     git: &mut GitCache,
     show_git: bool,
 ) -> String {
-    let disp = tildify(path, home).replace('\t', " ");
+    // Sanitize, not just de-tab.  A pane cwd is arbitrary bytes: an ESC in a
+    // path injected a live terminal escape into the popup, and width() counts
+    // the ESC as 0 cells while the terminal consumed the "[31m" that followed —
+    // so the padding came out short and the column shifted.  A CR redrew the row
+    // over itself.  Same rules as argv (proc::sanitize).
+    let disp = sanitize(&tildify(path, home)).replace('\t', " ");
     let disp = trim_path(&disp, w.path);
     let mut out = format!("{} {}{}{}", p.sep, p.dim_path, disp, RST);
     let mut len = 2 + width(&disp);
@@ -32,11 +38,20 @@ pub fn ctx_field(
     if w.badge > 0 {
         let mut badge = String::new();
         let mut blen = 0usize;
+        // Reserve room for the flag glyphs FIRST: each of Z / ! / # costs 2
+        // cells, and pad_to can only pad, never trim — so a long branch plus a
+        // flag used to overflow the field and shift the command column for that
+        // one row.
+        let nflags = usize::from(zoomed) + usize::from(bell) + usize::from(activity);
+        let branch_budget = w.badge.saturating_sub(2 + 2 * nflags);
         if show_git {
-            let mut b = git.branch(path);
+            // .git/HEAD is a file anyone can write: a TAB in the ref name
+            // produced a FIVE-field row, breaking the contract fzf's
+            // --delimiter/--with-nth/--nth all depend on.
+            let mut b = sanitize(&git.branch(path)).replace('\t', " ");
             if !b.is_empty() {
-                if width(&b) > w.badge.saturating_sub(2) {
-                    b = truncate(&b, w.badge.saturating_sub(2));
+                if width(&b) > branch_budget {
+                    b = truncate(&b, branch_budget);
                 }
                 badge.push_str(&format!(" {}‹{}›{}", p.dim_git, b, RST));
                 blen += width(&b) + 3;
@@ -142,10 +157,22 @@ pub fn pane_ident(
     // pane id itself.
     let mut pdisp = sdisp.to_string();
     let over = (9 + width(&pdisp) + width(widx) + width(pidx)) as isize - w.ident as isize;
-    if over > 0 && width(&pdisp) > (over as usize + 1) {
-        pdisp = truncate(&pdisp, width(&pdisp) - over as usize);
+    if over > 0 {
+        if width(&pdisp) > (over as usize + 1) {
+            pdisp = truncate(&pdisp, width(&pdisp) - over as usize);
+        } else {
+            // The prefix is too short to absorb the overflow (short session
+            // name, wide window/pane indexes).  Dropping it entirely keeps the
+            // column aligned; leaving it made pane rows wider than every other
+            // row, since pad_to cannot trim.
+            pdisp = String::new();
+        }
     }
-    let pprefix = format!("{} {}.", pdisp, widx);
+    let pprefix = if pdisp.is_empty() {
+        format!("{}.", widx)
+    } else {
+        format!("{} {}.", pdisp, widx)
+    };
     let body = format!(
         "{} {}{} {}{} {}{}{}{}",
         marker, p.dim_tree, cont, pglyph, RST, DIM, pprefix, RST, pidx

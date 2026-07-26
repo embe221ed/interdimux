@@ -69,6 +69,30 @@ fn render(dump: &str, extra: &[(&str, &str)]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Like `render`, but tolerates a deliberate rejection: the binary exits 3 when
+/// the input framing is not exactly four RS-separated sections, so that bash
+/// falls back to its own renderer rather than showing a mis-framed list.
+fn try_render(dump: &str) -> (Option<i32>, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
+        .arg("gather")
+        .env_clear()
+        .env("HOME", "/home/u")
+        .env("PATH", "/usr/bin:/bin")
+        .env("INTERDIMUX_NOW", "1700086400")
+        .env("INTERDIMUX_COLS", "120")
+        .env("INTERDIMUX_SHOW_FULL_COMMAND", "off")
+        .env("INTERDIMUX_SHOW_GIT_BRANCH", "off")
+        .env("INTERDIMUX_SHOW_DIRS", "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn imux");
+    child.stdin.as_mut().unwrap().write_all(dump.as_bytes()).ok();
+    let out = child.wait_with_output().expect("run imux");
+    (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn check(case: &str, extra: &[(&str, &str)]) {
     let dir = corpus_dir();
     let dump = std::fs::read_to_string(dir.join(format!("{}.dump", case)))
@@ -188,9 +212,21 @@ fn malformed_input_never_panics() {
         "1\u{1f}a\u{0}b\u{1f}1\u{1f}\n\u{1e}\n\u{1e}\n\u{1e}\n".into(),
     ];
     for (i, c) in cases.iter().enumerate() {
-        let out = render(c, &[]); // render() asserts a successful exit status
-        assert!(!out.contains('\t') || out.lines().all(|l| l.split('\t').count() == 4),
-                "case {} produced a malformed row", i);
+        let (code, out) = try_render(c);
+        // A signal (None) means it crashed; anything else is a controlled
+        // outcome.  0 = rendered; 3 = framing rejected so bash falls back.
+        assert!(
+            matches!(code, Some(0) | Some(3)),
+            "case {} exited {:?} (None = killed by a signal, i.e. a panic)", i, code
+        );
+        if code == Some(0) {
+            assert!(
+                out.lines().all(|l| l.split('\t').count() == 4),
+                "case {} produced a malformed row: {:?}", i, out
+            );
+        } else {
+            assert!(out.is_empty(), "case {} rejected the input but still printed rows", i);
+        }
     }
 }
 
@@ -228,4 +264,51 @@ fn identity_columns_all_have_equal_display_width() {
             }
         }
     }
+}
+
+/// A stray RS inside a pane's cwd renumbers every later section: windows and
+/// panes vanish and the current-row marker is lost.  tmux only rejects control
+/// bytes in session and window NAMES, so this is reachable with a real
+/// directory. The binary must REFUSE rather than render a mis-framed list.
+#[test]
+fn a_stray_record_separator_is_rejected_not_misparsed() {
+    let good = "1700000000\u{1f}s\u{1f}1\u{1f}\n\u{1e}\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let (code, out) = try_render(good);
+    assert_eq!(code, Some(0), "the well-formed control case must render");
+    assert!(!out.is_empty());
+
+    // the same dump with an extra RS, as a cwd containing \x1e would produce
+    let bad = "1700000000\u{1f}s\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/we\u{1e}ird\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let (code, out) = try_render(bad);
+    assert_eq!(code, Some(3), "a stray RS must be rejected, not rendered");
+    assert!(out.is_empty(), "a rejected input must print nothing");
+}
+
+/// A US inside a pane's cwd shifts every later field, which used to make
+/// pane_pid attacker-chosen — a pid this process then reads from /proc.
+#[test]
+fn a_stray_unit_separator_drops_the_row_rather_than_shifting_fields() {
+    // 10 fields where 9 are expected, because the path contains one US
+    let bad = "1700000000\u{1f}s\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/x\u{1f}1\u{1f}1\u{1f}4242\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let (code, out) = try_render(bad);
+    assert_eq!(code, Some(0));
+    // the session row survives; the malformed window row is dropped, not
+    // rendered with fields read from the wrong positions
+    assert!(out.contains("S:s"), "the session row should still render");
+    assert!(!out.contains("4242"), "a shifted field must not be used as a pid");
+    for l in out.lines() {
+        assert_eq!(l.split('\t').count(), 4);
+    }
+}
+
+/// Control bytes in a path must not reach the terminal: an ESC injected a live
+/// escape sequence into the popup and silently broke the column maths.
+#[test]
+fn control_bytes_in_a_path_are_neutralised() {
+    let dump = "1700000000\u{1f}s\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/e\u{1b}[31mvil\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let (code, out) = try_render(dump);
+    assert_eq!(code, Some(0));
+    // the only ESCs left must be our own SGR colours, never one from the path
+    assert!(!out.contains("\u{1b}[31m"), "a path injected its own escape: {:?}", out);
+    assert!(!out.contains('\r'), "a CR in a path would redraw the row over itself");
 }

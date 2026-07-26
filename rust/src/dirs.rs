@@ -24,7 +24,13 @@ pub fn candidates() -> Vec<String> {
     let mut out = Vec::new();
     let limit = recent_limit();
 
-    if let Ok(content) = fs::read_to_string(recent_file()) {
+    // Read BYTES and decode lossily per line.  read_to_string() errors on the
+    // first invalid UTF-8 byte and the `if let Ok` swallowed it, so ONE
+    // non-UTF-8 directory name silently deleted the entire recent list — and
+    // interdimux writes this file itself, so visiting such a directory once
+    // killed the feature permanently.
+    if let Ok(bytes) = fs::read(recent_file()) {
+        let content = String::from_utf8_lossy(&bytes).into_owned();
         for d in content.lines() {
             if out.len() >= limit {
                 break;

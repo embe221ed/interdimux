@@ -90,10 +90,21 @@ fn read_sections() -> Vec<String> {
     if io::Read::read_to_end(&mut io::stdin(), &mut buf).is_err() {
         std::process::exit(1); // let bash fall back rather than print nothing
     }
-    String::from_utf8_lossy(&buf)
+    let parts: Vec<String> = String::from_utf8_lossy(&buf)
         .split('\u{1e}')
         .map(|s| s.trim_matches('\n').to_string())
-        .collect()
+        .collect();
+    // EXACTLY four sections, or the framing is not what we think it is.  A pane
+    // cwd may legally contain RS (tmux only rejects control bytes in session and
+    // window NAMES), and one stray RS renumbers every later section: windows and
+    // panes vanish and the current-row marker is lost — silently, with a
+    // successful exit.  bash has the same guard on its side; exiting non-zero
+    // here makes it fall back to its own renderer instead of showing a wrong list.
+    if parts.len() != 4 {
+        eprintln!("imux: expected 4 input sections, got {}", parts.len());
+        std::process::exit(3);
+    }
+    parts
 }
 
 fn gather() {
@@ -141,7 +152,11 @@ fn gather() {
         .filter(|l| !l.is_empty())
         .filter_map(|l| {
             let f: Vec<&str> = l.split(US).collect();
-            if f.len() < 9 || f[0].is_empty() {
+            // EXACTLY 9: `< 9` accepted *at least* 9, so a US inside
+            // pane_current_path shifted every later field and pane_pid became
+            // whatever followed the injected separator — a pid this process
+            // then read from /proc.
+            if f.len() != 9 || f[0].is_empty() {
                 return None;
             }
             let flags = f[8].as_bytes();
@@ -166,7 +181,7 @@ fn gather() {
         .filter(|l| !l.is_empty())
         .filter_map(|l| {
             let f: Vec<&str> = l.split(US).collect();
-            if f.len() < 7 || f[0].is_empty() {
+            if f.len() != 8 || f[0].is_empty() {
                 return None;
             }
             Some(Pane {
@@ -280,7 +295,14 @@ fn gather() {
 
     // ---- directory rows (the one-list model) -------------------------------
     if env_is("INTERDIMUX_SHOW_DIRS", "on") {
-        let limit: usize = env_or("INTERDIMUX_DIRS_LIMIT", "15").parse().unwrap_or(15);
+        // bash treats a malformed limit as "off" (emit_dir_rows returns early
+        // unless it matches ^[0-9]+$); silently substituting the default here
+        // made the two renderers disagree on how many rows to print.
+        let raw = env_or("INTERDIMUX_DIRS_LIMIT", "15");
+        let limit: usize = match raw.parse() {
+            Ok(n) => n,
+            Err(_) => return out_flush(&mut out),
+        };
         let mut n = 0;
         for d in dirs::candidates() {
             if n >= limit {
@@ -304,5 +326,9 @@ fn gather() {
         }
     }
     let _ = out.flush();
+}
+
+fn out_flush<W: Write>(w: &mut W) {
+    let _ = w.flush();
 }
 
