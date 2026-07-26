@@ -99,7 +99,11 @@ ck "order forwarded"                                "$(get INTERDIMUX_ORDER)" "i
 ck "unset option arrives empty (-> built-in default)" "$(get INTERDIMUX_SHOW_PREVIEW)" ""
 ck "OPTS_PRIMED set"                                "$(get INTERDIMUX_OPTS_PRIMED)" "1"
 ck "TMUX_PANE is the PRESSING client's pane"        "$(get TMUX_PANE)" "$EXPECT_PANE"
-ck "TITLE forwarded for popup_accent repaints"      "$(get INTERDIMUX_TITLE)" " interdimux "
+# The title names the session you are in: once the list is longer than the
+# popup the current row scrolls away, and the title is the only thing left on
+# screen saying where you are.  Free here -- it comes from a tmux format
+# expanded in-server at keypress.
+ck "TITLE names the current session"                "$(get INTERDIMUX_TITLE)" " interdimux · main "
 ck "TMUX_VNUM baked numerically"                    "$(get INTERDIMUX_TMUX_VNUM)" "307"
 
 ck "every option in OPT_MAP is forwarded" \
@@ -150,6 +154,28 @@ for _k_what in "f:--launch switch or a popup" "g:--dashboard-launch"; do
       ERRORS+="  FAIL: prefix+$_k from a '#' path"$'\n'"        want to contain: [$HASHD/probe.sh]"$'\n'"        expanded to    : [$_expanded]"$'\n' ;;
   esac
 done
+
+# The session name now travels inside the title, so a hostile one has to survive
+# the whole -e/-T chain.  Measured on tmux 3.7b, what a name can actually hold:
+# tmux FORMAT-EXPANDS the name at create/rename time, so "#S" and "#h" are gone
+# before they are ever stored ("has#hash" becomes "has<hostname>ash") -- but a
+# '"' survives intact, and so does a '#' in a benign position.  A quote is the
+# dangerous one: it would close the -e token and kill the binding outright.
+"$T" -L "$SOCK" rename-session -t main 'ma"in#xy'
+bash "$HASHD/probe.sh" --bind-keys
+rm -f "$OUT2"
+"$T" -L "$OUTER" send-keys -t '=drv:' C-b
+sleep 0.6
+"$T" -L "$OUTER" send-keys -t '=drv:' f
+sleep 3.5
+_got_title=$(sed -n 's/^INTERDIMUX_TITLE=//p' "$OUT2" 2>/dev/null)
+if [ "$_got_title" = ' interdimux · ma"in#xy ' ]; then
+  PASS=$((PASS + 1)); printf '  \033[32m\xe2\x9c\x93\033[0m %s\n' "a session name with a quote and a '#' survives into the title"
+else
+  FAIL=$((FAIL + 1)); printf '  \033[31m\xe2\x9c\x97\033[0m %s\n' "a session name with a quote and a '#' survives into the title"
+  ERRORS+="  FAIL: hostile session name in the title"$'\n'"        want: [ interdimux · ma\"in#Sx ]"$'\n'"        got : [$_got_title]"$'\n'
+fi
+"$T" -L "$SOCK" rename-session -t 'ma"in#xy' main
 
 # ...and end to end: a real key press must actually reach the popup.
 "$T" -L "$OUTER" send-keys -t '=drv:' C-b

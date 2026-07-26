@@ -35,6 +35,12 @@ echo "interdimux hydration tests"
 echo
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s anchor -x 120 -y 30
+# connect_dir creates its own sessions, so the pane shell cannot be passed per
+# session -- pin it on the server.  Without this every pane starts the user's
+# real login shell and sources their rc, and on a loaded box that shell had not
+# reached a prompt before the test's `clear` was sent: the first hydration's
+# output was still on screen and the re-hydration check failed spuriously.
+tmux -L "$SOCK" set -g default-command 'bash --norc --noprofile -i' 
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=anchor:' -F '#{pane_id}' | head -1)"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1

@@ -14,7 +14,7 @@ A portal gun for your tmux sessions.
   with that name (resolved as a path, then via zoxide, then under `$HOME`)
 - Scoped fuzzy matching — queries match names and commands, not paths,
   padding, badges, or tree glyphs; cycle the scope with `Ctrl-]`
-  (name / path / cmd / all, fzf >= 0.58)
+  (name / path / cmd / all / name+cmd, fzf >= 0.58)
 - Warm fzf theme matched to the list palette; popups inherit your
   `popup-border-style` / `popup-border-lines` settings, with titled
   frames on tmux >= 3.3 and a red frame during kill prompts and kill
@@ -116,12 +116,12 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 | `Ctrl-s` | Swap the selected window or pane |
 | `Ctrl-d` | Detach clients from the selected session |
 | `Ctrl-t` | Send a command to the selected pane |
-| `Ctrl-]` | Cycle the match scope: name / path / cmd / all (fzf >= 0.58) |
+| `Ctrl-]` | Cycle the match scope: name / path / cmd / all / name+cmd (fzf >= 0.58). The prompt names the active scope |
 | `Ctrl-/` | Toggle preview pane |
 | `Ctrl-r` | Reload the list |
 | `Esc` | Cancel |
 
-The header dynamically updates to show only the relevant keybindings for the currently focused item (session, window, or pane).
+The header dynamically updates to show only the relevant keybindings for the currently focused item (session, window, or pane), and the popup title names the session you are in — the current row is marked in the list, but that row scrolls out of view as soon as the list is longer than the popup.
 
 Sessions are listed most-recently-used first, with the **current session
 last** — so opening the navigator and pressing `Enter` toggles to the
@@ -142,6 +142,15 @@ Creates (or switches to) a session from a directory. The list has three tiers:
 - `★` recent — directories you created sessions from before (plus, when [zoxide](https://github.com/ajeetdsouza/zoxide) is installed, your most frecent zoxide dirs)
 - `◆` projects — directories containing a project marker (`.git`, `package.json`, `Cargo.toml`, `go.mod`, …)
 - `·` plain directories
+
+A directory that already has a session is marked `▸` and shows which one, so
+`Enter` there is visibly a switch rather than a create:
+
+```
+  ▸  ~/code/api          → api
+  ★  ~/code/worker
+  ◆  ~/code/tools        Rust
+```
 
 By default the configured project directories (see `@interdimux-project-dirs`) are scanned one level deep. To go deeper:
 

@@ -175,6 +175,75 @@ else
   report "...and no unreachable session was created" pass
 fi
 
+# --- the dialog must stay inside a SHORT popup ------------------------------------
+# The box is centred on the terminal size read from the tty, and the status row
+# carries pre-coloured text.  Two things went wrong on a small popup, and both
+# destroyed the frame rather than merely looking cramped:
+#
+#   * ${#text} counts the SGR escapes, so a coloured message that "fits" by that
+#     measure ran past the right border, wrapped, and overwrote the bottom one.
+#     Captured at 52x6 before the fix:
+#         │   ✗ a name cannot contain ':' (tmux splits targ
+#         ets there)────────────────────────────────────╯
+#   * a box taller than the popup clamped DLG_TOP to 1, drew its bottom border
+#     past the last row, and scrolled the title off the top.
+#
+# Needs a REAL tty of the right size: the dialog reads its dimensions with
+# `stty size`, which returns nothing for the file the other tests feed in, so a
+# file-driven run always renders at the 24x80 fallback and proves nothing.
+run_rename_tty() { # $1 = cols, $2 = rows, $3 = new name
+  local w="$1" h="$2" newname="$3" i out=""
+  tmux -L "$SOCK" kill-session -t tiny 2>/dev/null || true
+  tmux -L "$SOCK" new-session -d -s tiny -x "$w" -y "$h" \
+    "env INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
+         TMUX_PANE='$TMUX_PANE' bash '$SCRIPT' --action rename 'S:one'; sleep 6"
+  for i in $(seq 1 60); do
+    tmux -L "$SOCK" capture-pane -t '=tiny:' -p 2>/dev/null | grep -q '╭' && break
+    sleep 0.1
+  done
+  tmux -L "$SOCK" send-keys -t '=tiny:' C-u "$newname" Enter
+  for i in $(seq 1 60); do
+    out=$(tmux -L "$SOCK" capture-pane -t '=tiny:' -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+    printf '%s' "$out" | grep -q '✗' && break
+    sleep 0.1
+  done
+  printf '%s' "$out"
+}
+
+tiny_out=$(run_rename_tty 52 6 'no:good')
+
+# the frame survives: both borders present, on their own rows
+if printf '%s\n' "$tiny_out" | grep -q '╭' && printf '%s\n' "$tiny_out" | grep -q '╰'; then
+  report "in a 6-row popup the dialog keeps both borders" pass
+else
+  report "in a 6-row popup the dialog keeps both borders" fail
+  ERRORS+="$(printf '%s\n' "$tiny_out" | sed 's/^/      /')"$'\n'
+fi
+
+# nothing leaked past the right border onto the frame row
+if printf '%s\n' "$tiny_out" | grep -q '^[^│]*there)'; then
+  report "the error text does not overrun the frame" fail
+  ERRORS+="$(printf '%s\n' "$tiny_out" | sed 's/^/      /')"$'\n'
+else
+  report "the error text does not overrun the frame" pass
+fi
+
+# ...and it is still legible, truncated rather than dropped
+if printf '%s\n' "$tiny_out" | grep -q '✗ a name cannot contain'; then
+  report "the error is still shown, truncated to fit" pass
+else
+  report "the error is still shown, truncated to fit" fail
+fi
+
+# no rendered row is wider than the popup — a wrap is what ate the border
+too_wide=$(printf '%s\n' "$tiny_out" | awk '{ n=0; for (i=1; i<=length($0); i++) n++ } n > 52 { print NR }')
+if [ -z "$too_wide" ]; then
+  report "no dialog row is wider than the popup" pass
+else
+  report "no dialog row is wider than the popup (rows: $too_wide)" fail
+fi
+tmux -L "$SOCK" kill-session -t tiny 2>/dev/null || true
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

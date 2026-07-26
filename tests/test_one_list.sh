@@ -170,6 +170,52 @@ else
   report "a directory path containing ':' round-trips in the spec" fail
 fi
 
+# --- the ctrl-o picker marks directories that already have a session (IDEAS #7) ---
+# Enter on such a row switches rather than creates -- connect_dir finds the
+# session first -- but the picker gave no sign of it, so "new session" on a
+# directory you already had open looked like it had done nothing.  Naming the
+# session is the useful half: it says where you are about to land.
+#
+# ("taken" is the fixture session created at $TMPD/taken during setup.)
+dirs_out=$(INTERDIMUX_PROJECT_DIRS="$TMPD" bash "$SCRIPT" --dirs-list 2>/dev/null \
+           | sed 's/\x1b\[[0-9;]*m//g')
+taken_row=$(printf '%s\n' "$dirs_out" | awk -F'\t' -v p="$TMPD/taken" '$3 == p')
+free_row=$(printf '%s\n' "$dirs_out"  | awk -F'\t' -v p="$TMPD/beta"  '$3 == p')
+
+# Assert on the BADGE column, not the whole row: this fixture's session is named
+# after its directory, so a row-wide match would pass on the path alone and the
+# test would have no teeth.
+taken_badge=$(printf '%s\n' "$taken_row" | awk -F'\t' '{print $2}')
+if [ "$taken_badge" = "→ taken" ]; then
+  report "the dir picker names the session already open in a directory" pass
+else
+  report "the dir picker names the session already open in a directory" fail
+  ERRORS+="    badge: [$taken_badge]"$'\n'
+fi
+case "$taken_row" in
+  *▸*) report "...and marks it with the session glyph, not the tier glyph" pass ;;
+  *) report "...and marks it with the session glyph, not the tier glyph" fail
+     ERRORS+="    row: [$taken_row]"$'\n' ;;
+esac
+# a directory with no session must be untouched, or the mark means nothing
+free_badge=$(printf '%s\n' "$free_row" | awk -F'\t' '{print $2}')
+case "$free_row" in
+  '') report "a directory with no session is NOT marked (row missing)" fail ;;
+  *▸*) report "a directory with no session is NOT marked" fail
+       ERRORS+="    row: [$free_row]"$'\n' ;;
+  *) case "$free_badge" in
+       *→*) report "a directory with no session is NOT marked" fail
+            ERRORS+="    badge: [$free_badge]"$'\n' ;;
+       *)   report "a directory with no session is NOT marked" pass ;;
+     esac ;;
+esac
+# the spec column still carries the plain path, so Enter still resolves
+if [ "$(printf '%s\n' "$taken_row" | awk -F'\t' '{print $3}')" = "$TMPD/taken" ]; then
+  report "a marked row still carries its plain path in the spec column" pass
+else
+  report "a marked row still carries its plain path in the spec column" fail
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then

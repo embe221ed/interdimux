@@ -118,11 +118,39 @@ else
 fi
 
 # --- scope prompt ------------------------------------------------------------
-scope_case='case "${FZF_NTH:-}" in'
-scope_case+=' 1) printf "name ❯ \n";; 2) printf "path ❯ \n";;'
-scope_case+=' 3) printf "cmd ❯ \n";; 1,2,3) printf "all ❯ \n";;'
-scope_case+=' *) printf "❯ \n";; esac'
-for nth in 1 2 3 1,2,3 1,3 ""; do
+# Build the inline case by EVALUATING the script's own _scope_case assignments
+# rather than re-typing them here.  A hand-copied duplicate silently stopped
+# matching the moment a state was added to one side only -- which is exactly the
+# drift this test exists to catch.
+eval "$(grep -E '^\s*_scope_case(\+)?=' "$SCRIPT")"
+scope_case="$_scope_case"
+if [ -n "$scope_case" ]; then
+  report "the inline scope case was extracted from the script" pass
+else
+  report "the inline scope case was extracted from the script" fail
+fi
+
+# Every state the ctrl-] cycle can actually reach, read from the binding itself:
+# a sixth state added to change-nth without a label would otherwise show a bare
+# "❯ ", indistinguishable from no scope at all.
+cycle=$(grep -o 'change-nth([^)]*)' "$SCRIPT" | head -1 | sed 's/change-nth(//; s/)$//')
+IFS='|' read -r -a cycle_states <<< "$cycle"
+if [ "${#cycle_states[@]}" -ge 5 ]; then
+  report "the ctrl-] cycle was parsed from the binding (${#cycle_states[@]} states)" pass
+else
+  report "the ctrl-] cycle was parsed from the binding (got: '$cycle')" fail
+fi
+for nth in ${cycle_states[@]+"${cycle_states[@]}"}; do
+  got=$(FZF_NTH="$nth" bash "$SCRIPT" --scope-prompt)
+  if [ "$got" != "❯ " ]; then
+    report "scope state '$nth' has a label ('${got% ❯ }')" pass
+  else
+    report "scope state '$nth' has a label" fail
+    ERRORS+="    every state ctrl-] cycles to must name itself"$'\n'
+  fi
+done
+
+for nth in ${cycle_states[@]+"${cycle_states[@]}"} ""; do
   want=$(FZF_NTH="$nth" bash "$SCRIPT" --scope-prompt)
   got=$(FZF_NTH="$nth" sh -c "$scope_case")
   if [ "$want" = "$got" ]; then

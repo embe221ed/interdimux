@@ -174,7 +174,20 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # popup_accent re-sends -T on every repaint, and on tmux >= 3.6 a partial
   # display-popup resets omitted properties — without this the title vanishes
   # after the ctrl-x kill confirm.
-  _bk_env+=" -e \"INTERDIMUX_TITLE= interdimux \""
+  #
+  # The title names the session you are IN.  The list marks the current row, but
+  # that row scrolls out of view the moment the list is longer than the popup,
+  # and then nothing on screen says where you are — which matters most in
+  # exactly the case where you have enough sessions to need the picker.  The
+  # title is the one thing always visible, and here it costs nothing: the name
+  # comes from a tmux format expanded in-server at keypress, not a fork.
+  #
+  # #{q:} on the NAME only: a session name may contain a quote, which would
+  # otherwise close the -e/-T token and kill the binding.  The surrounding
+  # "#[bold]" stays unquoted, because rs_quote would double its '#' and '##['
+  # does not collapse back before '['.
+  _bk_title=' interdimux · #{q:session_name} '
+  _bk_env+=" -e \"INTERDIMUX_TITLE=$_bk_title\""
 
   # #{?…,…,…} treats the string "0" as FALSE, so it cannot be used as an
   # emptiness test — #{==:…,} can.  (Width/height can't legitimately be 0, but
@@ -182,10 +195,8 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_w='#{?#{==:#{@interdimux-popup-width},},80%,#{@interdimux-popup-width}}'
   _bk_h='#{?#{==:#{@interdimux-popup-height},},75%,#{@interdimux-popup-height}}'
 
-  # -T is NOT #{q:}-quoted: rs_quote would double the '#' and '##[' does not
-  # collapse back before '[', so the popup would show a literal "#[bold]".
   tmux bind-key "$_bk_nav" run-shell -bC \
-    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold] interdimux \"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
 
@@ -2048,6 +2059,23 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
   declare -A seen=()
 
+  # Which directories already have a session, and which one (IDEAS #7).
+  #
+  # Enter on such a row switches rather than creates -- connect_dir finds the
+  # session first -- but the picker gave no sign of that, so "new session" on a
+  # directory you already had open looked like it had done nothing.  Naming the
+  # session is the useful half: it tells you where you are about to land.
+  #
+  # One tmux invocation, keyed on each session's ACTIVE window, the same basis
+  # the navigator's directory rows use.  This is the ctrl-o picker, not the hot
+  # path, so ~5 ms of round-trip is affordable here.
+  declare -A DIR_SESSION=()
+  while IFS="$US" read -r _ds_name _ds_path; do
+    [ -n "$_ds_path" ] || continue
+    [[ -v "DIR_SESSION[$_ds_path]" ]] || DIR_SESSION["$_ds_path"]="$_ds_name"
+  done < <(tmux list-windows -a -F \
+             "#{?window_active,#{session_name}${US}#{pane_current_path},}" 2>/dev/null)
+
   # Path column width derived from the popup (list pane is ~60% with the
   # 40% preview open)
   DIRS_PATH_W=$(( $(term_cols) * 55 / 100 - 10 ))
@@ -2066,6 +2094,16 @@ if [ "${1:-}" = "--dirs-list" ]; then
     seen["$dir"]=1
     local display_path="${dir/#$HOME/\~}"
     trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
+
+    # Already open?  Say so, and say WHERE -- the badge column is outside fzf's
+    # match scope, so the session name is display-only and cannot skew results.
+    if [[ -v "DIR_SESSION[$dir]" ]]; then
+      printf '  %s▸%s  %s\t%s→%s %s%s%s\t%s\n' \
+        "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" \
+        "$DIM" "$RST" "$ACCENT_ESC" "${DIR_SESSION[$dir]}" "$RST" "$dir"
+      return
+    fi
+
     case "$tier" in
       recent)
         printf '  %s★%s  %s\t\t%s\n' \
@@ -2567,8 +2605,46 @@ popup_accent() {
   local style
   if [ "$1" = "danger" ]; then style=$(danger_style); else style=$(popup_user_style); fi
   local -a t=()
-  [ -n "${INTERDIMUX_TITLE:-}" ] && t=(-T "${POPUP_TITLE_STYLE}${INTERDIMUX_TITLE}")
+  # -T is a FORMAT, and the title now carries the session name, so any '#' in it
+  # would be re-expanded on every repaint.  In practice tmux already expands a
+  # name at create/rename time -- "has#hash" is stored as "has<hostname>ash" --
+  # so only benign sequences ('#x', '#1') can reach here and nothing observable
+  # breaks today.  Doubling is free, and this stops being true the moment tmux
+  # gains a format character.  The style prefix is left alone: its '#[' is meant
+  # as a format.
+  [ -n "${INTERDIMUX_TITLE:-}" ] && t=(-T "${POPUP_TITLE_STYLE}${INTERDIMUX_TITLE//'#'/##}")
   tmux display-popup -b "$(popup_user_lines)" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
+}
+
+# Truncate a PRE-COLOURED string to a visible column budget, keeping its escape
+# sequences intact.  ${#s} counts the escapes, so measuring with it lets a
+# coloured string overrun the frame while a plain one of the same visible length
+# fits.  Observed: the rename dialog's "✗ a name cannot contain ':' (tmux splits
+# targets there)" ran straight through the right border and off the box.
+#
+# Sets REPLY.  Character-at-a-time is fine here: these are single dialog lines,
+# not the list.
+dlg_fit() {
+  local s="$1" max="$2" out="" n=0 i=0 ch j len
+  # NOT `local s="$1" … len=${#s}`: bash expands every word of a `local` command
+  # before performing any of its assignments, so ${#s} reads the OUTER s — unset
+  # here, which under `set -u` killed the dialog outright.
+  len=${#s}
+  [ "$max" -lt 2 ] && max=2
+  while [ "$i" -lt "$len" ]; do
+    ch="${s:i:1}"
+    if [ "$ch" = $'\033' ]; then
+      # copy the whole CSI/OSC-style sequence: it costs no columns
+      j=$(( i + 1 ))
+      while [ "$j" -lt "$len" ] && [[ "${s:j:1}" != [a-zA-Z] ]]; do j=$(( j + 1 )); done
+      out+="${s:i:j-i+1}"
+      i=$(( j + 1 ))
+      continue
+    fi
+    if [ "$n" -ge $(( max - 1 )) ]; then out+="…"; break; fi
+    out+="$ch"; n=$(( n + 1 )); i=$(( i + 1 ))
+  done
+  REPLY="${out}${RST}"
 }
 
 # dialog_open ACCENT TITLE [BODY...] — clear the screen and draw a
@@ -2590,6 +2666,22 @@ dialog_open() {
   [ "$w" -gt $(( DLG_COLS - 2 )) ] && w=$(( DLG_COLS - 2 ))
   DLG_W="$w"
   DLG_H=$(( $# + 5 ))   # top border, blank, body…, blank, hint, bottom border
+
+  # A box taller than the popup does not just look wrong: DLG_TOP clamps to 1,
+  # the bottom border is then drawn past the last row, the terminal scrolls, and
+  # the scroll takes the top border and title with it -- leaving a half-drawn
+  # frame over the list.  Drop body rows instead; the hint row is what carries
+  # the error text and it is the one that must survive.
+  local -a body=("$@")
+  if [ "$DLG_H" -gt $(( DLG_ROWS - 1 )) ]; then
+    local keep=$(( DLG_ROWS - 6 ))
+    [ "$keep" -lt 0 ] && keep=0
+    body=("${body[@]:0:keep}")
+    DLG_H=$(( ${#body[@]} + 5 ))
+    [ "$DLG_H" -gt "$DLG_ROWS" ] && DLG_H="$DLG_ROWS"
+  fi
+  set -- ${body[@]+"${body[@]}"}
+
   DLG_TOP=$(( (DLG_ROWS - DLG_H) / 2 ))
   [ "$DLG_TOP" -lt 1 ] && DLG_TOP=1
   DLG_LEFT=$(( (DLG_COLS - DLG_W) / 2 ))
@@ -2612,7 +2704,8 @@ dialog_open() {
     printf '\033[%d;%dH%s %s %s' "$DLG_TOP" $(( DLG_LEFT + 2 )) "${accent}${BOLD}" "$title" "$RST"
     r=$(( DLG_TOP + 2 ))
     for line in "$@"; do
-      printf '\033[%d;%dH%s' "$r" $(( DLG_LEFT + 4 )) "$line"
+      dlg_fit "$line" $(( DLG_W - 8 ))
+      printf '\033[%d;%dH%s' "$r" $(( DLG_LEFT + 4 )) "$REPLY"
       r=$(( r + 1 ))
     done
   } >"$tty_out"
@@ -2623,9 +2716,10 @@ dialog_status() {
   local text="$1" sp
   local r=$(( DLG_TOP + DLG_H - 2 ))
   printf -v sp '%*s' $(( DLG_W - 8 )) ''
+  dlg_fit "$text" $(( DLG_W - 8 ))
   printf '\033[%d;%dH%s\033[%d;%dH%s' \
     "$r" $(( DLG_LEFT + 4 )) "$sp" \
-    "$r" $(( DLG_LEFT + 4 )) "$text" >"$tty_out"
+    "$r" $(( DLG_LEFT + 4 )) "$REPLY" >"$tty_out"
 }
 
 dialog_close() {
@@ -3141,11 +3235,16 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--scope-prompt" ]; then
+  # Every state the ctrl-] cycle can reach must have a label.  The fifth,
+  # "1,3" (identity + command, skipping the path), had none and fell through to
+  # a bare "❯ " -- indistinguishable from the unset state, so the one scope that
+  # is not self-evident was also the one the prompt would not name.
   case "${FZF_NTH:-}" in
     1)     echo 'name ❯ ' ;;
     2)     echo 'path ❯ ' ;;
     3)     echo 'cmd ❯ ' ;;
     1,2,3) echo 'all ❯ ' ;;
+    1,3)   echo 'name+cmd ❯ ' ;;
     *)     echo '❯ ' ;;
   esac
   exit 0
@@ -3428,7 +3527,13 @@ if [ "${1:-}" = "--launch" ]; then
   set +e
   mode="${2:-switch}"
 
+  # The navigator's title names the session you are in, so there is a "you are
+  # here" anchor even once the current row has scrolled out of the list.  The
+  # baked prefix+f binding gets this from a tmux format for free; this path is
+  # already forking, so one more round-trip costs nothing that matters.
+  _cur_sess=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S' 2>/dev/null) || _cur_sess=""
   title=' interdimux '
+  [ -n "$_cur_sess" ] && title=" interdimux · $_cur_sess "
   case "$mode" in
     kill)   title=' interdimux · kill ' ;;
     rename) title=' interdimux · rename ' ;;
@@ -3745,6 +3850,7 @@ while true; do
           _scope_case='case "${FZF_NTH:-}" in'
           _scope_case+=' 1) printf "name ❯ \n";; 2) printf "path ❯ \n";;'
           _scope_case+=' 3) printf "cmd ❯ \n";; 1,2,3) printf "all ❯ \n";;'
+          _scope_case+=' 1,3) printf "name+cmd ❯ \n";;'
           _scope_case+=' *) printf "❯ \n";; esac'
           fzf_opts+=(--bind="ctrl-]:change-nth(1|2|3|1,2,3|1,3)+transform-prompt:$_scope_case")
         else
