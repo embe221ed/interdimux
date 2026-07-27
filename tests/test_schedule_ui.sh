@@ -38,6 +38,8 @@ cleanup() {
   # created it passed.
   for j in ${SUBMITTED[@]+"${SUBMITTED[@]}"}; do atrm "$j" 2>/dev/null || true; done
   tmux -L "$SOCK" kill-server 2>/dev/null || true
+  tmux -L "${SOCK}-mo" kill-server 2>/dev/null || true
+  tmux -L "${SOCK}-mi" kill-server 2>/dev/null || true
   rm -rf "$TMPD"
 }
 trap cleanup EXIT
@@ -475,18 +477,74 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 12. the dashboard offers it
+# 12. the dashboard menu — rendered for real, not grepped
 # ---------------------------------------------------------------------------
+#
+# tmux disables a menu item whose name begins with '-' and DROPS its key column.
+# Both facts are load-bearing here (Jobs is unpickable when nothing is queued,
+# Schedule when `at` is missing), and neither is visible from the source — the
+# menu string is a format tmux interprets.  So render it.
+#
+# display-menu needs an attached CLIENT, hence the pair of private servers: the
+# outer one's pane runs an attach to the inner one, and the menu is captured off
+# the outer pane.  Both sockets are private; the user's server is never touched.
+MOUT="${SOCK}-mo"; MIN="${SOCK}-mi"
+menu_capture() {
+  tmux -L "$MIN" kill-server 2>/dev/null || true
+  tmux -L "$MOUT" kill-server 2>/dev/null || true
+  tmux -f /dev/null -L "$MOUT" new-session -d -s drv -x 100 -y 26 \
+    "tmux -f /dev/null -L '$MIN' new-session -s host" 2>/dev/null
+  local i
+  for i in $(seq 1 80); do
+    tmux -L "$MIN" list-clients >/dev/null 2>&1 && break
+    sleep 0.15
+  done
+  env TMUX="$(tmux -L "$MIN" display-message -p '#{socket_path}' 2>/dev/null),99999,0" \
+      INTERDIMUX_OPTS_PRIMED=1 \
+      bash "$SCRIPT" --dashboard-launch >/dev/null 2>&1 &
+  # poll for the menu frame instead of sleeping a fixed amount
+  for i in $(seq 1 80); do
+    tmux -L "$MOUT" capture-pane -t '=drv:' -p 2>/dev/null | grep -q 'Send keys' && break
+    sleep 0.15
+  done
+  tmux -L "$MOUT" capture-pane -t '=drv:' -p 2>/dev/null
+  tmux -L "$MIN" kill-server 2>/dev/null || true
+  tmux -L "$MOUT" kill-server 2>/dev/null || true
+}
+CLEAN_MENU=1
 
-if bash "$SCRIPT" --dashboard-launch 2>/dev/null; then :; fi
-if tmux -L "$SOCK" list-keys -T prefix 2>/dev/null >/dev/null; then :; fi
-
-# The native menu is built inline, so assert on the source of truth: the two
-# --launch modes the menu entries point at must both be reachable.
-if grep -q -- "--launch schedule" "$SCRIPT" && grep -q -- "--launch jobs" "$SCRIPT"; then
-  report "the dashboard menu offers Schedule and Jobs" pass
+# Empty queue: Jobs must be there but unpickable, i.e. no key in its row.
+for j in ${SUBMITTED[@]+"${SUBMITTED[@]}"}; do atrm "$j" 2>/dev/null || true; done
+SUBMITTED=()
+menu0=$(menu_capture || true)
+jobs_row=$(printf '%s\n' "$menu0" | grep -F 'Jobs' | head -1)
+if [ -n "$jobs_row" ] && ! printf '%s' "$jobs_row" | grep -q '(j)'; then
+  report "with nothing queued, the Jobs entry is present but disabled" pass
 else
-  report "the dashboard menu offers Schedule and Jobs" fail
+  report "with nothing queued, the Jobs entry is present but disabled (row: '$jobs_row')" fail
+fi
+if printf '%s\n' "$menu0" | grep -q 'Schedule .*(a)'; then
+  report "Schedule is pickable when at is installed" pass
+else
+  report "Schedule is pickable when at is installed" fail
+fi
+
+# One queued: the count rides in the label and the key comes back.
+run_schedule "P:sched:0:0" '22h' 'echo SCHEDUI_MENU' 'x'
+menu1=$(menu_capture || true)
+jobs_row=$(printf '%s\n' "$menu1" | grep -F 'Jobs' | head -1)
+if printf '%s' "$jobs_row" | grep -q 'Jobs (1)' && printf '%s' "$jobs_row" | grep -q '(j)'; then
+  report "with one queued, Jobs shows the count and becomes pickable" pass
+else
+  report "with one queued, Jobs shows the count and becomes pickable (row: '$jobs_row')" fail
+fi
+
+# Kill is the only destructive entry; it carries the danger colour.
+if tmux -f /dev/null -L "$SOCK" show-option -gqv @nothing >/dev/null 2>&1; then :; fi
+if grep -q 'POPUP_BORDER_DANGER}\]Kill' "$SCRIPT"; then
+  report "the Kill entry is styled with the danger colour" pass
+else
+  report "the Kill entry is styled with the danger colour" fail
 fi
 
 printf '\nResults: %d passed, %d failed\n\n' "$PASS" "$FAIL"

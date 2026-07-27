@@ -102,6 +102,11 @@ menu on tmux >= 3.4 (one keypress per action: `s`, `n`, `r`, `i`, `w`,
 - **Schedule** (`a`) — Run a command later, via `at`
 - **Jobs** (`j`) — See and cancel scheduled commands
 
+`Kill` is drawn in the danger colour, and on tmux >= 3.4 an entry that cannot do
+anything is greyed out and loses its key rather than opening a popup to say so:
+`Jobs` when nothing is queued (it shows the count when something is), and both
+scheduling entries when `at` is not installed.
+
 Select an action to launch the corresponding tool. Action modes open the navigator with a modified prompt — `Enter` performs the action on the selected target, and the list reloads in place so you can repeat. Press `Esc` when done.
 
 ### Navigator (`prefix + f`)

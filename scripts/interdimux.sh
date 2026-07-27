@@ -4279,6 +4279,29 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     menu_sp="${menu_sp//\\/\\\\}"
     menu_sp="${menu_sp//\"/\\\"}"
     menu_sp="${menu_sp//\$/\\\$}"
+
+    # A menu item whose name begins with '-' is DISABLED: tmux dims it and drops
+    # its key column (verified against 3.7b).  Offering Schedule on a box with no
+    # `at`, and answering the click with an error dialog, is worse than saying up
+    # front that it is unavailable.  The count rides in the Jobs label for the
+    # same reason — an empty picker is a wasted keypress.
+    #
+    # Two forks on the prefix+g path, which is not the hot path (prefix+f is) and
+    # already forks bash to get here.
+    _m_sched='Schedule' _m_jobs='-Jobs'
+    if command -v at >/dev/null 2>&1; then
+      _njobs=$(atq -q "$SCHED_QUEUE" 2>/dev/null | grep -c . || true)
+      case "$_njobs" in
+        ''|0) _m_jobs='-Jobs' ;;
+        *)    _m_jobs="Jobs ($_njobs)" ;;
+      esac
+    else
+      _m_sched='-Schedule (needs at)'
+      _m_jobs='-Jobs (needs at)'
+    fi
+    # Item names are FORMATS, so #[...] styles them.  Kill is the only entry here
+    # that destroys something; give it the same danger colour as the frame it
+    # turns red.
     tmux display-menu -x C -y C \
       -T '#[align=centre,bold] interdimux ' \
       -H "bg=${MENU_SEL_BG},fg=${MENU_SEL_FG},bold" \
@@ -4286,15 +4309,15 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       'New session' n "run-shell -b \"bash '$menu_sp' --launch dirs\"" \
       '' \
       'Rename'      r "run-shell -b \"bash '$menu_sp' --launch rename\"" \
-      'Kill'        i "run-shell -b \"bash '$menu_sp' --launch kill\"" \
+      "#[fg=${POPUP_BORDER_DANGER}]Kill" i "run-shell -b \"bash '$menu_sp' --launch kill\"" \
       'Swap'        w "run-shell -b \"bash '$menu_sp' --launch swap\"" \
       'Zoom'        z "run-shell -b \"bash '$menu_sp' --launch zoom\"" \
       '' \
       'Detach'      d "run-shell -b \"bash '$menu_sp' --launch detach\"" \
       'Send keys'   t "run-shell -b \"bash '$menu_sp' --launch send\"" \
       '' \
-      'Schedule'    a "run-shell -b \"bash '$menu_sp' --launch schedule\"" \
-      'Jobs'        j "run-shell -b \"bash '$menu_sp' --launch jobs\""
+      "$_m_sched"   a "run-shell -b \"bash '$menu_sp' --launch schedule\"" \
+      "$_m_jobs"    j "run-shell -b \"bash '$menu_sp' --launch jobs\""
   else
     chrome=()
     cmd="$(build_env_fwd) bash '$sp' --dashboard"
