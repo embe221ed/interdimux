@@ -4264,13 +4264,40 @@ fi
 # Dashboard
 # ---------------------------------------------------------------------------
 
+# The pressing client's width or height in cells, or 0 when it cannot be read.
+# Sets REPLY.
+#
+# Targeted first, so the answer is the pressing client's when several are
+# attached; untargeted second, because a TMUX_PANE inherited from a DIFFERENT
+# server does not resolve here and would otherwise read as "unknown".
+client_dim() {
+  local fmt="$1" v
+  v=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$fmt" 2>/dev/null)
+  case "$v" in ''|*[!0-9]*) v=$(tmux display-message -p "$fmt" 2>/dev/null) ;; esac
+  case "$v" in ''|*[!0-9]*) v=0 ;; esac
+  REPLY="$v"
+}
+
 # Entry point for the prefix+g binding: a native styled menu on
 # tmux >= 3.4, otherwise a compact fzf menu in a popup.
 if [ "${1:-}" = "--dashboard-launch" ]; then
   set +e
   sp="$SQ_SCRIPT"
 
-  if tmux_ge 304; then
+  # display-menu SILENTLY draws nothing and exits 0 when the menu is taller than
+  # the client.  Verified on 3.7b: this menu appears on a 15-row client and does
+  # not appear at all on a 14-row one — no message, no error, prefix+g simply
+  # becomes a dead key.  Menu height is items + 2 for the borders, and this menu
+  # is 13 items (10 entries + 3 separators), so it needs 15.
+  #
+  # The fzf fallback below has no such ceiling: its list scrolls.  So the tmux
+  # version is not the only thing that decides which one to draw.
+  MENU_ROWS=15
+  client_dim '#{client_height}'; _cli_h="$REPLY"
+  client_dim '#{client_width}';  _cli_w="$REPLY"
+  # Unknown height takes the fallback, not the menu: a popup where a menu would
+  # have done is cosmetic, and a dead prefix+g is not.
+  if tmux_ge 304 && [ "$_cli_h" -ge "$MENU_ROWS" ]; then
     # Menu item commands are re-parsed by tmux's command parser when
     # selected: inside its double-quoted token, \ " $ are escapes and
     # run-shell format-expands #{...} — escape those layers on top of
@@ -4330,7 +4357,16 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     fi
     # 10 entries + fzf's prompt, header and border; too short and fzf scrolls
     # the menu, which hides the entries added last.
-    tmux display-popup -w 64 -h 19 ${chrome[@]+"${chrome[@]}"} \
+    #
+    # Clamped to the client, because display-popup does NOT clamp: it fails with
+    # "height too large" and draws nothing.  Verified — on a 14-row client `-h 14`
+    # succeeds and `-h 15` errors, so the limit is exactly the client's size.  A
+    # fixed 64x19 made this the same dead key as an oversized menu, reached by the
+    # other path.  fzf's list scrolls, so a short popup is merely cramped.
+    _pop_w=64 _pop_h=19
+    [ "$_cli_w" -gt 0 ] && [ "$_cli_w" -lt "$_pop_w" ] && _pop_w="$_cli_w"
+    [ "$_cli_h" -gt 0 ] && [ "$_cli_h" -lt "$_pop_h" ] && _pop_h="$_cli_h"
+    tmux display-popup -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
       -E "$cmd"
   fi
   exit 0
