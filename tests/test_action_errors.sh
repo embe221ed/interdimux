@@ -191,12 +191,17 @@ fi
 # Needs a REAL tty of the right size: the dialog reads its dimensions with
 # `stty size`, which returns nothing for the file the other tests feed in, so a
 # file-driven run always renders at the 24x80 fallback and proves nothing.
-run_rename_tty() { # $1 = cols, $2 = rows, $3 = new name
-  local w="$1" h="$2" newname="$3" i out=""
-  tmux -L "$SOCK" kill-session -t tiny 2>/dev/null || true
+run_rename_tty() { # $1 = cols, $2 = rows, $3 = new name, $4 = session to rename
+  local w="$1" h="$2" newname="$3" sess="$4" i out=""
+  # '=tiny', not 'tiny': tmux matches an UNANCHORED target by prefix, so
+  # `kill-session -t tiny` killed the "tinysrc" fixture this test had just
+  # created — and the action then correctly reported the target as gone, which
+  # looked like the dialog was broken.  The product code anchors every target
+  # for the same reason.
+  tmux -L "$SOCK" kill-session -t '=tiny' 2>/dev/null || true
   tmux -L "$SOCK" new-session -d -s tiny -x "$w" -y "$h" \
     "env INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
-         TMUX_PANE='$TMUX_PANE' bash '$SCRIPT' --action rename 'S:one'; sleep 6"
+         TMUX_PANE='$TMUX_PANE' bash '$SCRIPT' --action rename \"S:$sess\"; sleep 6"
   for i in $(seq 1 60); do
     tmux -L "$SOCK" capture-pane -t '=tiny:' -p 2>/dev/null | grep -q '╭' && break
     sleep 0.1
@@ -210,7 +215,12 @@ run_rename_tty() { # $1 = cols, $2 = rows, $3 = new name
   printf '%s' "$out"
 }
 
-tiny_out=$(run_rename_tty 52 6 'no:good')
+# Its own session: an earlier test renames "one" away, and acting on a spec
+# whose target is gone now (correctly) shows the "Gone" dialog instead of the
+# rename one -- which is a different assertion entirely.
+tmux -L "$SOCK" new-session -d -s tinysrc -x 100 -y 30
+for _i in $(seq 1 50); do tmux -L "$SOCK" has-session -t '=tinysrc' 2>/dev/null && break; sleep 0.1; done
+tiny_out=$(run_rename_tty 52 6 'no:good' 'tinysrc')
 
 # the frame survives: both borders present, on their own rows
 if printf '%s\n' "$tiny_out" | grep -q '╭' && printf '%s\n' "$tiny_out" | grep -q '╰'; then
@@ -233,6 +243,7 @@ if printf '%s\n' "$tiny_out" | grep -q '✗ a name cannot contain'; then
   report "the error is still shown, truncated to fit" pass
 else
   report "the error is still shown, truncated to fit" fail
+  ERRORS+="$(printf '%s\n' "$tiny_out" | sed 's/^/      /')"$'\n'
 fi
 
 # no rendered row is wider than the popup — a wrap is what ate the border
@@ -243,6 +254,105 @@ else
   report "no dialog row is wider than the popup (rows: $too_wide)" fail
 fi
 tmux -L "$SOCK" kill-session -t tiny 2>/dev/null || true
+
+# --- acting on a row whose target is gone -------------------------------------------
+# The list is a snapshot.  Open the picker, get distracted, and by the time you
+# press ctrl-x that window may have been closed from another client.  Every
+# action used to open its dialog regardless — "Kill session 'victim'?" for a
+# session that no longer exists — and only failed after you confirmed.
+tmux -L "$SOCK" new-session -d -s vanishing -x 100 -y 30
+tmux -L "$SOCK" new-window -d -t '=vanishing:' -n doomed
+for _i in $(seq 1 50); do tmux -L "$SOCK" has-session -t '=vanishing' 2>/dev/null && break; sleep 0.1; done
+tmux -L "$SOCK" kill-session -t '=vanishing'
+
+run_on_gone() { # $1 = action, $2 = spec -> the rendered screen
+  local act="$1" gspec="$2" i out=""
+  tmux -L "$SOCK" kill-window -t '=colonsrc:gone' 2>/dev/null || true
+  tmux -L "$SOCK" new-window -d -t '=colonsrc:' -n gone \
+    "env INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
+         TMUX_PANE='$TMUX_PANE' bash '$SCRIPT' --action $act \"$gspec\"; sleep 5"
+  for i in $(seq 1 60); do
+    out=$(tmux -L "$SOCK" capture-pane -t '=colonsrc:gone' -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+    printf '%s' "$out" | grep -q '╭' && break
+    sleep 0.1
+  done
+  printf '%s' "$out"
+}
+
+for pair in "kill:S:vanishing" "rename:W:vanishing:1" "send:P:vanishing:1:0"; do
+  act="${pair%%:*}"; gspec="${pair#*:}"
+  out=$(run_on_gone "$act" "$gspec")
+  if printf '%s\n' "$out" | grep -q 'no longer exists'; then
+    report "$act on a vanished $gspec says so instead of prompting" pass
+  else
+    report "$act on a vanished $gspec says so instead of prompting" fail
+    ERRORS+="$(printf '%s\n' "$out" | grep -v '^ *$' | head -3 | sed 's/^/      /')"$'\n'
+  fi
+done
+# The second line of that dialog is exactly as wide as the box allows, which is
+# the case dlg_fit used to get wrong: it reserved a column for the ellipsis
+# before checking whether anything needed cutting, so a line that fitted exactly
+# lost its last character to a "…" that bought nothing.
+out=$(run_on_gone kill 'S:vanishing')
+if printf '%s\n' "$out" | grep -q 'press \^r to reload\.'; then
+  report "a dialog line that fits exactly is not ellipsised" pass
+else
+  report "a dialog line that fits exactly is not ellipsised" fail
+  ERRORS+="$(printf '%s\n' "$out" | grep 'reload' | sed 's/^/      /')"$'\n'
+fi
+
+# ...and it must NOT fire for a target that is still there
+out=$(run_on_gone kill 'S:colonsrc')
+if printf '%s\n' "$out" | grep -q 'no longer exists'; then
+  report "a live target is not reported as gone" fail
+else
+  report "a live target is not reported as gone" pass
+fi
+tmux -L "$SOCK" kill-window -t '=colonsrc:gone' 2>/dev/null || true
+
+# --- dialogs are measured in CELLS, not characters ------------------------------------
+# ${#s} counts characters, so a CJK name produced a title 87 cells wide inside a
+# 66-cell box and obliterated the right border.  Measured with tmux's own
+# #{cursor_x}, which is the only thing that knows how many cells a row occupies.
+CJK='日本語のセッション名前とても長い名前です本当に長いのです'
+tmux -L "$SOCK" new-session -d -s "$CJK" -x 100 -y 30
+for _i in $(seq 1 50); do tmux -L "$SOCK" has-session -t "=$CJK" 2>/dev/null && break; sleep 0.1; done
+printf 'n\n' > "$TMPD/cjkin"
+tmux -L "$SOCK" new-window -d -t "=$CJK:" -n dlg \
+  "env INTERDIMUX_TTY_IN='$TMPD/cjkin' INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 \
+       INTERDIMUX_TMUX_VNUM=307 TMUX_PANE='$TMUX_PANE' \
+       bash '$SCRIPT' --action kill \"S:$CJK\"; sleep 6"
+for _i in $(seq 1 60); do
+  tmux -L "$SOCK" capture-pane -t "=$CJK:dlg" -p 2>/dev/null | grep -q '╭' && break
+  sleep 0.1
+done
+tmux -L "$SOCK" capture-pane -t "=$CJK:dlg" -p 2>/dev/null \
+  | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^ *$' > "$TMPD/cjkrows"
+
+# every rendered row must occupy the same number of CELLS -- ask tmux, because
+# counting characters here would repeat the very mistake under test
+nrow=0
+while IFS= read -r r; do nrow=$((nrow+1)); printf '%s' "$r" > "$TMPD/cjk$nrow"; done < "$TMPD/cjkrows"
+widths=""
+for _i in $(seq 1 "$nrow"); do
+  ms="${SOCK}-m$_i"
+  tmux -f /dev/null -L "$ms" new-session -d -s m -x 250 -y 10 "cat '$TMPD/cjk$_i'; sleep 10"
+  for _j in $(seq 1 40); do
+    w=$(tmux -L "$ms" display-message -p -t '=m:' '#{cursor_x}' 2>/dev/null || echo 0)
+    [ "${w:-0}" -gt 0 ] && break
+    sleep 0.1
+  done
+  widths="$widths $w"
+  tmux -L "$ms" kill-server 2>/dev/null || true
+done
+uniq_w=$(printf '%s\n' $widths | sort -u | tr '\n' ' ')
+if [ "$nrow" -ge 4 ] && [ "$(printf '%s\n' $widths | sort -u | wc -l)" = 1 ]; then
+  report "a CJK dialog title keeps every row the same cell width ($uniq_w)" pass
+else
+  report "a CJK dialog title keeps every row the same cell width" fail
+  ERRORS+="    rows=$nrow widths:$widths"$'\n'
+fi
+tmux -L "$SOCK" kill-session -t "=$CJK" 2>/dev/null || true
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

@@ -2747,6 +2747,60 @@ popup_accent() {
   tmux display-popup -b "$(popup_user_lines)" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
 }
 
+# Display cells for a string, ignoring SGR escapes.  Sets REPLY.
+#
+# Bash measures CHARACTERS (${#s}), and the dialogs sized themselves with that:
+# a session named with 26 CJK characters produced a title 87 cells wide inside a
+# 66-cell box, obliterating the right border (measured with tmux's own
+# #{cursor_x}).  The list has had a proper measurement since the Rust core; the
+# dialogs had not.
+#
+# Deliberately CONSERVATIVE rather than exact, because the two errors are not
+# symmetric: over-counting makes the box a little wide, under-counting lets text
+# run off it.  Per character —
+#
+#   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
+#   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
+#   combining marks, ZWJ, U+FE0E                  0
+#   everything else                               1
+#
+# so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
+# 2 and a flag counts 4 instead of 2 — wide, never narrow.  Exact cluster
+# handling lives in the Rust core, where it is on the path that needs it.
+#
+# `printf %d "'<char>"` yields the codepoint with no fork; the dialogs are short
+# strings on the action path, so per-character work is affordable here.
+dlg_width() {
+  # `len` is assigned separately for the same reason dlg_fit does it: bash
+  # expands every word of a `local` command before performing any of its
+  # assignments, so ${#s} on this line would read the OUTER s.
+  local s="$1" i=0 n=0 ch cp j len
+  len=${#s}
+  while [ "$i" -lt "$len" ]; do
+    ch="${s:i:1}"
+    if [ "$ch" = $'\033' ]; then
+      j=$(( i + 1 ))
+      while [ "$j" -lt "$len" ] && [[ "${s:j:1}" != [a-zA-Z] ]]; do j=$(( j + 1 )); done
+      i=$(( j + 1 ))
+      continue
+    fi
+    printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
+    if (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || cp == 0xfe0e )); then
+      :
+    elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
+         || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
+         || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) \
+         || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) \
+         || (cp >= 0x1f000 && cp <= 0x1f2ff) || (cp >= 0x20000 && cp <= 0x3fffd) )); then
+      n=$(( n + 2 ))
+    else
+      n=$(( n + 1 ))
+    fi
+    i=$(( i + 1 ))
+  done
+  REPLY="$n"
+}
+
 # Truncate a PRE-COLOURED string to a visible column budget, keeping its escape
 # sequences intact.  ${#s} counts the escapes, so measuring with it lets a
 # coloured string overrun the frame while a plain one of the same visible length
@@ -2756,12 +2810,19 @@ popup_accent() {
 # Sets REPLY.  Character-at-a-time is fine here: these are single dialog lines,
 # not the list.
 dlg_fit() {
-  local s="$1" max="$2" out="" n=0 i=0 ch j len
+  local s="$1" max="$2" out="" n=0 i=0 ch j len w
   # NOT `local s="$1" … len=${#s}`: bash expands every word of a `local` command
   # before performing any of its assignments, so ${#s} reads the OUTER s — unset
   # here, which under `set -u` killed the dialog outright.
   len=${#s}
   [ "$max" -lt 2 ] && max=2
+
+  # Nothing to do is the common case, and it has to be checked FIRST: the loop
+  # below reserves a column for the ellipsis, so without this a string exactly
+  # `max` cells wide lost its last character to a "…" that bought nothing.
+  dlg_width "$s"
+  if [ "$REPLY" -le "$max" ]; then REPLY="$s"; return 0; fi
+
   while [ "$i" -lt "$len" ]; do
     ch="${s:i:1}"
     if [ "$ch" = $'\033' ]; then
@@ -2772,8 +2833,9 @@ dlg_fit() {
       i=$(( j + 1 ))
       continue
     fi
-    if [ "$n" -ge $(( max - 1 )) ]; then out+="…"; break; fi
-    out+="$ch"; n=$(( n + 1 )); i=$(( i + 1 ))
+    dlg_width "$ch"; w="$REPLY"
+    if [ $(( n + w )) -gt $(( max - 1 )) ]; then out+="…"; break; fi
+    out+="$ch"; n=$(( n + w )); i=$(( i + 1 ))
   done
   REPLY="${out}${RST}"
 }
@@ -2789,9 +2851,12 @@ dialog_open() {
   if [ -c "$tty_in" ] && dims=$({ stty size <"$tty_in"; } 2>/dev/null); then
     DLG_ROWS="${dims%% *}" DLG_COLS="${dims#* }"
   fi
-  w=$(( ${#title} + 10 ))
+  # CELLS, not characters: ${#title} counted a CJK name at half its drawn width,
+  # so the box was sized for 66 cells and the title drew 87.
+  dlg_width "$title"; w=$(( REPLY + 10 ))
   for line in "$@"; do
-    [ $(( ${#line} + 8 )) -gt "$w" ] && w=$(( ${#line} + 8 ))
+    dlg_width "$line"
+    [ $(( REPLY + 8 )) -gt "$w" ] && w=$(( REPLY + 8 ))
   done
   [ "$w" -lt 44 ] && w=44
   [ "$w" -gt $(( DLG_COLS - 2 )) ] && w=$(( DLG_COLS - 2 ))
@@ -2817,7 +2882,11 @@ dialog_open() {
   [ "$DLG_TOP" -lt 1 ] && DLG_TOP=1
   DLG_LEFT=$(( (DLG_COLS - DLG_W) / 2 ))
   [ "$DLG_LEFT" -lt 1 ] && DLG_LEFT=1
-  [ "${#title}" -gt $(( DLG_W - 6 )) ] && title="${title:0:DLG_W-7}…"
+  # ...and truncate the title in cells too, keeping any escapes it carries
+  dlg_width "$title"
+  if [ "$REPLY" -gt $(( DLG_W - 6 )) ]; then
+    dlg_fit "$title" $(( DLG_W - 6 )); title="$REPLY"
+  fi
 
   local hbar sp i r
   printf -v hbar '%*s' $(( DLG_W - 2 )) ''
@@ -2984,8 +3053,13 @@ input_dialog() {
 }
 
 # Brief informational dialog
+# info_flash ACCENT TITLE [BODY...] — every body line is forwarded, because
+# dialog_open already lays out as many as it is given and `"${3:-}"` silently
+# dropped the rest.
 info_flash() {
-  dialog_open "$1" "$2" "${3:-}"
+  local _if_accent="$1" _if_title="$2"
+  shift 2
+  dialog_open "$_if_accent" "$_if_title" ${@+"$@"}
   sleep 0.9
   dialog_close
 }
@@ -3047,6 +3121,31 @@ if [ "${1:-}" = "--action" ]; then
   }
   trap '_action_cleanup; exit 130' INT TERM
   trap '_action_cleanup' EXIT
+
+  # The row you are acting on may be gone.  The list is a snapshot: open the
+  # picker, get distracted, and by the time you press ctrl-x that window may
+  # have been closed from another client.  Every action used to open its dialog
+  # regardless -- "Kill session 'victim'?" for a session that no longer exists --
+  # and only failed after you confirmed, which is a confusing two-step for what
+  # is really one fact.  Checked once here rather than in six places, and only
+  # on the action path, never on the hot one.
+  #
+  # Deliberately NOT a guard against index reuse: if a different window has
+  # since taken that index this check passes, because tmux cannot tell us it is
+  # a different window from a "session:index" target alone. Fixing that needs
+  # the SPEC to carry @id/%id, which is a wider change than this.
+  case "$SPEC_TYPE" in
+    S) tmux has-session -t "$target" 2>/dev/null ;;
+    *) [ -n "$(tmux display-message -p -t "$target" '#{window_id}' 2>/dev/null)" ] ;;
+  esac || {
+    if [ "$action" = zoom ]; then
+      # zoom has no dialog of its own; it reports through the status line
+      tmux display-message "interdimux: $label is gone — press ^r to reload" 2>/dev/null
+    else
+      info_flash "$BOLD_AMBER" "Gone" "$label no longer exists." "The list is stale — press ^r to reload."
+    fi
+    exit 0
+  }
 
   case "$action" in
     kill)

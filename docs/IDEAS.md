@@ -73,6 +73,9 @@ because the *class* is what is worth remembering, not the individual line.
 | A junk `@interdimux-recent-limit` printed errors onto the popup | unvalidated option | `[ "$count" -ge "lots" ]` → "integer expression expected", painted over the list. A junk `dirs-limit` made the Rust renderer drop every directory row. |
 | An unwritable `$XDG_DATA_HOME` printed three errors onto the popup | best-effort not enforced | `mkdir`, `mktemp` and `echo > ""` all complained. Remembering a directory is a convenience; it must not cost the switch. |
 | Dialogs overran a short popup | escapes counted as width | `${#text}` counts SGR bytes, so a coloured message that "fit" wrapped and overwrote the bottom border. |
+| Dialogs measured characters, not cells | wrong unit | A 26-character CJK session name produced an 87-cell title inside a 66-cell box, destroying the right border. Same class as the emoji bug in the list — found the same way, with tmux's `#{cursor_x}`. |
+| Every action prompted for a target that was gone | stale snapshot | "Kill session 'victim'?" for a session that no longer existed, failing only after you confirmed. |
+| An unanchored tmux target prefix-matches | test bug, same root | `kill-session -t tiny` killed the `tinysrc` fixture. The product code anchors every target (`=name`); the test did not, and the resulting "gone" dialog looked like a broken feature. |
 
 Two recurring lessons, both of which cost real time here:
 
