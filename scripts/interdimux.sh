@@ -89,7 +89,7 @@ OPT_MAP=(
   "color-menu-sel-fg:COLOR_MENU_SEL_FG"
   "startup-command:STARTUP_COMMAND"  "hydrate:HYDRATE"
   "show-dirs:SHOW_DIRS"              "dirs-limit:DIRS_LIMIT"
-  "raw:RAW"
+  "raw:RAW"                          "hide:HIDE"
 )
 OPT_NAMES=()
 for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
@@ -391,6 +391,7 @@ get_opt HYDRATE           "${INTERDIMUX_HYDRATE:-}"          @interdimux-hydrate
 get_opt SHOW_DIRS         "${INTERDIMUX_SHOW_DIRS:-}"        @interdimux-show-dirs         on
 get_opt DIRS_LIMIT        "${INTERDIMUX_DIRS_LIMIT:-}"       @interdimux-dirs-limit        15
 get_opt RAW_MODE          "${INTERDIMUX_RAW:-}"              @interdimux-raw               on
+get_opt HIDE_PATTERNS     "${INTERDIMUX_HIDE:-}"             @interdimux-hide              ""
 
 # Numeric options reach `[ -ge ]`, `find -maxdepth` and arithmetic, so a junk
 # value is not a harmless no-op.  Verified: a non-numeric @interdimux-recent-limit
@@ -1625,6 +1626,7 @@ emit_dir_rows() {
 gather_targets() {
   local current_session current_window current_pane cur_raw
   local sessions_raw all_windows_raw all_panes_raw
+  local _hline
 
   # Build process table once (instead of per-pane pgrep+ps).  Started before
   # the queries so a slow ps overlaps the tmux round-trip; on Linux this is a
@@ -1686,6 +1688,70 @@ gather_targets() {
     all_panes_raw=$(tmux list-panes -a -F "$_pfmt")
   fi
   IFS="$US" read -r current_session current_window current_pane <<< "$cur_raw"
+
+  # @interdimux-hide 'scratch floax-*' — glob patterns, matched against session
+  # names.  MRU ranks by recency, so a scratch popup you opened ten seconds ago
+  # outranks the project you have been in all day; this is how you get it out of
+  # the way without renaming anything.
+  #
+  # Filtered HERE, on the raw sections, so both renderers see the same list and
+  # neither needs to know about the option.  Guarded on emptiness, so the
+  # default config pays nothing at all.
+  #
+  # The CURRENT session is never hidden: the row marker, the header and MRU's
+  # move-to-end all key off it, and a picker that cannot show you where you are
+  # standing is worse than one that shows a scratch session.
+  #
+  # Hidden is not unreachable — typing an exact name still lands there. Nothing
+  # matches, so find-or-create runs, and connect_dir switches to the existing
+  # session rather than making a new one.
+  if [ -n "${HIDE_PATTERNS:-}" ]; then
+    local _hp _hname _hkeep _hout=""
+    while IFS= read -r _hline; do
+      [ -n "$_hline" ] || continue
+      _hname="${_hline#*"$US"}"; _hname="${_hname%%"$US"*}"
+      _hkeep=1
+      if [ "$_hname" != "$current_session" ]; then
+        for _hp in $HIDE_PATTERNS; do
+          # shellcheck disable=SC2254  # the pattern is a glob by design
+          case "$_hname" in $_hp) _hkeep=0; break ;; esac
+        done
+      fi
+      [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
+    done <<< "$sessions_raw"
+    sessions_raw="${_hout%$'\n'}"
+
+    # windows and panes carry the session name in field 1
+    _hout=""
+    while IFS= read -r _hline; do
+      [ -n "$_hline" ] || continue
+      _hname="${_hline%%"$US"*}"
+      _hkeep=1
+      if [ "$_hname" != "$current_session" ]; then
+        for _hp in $HIDE_PATTERNS; do
+          # shellcheck disable=SC2254
+          case "$_hname" in $_hp) _hkeep=0; break ;; esac
+        done
+      fi
+      [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
+    done <<< "$all_windows_raw"
+    all_windows_raw="${_hout%$'\n'}"
+
+    _hout=""
+    while IFS= read -r _hline; do
+      [ -n "$_hline" ] || continue
+      _hname="${_hline%%"$US"*}"
+      _hkeep=1
+      if [ "$_hname" != "$current_session" ]; then
+        for _hp in $HIDE_PATTERNS; do
+          # shellcheck disable=SC2254
+          case "$_hname" in $_hp) _hkeep=0; break ;; esac
+        done
+      fi
+      [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
+    done <<< "$all_panes_raw"
+    all_panes_raw="${_hout%$'\n'}"
+  fi
 
   # Hand the whole render to the Rust core when it is available.  This is the
   # part that was ~181 ms of in-process bash (measure_widths + grouping + emit);
@@ -2160,15 +2226,24 @@ if [ "${1:-}" = "--dirs-list" ]; then
       return
     fi
 
+    # The type badge is on the ★ tier too.  These are the directories you use
+    # most, and they were the only ones without it -- a ◆ row showed "Rust" and
+    # the same directory, once it became recent, showed nothing.  detect_project_type
+    # is a handful of `[ -f ]` tests and this is the ctrl-o picker, not the hot path.
+    local type_badge=""
+    case "$tier" in
+      recent|project)
+        detect_project_type "$dir"
+        [ -n "$REPLY" ] && type_badge="${DIM}${REPLY}${RST}"
+        ;;
+    esac
+
     case "$tier" in
       recent)
-        printf '  %s★%s  %s\t\t%s\n' \
-          "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" "$dir"
+        printf '  %s★%s  %s\t%s\t%s\n' \
+          "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" "$type_badge" "$dir"
         ;;
       project)
-        detect_project_type "$dir"
-        local type_badge=""
-        [ -n "$REPLY" ] && type_badge="${DIM}${REPLY}${RST}"
         printf "  ${GREEN}◆${RST}  %s\t%s\t%s\n" \
           "$(dpad "$display_path" "$DIRS_PATH_W")" "$type_badge" "$dir"
         ;;
@@ -3420,6 +3495,7 @@ env_fwd_vars() {
     "INTERDIMUX_SHOW_DIRS=$SHOW_DIRS"
     "INTERDIMUX_DIRS_LIMIT=$DIRS_LIMIT"
     "INTERDIMUX_RAW=$RAW_MODE"
+    "INTERDIMUX_HIDE=$HIDE_PATTERNS"
     "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
     "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
     "INTERDIMUX_COLOR_GIT=$COLOR_GIT"

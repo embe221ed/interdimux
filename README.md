@@ -264,6 +264,13 @@ set -g @interdimux-dashboard-key 'g'
 # Off by default.  (default: unset)
 set -g @interdimux-jump-keys 'M-1 M-2 M-3'
 
+# Keep sessions out of the list: space-separated glob patterns matched
+# against session names.  The session you are currently in is never
+# hidden, and a hidden session is still reachable by typing its exact
+# name (nothing matches, so find-or-create switches to it).
+# (default: unset)
+set -g @interdimux-hide 'scratch floax-*'
+
 # Popup dimensions (default: 80% x 75%)
 set -g @interdimux-popup-width '80%'
 set -g @interdimux-popup-height '75%'

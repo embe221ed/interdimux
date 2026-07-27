@@ -86,7 +86,7 @@ Two recurring lessons, both of which cost real time here:
 
 - ~~**alt-1..5 numbered MRU quick-jump**~~ — done as `--jump N` plus the opt-in `@interdimux-jump-keys`. Root-table keys, no popup. The order comes from `gather_targets` rather than a second sort, so "the Nth session" means exactly the Nth row the picker would show under either ordering.
 - **Pinned-sessions tier** (M) — harpoon-style anchors above MRU (`alt-p` toggle, state file like `recent_dirs`).
-- **Hidden-session filter** (S) — `@interdimux-hide 'scratch floax-*'` + `_`-prefix convention; MRU makes scratch popups rank #1 today. Reveal toggle à la `sesh list -b`.
+- ~~**Hidden-session filter**~~ — `@interdimux-hide 'scratch floax-*'`, filtered on the raw sections so both renderers agree. No reveal toggle was needed: a hidden session is still reachable by typing its exact name, because nothing matches and find-or-create then *switches* to the existing session rather than creating one. The current session is never hidden — the row marker, the header and MRU's move-to-end all key off it.
 - **Clone git URL → session** (M) — find-or-create currently turns a pasted URL into a junk session named `https---github-com-…`; detect URLs, confirm, clone into the first project dir, hydrate.
 - **Git-root awareness** (M) — jump-to-repo-root binding (`--root`); worktree sessions named `repo/worktree` so a repo's worktrees group.
 - **Outside-tmux entry** (M) — `--cli [name]`: full-screen fzf + `attach`, so the picker works as the terminal's front door.
@@ -101,7 +101,7 @@ Two recurring lessons, both of which cost real time here:
 - **`--info-command`** (S, fzf ≥ 0.54) — show `12/24 · mru` so the active ordering is visible.
 - **Red Kill entry in the dashboard menu** (S) — `#[fg=colour167]Kill`, matching the danger vocabulary elsewhere.
 - **Pluggable dir preview command** (S) — `@interdimux-dirs-preview-cmd 'eza -la {}'` for the listing body.
-- **Recent (★) rows keep the project-type badge** (S) — currently the most-used dirs are the only ones missing it.
+- ~~**Recent (★) rows keep the project-type badge**~~ — done.
 - **tmuxinator/tmuxp tier** (M) — list projects, start detached (`--no-attach` / `-d`) + switch-client, popup-safe.
 - **fzf-marks merge** (S) — parse `~/.fzf-marks` into the recent tier; mark names become offered session names.
 - **Clickable footer hints** (S, fzf ≥ 0.65) — `click-footer` + `trigger()` re-dispatches to existing binds.

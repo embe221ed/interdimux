@@ -216,6 +216,87 @@ else
   report "a marked row still carries its plain path in the spec column" fail
 fi
 
+# --- @interdimux-hide keeps scratch sessions out of the way -------------------------
+# MRU ranks by recency, so a popup you opened ten seconds ago outranks the
+# project you have been in all day.  Filtered on the RAW sections, so both
+# renderers see the same list.
+tmux -L "$SOCK" new-session -d -s scratchpad -x 200 -y 50 -c "$TMPD"
+tmux -L "$SOCK" new-session -d -s 'floax-one' -x 200 -y 50 -c "$TMPD"
+tmux -L "$SOCK" new-window  -d -t '=scratchpad:' -n extra -c "$TMPD"
+wait_for "the hide fixtures" sh -c \
+  "tmux -L '$SOCK' has-session -t '=scratchpad' && tmux -L '$SOCK' has-session -t '=floax-one'"
+
+specs_of() { bash "$SCRIPT" --list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' '{print $4}'; }
+
+if specs_of | grep -q '^S:scratchpad$'; then
+  report "the scratch session is visible before hiding" pass
+else
+  report "the scratch session is visible before hiding" fail
+fi
+
+for renderer in rust bash; do
+  [ "$renderer" = bash ] && export INTERDIMUX_USE_RUST=off || unset INTERDIMUX_USE_RUST
+  out=$(INTERDIMUX_HIDE='scratchpad floax-*' specs_of)
+  if printf '%s\n' "$out" | grep -q 'scratchpad\|floax'; then
+    report "[$renderer] @interdimux-hide removes matching sessions" fail
+    ERRORS+="    $(printf '%s' "$out" | tr '\n' ' ')"$'\n'
+  else
+    report "[$renderer] @interdimux-hide removes matching sessions" pass
+  fi
+  # their windows go with them, or the tree is left with orphan rows
+  if printf '%s\n' "$out" | grep -q '^W:scratchpad:'; then
+    report "[$renderer] ...and their windows go with them" fail
+  else
+    report "[$renderer] ...and their windows go with them" pass
+  fi
+  # everything else survives
+  if printf '%s\n' "$out" | grep -q '^S:taken$'; then
+    report "[$renderer] ...and nothing else is removed" pass
+  else
+    report "[$renderer] ...and nothing else is removed" fail
+  fi
+done
+unset INTERDIMUX_USE_RUST
+
+# The current session is never hidden: the row marker, the header and MRU's
+# move-to-end all key off it.
+cur=$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#S')
+if INTERDIMUX_HIDE="$cur" specs_of | grep -q "^S:$cur\$"; then
+  report "the current session is never hidden ($cur)" pass
+else
+  report "the current session is never hidden ($cur)" fail
+fi
+
+# Hidden is not unreachable: nothing matches an exact name, so find-or-create
+# runs and connect_dir switches to the existing session instead of making one.
+verb=$(INTERDIMUX_HIDE='scratchpad' bash "$SCRIPT" --describe-create 'scratchpad' 2>/dev/null \
+       | sed 's/\x1b\[[0-9;]*m//g')
+case "$verb" in
+  'switch to scratchpad'*) report "a hidden session is still reachable by exact name" pass ;;
+  *) report "a hidden session is still reachable by exact name (got: $verb)" fail ;;
+esac
+
+tmux -L "$SOCK" kill-session -t scratchpad 2>/dev/null || true
+tmux -L "$SOCK" kill-session -t 'floax-one' 2>/dev/null || true
+
+# --- recent (★) rows carry the project-type badge too --------------------------------
+# They are the directories you use most, and were the only tier without it: the
+# same directory showed "Rust" as a ◆ row and nothing once it became recent.
+mkdir -p "$TMPD/rustyrec"
+printf '[package]\n' > "$TMPD/rustyrec/Cargo.toml"
+printf '%s\n' "$TMPD/rustyrec" >> "$TMPD/data/interdimux/recent_dirs"
+row=$(INTERDIMUX_PROJECT_DIRS="$TMPD" bash "$SCRIPT" --dirs-list 2>/dev/null \
+      | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' -v p="$TMPD/rustyrec" '$3 == p')
+case "$row" in
+  *'★'*) report "the new dir is on the recent tier" pass ;;
+  *) report "the new dir is on the recent tier (got: $row)" fail ;;
+esac
+if [ "$(printf '%s' "$row" | awk -F'\t' '{print $2}')" = "Rust" ]; then
+  report "...and a recent row still shows its project type" pass
+else
+  report "...and a recent row still shows its project type (got: $(printf '%s' "$row" | awk -F'\t' '{print $2}'))" fail
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
