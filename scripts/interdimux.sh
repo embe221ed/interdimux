@@ -2534,6 +2534,34 @@ SCHED_QUEUE=i   # a dedicated at queue: bare `atq` lists EVERY queue and would
                 # mix in the user's own jobs.  Never uppercase — that switches
                 # to batch semantics that wait for a low load average.
 
+# `-M` ("never mail") is a GNU at extension; BSD at (macOS) has no such flag and
+# aborts option parsing with "illegal option -- M" before it reads the job — so
+# every submit failed on macOS with exactly that message.  We still want it where
+# it exists: the job body redirects all output to a log, so with no -m either at
+# defaults to "mail only if there was output" = no mail, but -M also silences the
+# one edge case the redirect can't (atd failing to open the log at all).  Probe
+# once, with no timespec so neither variant can submit a job while we ask, and
+# cache the answer.  The pattern matches BSD's "illegal option -- M" and glibc's
+# "invalid option -- 'M'" alike; GNU at ACCEPTS -M, so its no-timespec error is
+# about the time, never the option, and the probe correctly yields "-M".
+at_mail_flag() {
+  if [ -z "${_AT_MFLAG+x}" ]; then
+    # Capture the message, don't pipe it: `at -M` EXITS NON-ZERO here on both
+    # variants (BSD rejects the option, GNU errors on the missing timespec), and
+    # under this script's `set -o pipefail` a `... | grep` would inherit at's
+    # failure and answer "GNU" on every host.  Only the text tells them apart:
+    # BSD prints "illegal option -- M", glibc "invalid option -- 'M'"; GNU at
+    # accepts -M, so its error names the time, never the option.
+    local _probe
+    _probe=$(LC_ALL=C at -M </dev/null 2>&1)
+    case "$_probe" in
+      *'ption -- '*M*) _AT_MFLAG="" ;;   # BSD/macOS at: -M rejected, rely on the log redirect
+      *)               _AT_MFLAG="-M" ;; # GNU at: -M accepted
+    esac
+  fi
+  printf '%s' "$_AT_MFLAG"
+}
+
 # Resolve a user-supplied target to a stable pane id, plus the socket and the
 # server pid the job will be validated against.  Sets SCHED_PANE/SOCK/SRVPID.
 sched_resolve() {
@@ -2600,8 +2628,12 @@ sched_job_body() {
 #
 # Two things this gets right that the inline version did not:
 #   * atq's default time column starts with the DAY NAME, so `sort -k2` ordered
-#     jobs Fri < Mon < Sat rather than chronologically.  -o gives a sortable
-#     stamp.  BSD at (macOS) has no -o, so fall back to its own ordering.
+#     jobs Fri < Mon < Sat rather than chronologically.  GNU -o gives a sortable
+#     "YYYY-MM-DD HH:MM" stamp.  BSD at (macOS) has no -o and prints a ctime-style
+#     "<dow> <mon> <dd> HH:MM:SS <YYYY>" in job-id order, so reformat it to that
+#     same sortable stamp with `date -j -f` and sort by it — the Jobs list stays
+#     chronological on macOS too, and its when-column stays narrow instead of
+#     carrying a day name and seconds.
 #   * the header fields are read positionally from their own lines, so a session
 #     name containing a space or "desc=" cannot shift them.
 sched_rows() {
@@ -2609,7 +2641,13 @@ sched_rows() {
   if rows=$(atq -q "$SCHED_QUEUE" -o '%Y-%m-%d %H:%M' 2>/dev/null); then
     rows=$(printf '%s\n' "$rows" | sort -k2)
   else
-    rows=$(atq -q "$SCHED_QUEUE" 2>/dev/null)
+    rows=$(atq -q "$SCHED_QUEUE" 2>/dev/null | while IFS=$'\t' read -r id when; do
+      [ -n "$id" ] || continue
+      # BSD `date -j -f` parses the ctime string; keep the original on the off
+      # chance a future BSD atq changes format, so a row is never dropped.
+      when=$(date -j -f '%a %b %d %T %Y' "$when" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '%s' "$when")
+      printf '%s\t%s\n' "$id" "$when"
+    done | sort -k2)
   fi
   while IFS=$'\t' read -r id when; do
     [ -n "$id" ] || continue
@@ -2676,8 +2714,11 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
   esac
   # Submit from / : at bakes the submitting directory into the job and aborts
   # with "Execution directory inaccessible" if it is gone by firing time.
+  # $_mflag is "-M" only where at accepts it (GNU); empty on BSD/macOS, so it
+  # word-splits away and never reaches at as a bogus argument.
+  _mflag=$(at_mail_flag)
   _out=$(cd / && sched_job_body "$SCHED_PANE" "$SCHED_SOCK" "$SCHED_SRVPID" "$SCHED_LABEL" "$_keys" \
-         | at -M -q "$SCHED_QUEUE" $_spec 2>&1)
+         | at $_mflag -q "$SCHED_QUEUE" $_spec 2>&1)
   if [ $? -ne 0 ]; then
     printf '%s\n' "$_out" >&2
     echo "interdimux: at rejected the time spec '$_spec'" >&2

@@ -43,6 +43,19 @@ report() {
 echo "interdimux scheduled-keys tests"
 echo
 
+# Count the user's OWN at jobs — everything NOT in interdimux's queue.  bare
+# `atq` lists every queue, but its columns are platform-specific: GNU appends
+# the queue letter and owner ("… i user"), while BSD/macOS atq prints only
+# "<id>\t<date>" with no queue column at all — so `grep -v " i "` cannot tell
+# our job from the user's there and miscounts.  Compare id SETS instead: every
+# id, minus the ids in our own queue.  Works on both.
+count_other_jobs() {
+  comm -23 \
+    <(atq       2>/dev/null | awk '{print $1}' | sort -u) \
+    <(atq -q i  2>/dev/null | awk '{print $1}' | sort -u) \
+    | grep -c . || true
+}
+
 if ! command -v at >/dev/null 2>&1 || ! command -v atq >/dev/null 2>&1; then
   echo "  (skipped: 'at' is not installed)"
   echo; echo "Results: 0 passed, 0 failed"; exit 0
@@ -55,7 +68,7 @@ export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=target:0' -F '#{pane_id}' | 
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
 sleep 1
 
-before_other=$(atq | grep -cv " i " || true)
+before_other=$(count_other_jobs)
 
 # --- submit --------------------------------------------------------------------
 out=$(bash "$SCRIPT" --send-at "now + 1 hour" '=target:0' 'echo SCHEDULED_MARKER' 2>&1) || true
@@ -72,7 +85,7 @@ if [ -n "$jid" ] && atq -q i | awk '{print $1}' | grep -qx "$jid"; then
 else
   report "the job goes to interdimux's dedicated at queue" fail
 fi
-after_other=$(atq | grep -cv " i " || true)
+after_other=$(count_other_jobs)
 if [ "$before_other" = "$after_other" ]; then
   report "the user's own at jobs are untouched" pass
 else

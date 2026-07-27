@@ -114,9 +114,18 @@ run_schedule() {
   return 0
 }
 
-# The at time of a job as "YYYY-MM-DD HH:MM"
+# The at time of a job, ending in HH:MM.  GNU atq honours -o and yields a
+# sortable "YYYY-MM-DD HH:MM"; BSD/macOS atq has no -o and prints
+# "<id>\t<dow> <mon> <dd> HH:MM:SS <YYYY>" — so fall back and drop the seconds,
+# exactly as sched_rows does in the script.  The full stamp is only compared
+# under GNU `date -d`; the BSD branch only needs its trailing HH:MM to be right.
 job_when() {
-  atq -q i -o '%Y-%m-%d %H:%M' 2>/dev/null | awk -v j="$1" '$1==j{print $2" "$3}'
+  local j="$1" rows
+  if rows=$(atq -q i -o '%Y-%m-%d %H:%M' 2>/dev/null); then
+    printf '%s\n' "$rows" | awk -v j="$j" '$1==j{print $2" "$3}'
+  else
+    atq -q i 2>/dev/null | awk -v j="$j" '$1==j{ t=$5; sub(/:[0-9][0-9]$/,"",t); print $2" "$3" "$4" "t }'
+  fi
 }
 # The pane a job will fire into, read back out of the job body
 job_pane() {
@@ -518,7 +527,11 @@ for j in ${SUBMITTED[@]+"${SUBMITTED[@]}"}; do atrm "$j" 2>/dev/null || true; do
 SUBMITTED=()
 menu0=$(menu_capture || true)
 jobs_row=$(printf '%s\n' "$menu0" | grep -F 'Jobs' | head -1)
-if [ -n "$jobs_row" ] && ! printf '%s' "$jobs_row" | grep -q '(j)'; then
+# Jobs' accelerator is 'o', not 'j': tmux's display-menu already spends j/k on
+# item navigation, so a 'j' mnemonic was a dead key (fixed in the script, hence
+# Kill is 'i' too).  A disabled item drops its key column entirely, so the tell
+# is the ABSENCE of "(o)".
+if [ -n "$jobs_row" ] && ! printf '%s' "$jobs_row" | grep -q '(o)'; then
   report "with nothing queued, the Jobs entry is present but disabled" pass
 else
   report "with nothing queued, the Jobs entry is present but disabled (row: '$jobs_row')" fail
@@ -533,7 +546,7 @@ fi
 run_schedule "P:sched:0:0" '22h' 'echo SCHEDUI_MENU' 'x'
 menu1=$(menu_capture || true)
 jobs_row=$(printf '%s\n' "$menu1" | grep -F 'Jobs' | head -1)
-if printf '%s' "$jobs_row" | grep -q 'Jobs (1)' && printf '%s' "$jobs_row" | grep -q '(j)'; then
+if printf '%s' "$jobs_row" | grep -q 'Jobs (1)' && printf '%s' "$jobs_row" | grep -q '(o)'; then
   report "with one queued, Jobs shows the count and becomes pickable" pass
 else
   report "with one queued, Jobs shows the count and becomes pickable (row: '$jobs_row')" fail
