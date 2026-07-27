@@ -185,6 +185,67 @@ fi
 chmod 700 "$TMPD/ro2"
 chmod 700 "$TMPD/ro"
 
+# --- navigator errors are logged, not painted over the list ------------------------
+# The popup's stderr IS the popup: anything written there lands across the
+# rendered rows and then vanishes with the popup.  A read-only data dir used to
+# produce three "Permission denied" lines smeared over the tree.  Now stderr
+# goes to the status line and a log, and --doctor is where you find the log.
+if doctor | grep -q '✓ no navigator errors logged'; then
+  report "a clean install reports no logged errors" pass
+else
+  report "a clean install reports no logged errors" fail
+fi
+
+mkdir -p "$XDG_STATE_HOME/interdimux"
+printf '== 2026-01-01 00:00:00 navigator stderr\nsomething went wrong\n' \
+  > "$XDG_STATE_HOME/interdimux/errors.log"
+out=$(doctor)
+if printf '%s' "$out" | grep -q '✗ the navigator has logged 1 error'; then
+  report "a logged error is surfaced by --doctor" pass
+else
+  report "a logged error is surfaced by --doctor" fail
+  ERRORS+="$(printf '%s' "$out" | grep -i 'error' | sed 's/^/    /')"$'\n'
+fi
+if printf '%s' "$out" | grep -q 'something went wrong'; then
+  report "...and it quotes the most recent one" pass
+else
+  report "...and it quotes the most recent one" fail
+fi
+rm -f "$XDG_STATE_HOME/interdimux/errors.log"
+
+# The whole point: an error must reach the log rather than the rendered rows.
+# Driven end to end, because the redirect happens in the navigator and a
+# --list-style child keeps its real stderr on purpose.
+if command -v fzf >/dev/null 2>&1; then
+  ERRD="$TMPD/errstate"
+  OUTER="${SOCK}-errouter"
+  tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
+    "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_STATE_HOME='$ERRD' \
+         INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
+         INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_FZF_OPTS='--totally-bogus-flag' \
+         bash '$SCRIPT'; sleep 5"
+  for _i in $(seq 1 80); do
+    [ -s "$ERRD/interdimux/errors.log" ] && break
+    sleep 0.1
+  done
+  if grep -q 'totally-bogus-flag' "$ERRD/interdimux/errors.log" 2>/dev/null; then
+    report "a real navigator failure reaches the error log" pass
+  else
+    report "a real navigator failure reaches the error log" fail
+    # `|| true`: under `set -o pipefail` a missing log makes the whole
+    # substitution non-zero, and the assignment then kills the suite --
+    # the failure branch must not be able to take the harness down with it
+    ERRORS+="    log: $( (cat "$ERRD/interdimux/errors.log" 2>/dev/null || true) | head -2 | tr '\n' '|')"$'\n'
+  fi
+  # ...and it was ALSO announced, so the user is not expected to go looking
+  if tmux -L "$SOCK" show-messages 2>/dev/null | grep -q 'interdimux: unknown option'; then
+    report "...and announced on the status line" pass
+  else
+    report "...and announced on the status line" fail
+  fi
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
+fi
+
 # --- THE BEHAVIOURAL HALF: junk numerics must not reach the popup -------------------
 # Before the guard, a non-numeric limit turned every recent-dir comparison into
 # "integer expression expected" on stderr, which display-popup paints over the

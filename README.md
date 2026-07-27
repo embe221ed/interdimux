@@ -216,6 +216,12 @@ nothing to tell you why:
 
 Exits non-zero if anything is wrong, so it works in a health check.
 
+It is also where past failures surface. The navigator sends its stderr to the
+status line and to `$XDG_STATE_HOME/interdimux/errors.log` rather than to the
+popup — anything written to a popup's stderr is painted over the rendered rows
+and then vanishes with the popup, which is how several silent failures stayed
+silent. `--doctor` reports the log and quotes the most recent entry.
+
 ## Configuration
 
 All options are set via tmux options in `~/.tmux.conf`:

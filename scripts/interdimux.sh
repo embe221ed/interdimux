@@ -3464,6 +3464,17 @@ if [ "${1:-}" = "--doctor" ]; then
     *)     _ok "install path is safe to embed in a key binding" ;;
   esac
 
+  # The navigator routes its stderr to a log rather than painting it over the
+  # list, so this is the one place a past failure is still visible.
+  if [ -s "$SCHED_LOGDIR/errors.log" ]; then
+    _last=$(grep -c '^== ' "$SCHED_LOGDIR/errors.log" 2>/dev/null || echo 0)
+    _bad "the navigator has logged $_last error(s)"
+    _note "most recent: $(grep -A1 '^== ' "$SCHED_LOGDIR/errors.log" | tail -1)"
+    _note "full log: $SCHED_LOGDIR/errors.log"
+  else
+    _ok "no navigator errors logged"
+  fi
+
   for _d in "${XDG_DATA_HOME:-$HOME/.local/share}/interdimux" "$SCHED_LOGDIR"; do
     if mkdir -p "$_d" 2>/dev/null && [ -w "$_d" ]; then
       _ok "writable: $_d"
@@ -3745,7 +3756,48 @@ fi
 PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
 printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null || PREVIEW_STATE_FILE=""
 export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
-trap 'rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE"' EXIT
+
+# Errors go to the status line and a log, not across the list.
+#
+# The popup's stderr IS the popup: anything written there is painted over the
+# rendered rows and then vanishes with the popup, which is how a read-only
+# $XDG_DATA_HOME turned into three "Permission denied" lines smeared across the
+# tree, and how every other silent failure this picker has had stayed silent.
+# fzf draws its interface on /dev/tty rather than stderr, so redirecting fd 2
+# costs the UI nothing.
+#
+# Reported, never swallowed: the first line goes to `display-message` (which
+# also lands in `tmux show-messages`) and the whole thing is appended to a log
+# that --doctor points at.
+#
+# Only on this path.  Child modes (--list, --preview, --action, --doctor …) keep
+# their real stderr: they are called by fzf, by the test suites, and by the user.
+ERR_FILE="${RESUME_FILE}.err"
+if : > "$ERR_FILE" 2>/dev/null; then
+  exec 2>"$ERR_FILE"
+else
+  ERR_FILE=""
+fi
+
+_report_stderr() {
+  [ -n "$ERR_FILE" ] && [ -s "$ERR_FILE" ] || return 0
+  local first
+  { read -r first < "$ERR_FILE"; } 2>/dev/null || :
+  [ -n "$first" ] || return 0
+  # `#` would be format-expanded by display-message; a long line would be
+  # truncated by the status line anyway, so cut it where it stays readable
+  first="${first//\#/##}"
+  [ "${#first}" -gt 160 ] && first="${first:0:157}…"
+  tmux display-message "interdimux: $first" 2>/dev/null || :
+  if mkdir -p "$SCHED_LOGDIR" 2>/dev/null; then
+    {
+      printf '== %s navigator stderr\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+      cat "$ERR_FILE"
+    } >> "$SCHED_LOGDIR/errors.log" 2>/dev/null || :
+  fi
+}
+
+trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"}' EXIT
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"
 ACTION_CMD="bash '$SCRIPT_PATH' --action"

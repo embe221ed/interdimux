@@ -42,6 +42,13 @@ mkdir -p "$TMPD/work/api" "$TMPD/other/api" "$TMPD/real/target" "$TMPD/plain"
 ln -s "$TMPD/real/target" "$TMPD/linkdir"
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s anchor -x 120 -y 40 -c "$TMPD"
+# connect_dir creates its own sessions, so the pane shell cannot be passed per
+# session -- pin it on the server.  resolve_session_name decides whether to
+# reuse a name by comparing the session's CURRENT cwd against the requested dir,
+# and the user's login shell rc can move that cwd transiently: observed as
+# "target" being disambiguated to "real-target" while tmux was, moments later,
+# reporting exactly the right path.
+tmux -L "$SOCK" set -g default-command 'bash --norc --noprofile -i' 
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=anchor:' -F '#{pane_id}' | head -1)"
 export XDG_DATA_HOME="$TMPD/data" XDG_STATE_HOME="$TMPD/state"
@@ -78,16 +85,21 @@ created_name() { # $1 = query
     sleep 0.1
   done
   new=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
-  # ...and then for tmux to REPORT its cwd.  resolve_session_name compares an
-  # existing session's cwd against the requested dir to decide whether to reuse
-  # the name or disambiguate, and tmux derives that cwd from /proc at query
-  # time: on a loaded box the pane exists before its cwd does, so the next
-  # describe of the same path briefly disambiguated a name that needed no
-  # disambiguating.
-  if [ -n "$new" ]; then
-    for i in $(seq 1 60); do
-      [ -n "$(tmux -L "$SOCK" list-panes -t "=$new" -F '#{pane_current_path}' \
-                -f '#{pane_active}' 2>/dev/null | head -1)" ] && break
+  # ...and then for tmux to report the RIGHT cwd, not merely a non-empty one.
+  # resolve_session_name compares an existing session's cwd against the
+  # requested dir to decide whether to reuse the name or disambiguate, and tmux
+  # derives that cwd from /proc at query time.  On a loaded box the pane exists
+  # before its cwd is right, and a stale value is just as wrong as an empty one:
+  # observed as "target" being disambiguated to "real-target" because the
+  # comparison ran against whatever cwd tmux had at that instant.
+  #
+  # $2 is the physical directory the session should land in, when the caller
+  # knows it (every path-shaped query does).
+  local want="${2:-}"
+  if [ -n "$new" ] && [ -n "$want" ]; then
+    for i in $(seq 1 80); do
+      [ "$(tmux -L "$SOCK" list-panes -t "=$new" -F '#{pane_current_path}' \
+             -f '#{pane_active}' 2>/dev/null | head -1)" = "$want" ] && break
       sleep 0.1
     done
   fi
@@ -95,9 +107,12 @@ created_name() { # $1 = query
 }
 
 check_agrees() { # $1 = label, $2 = query
-  local label="$1" query="$2" want got
+  local label="$1" query="$2" want got expect_dir=""
+  # a path-shaped query lands in its PHYSICAL directory; tell created_name so it
+  # can wait for tmux to report exactly that
+  [ -d "$query" ] && expect_dir=$(cd "$query" 2>/dev/null && pwd -P)
   want=$(announced_name "$query")
-  got=$(created_name "$query")
+  got=$(created_name "$query" "$expect_dir")
   if [ -n "$want" ] && [ "$want" = "$got" ]; then
     report "$label — announced '$want', created '$got'" pass
   else
@@ -131,6 +146,8 @@ if [ "$link_name" = "target" ]; then
   report "...and that name is the physical target, not the link" pass
 else
   report "...and that name is the physical target, not the link (got: $link_name)" fail
+  ERRORS+="    want dir: $(cd "$TMPD/linkdir" && pwd -P)"$'\n'
+  ERRORS+="    sessions: $(tmux -L "$SOCK" list-panes -a -F '#{session_name}=[#{pane_current_path}] act=#{pane_active}' | tr '\n' ' ')"$'\n'
 fi
 
 # --- an existing name says "switch to", not "create" -------------------------------
