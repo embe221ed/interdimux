@@ -135,6 +135,33 @@ editor window of the *proj* session) and the command column. Paths, git
 badges, and metadata are visible but not matched — press `Ctrl-]` to
 cycle the scope when you *do* want to search by path.
 
+### Numbered jumps (opt-in)
+
+```tmux
+set -g @interdimux-jump-keys 'M-1 M-2 M-3'
+```
+
+Binds one root-table key per position: `M-1` switches to session #1 in the
+picker's own ordering, `M-2` to #2, and so on. Under the default MRU order #1
+is the previous session, so this is a single keystroke to a fixed destination —
+which is the point. A fuzzy query cannot promise that, and neither can a list
+position that shifts as you type.
+
+Off by default and you name the keys: claiming root-table keys in someone
+else's tmux is not the plugin's to do. Note that a key you name is *taken* —
+tmux offers no way to ask what it was bound to and restore it later.
+
+The mode is also usable directly, for a different key layout or a different N:
+
+```tmux
+bind-key -n M-0 run-shell -b "TMUX_PANE=#{pane_id} bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --jump 4"
+```
+
+`TMUX_PANE=#{pane_id}` is required, not decoration: `run-shell` passes the tmux
+*server's* global environment, not the pressing client's pane, so without it
+the "which session am I in" question — and therefore the numbering — can be
+answered for the wrong session.
+
 ### Directory picker (`Ctrl-o` / dashboard "New Session")
 
 Creates (or switches to) a session from a directory. The list has three tiers:
@@ -232,6 +259,10 @@ set -g @interdimux-key 'f'
 
 # Dashboard key binding (default: g)
 set -g @interdimux-dashboard-key 'g'
+
+# Numbered jumps: one root-table key per session position, in order.
+# Off by default.  (default: unset)
+set -g @interdimux-jump-keys 'M-1 M-2 M-3'
 
 # Popup dimensions (default: 80% x 75%)
 set -g @interdimux-popup-width '80%'

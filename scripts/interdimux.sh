@@ -131,12 +131,48 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_nav=$(tmux show-option -gqv @interdimux-key 2>/dev/null);           _bk_nav="${_bk_nav:-f}"
   _bk_dash=$(tmux show-option -gqv @interdimux-dashboard-key 2>/dev/null); _bk_dash="${_bk_dash:-g}"
 
+  # TMUX_PANE=#{pane_id} on every run-shell binding, not just the popup one.
+  #
+  # run-shell does NOT derive TMUX_PANE from the pressing client — it passes the
+  # tmux SERVER's global environment, which holds whatever TMUX_PANE the process
+  # that started the server happened to export.  Measured: a server started from
+  # inside another tmux had `show-environment -g TMUX_PANE` = %8, a pane id that
+  # did not exist in it, and every run-shell binding inherited that; tmux then
+  # resolved `-t %8` to something arbitrary rather than failing.  Anything that
+  # depends on "which pane am I in" — the current-row marker, MRU's
+  # move-current-to-end, and --jump's numbering — silently answers for the wrong
+  # session.  run-shell format-expands its argument, so #{pane_id} is the
+  # pressing client's pane, resolved in-server at keypress.
+  #
   # The dashboard is not the hot path — it keeps the simple launcher.
-  tmux bind-key "$_bk_dash" run-shell -b "bash '$SQ_SCRIPT_FMT' --dashboard-launch"
+  tmux bind-key "$_bk_dash" run-shell -b "TMUX_PANE=#{pane_id} bash '$SQ_SCRIPT_FMT' --dashboard-launch"
+
+  # Opt-in numbered jumps (@interdimux-jump-keys 'M-1 M-2 M-3').  Space-separated
+  # keys, in order: the first jumps to session #1 in the picker's own ordering,
+  # which under the default MRU is the previous session.
+  #
+  # Bound in the ROOT table (-n), no prefix: the entire point is a single
+  # keystroke that always lands in the same place, which a prefix sequence and a
+  # fuzzy query both fail at for different reasons.  Off by default and the user
+  # names the keys, because silently claiming root-table keys in someone else's
+  # tmux is not ours to do.
+  #
+  # Previously bound keys are NOT preserved -- tmux has no way to ask what a key
+  # was bound to and restore it later, so the honest contract is "you named
+  # these keys, they are ours now".
+  _bk_jump=$(tmux show-option -gqv @interdimux-jump-keys 2>/dev/null)
+  if [ -n "$_bk_jump" ]; then
+    _bk_i=0
+    for _bk_k in $_bk_jump; do
+      _bk_i=$(( _bk_i + 1 ))
+      tmux bind-key -n "$_bk_k" run-shell -b "TMUX_PANE=#{pane_id} bash '$SQ_SCRIPT_FMT' --jump $_bk_i" 2>/dev/null
+    done
+    unset _bk_i _bk_k
+  fi
 
   # run-shell -C needs tmux >= 3.4; below it, keep the original binding.
   if [ "$_bk_tvnum" -lt 304 ]; then
-    tmux bind-key "$_bk_nav" run-shell -b "bash '$SQ_SCRIPT_FMT' --launch switch"
+    tmux bind-key "$_bk_nav" run-shell -b "TMUX_PANE=#{pane_id} bash '$SQ_SCRIPT_FMT' --launch switch"
     exit 0
   fi
 
@@ -2011,10 +2047,22 @@ if [ "${1:-}" = "--dirs-preview" ]; then
       esac
     fi
 
-    last_commit=$(git -C "$dir" --no-optional-locks log -1 --oneline 2>/dev/null || true)
+    # Bound the two git forks.  `head -200` bounds the OUTPUT, not the work:
+    # `git status` still walks the whole tree before emitting anything, and this
+    # runs on every cursor move in the picker.  Measured on a 30,000-file repo
+    # with a warm page cache: 60-70 ms — tolerable, but it scales with the tree
+    # and a cold cache or a network filesystem has no ceiling at all.  A repo
+    # with submodules is worse still, since the scan recurses into each one.
+    #
+    # `timeout` is coreutils and not guaranteed present; without it the calls
+    # stay unbounded, which is exactly today's behaviour.
+    _git_to=""
+    command -v timeout >/dev/null 2>&1 && _git_to="timeout 1"
+
+    last_commit=$($_git_to git -C "$dir" --no-optional-locks log -1 --oneline 2>/dev/null || true)
     [ -n "$last_commit" ] && printf "  ${DIM_PATH}Commit:${RST} %s\n" "$last_commit"
 
-    changed=$(git -C "$dir" --no-optional-locks status --porcelain 2>/dev/null | head -200 | wc -l | tr -d ' ')
+    changed=$($_git_to git -C "$dir" --no-optional-locks status --porcelain --ignore-submodules 2>/dev/null | head -200 | wc -l | tr -d ' ')
     [ "$changed" -eq 200 ] && changed="200+"
     [ "$changed" != "0" ] && printf "  ${DIM_CMD}Changes:${RST} %s files\n" "$changed"
   fi
@@ -3266,6 +3314,41 @@ if [ "${1:-}" = "--list" ]; then
   exit 0
 fi
 
+# --jump N — switch to the Nth session in the picker's own order, no popup.
+#
+# With the default MRU ordering the current session is parked last, so N=1 is
+# the previous session, N=2 the one before that, and so on: a fixed number is a
+# fixed destination for as long as you do not visit anything else.  That is the
+# whole point — muscle memory needs the target not to move, which a fuzzy query
+# cannot promise.
+#
+# The order comes from gather_targets rather than a second sort here, so "the
+# Nth session" means exactly the Nth session the picker would show, under
+# @interdimux-order 'mru' or 'index' alike.  Duplicating the sort would let the
+# two drift, and a jump that lands somewhere other than the row you counted is
+# worse than no jump at all.
+#
+# Bindable on its own for a two-keystroke hop with no popup:
+#   bind-key -n M-2 run-shell -b "bash …/interdimux.sh --jump 2"
+# and bound to alt-1..alt-5 inside the navigator.
+if [ "${1:-}" = "--jump" ]; then
+  set +e
+  _jn="${2:-}"
+  case "$_jn" in
+    ''|*[!0-9]*) echo "interdimux: usage: --jump N (1-based)" >&2; exit 2 ;;
+  esac
+  [ "$_jn" -ge 1 ] || { echo "interdimux: --jump is 1-based" >&2; exit 2; }
+
+  _jt=$(gather_targets 2>/dev/null | awk -F'\t' -v n="$_jn" '
+    $4 ~ /^S:/ { c++; if (c == n) { print substr($4, 3); exit } }')
+  if [ -z "$_jt" ]; then
+    tmux display-message "interdimux: no session #$_jn" 2>/dev/null
+    exit 1
+  fi
+  tmux switch-client -t "=$_jt" 2>/dev/null || exit 1
+  exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # Dynamic header (called by fzf focus:transform-header)
 # ---------------------------------------------------------------------------
@@ -3512,7 +3595,7 @@ if [ "${1:-}" = "--doctor" ]; then
   printf '\n\033[1moptions\033[0m\n'
   # Names the code understands but that are not in OPT_MAP: they are read
   # directly rather than forwarded to the popup.
-  _known=("${OPT_NAMES[@]}" key dashboard-key binary project-dirs)
+  _known=("${OPT_NAMES[@]}" key dashboard-key binary project-dirs jump-keys)
 
   _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 
@@ -3555,6 +3638,9 @@ if [ "${1:-}" = "--doctor" ]; then
         esac ;;
       key|dashboard-key)
         [ "${#v}" -eq 1 ] || printf 'expected a single key' ;;
+      jump-keys)
+        # space-separated tmux key specs; the count is what maps to #1, #2, …
+        case "$v" in *[!A-Za-z0-9\ ^\-]*) printf 'expected space-separated tmux keys, e.g. "M-1 M-2 M-3"' ;; esac ;;
       binary)
         [ -x "$v" ] || printf 'not an executable file' ;;
     esac

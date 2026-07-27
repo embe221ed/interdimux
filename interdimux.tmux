@@ -24,8 +24,11 @@ if ! bash "$SCRIPT" --bind-keys 2>/dev/null; then
   sq="${SCRIPT//\'/\'\\\'\'}"
   fmt="${sq//'#'/##}"
 
+  # TMUX_PANE=#{pane_id}: run-shell passes the SERVER's global TMUX_PANE, which
+  # is whatever the process that started the server exported — not the pressing
+  # client's pane.  Everything that asks "which pane am I in" depends on this.
   tmux bind-key "$interdimux_key" run-shell -b \
-    "bash '$fmt' --launch switch"
+    "TMUX_PANE=#{pane_id} bash '$fmt' --launch switch"
   tmux bind-key "$dashboard_key" run-shell -b \
-    "bash '$fmt' --dashboard-launch"
+    "TMUX_PANE=#{pane_id} bash '$fmt' --dashboard-launch"
 fi
