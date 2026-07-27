@@ -548,6 +548,34 @@ Byte-parity confirmed on this Mac: settled static load, 8/8 reps rust-ps == bash
 suite green. **On Linux the change is a no-op** — `PROC_CMDLINE_OK=1` already made the old gate's
 first clause true, so the default Linux path (Rust + `/proc`) is unchanged.
 
+### Tier 7.1 — libproc: kill the last `ps` fork on macOS
+
+The ps backend still forks `ps -eo` once per build (and per reload) and reads every host process's
+argv — ~100 ms, the whole remaining gap vs Linux's `/proc`. `rust/src/macproc.rs` replaces it with
+per-pane kernel calls: `sysctl(KERN_PROCARGS2, pid)` for argv, `proc_listpids(PROC_PPID_ONLY, pid)`
+for the first child. Cost scales with pane count, not host load — the native equivalent of the
+`/proc` path. It is now the **default off-Linux backend**; the ps snapshot is retained for
+`INTERDIMUX_FORCE_PS=1` and as the fallback (other BSDs, sandboxed libproc). Measured on the Mac:
+full `--list` **250 ms → 135 ms**; `imux gather` on a captured dump **145 ms → 36 ms**; **zero**
+`ps` forks on the default path (verified with a PATH shim). Full journey: **~1000 → ~135 ms** (~7×),
+now the same performance class as the VPS.
+
+The hard part is byte-parity with the bash **fallback**, which has no libproc and uses `ps`. `ps_vis`
+reproduces macOS `ps -o args=` exactly for everything a real command carries — ASCII, valid UTF-8
+(accents, CJK), and control-byte escaping (tab→`\011`, newline→`\012`, other C0 + DEL → caret). An
+adversarial pass (multi-child ordering, KERN_PROCARGS2 parse, EPERM/dead-pid/races, an FFI-safety
+audit with 3000 crash-hammers + fuzzing, and a full e2e sweep) confirmed libproc == bash+ps ==
+rust-ps across the config space, with no OOB/UB/panics. Two **accepted, display-only** divergences,
+documented in `macproc.rs`, neither reachable by a real command nor able to break the row contract:
+
+- **child selection:** lowest-pid vs ps's `(tty, pid)`-order first child. Identical for every ordinary
+  multi-child shell (jobs/pipelines/fg+bg all share the pane tty → pid-ascending). Differs only when a
+  sibling `setsid()`s off the tty yet stays parented to the shell — both are valid children and the
+  SPEC/target is identical, so Enter lands on the same pane either way.
+- **invalid-UTF-8 argv** (binary/Latin-1 — never a real command): `ps` locale-escapes such bytes
+  (locale-dependent); libproc maps them to U+FFFD like the Linux `/proc` backend, after escaping every
+  control byte, so the row stays safe.
+
 ---
 
 ## Suggested rollout
