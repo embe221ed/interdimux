@@ -4344,7 +4344,7 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       'Send keys'   t "run-shell -b \"bash '$menu_sp' --launch send\"" \
       '' \
       "$_m_sched"   a "run-shell -b \"bash '$menu_sp' --launch schedule\"" \
-      "$_m_jobs"    j "run-shell -b \"bash '$menu_sp' --launch jobs\""
+      "$_m_jobs"    o "run-shell -b \"bash '$menu_sp' --launch jobs\""
   else
     chrome=()
     cmd="$(build_env_fwd) bash '$sp' --dashboard"
