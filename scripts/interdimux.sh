@@ -1628,10 +1628,10 @@ gather_targets() {
   local sessions_raw all_windows_raw all_panes_raw
   local _hline
 
-  # Build process table once (instead of per-pane pgrep+ps).  Started before
-  # the queries so a slow ps overlaps the tmux round-trip; on Linux this is a
-  # no-op (the /proc backend needs no table).
-  [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
+  # The process table for full-command resolution is built LAZILY, only on the
+  # bash-renderer fallback path below (see before measure_widths).  The Rust core
+  # resolves commands itself now — from /proc on Linux, from its own ps snapshot
+  # everywhere else — so when the binary is present bash never forks ps at all.
 
   local _sfmt _wfmt _pfmt _curfmt
   _sfmt="#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}${US}#{session_windows}${US}#{?session_attached,attached,}"
@@ -1753,16 +1753,18 @@ gather_targets() {
     all_panes_raw="${_hout%$'\n'}"
   fi
 
-  # Hand the whole render to the Rust core when it is available.  This is the
-  # part that was ~181 ms of in-process bash (measure_widths + grouping + emit);
-  # the binary does it in ~2 ms.  bash keeps the tmux plumbing so the socket
-  # handling lives in exactly one place, and keeps its own renderer below as the
-  # fallback for anyone without the binary.
-  # The binary resolves full commands from /proc only — it has no ps backend.
-  # Where /proc is unavailable (macOS/BSD) or has been forced off, bash renders
-  # instead, because bash still carries the ps table.  Slower, but correct; the
-  # alternative would be silently downgrading those rows to the short command.
-  if [ -n "$IMUX_BIN" ] && { [ "$PROC_CMDLINE_OK" = 1 ] || [ "$SHOW_FULL_COMMAND" != "on" ]; }; then
+  # Hand the whole render to the Rust core when it is present.  This is the part
+  # that was ~181 ms of in-process bash (measure_widths + grouping + emit); the
+  # binary does it in ~2 ms.  bash keeps the tmux plumbing so the socket handling
+  # lives in exactly one place, and keeps its own renderer below as the fallback
+  # for anyone without the binary.
+  #
+  # The binary resolves full commands from /proc on Linux and from its own single
+  # `ps -eo` snapshot on macOS/BSD (or when INTERDIMUX_FORCE_PS=1), so it renders
+  # correctly EVERYWHERE — it is preferred whenever it is present.  A binary that
+  # fails or prints nothing falls through to the bash renderer below (the empty
+  # `_imux_out` guard), so preferring it can never turn into an empty picker.
+  if [ -n "$IMUX_BIN" ]; then
     # Pass every option EXPLICITLY rather than letting the binary re-derive
     # defaults from the environment.  bash is the single owner of config
     # resolution (env -> tmux option -> built-in default, see get_opt), and a
@@ -1809,6 +1811,12 @@ IMUX_SECTIONS
       return 0
     fi
   fi
+
+  # We only reach here when the Rust core is absent or fell through — i.e. the
+  # bash renderer will do the work, and IT needs the ps process table (the binary
+  # built its own).  On Linux this is a no-op (the /proc backend needs no table);
+  # elsewhere it is the one ps fork, paid only when there is no working binary.
+  [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
 
   # Size the columns to the content we just fetched (fork-free).
   measure_widths

@@ -359,7 +359,9 @@ plus `ps` gone entirely.
    and `ps` was implicitly sanitizing argv — a raw newline splits a row and
    detaches its SPEC field, a raw `\x1f` reaches an fzf-visible field.
    `sanitize_args` reproduces `ps` byte-for-byte (NUL/newline → space, every
-   other non-printable → `?`). `INTERDIMUX_FORCE_PS=1` pins the old backend.
+   other non-printable → `?`). `INTERDIMUX_FORCE_PS=1` pins the ps backend on
+   both sides — bash's ps table and, since the macOS work in Tier 7 below, the
+   Rust core's own ps snapshot.
 
 4. **The last pre-`exec fzf` forks are gone**: `mktemp`, the `awk` in version
    parsing, three `$(sq_script)` subshells, and the dir picker re-exec'ing the
@@ -502,6 +504,49 @@ its design does not port unchanged.
 `awk` for the row renderer, and for a fused maxima+sort+grouping pass (17 ms → 5 ms): Debian and
 Ubuntu ship **mawk**, where `length("żółć")` is 8 and `substr` splits UTF-8 mid-character, so
 every padded column misaligns for non-ASCII names. Would need an explicit gawk dependency.
+
+---
+
+## Tier 7 — the Rust core was Linux-only; macOS ran the pre-Rust path (2026-07-27)
+
+A user reported `prefix+f` "significantly slower" on a macOS laptop than on a Linux VPS with a
+comparable session count. Measured on the Mac (15 sess / 75 win / 105 panes = ~150 rows, ~1300
+host processes, medians): **`--list` ~1000 ms, vs ~200 ms for the same build with the Rust core
+active** — a ~5× gap, with a far worse tail (10 s vs 0.5 s).
+
+**Root cause.** The Rust core (Tier 5.3's follow-on) resolves the full-command column from
+`/proc` and had **no other backend**, so the gate that hands rendering to it —
+`[ -n "$IMUX_BIN" ] && { [ "$PROC_CMDLINE_OK" = 1 ] || [ "$SHOW_FULL_COMMAND" != "on" ]; }` —
+was **false** on any host without `/proc` under the default `SHOW_FULL_COMMAND=on`. macOS has no
+`/proc`, so every open fell to the bash renderer *and* `build_process_table` (fork `ps -eo`, then
+a bash loop over **all** host processes, then a per-pane walk). Linux got the ~2 ms Rust render +
+O(panes) `/proc` reads; macOS got the exact fork-heavy path the Rust core was built to retire.
+
+**Fix.** Give the Rust core a **ps backend** (`rust/src/proc.rs`): where `/proc` is unavailable
+(macOS/BSD) or `INTERDIMUX_FORCE_PS=1`, it takes one `ps -eo pid=,ppid=,args=` snapshot into the
+same two maps bash builds (pid→argv, ppid→children in ps order) and walks them natively. The gate
+relaxes to `[ -n "$IMUX_BIN" ]` (the binary resolves everywhere now); the empty-output
+fall-through still covers a failing binary. `build_process_table` moves to the bash-renderer
+*fallback* path only, so bash never forks `ps` when the binary works. Result on the Mac:
+**~1000 ms → ~120 ms**, full command column intact.
+
+Traps this reproduced (all covered by `tests/test_rust_parity.sh` + `tests/test_full_command.sh`,
+with a new `INTERDIMUX_FORCE_PS=1` parity case so Linux CI exercises the ps backend too):
+
+- **ps output is stored VERBATIM** (no re-sanitize) so it byte-matches bash's `PS_ARGS[$pid]="$args"`.
+- **macOS `ps` escapes control bytes differently** than Linux `ps`: newline → `\012`, `\x1f` → `^_`
+  (printable text), where Linux uses space / `?`. Both neutralize row-breakers; the test assertion
+  is now OS-aware. Verified with `od -c` that no raw newline or `\x1f` reaches a field.
+- **ASCII IFS, not Unicode.** The line splitter must mirror bash `read`'s default IFS (space/tab),
+  **not** Rust's Unicode-aware `char::is_whitespace`/`trim_start` — macOS `ps` passes NBSP / U+2028 /
+  U+2000 / U+3000 through verbatim and bash keeps a leading one in the args field. A Unicode strip
+  diverged from bash at *shell detection* (which reads the un-trimmed argv0) on a pathological argv0
+  like `\u{a0}-bash`: bash sees a non-shell, Rust saw `-bash` and descended. Found by an adversarial
+  verification pass; fixed to ASCII-only and locked in with a regression test.
+
+Byte-parity confirmed on this Mac: settled static load, 8/8 reps rust-ps == bash-ps; the whole
+suite green. **On Linux the change is a no-op** — `PROC_CMDLINE_OK=1` already made the old gate's
+first clause true, so the default Linux path (Rust + `/proc`) is unchanged.
 
 ---
 

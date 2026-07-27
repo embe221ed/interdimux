@@ -164,9 +164,15 @@ if [ -n "$SLEEPER" ]; then
   else
     report "control-char argv still produces a row" fail
   fi
+  # ps neutralizes control bytes in argv, but HOW is OS-specific: Linux ps maps
+  # NUL/newline -> space and every other unprintable -> '?', while macOS/BSD ps
+  # escapes to printable text instead (newline -> \012, 0x1f -> ^_).  Either way
+  # no RAW row-breaker survives — that safety is enforced by the "4 fields" and
+  # "no \x1f" checks above; here we only confirm the bytes were transformed and
+  # not passed through verbatim.
   case "$got" in
-    *'?'*|*'a b'*) report "control chars are sanitized ps-style" pass ;;
-    *) report "control chars are sanitized ps-style (got '$got')" fail ;;
+    *'?'*|*'a b'*|*'\012'*|*'^_'*) report "control chars are neutralized ($(uname -s) ps-style)" pass ;;
+    *) report "control chars are neutralized (got '$got')" fail ;;
   esac
 else
   echo "  (skipped control-char cases: no python3/perl)"

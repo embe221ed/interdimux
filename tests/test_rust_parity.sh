@@ -106,6 +106,10 @@ run_case() {
 run_case "defaults"                     INTERDIMUX_SHOW_DIRS=off
 run_case "full command resolution on"   INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_FULL_COMMAND=on
 run_case "full command resolution off"  INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_FULL_COMMAND=off
+# Force the ps backend on BOTH sides: rust's ps snapshot vs bash's ps table.
+# On Linux this is the only case that exercises the ps backend (the default
+# uses /proc); on macOS/BSD it is what every open runs.
+run_case "full command via ps backend"  INTERDIMUX_SHOW_DIRS=off INTERDIMUX_FORCE_PS=1 INTERDIMUX_SHOW_FULL_COMMAND=on
 run_case "git badges on"                INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_GIT_BRANCH=on
 run_case "git badges off"               INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_GIT_BRANCH=off
 run_case "preview on (half width)"      INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_PREVIEW=on
