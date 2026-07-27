@@ -42,6 +42,8 @@ fn render(dump: &str, extra: &[(&str, &str)]) -> String {
         .env("INTERDIMUX_SHOW_GIT_BRANCH", "off")
         .env("INTERDIMUX_SHOW_DIRS", "off")
         .env("INTERDIMUX_ORDER", "mru")
+        // pinned to the shipped default, so the goldens describe what users see
+        .env("INTERDIMUX_SESSION_RULE", "on")
         .env("INTERDIMUX_COLOR_ACCENT", "173")
         .env("INTERDIMUX_COLOR_PATH", "180")
         .env("INTERDIMUX_COLOR_GIT", "140")
@@ -317,24 +319,77 @@ fn identity_columns_all_have_equal_display_width() {
         }
         cells
     }
+    // The rule must actually be ON somewhere and OFF somewhere: an
+    // implementation that never drew it would satisfy every assertion below.
+    {
+        let dump = std::fs::read_to_string(corpus_dir().join("basic.dump")).unwrap();
+        let wide = render(&dump, &[("INTERDIMUX_COLS", "120"), ("INTERDIMUX_SESSION_RULE", "on")]);
+        let tight = render(&dump, &[("INTERDIMUX_COLS", "40"), ("INTERDIMUX_SESSION_RULE", "on")]);
+        let has_rule = |o: &str| {
+            o.lines()
+                .filter(|l| l.split('\t').nth(3).is_some_and(|s| s.starts_with("S:")))
+                .any(|l| l.contains("──"))
+        };
+        assert!(has_rule(&wide), "the rule never drew at 120 cols");
+        assert!(!has_rule(&tight), "the rule still drew at 40 cols, where the meta gets clipped");
+    }
+
     for case in ["basic", "cjk", "hostile", "emoji", "bigindex"] {
         let dump = std::fs::read_to_string(corpus_dir().join(format!("{}.dump", case))).unwrap();
         // 52 is not decoration: the pane-id clamp only engages once the squeeze
         // loop has driven the identity column to its floor, which happens below
-        // 60.  Sweeping only the wide widths would miss it entirely.
-        for cols in [52, 60, 80, 120, 200] {
-            let out = render(&dump, &[("INTERDIMUX_COLS", &cols.to_string())]);
-            let widths: Vec<usize> = out
-                .lines()
-                .map(|l| visible_width(l.split('\t').next().unwrap_or("")))
-                .collect();
-            if let Some(&first) = widths.first() {
-                for (i, w) in widths.iter().enumerate() {
-                    assert_eq!(
-                        *w, first,
-                        "{} @ {} cols: identity column of row {} is {} cells, row 1 is {} — columns are misaligned",
-                        case, cols, i + 1, w, first
-                    );
+        // 60.  Sweeping only the wide widths would miss it entirely.  40 is
+        // there for the session rule, whose dash run has to survive the floors.
+        for cols in [40, 52, 60, 80, 120, 200] {
+            for rule in ["on", "off"] {
+                let out = render(
+                    &dump,
+                    &[("INTERDIMUX_COLS", &cols.to_string()), ("INTERDIMUX_SESSION_RULE", rule)],
+                );
+                // Session header rows are a SECOND column class once the group
+                // rule is on: their identity field runs out to `rule` cells
+                // rather than `ident`.  Both classes must still be internally
+                // uniform, or one long session name shifts a whole group.
+                let mut sess: Option<usize> = None;
+                let mut child: Option<usize> = None;
+                let mut ctx: Option<usize> = None;
+                for (i, l) in out.lines().enumerate() {
+                    let f: Vec<&str> = l.split('\t').collect();
+                    let w = visible_width(f[0]);
+                    let (slot, kind) = if f[3].starts_with("S:") {
+                        (&mut sess, "session")
+                    } else {
+                        ctx = Some(visible_width(f[1]));
+                        (&mut child, "child")
+                    };
+                    match *slot {
+                        None => *slot = Some(w),
+                        Some(first) => assert_eq!(
+                            w, first,
+                            "{} @ {} cols rule={}: {} row {} has a {}-cell identity column, the first has {} — columns are misaligned",
+                            case, cols, rule, kind, i + 1, w, first
+                        ),
+                    }
+                }
+                match (rule, sess, child, ctx) {
+                    // no rule: every row is one class again, exactly as before
+                    ("off", Some(s), Some(c), _) => assert_eq!(
+                        s, c,
+                        "{} @ {} cols: with the rule off the session row must match the rest",
+                        case, cols
+                    ),
+                    // The rule's whole purpose: the meta lands in the command
+                    // column, i.e. ident + TAB + ctx.  Below the width where the
+                    // squeeze stops fitting there IS no command column left, so
+                    // the rule switches itself off and the row must be identical
+                    // to the rule-off layout — those are the only two answers.
+                    ("on", Some(s), Some(c), Some(x)) => assert!(
+                        s == c + 1 + x || s == c,
+                        "{} @ {} cols: the session row is {} cells, which is neither the \
+                         command column ({}) nor the plain identity column ({})",
+                        case, cols, s, c + 1 + x, c
+                    ),
+                    _ => {}
                 }
             }
         }

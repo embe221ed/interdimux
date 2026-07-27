@@ -20,6 +20,10 @@ pub struct Widths {
     pub badge: usize,
     pub pfx: usize,
     pub win: usize,
+    /// Total width a session header row's identity field is padded to when the
+    /// group rule is drawn.  Chosen so the session meta lands in the same column
+    /// as the command field on child rows: ident + TAB + ctx.
+    pub rule: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -92,7 +96,16 @@ pub fn compute(m: Maxima, cols: usize, preview_on: bool) -> Widths {
             break;
         }
     }
-    Widths { ident, path, badge, pfx, win }
+    let ctx = if badge > 0 { path + 3 + badge } else { path + 2 };
+    // The rule is a wide-terminal affordance: it works by moving the session
+    // meta into the command column, so it is only right while that column still
+    // exists.  Once the squeeze has run out of room — it left the loop at the
+    // floors rather than because everything fit — the meta would be clipped at
+    // exactly the point the command already is, so the rule switches itself off
+    // and session rows go back to the plain layout.  Measured: below ~49 popup
+    // columns "2 win ● 2h" became "2 win…".
+    let rule = if ident + ctx + 2 + CMD_MIN <= avail { ident + 1 + ctx } else { 0 };
+    Widths { ident, path, badge, pfx, win, rule }
 }
 
 #[cfg(test)]

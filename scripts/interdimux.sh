@@ -90,6 +90,7 @@ OPT_MAP=(
   "startup-command:STARTUP_COMMAND"  "hydrate:HYDRATE"
   "show-dirs:SHOW_DIRS"              "dirs-limit:DIRS_LIMIT"
   "raw:RAW"                          "hide:HIDE"
+  "session-rule:SESSION_RULE"        "scope-highlight:SCOPE_HIGHLIGHT"
 )
 OPT_NAMES=()
 for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
@@ -392,6 +393,8 @@ get_opt SHOW_DIRS         "${INTERDIMUX_SHOW_DIRS:-}"        @interdimux-show-di
 get_opt DIRS_LIMIT        "${INTERDIMUX_DIRS_LIMIT:-}"       @interdimux-dirs-limit        15
 get_opt RAW_MODE          "${INTERDIMUX_RAW:-}"              @interdimux-raw               on
 get_opt HIDE_PATTERNS     "${INTERDIMUX_HIDE:-}"             @interdimux-hide              ""
+get_opt SESSION_RULE      "${INTERDIMUX_SESSION_RULE:-}"     @interdimux-session-rule      on
+get_opt SCOPE_HIGHLIGHT   "${INTERDIMUX_SCOPE_HIGHLIGHT:-}"  @interdimux-scope-highlight   on
 
 # Numeric options reach `[ -ge ]`, `find -maxdepth` and arithmetic, so a junk
 # value is not a harmless no-op.  Verified: a non-numeric @interdimux-recent-limit
@@ -470,7 +473,37 @@ tmux_color() {
 
 # fzf --color chrome, rebuilt from the palette (fzf accepts hex/index/-1 as-is)
 build_fzf_colors() {
-  FZF_COLORS="--color=hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,fg+:${COLOR_QUERY},bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
+  FZF_COLORS="--color=hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
+  # Every one of these names must exist in the running fzf: an unknown colour
+  # key is FATAL ("invalid color specification"), not ignored, so a picker that
+  # names `footer:` on fzf < 0.63 does not open at all.  Verified on 0.74.
+  if fzf_ge 63; then
+    FZF_COLORS+=",footer:${COLOR_HEADER}"
+  fi
+  # Make the ^] match scope visible in the rows themselves.  fzf's `nth:`
+  # restyles the --nth fields independently of everything else, so the
+  # SEARCHABLE columns become literally the bright part of the screen — and the
+  # bright band moves live when change-nth fires, with no reload and no extra
+  # bind.  Measured: the dim is OR'd onto each row's own --ansi colour rather
+  # than replacing it, and a match can only ever land in a bright field, so hl
+  # is never dimmed.
+  #
+  # All-or-nothing by construction: --color cannot be re-issued mid-session (no
+  # change-color action exists), so it cannot apply "only when the scope is
+  # non-default", and at the default `1,3` the context column is permanently
+  # faint.  That is a taste call, hence @interdimux-scope-highlight.
+  #
+  # fg+ carries `regular:bold` with it on: fzf's fg+ default is bold, and
+  # overriding only the COLOUR leaves that bold in place — so the current row's
+  # non-searchable half came out bold AND dim at once, a combination whose
+  # rendering is terminal-dependent.  `regular` clears the inherited dim, `bold`
+  # puts back the line-wide bold, and the result is byte-identical to today's
+  # current row.  Measured, both halves of it.
+  if [ "$SCOPE_HIGHLIGHT" = "on" ] && fzf_ge 58; then
+    FZF_COLORS+=",fg:dim,nth:regular,fg+:${COLOR_QUERY}:regular:bold"
+  else
+    FZF_COLORS+=",fg+:${COLOR_QUERY}"
+  fi
 }
 
 # Resolve the palette into the escapes/vars used across the script.
@@ -499,21 +532,148 @@ set_palette
 # Title style is a bold delta only — keeps the user's popup border colours.
 POPUP_TITLE_STYLE='#[bold]'
 
-# Header hint builder: accent key + dim label pairs.  hint_r sets REPLY so the
-# navigator can build all four per-row-type headers with no subshell at all
-# (they are handed to fzf as env vars for the focus bind — see below); hint
-# keeps the printing form for the handlers whose whole job is to emit one.
+# ---------------------------------------------------------------------------
+# The hint bar
+# ---------------------------------------------------------------------------
+#
+# It lives at the BOTTOM (fzf >= 0.63's --footer), not above the list.  The bar
+# is rewritten on every cursor move, and at the top that put moving text exactly
+# where the eye anchors while scrolling; lazygit, k9s and zellij all put keys at
+# the bottom for the same reason.  Measured cost with --footer-border=none:
+# exactly one list row, i.e. the same row the --header was already spending.
+# (The default footer border draws a separator too and costs TWO — verified on
+# fzf 0.74 at 20 rows: 18 without a bar, 17 with a header, 17 with a borderless
+# footer, 16 with a bordered one.)
+#
+# Below 0.63 every --footer here is a --header, and nothing else changes.
+
+# Hint builder: accent key + dim label pairs.  Sets REPLY (styled) and REPLY_W
+# (its width in cells) so the navigator can size and build every bar with no
+# subshell at all — they are handed to fzf as env vars for the focus bind.
 hint_r() {
-  local out="" k l
+  local out="" k l w=0
   while [ $# -ge 2 ]; do
     k="$1" l="$2"
     shift 2
     out+="${ACCENT_ESC}${k}"$'\033[0m\033[2m '"${l}"$'\033[0m'
-    [ $# -ge 2 ] && out+="  "
+    w=$(( w + ${#k} + 1 + ${#l} ))
+    if [ $# -ge 2 ]; then out+="  "; w=$(( w + 2 )); fi
   done
-  REPLY="$out"
+  REPLY="$out" REPLY_W="$w"
 }
 hint() { hint_r "$@"; printf '%s' "$REPLY"; }
+
+# Share of the picker's width the PREVIEW takes, as a percentage; the list gets
+# the rest.  Empty means work it out: the navigator's preview is a runtime
+# toggle, so it has to be detected.  Pickers whose geometry is fixed declare it —
+# and they must, because an `execute` child inherits the NAVIGATOR's
+# FZF_PREVIEW_COLUMNS and would otherwise halve a bar that has no preview at all.
+#
+# Stated as the preview's share rather than the list's so the arithmetic below
+# can SUBTRACT it, which is not pedantry: at an odd width fzf hands the list the
+# ceiling half, and `c * 50 / 100` rounds the other way and quietly costs a cell.
+HINT_PREVIEW_PCT=""
+
+# Cells the bar actually gets.  Measured on fzf 0.74: `list width - 3` — a
+# two-cell left indent, and fzf keeps the last column for the scrollbar whether
+# or not one is drawn.  A right-hand preview halves the list width while
+# FZF_COLUMNS stays at the full window width (measured), so the preview state
+# has to be folded in by hand; FZF_PREVIEW_COLUMNS is set exactly while the
+# preview is visible, which is the fork-free way to ask.  Sets REPLY.
+hint_cols() {
+  local c pct="$HINT_PREVIEW_PCT"
+  c=$(term_cols)
+  if [ -z "$pct" ]; then
+    pct=0
+    if [ -n "${FZF_PREVIEW_COLUMNS:-}" ]; then
+      pct=50
+    elif [ -z "${FZF_COLUMNS:-}" ] && [ "$(live_preview_state)" = "on" ]; then
+      # launch time: there is no fzf yet, so ask the state file the way the
+      # renderer does
+      pct=50
+    fi
+  fi
+  REPLY=$(( c - c * pct / 100 - 3 ))
+  [ "$REPLY" -lt 0 ] && REPLY=0
+  return 0
+}
+
+# The bindings one row type advertises, as (key label priority) triples.
+#
+# ONE definition, read by the navigator (which packs the tiers into env vars for
+# fzf's inline focus bind) and by the --footer-for handler (the fallback for old
+# fzf, or a user-supplied --with-shell).  These used to be two hand-kept lists
+# and a test existed purely to catch them drifting apart.
+#
+# PRIORITY is the drop order when the bar does not fit: lowest goes first.
+# `enter` leads because it is the one binding nothing has to advertise; `^]
+# scope` survives longest because it is the least discoverable thing in the tool
+# and, being last in the line, was the first casualty of plain truncation.
+# Array ORDER is what the eye sees and is unchanged from the pre-tier bar.
+hint_set() {
+  local -a scope=()
+  fzf_ge 58 && scope=('^]' scope 9)
+  case "${1:-}" in
+    S) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^d detach 3  ^o new 4  ^/ preview 2) ;;
+    W) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^s swap 3     ^o new 4  ^/ preview 2) ;;
+    P) HINT_SET=(enter switch 1  ^x kill 7  ^z zoom 5    ^s swap 4     ^t send 3 ^/ preview 2) ;;
+    D) HINT_SET=(enter open 3    ^o new 4   ^r reload 1  ^/ preview 2) ;;
+    *) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^o new 4      ^r reload 3 ^/ preview 2)
+       scope=() ;;
+  esac
+  HINT_SET+=(${scope[@]+"${scope[@]}"})
+  return 0
+}
+
+# Every tier of one hint set, packed widest-first as "W:LINE|W:LINE|…|0:".
+# A POSIX snippet can then pick the right tier from the live width with no fork,
+# which is what keeps the bar correct across ^/ (the preview halves the list)
+# and a client resize without paying a process per cursor move.  Sets REPLY.
+hint_tiers() {
+  local -a hk=() hl=() hp=() args=()
+  while [ $# -ge 3 ]; do hk+=("$1"); hl+=("$2"); hp+=("$3"); shift 3; done
+  local i n="${#hk[@]}" lo loi packed=""
+  while :; do
+    args=()
+    for (( i = 0; i < n; i++ )); do
+      [ -n "${hk[i]}" ] && args+=("${hk[i]}" "${hl[i]}")
+    done
+    hint_r ${args[@]+"${args[@]}"}
+    packed+="${REPLY_W}:${REPLY}|"
+    [ "${#args[@]}" -eq 0 ] && break
+    lo=999999 loi=-1
+    for (( i = 0; i < n; i++ )); do
+      [ -n "${hk[i]}" ] || continue
+      if [ "${hp[i]}" -lt "$lo" ]; then lo="${hp[i]}"; loi="$i"; fi
+    done
+    hk[loi]=""
+  done
+  REPLY="${packed%|}"
+}
+
+# Pick the widest packed tier that fits.  Nothing fits below the last one, and
+# an EMPTY bar is the right answer there: a transform that emits nothing removes
+# the footer section outright and the list reflows into the row (measured), so
+# the floor costs nothing rather than showing a line cut mid-word.  Sets REPLY.
+hint_pick() {
+  local avail="$1" rest="$2" x
+  REPLY=""
+  while [ -n "$rest" ]; do
+    x="${rest%%|*}"
+    if [ "$x" = "$rest" ]; then rest=""; else rest="${rest#*|}"; fi
+    if [ "${x%%:*}" -le "$avail" ]; then REPLY="${x#*:}"; return 0; fi
+  done
+  return 0
+}
+
+# One fitted bar for a picker that has no per-row variation.  Prints it.
+hint_bar() {
+  local w
+  hint_cols; w="$REPLY"
+  hint_tiers "$@"
+  hint_pick "$w" "$REPLY"
+  printf '%s' "$REPLY"
+}
 
 # Shared fzf theme — applied to all pickers for consistency.  Built once,
 # tiered by fzf version so old installs keep a working (plainer) UI.
@@ -532,6 +692,11 @@ build_fzf_theme() {
     "$FZF_COLORS"
   )
   fzf_ge 52 && FZF_THEME+=(--highlight-line)
+  # The footer's DEFAULT border draws a separator line and costs a second row.
+  # Borderless, the hint bar costs exactly the one row the header was already
+  # spending, so moving it down is free.  Harmless with no --footer set
+  # (measured: same visible row count either way).
+  fzf_ge 63 && FZF_THEME+=(--footer-border=none)
   # 0.66 made the gutter a visible bar by default (and gutter:-1 no
   # longer hides it) — blank it so the pointer marks the current line
   fzf_ge 66 && FZF_THEME+=(--gutter=' ')
@@ -554,6 +719,15 @@ build_fzf_theme() {
   fi
 }
 build_fzf_theme
+
+# Which end of the picker the hint bar lives at.  --footer and its
+# transform/bg-transform actions arrived together in fzf 0.63 (checked against
+# fzf's own CHANGELOG); below that every bar here is a header, exactly as
+# before.  Both spellings are used verbatim in flags (--$HINT_BAR=) and in bind
+# actions (transform-$HINT_BAR), which is the only reason one variable can carry
+# the whole switch.
+HINT_BAR=header
+fzf_ge 63 && HINT_BAR=footer
 
 # Whether the cheap fzf callbacks (per-row header, match-scope prompt) can be
 # answered by an inline POSIX snippet instead of re-exec'ing this script.  Both
@@ -1367,6 +1541,10 @@ term_cols() {
 # (redundant) session-name prefix carried on child rows, and WIN_W is the
 # protected window-name budget.
 IDENT_W=24 PATH_W=24 BADGE_W=16 PFX_W=14 WIN_W=12
+# Width a session header row's identity field is padded to when the group rule
+# is drawn: IDENT_W + the TAB + the context column, so the session meta lands in
+# the same column as the command on child rows.
+SESS_RULE_W=0
 IDENT_OV=6            # marker(1) + " ├─ "(4) + the space after the prefix(1)
 CMD_MIN=12            # columns kept for the flowing (unpadded) command field
 WIDTH_GUTTER=8        # fzf pointer/marker/scrollbar overhead
@@ -1424,9 +1602,14 @@ compute_widths() {
   local avail
   avail=$(term_cols)
   # The live preview state, not the configured one: ctrl-/ toggles the preview
-  # after launch, and fzf reports the FULL terminal width in FZF_COLUMNS either
-  # way (verified), so without this the rows stay sized for the old geometry and
-  # fzf just clips them with an ellipsis.  That is IDEAS #26.
+  # after launch, and FZF_COLUMNS does not move when it does (verified), so
+  # without this the rows stay sized for the old geometry and fzf just clips them
+  # with an ellipsis.  That is IDEAS #26.
+  #
+  # FZF_COLUMNS is fzf's WINDOW inner width, which equals the terminal width only
+  # because nothing here sets --margin, --border or --height; man fzf defines it
+  # as "excluding padding and margin", and adding any of those would silently
+  # make this arithmetic wrong.
   local _pv="$SHOW_PREVIEW"
   if [ -n "${INTERDIMUX_PREVIEW_STATE:-}" ] && [ -s "${INTERDIMUX_PREVIEW_STATE}" ]; then
     { read -r _pv < "$INTERDIMUX_PREVIEW_STATE"; } 2>/dev/null || :
@@ -1473,6 +1656,16 @@ compute_widths() {
     else break
     fi
   done
+
+  # ctx_w is whatever the loop last computed, which always matches the widths it
+  # exits with (it recomputes at the top of every iteration, and every break is
+  # taken after that recompute).  The rule only draws when the squeeze actually
+  # FIT — see rust/src/widths.rs, which this mirrors.
+  if (( IDENT_W + ctx_w + 2 + CMD_MIN <= avail )); then
+    SESS_RULE_W=$(( IDENT_W + 1 + ctx_w ))
+  else
+    SESS_RULE_W=0
+  fi
 }
 
 # Trim a path to fit within max_width display columns.  Sets REPLY (no
@@ -1782,6 +1975,7 @@ gather_targets() {
       INTERDIMUX_SHOW_PREVIEW="$(live_preview_state)" \
       INTERDIMUX_ORDER="$ORDER" \
       INTERDIMUX_SHOW_DIRS="$SHOW_DIRS" \
+      INTERDIMUX_SESSION_RULE="$SESSION_RULE" \
       INTERDIMUX_DIRS_LIMIT="$DIRS_LIMIT" \
       INTERDIMUX_RECENT_LIMIT="$RECENT_LIMIT" \
       INTERDIMUX_USE_ZOXIDE="$USE_ZOXIDE" \
@@ -1870,7 +2064,7 @@ IMUX_SECTIONS
     fi
   done <<< "$all_panes_raw"
 
-  local sla sname swins sattach marker meta age sdisp
+  local sla sname swins sattach marker meta age sdisp rule_n rule_run
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
   local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
@@ -1890,7 +2084,23 @@ IMUX_SECTIONS
     fld_add "$marker" 1
     fld_add " ${DIM_TREE}▸${RST} " 3
     fld_add "${BOLD}${sdisp}${RST}" "${#sdisp}"
-    fld_pad "$IDENT_W"
+    # The group rule: the padding that would follow the name becomes a run of
+    # '─' out to SESS_RULE_W, so the flat list reads as groups at the cost of no
+    # extra rows.  Entirely inside field 1 — see rust/src/render.rs for why it
+    # cannot be split across the tab into field 2.
+    #
+    # The SPACE before the run is load-bearing, not cosmetic: --tiebreak=chunk
+    # scores by the whitespace chunk a match lands in, so gluing the rule to the
+    # name makes that chunk 50-odd cells instead of 4.  Measured — querying
+    # "proj" dropped the `proj` session row from rank 1 to rank 11, below every
+    # window row.
+    rule_n=$(( SESS_RULE_W - FLD_LEN - 3 ))
+    if [ "$SESSION_RULE" = "on" ] && [ "$rule_n" -ge 3 ]; then
+      printf -v rule_run '%*s' "$rule_n" ''
+      fld_add " ${DIM_TREE}${rule_run// /─}${RST}  " $(( rule_n + 3 ))
+    else
+      fld_pad "$IDENT_W"
+    fi
     ident="$FLD"
 
     age_of "$sla"; age="$REPLY"
@@ -3675,13 +3885,17 @@ if [ "${1:-}" = "--action" ]; then
       _swap_src="${_swap_src//$'\n'/ }"
 
       printf '\033[2J\033[H' >>"$tty_out"
+      HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
+      _swap_freeze=(--no-hscroll)
+      fzf_ge 67 && _swap_freeze=(--freeze-left=1)
       dest=$(printf '%s\n' "$swap_list" | fzf \
         "${FZF_THEME[@]}" \
+        "${_swap_freeze[@]}" \
         --delimiter=$'\t' \
         --with-nth=1..3 \
         --nth=1,3 \
         --prompt="swap $_swap_src with ❯ " \
-        --header="$(hint enter 'swap destination' esc cancel)" \
+        --"$HINT_BAR"="$(hint_bar enter 'swap destination' 2 esc cancel 1)" \
       ) || exit 0
 
       dest_spec="${dest##*	}"
@@ -3708,11 +3922,18 @@ fi
 # Directory picker header (called by fzf transform-header)
 # ---------------------------------------------------------------------------
 
-if [ "${1:-}" = "--dirs-header" ]; then
+if [ "${1:-}" = "--dirs-hints" ]; then
+  # 40, not the navigator's 50: this picker's preview is unconditional and 40%
+  # wide, and it is reached through an `execute` child that has inherited the
+  # navigator's FZF_PREVIEW_COLUMNS, so nothing here can be auto-detected.
+  HINT_PREVIEW_PCT=40
   case "${2:-default}" in
+    # The deep/browse forms lead with a STATUS (the text being searched), not a
+    # hint, so they are left to truncate the way any status does — the escape
+    # hatch they would otherwise lose (^r) is on the prompt as well.
     deep)   printf '%s%s\n' "$(hint '🔎 deep search' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
     browse) printf '%s%s\n' "$(hint '⤷ browsing' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
-    *)      hint enter create ^f 'deep search' ^g 'browse into' ^r reset esc cancel; echo ;;
+    *)      hint_bar enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1; echo ;;
   esac
   exit 0
 fi
@@ -3767,8 +3988,8 @@ if [ "${1:-}" = "--dirs" ]; then
   # re-exec'ing the whole script for it cost ~18 ms of dead time before the
   # picker could open.  (The ctrl-f/ctrl-g binds still call --dirs-header:
   # theirs are per-mode and carry the live query.)
-  hint_r enter create ^f 'deep search' ^g 'browse into' ^r reset esc cancel
-  DIRS_HEADER="$REPLY"
+  HINT_PREVIEW_PCT=40
+  DIRS_HINTS="$(hint_bar enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1)"
 
   # pipefail off for THIS pipeline only, exactly as the navigator's
   # `gather_targets | fzf` needs it.  --dirs-list is a slow STREAMING producer --
@@ -3793,12 +4014,12 @@ if [ "${1:-}" = "--dirs" ]; then
     --with-nth=1..2 \
     --nth=1 \
     --prompt='new session ❯ ' \
-    --header="$DIRS_HEADER" \
+    --"$HINT_BAR"="$DIRS_HINTS" \
     --preview="bash '$SCRIPT_PATH' --dirs-preview {-1}" \
     --preview-window="right,40%,border-left,nowrap" \
-    --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-header(bash '$SCRIPT_PATH' --dirs-header deep {q})${ctrl_f_extra}" \
-    --bind="ctrl-g:reload(bash '$SCRIPT_PATH' --dirs-list --scan {-1})+transform-header(bash '$SCRIPT_PATH' --dirs-header browse {-1})" \
-    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-header(bash '$SCRIPT_PATH' --dirs-header)" \
+    --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints deep {q})${ctrl_f_extra}" \
+    --bind="ctrl-g:reload(bash '$SCRIPT_PATH' --dirs-list --scan {-1})+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints browse {-1})" \
+    --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints)" \
     ${dirs_extra[@]+"${dirs_extra[@]}"} \
   ) || exit 1
   set -o pipefail
@@ -3860,23 +4081,37 @@ if [ "${1:-}" = "--jump" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Dynamic header (called by fzf focus:transform-header)
+# Dynamic hint bar (called by fzf focus:transform-footer)
 # ---------------------------------------------------------------------------
+#
+# The fallback path only: the navigator normally answers this with an inline
+# POSIX snippet over pre-packed env vars, because a focus bind fires on every
+# cursor move and re-exec'ing this script there cost ~17 ms a move.  This
+# handler is what runs on fzf too old for --with-shell, or when the user
+# supplied their own --with-shell in @interdimux-fzf-opts.
+#
+# It is the more CORRECT of the two by construction — being a real child it sees
+# the live FZF_COLUMNS and FZF_PREVIEW_COLUMNS, so it re-tiers on anything.  The
+# inline snippet reads the same two variables to stay level with it.
 
-if [ "${1:-}" = "--header-for" ]; then
+if [ "${1:-}" = "--footer-for" ]; then
   spec="${2:-}"
   spec="${spec%%	*}"
-  type="${spec%%:*}"
-  scope_hint=()
-  fzf_ge 58 && scope_hint=('^]' scope)
-  case "$type" in
-    S) hint enter switch ^x kill ^e rename ^d detach ^o new ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
-    W) hint enter switch ^x kill ^e rename ^s swap ^o new ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
-    P) hint enter switch ^x kill ^z zoom ^s swap ^t send ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
-    D) hint enter open ^o new ^r reload ^/ preview ${scope_hint[@]+"${scope_hint[@]}"} ;;
-    *) hint enter switch ^x kill ^e rename ^o new ^r reload ^/ preview ;;
-  esac
+  hint_set "${spec%%:*}"
+  hint_bar ${HINT_SET[@]+"${HINT_SET[@]}"}
   echo
+  exit 0
+fi
+
+# The packed width ladder for one row type ("W:line|W:line|…|0:") — what the
+# navigator exports for its inline snippet.  This exists so the tests can drive
+# that snippet with exactly the environment the navigator would hand it, rather
+# than a hand-copied duplicate; a duplicate is precisely what stopped matching
+# the last time this pair drifted.
+if [ "${1:-}" = "--hint-ladder" ]; then
+  hint_set "${2:-}"
+  hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+  printf '%s' "$REPLY"
   exit 0
 fi
 
@@ -3931,6 +4166,8 @@ env_fwd_vars() {
     "INTERDIMUX_DIRS_LIMIT=$DIRS_LIMIT"
     "INTERDIMUX_RAW=$RAW_MODE"
     "INTERDIMUX_HIDE=$HIDE_PATTERNS"
+    "INTERDIMUX_SESSION_RULE=$SESSION_RULE"
+    "INTERDIMUX_SCOPE_HIGHLIGHT=$SCOPE_HIGHLIGHT"
     "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
     "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
     "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
@@ -4018,9 +4255,10 @@ if [ "${1:-}" = "--doctor" ]; then
 
   if command -v fzf >/dev/null 2>&1; then
     if   [ "$FZF_MINOR" -ge 74 ]; then _ok "fzf $(fzf --version | awk '{print $1}') (raw filter mode available)"
-    elif [ "$FZF_MINOR" -ge 63 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.74 adds raw mode, which stops the tree collapsing as you type"
-    elif [ "$FZF_MINOR" -ge 61 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.63 adds background transforms, so headers update without blocking"
-    else _warn "fzf $(fzf --version | awk '{print $1}') — old, but supported"
+    elif [ "$FZF_MINOR" -ge 67 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.74 adds raw mode, which stops the tree collapsing as you type"
+    elif [ "$FZF_MINOR" -ge 63 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.67 adds --freeze-left, which keeps a row's identity while a long command scrolls"
+    elif [ "$FZF_MINOR" -ge 58 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.63 moves the key hints to a footer, so the top of the list stops twitching"
+    else _warn "fzf $(fzf --version | awk '{print $1}') — old, but supported (0.58 adds the ^] scope highlight)"
     fi
   else
     _bad "fzf is not on PATH"
@@ -4353,6 +4591,7 @@ if [ "${1:-}" = "--jobs" ]; then
   fi
   _jwait=""
   fzf_ge 74 && _jwait="wait+"
+  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
   # Same guard as the other two pickers: under `set -o pipefail` an accept that
   # closes the pipe early makes the producer's SIGPIPE (141) mask fzf's status.
   # Nothing reads that status here, but the invariant is the point — the next
@@ -4364,7 +4603,7 @@ if [ "${1:-}" = "--jobs" ]; then
     --with-nth=1 \
     --no-sort \
     --prompt='jobs ❯ ' \
-    --header="$(hint enter cancel ^r reload esc quit)" \
+    --"$HINT_BAR"="$(hint_bar enter cancel 3 ^r reload 1 esc quit 2)" \
     --bind="enter:${_jwait}execute(bash '$SQ_SCRIPT' --job-cancel {-1})+reload($_jl)" \
     --bind="ctrl-r:reload($_jl)" \
     >/dev/null 2>&1
@@ -4500,6 +4739,7 @@ if [ "${1:-}" = "--dashboard" ]; then
     "schedule" "Schedule"   "Run a command later, via at" \
     "jobs"   "Jobs"         "See and cancel scheduled commands")
 
+  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
   choice=$(printf '%s\n' "$items" | fzf \
     "${FZF_THEME[@]}" \
     --no-sort \
@@ -4507,7 +4747,7 @@ if [ "${1:-}" = "--dashboard" ]; then
     --delimiter=$'\t' \
     --with-nth=2 \
     --prompt='interdimux ❯ ' \
-    --header="$(hint enter select esc quit)" \
+    --"$HINT_BAR"="$(hint_bar enter select 2 esc quit 1)" \
   ) || exit 0
 
   action="${choice%%	*}"
@@ -4622,6 +4862,29 @@ while true; do
   # popup opens.  --id-nth alone never blocks.
   fzf_ge 71 && fzf_opts+=(--id-nth=4)
 
+  # Keep the row's identity while a long command hscrolls.  The command is the
+  # LAST field and is written UNPADDED, and with show-full-command on it is the
+  # whole argv, so overflow is routine — and fzf scrolls the entire line to
+  # bring a match into view, which replaced the identity column with the
+  # ellipsis.  The row you were about to kill stopped saying which pane it was.
+  #
+  # =1 freezes exactly field 1 of the DISPLAYED line (measured: N counts fields
+  # after --with-nth, and N >= the displayed field count silently disables the
+  # whole thing, so 3 would be a no-op here).  The frozen prefix is
+  # right-trimmed, so padding is dropped at the cut and the ellipsis lands at a
+  # different column on each scrolled row — a ragged grid, which is the price
+  # for the rows staying identifiable at all.
+  #
+  # Below 0.67 the flag does not exist and fzf REFUSES TO START on an unknown
+  # option, so the gate is mandatory.  --no-hscroll is the only lever left
+  # there; it fixes the same misalignment by hiding the match instead, which is
+  # the wrong trade for ^] cmd but a better one than an anonymous row.
+  if fzf_ge 67; then
+    fzf_opts+=(--freeze-left=1)
+  else
+    fzf_opts+=(--no-hscroll)
+  fi
+
 
   # fzf 0.74's `wait` defers the remaining actions of a binding until any
   # in-flight search/load completes, and QUEUES them (unlike --track's
@@ -4635,73 +4898,72 @@ while true; do
     kill)
       fzf_opts+=(
         --prompt='kill ❯ '
-        --header="$(hint enter kill ^r reload esc quit)"
+        --"$HINT_BAR"="$(hint_bar enter kill 3 ^r reload 1 esc quit 2)"
         --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
       )
       ;;
     rename)
       fzf_opts+=(
         --prompt='rename ❯ '
-        --header="$(hint enter rename ^r reload esc quit)"
+        --"$HINT_BAR"="$(hint_bar enter rename 3 ^r reload 1 esc quit 2)"
         --bind="enter:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
       )
       ;;
     zoom)
       fzf_opts+=(
         --prompt='zoom ❯ '
-        --header="$(hint enter 'toggle zoom' ^r reload esc quit)"
+        --"$HINT_BAR"="$(hint_bar enter 'toggle zoom' 3 ^r reload 1 esc quit 2)"
         --bind="enter:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
       )
       ;;
     swap)
       fzf_opts+=(
         --prompt='swap ❯ '
-        --header="$(hint enter swap ^r reload esc quit)"
+        --"$HINT_BAR"="$(hint_bar enter swap 3 ^r reload 1 esc quit 2)"
         --bind="enter:${_wait}execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
       )
       ;;
     detach)
       fzf_opts+=(
         --prompt='detach ❯ '
-        --header="$(hint enter detach ^r reload esc quit)"
+        --"$HINT_BAR"="$(hint_bar enter detach 3 ^r reload 1 esc quit 2)"
         --bind="enter:${_wait}execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
       )
       ;;
     send)
       fzf_opts+=(
         --prompt='send ❯ '
-        --header="$(hint enter 'send keys' ^r reload esc quit)"
+        --"$HINT_BAR"="$(hint_bar enter 'send keys' 3 ^r reload 1 esc quit 2)"
         --bind="enter:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
       )
       ;;
     schedule)
       fzf_opts+=(
         --prompt='schedule ❯ '
-        --header="$(hint enter 'schedule a command' ^r reload esc quit)"
+        --"$HINT_BAR"="$(hint_bar enter 'schedule a command' 3 ^r reload 1 esc quit 2)"
         --bind="enter:${_wait}execute($ACTION_CMD schedule {-1})+reload($LIST_CMD)"
       )
       ;;
     *)
-      # The per-row header only ever picks between these four strings, and all
-      # four are known right here.  Export them so the focus bind can choose
-      # inline instead of re-exec'ing this script on every cursor move.
-      _scope_hint=()
-      fzf_ge 58 && _scope_hint=('^]' scope)
-      hint_r enter switch ^x kill ^e rename ^d detach ^o new ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
-      export INTERDIMUX_HDR_S="$REPLY"
-      hint_r enter switch ^x kill ^e rename ^s swap ^o new ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
-      export INTERDIMUX_HDR_W="$REPLY"
-      hint_r enter switch ^x kill ^z zoom ^s swap ^t send ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
-      export INTERDIMUX_HDR_P="$REPLY"
-      hint_r enter open ^o new ^r reload ^/ preview ${_scope_hint[@]+"${_scope_hint[@]}"}
-      export INTERDIMUX_HDR_D="$REPLY"
-      hint_r enter switch ^x kill ^e rename ^o new ^r reload ^/ preview
-      export INTERDIMUX_HDR_X="$REPLY"
+      # The per-row hint bar only ever picks between these five strings, and all
+      # five are known right here.  Each is exported as its full LADDER of width
+      # tiers ("W:line|W:line|…|0:"), so the focus bind can choose both the row
+      # type and the tier inline instead of re-exec'ing this script on every
+      # cursor move.
+      hint_cols; _hint_w="$REPLY"
+      for _t in S W P D X; do
+        hint_set "$_t"
+        hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+        printf -v "INTERDIMUX_HINTS_$_t" '%s' "$REPLY"
+        export "INTERDIMUX_HINTS_$_t"
+      done
+      # The launch-time bar, fitted here rather than by the snippet: fzf has to
+      # be told the string before it can draw a first frame.
+      hint_pick "$_hint_w" "$INTERDIMUX_HINTS_X"; _hint_x="$REPLY"
 
       fzf_opts+=(
         --prompt='❯ '
         --print-query
-        --header="$INTERDIMUX_HDR_X"
         --bind="ctrl-x:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
         --bind="ctrl-e:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
         --bind="ctrl-z:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
@@ -4717,35 +4979,61 @@ while true; do
         --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload($LIST_CMD)"
         --bind='resize:reload('"$LIST_CMD"')'
       )
-      # Per-row header hints, once per cursor move.  A focus bind runs
-      # SYNCHRONOUSLY — the fzf man page warns it "can make the interface
-      # sluggish" — so on fzf >= 0.63 we use the async bg- variant and
-      # bg-cancel to coalesce rapid scrolling.
+      # An empty bar means nothing fits at this width.  Passing --footer='' still
+      # costs a row (measured — the section is drawn, blank), so omit the flag
+      # entirely; a transform that emits nothing later removes the section again
+      # and the list reflows into the row.
+      [ -n "$_hint_x" ] && fzf_opts+=(--"$HINT_BAR"="$_hint_x")
+
+      # Per-row hints, once per cursor move.  A focus bind runs SYNCHRONOUSLY —
+      # the fzf man page warns it "can make the interface sluggish" — so on
+      # fzf >= 0.63 we use the async bg- variant and bg-cancel to coalesce rapid
+      # scrolling.
       #
-      # The command itself is an inline `case` over the exported headers, which
+      # The command itself is an inline snippet over the exported ladders, which
       # costs one ~1ms `sh -c` instead of re-parsing and re-executing this
-      # 2500-line script (~17ms) per move.  Notes on the two sharp edges:
+      # 4900-line script (~17ms) per move.  It picks the row type with a `case`
+      # and then walks that type's tiers, widest first, taking the first that
+      # fits the LIVE width — which is what keeps the bar right after ^/ (a
+      # right-hand preview halves the list) and after a client resize, neither
+      # of which is knowable at launch.  Notes on the sharp edges:
       #   * `_{-1}` — with an EMPTY result list fzf expands {-1} to *zero*
       #     words, so a bare `case {-1} in` becomes `case in`: a syntax error
-      #     and a blank header.  The `_` prefix keeps the word present.
+      #     and a blank bar.  The `_` prefix keeps the word present.
       #   * `action:rest-of-string` rather than `action(...)` — the arms contain
       #     `)`, which can terminate fzf's parenthesised argument parser.  This
       #     form has no terminator, so it must come last in the `+` chain.
+      #   * NO COMMAS anywhere in the snippet: fzf splits --bind on commas, so
+      #     one would silently become a second, malformed binding.
+      #   * FZF_COLUMNS is 0 during fzf's own `start`, hence the guard; and it
+      #     does NOT shrink when the preview opens, hence FZF_PREVIEW_COLUMNS
+      #     (set exactly while the preview is visible) as the halving test.
       # fzf single-quotes the placeholder, so a spec can't inject shell.
-      _hdr_case='case _{-1} in'
-      _hdr_case+=' _S:*) printf "%s\n" "$INTERDIMUX_HDR_S";;'
-      _hdr_case+=' _W:*) printf "%s\n" "$INTERDIMUX_HDR_W";;'
-      _hdr_case+=' _P:*) printf "%s\n" "$INTERDIMUX_HDR_P";;'
-      _hdr_case+=' _D:*) printf "%s\n" "$INTERDIMUX_HDR_D";;'
-      _hdr_case+=' *) printf "%s\n" "$INTERDIMUX_HDR_X";; esac'
+      _hint_case='c=${FZF_COLUMNS:-0}; [ "$c" -gt 0 ] || c=200;'
+      _hint_case+=' [ -n "${FZF_PREVIEW_COLUMNS:-}" ] && c=$(( c - c / 2 ));'
+      _hint_case+=' c=$(( c - 3 ));'
+      _hint_case+=' case _{-1} in'
+      _hint_case+=' _S:*) t=$INTERDIMUX_HINTS_S;;'
+      _hint_case+=' _W:*) t=$INTERDIMUX_HINTS_W;;'
+      _hint_case+=' _P:*) t=$INTERDIMUX_HINTS_P;;'
+      _hint_case+=' _D:*) t=$INTERDIMUX_HINTS_D;;'
+      _hint_case+=' *) t=$INTERDIMUX_HINTS_X;; esac;'
+      _hint_case+=' while [ -n "$t" ]; do x=${t%%|*};'
+      _hint_case+=' [ "$x" = "$t" ] && t= || t=${t#*|};'
+      _hint_case+=' [ "${x%%:*}" -le "$c" ] && { printf "%s\n" "${x#*:}"; break; };'
+      _hint_case+=' done'
       if [ "$INLINE_CALLBACKS" = 1 ] && fzf_ge 63; then
-        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-header:$_hdr_case")
+        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR:$_hint_case")
       elif [ "$INLINE_CALLBACKS" = 1 ]; then
-        fzf_opts+=(--bind="focus:transform-header:$_hdr_case")
+        fzf_opts+=(--bind="focus:transform-$HINT_BAR:$_hint_case")
       elif fzf_ge 63; then
-        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-header(bash '$SCRIPT_PATH' --header-for {-1})")
+        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
+        # Without the inline path there is no `result` bind to re-fit the bar,
+        # so the two events that change the width have to say so themselves.
+        fzf_opts+=(--bind="resize:reload($LIST_CMD)+transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
       else
-        fzf_opts+=(--bind="focus:transform-header(bash '$SCRIPT_PATH' --header-for {-1})")
+        fzf_opts+=(--bind="focus:transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
+        fzf_opts+=(--bind="resize:reload($LIST_CMD)+transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
       fi
       if fzf_ge 58; then
         # Same treatment for the match-scope prompt: FZF_NTH already holds the
@@ -4798,25 +5086,28 @@ while true; do
 
       # Announce find-or-create in the zero-match state (IDEAS #1).  Without it
       # the feature is invisible and a typo silently creates a junk session; now
-      # the header says exactly which session would be created, and where.
+      # the bar says exactly which session would be created, and where.
       # The announcement is precomputed per-keystroke by the same inline-snippet
-      # trick the row header uses: describe_create needs zoxide and the
+      # trick the row hints use: describe_create needs zoxide and the
       # filesystem, so it cannot be inlined, but `zero` only fires when the
       # match count reaches 0 — not on every keystroke — so one process there is
       # acceptable where one per cursor move would not be.
-      # The `focus` bind restores the normal per-row header as soon as matches
+      # The `focus` bind restores the normal per-row hints as soon as matches
       # come back, so no explicit restore bind is needed.
+      #
+      # This bind is also what re-fits the bar after ^/ and after a resize: both
+      # end in a reload, and a reload fires `result`.
       if [ "$INLINE_CALLBACKS" = 1 ]; then
-        # ONE bind owns the header on result changes, because two of them fight:
+        # ONE bind owns the bar on result changes, because two of them fight:
         # a `zero` bind that announces the create, plus a `result` bind that
-        # restores the row header, means the result bind emits nothing at zero
-        # matches — and an empty transform-header CLEARS the header, wiping the
+        # restores the row hints, means the result bind emits nothing at zero
+        # matches — and an empty transform CLEARS the bar, wiping the
         # announcement that `zero` just set.
         #
         # bg- so it never blocks typing: the create description has to shell out
         # (it consults zoxide and the filesystem), and `result` fires on every
         # keystroke.
-        _hdr_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hdr_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
+        _hint_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hint_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
         # `best` FIRST, and only on `result`: in raw mode every row stays
         # displayed, so nothing moves the cursor onto a match and
         # `--bind=change:first` actively pins it to row 1 — filter, press ctrl-x,
@@ -4829,9 +5120,9 @@ while true; do
         _res_pre=""
         [ "$_raw_on" = 1 ] && _res_pre="best+"
         if fzf_ge 63; then
-          fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-header:$_hdr_bind")
+          fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR:$_hint_bind")
         else
-          fzf_opts+=(--bind="result:${_res_pre}transform-header:$_hdr_bind")
+          fzf_opts+=(--bind="result:${_res_pre}transform-$HINT_BAR:$_hint_bind")
         fi
       fi
       ;;

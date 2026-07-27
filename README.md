@@ -14,7 +14,10 @@ A portal gun for your tmux sessions.
   with that name (resolved as a path, then via zoxide, then under `$HOME`)
 - Scoped fuzzy matching — queries match names and commands, not paths,
   padding, badges, or tree glyphs; cycle the scope with `Ctrl-]`
-  (name / path / cmd / all / name+cmd, fzf >= 0.58)
+  (name / path / cmd / all / name+cmd, fzf >= 0.58). The searchable columns
+  are the bright ones, and the bright band moves with the scope
+- Session groups are ruled off, so a flat list still reads as a tree — at
+  the cost of no extra rows
 - Warm fzf theme matched to the list palette; popups inherit your
   `popup-border-style` / `popup-border-lines` settings, with titled
   frames on tmux >= 3.3 and a red frame during kill prompts and kill
@@ -37,7 +40,8 @@ A portal gun for your tmux sessions.
   the popup width, so window names keep their space even under a long
   session name; panes/windows stay aligned across the tree
 - Create new sessions from a directory picker
-- Dynamic context header — keybinding hints change based on selection type
+- Key hints in a footer, out of the anchor zone at the top, tiered to the
+  width available instead of truncated — and they change with the selection
 - Dedicated modes for kill, rename, zoom, swap, detach, and send operations
 - Configurable key binding, popup size, ordering, preview, and extra fzf flags
 
@@ -46,7 +50,9 @@ A portal gun for your tmux sessions.
 - `tmux` >= 3.2 — popups; >= 3.3 adds popup titles, >= 3.4 the native
   dashboard menu, >= 3.6 live border accents
 - `fzf` >= 0.40 — newer versions unlock extra polish automatically
-  (0.52 full-line highlight, 0.58 match-scope cycling, 0.61 ghost text)
+  (0.52 full-line highlight, 0.58 match-scope cycling and the scope
+  highlight, 0.61 ghost text, 0.63 the footer hint bar, 0.67 the frozen
+  identity column, 0.74 raw filter mode)
 - `bash` >= 4.0
 - `fd` or `find` (for directory picker)
 - `zoxide` (optional — feeds the recent tier and find-or-create)
@@ -128,7 +134,36 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 | `Ctrl-r` | Reload the list |
 | `Esc` | Cancel |
 
-The header dynamically updates to show only the relevant keybindings for the currently focused item (session, window, or pane), and the popup title names the session you are in — the current row is marked in the list, but that row scrolls out of view as soon as the list is longer than the popup.
+The **hint bar sits at the bottom** and updates to show only the keybindings
+that apply to the row you are on (session, window, or pane). It is at the bottom
+because it is rewritten on every cursor move, and at the top that put moving text
+exactly where the eye anchors while scrolling — lazygit, k9s and zellij all put
+keys at the bottom for the same reason. It costs one list row, the same row the
+old header was already spending.
+
+It is also **tiered to the width available** rather than truncated. The full
+session line is 73 cells and an 80-column terminal gives the bar about 61, so it
+used to be cut from the right — which removed `^] scope`, the least discoverable
+binding in the tool, first. Now the most obvious binding (`Enter`) is dropped
+first and `^] scope` survives longest; below the narrowest tier the bar prints
+nothing rather than something cut mid-word. It re-tiers live when you open the
+preview or resize the client.
+
+The popup title names the session you are in — the current row is marked in the
+list, but that row scrolls out of view as soon as the list is longer than the
+popup.
+
+Two more things the picker does with what you can and cannot see:
+
+- **The searchable columns are the bright ones.** With `Ctrl-]` on `name+cmd`
+  (the default) the path column is dimmed; press `Ctrl-]` and the bright band
+  moves to whatever the new scope matches. The prompt names the scope, but the
+  rows show it. Turn it off with `@interdimux-scope-highlight 'off'`
+  (needs fzf >= 0.58).
+- **A long command scrolls without taking the row's identity with it.** Matching
+  a token deep inside a full command line makes fzf scroll that row sideways;
+  the identity column stays pinned, so you can still see which pane you are
+  about to act on (needs fzf >= 0.67).
 
 Sessions are listed most-recently-used first, with the **current session
 last** — so opening the navigator and pressing `Enter` toggles to the
@@ -204,17 +239,23 @@ The preview shows project type, git branch/status/last commit, a README excerpt,
 ### Tree display
 
 ```
-  ▸ my-project             3 win ● 2h
+  ▸ my-project ─────────────────────────────────────────── 3 win ● 2h
 * ├─ my-project 0:editor   │ ~/code/proj    ‹feature-x›    nvim main.c
   ├─ my-project 1:shell    │ ~/code/proj    ‹feature-x›    zsh
   └─ my-project 2:remote   │ ~/code/proj                   ssh user@host
     ├╴ my-project 2.0      │ ~/code/proj                   tail -f app.log
     └╴ my-project 2.1      │ ~/code/proj                   zsh
-  ▸ other-session          1 win 3d
-  └─ other-session 0:main  │ ~                              zsh
+  ▸ other-session ──────────────────────────────────────── 1 win 3d
+  └─ other-session 0:main  │ ~                             zsh
 ```
 
 - `▸` session header with window count, attached marker `●`, and last-used age
+- The rule after a session name is the **group separator** — a flat list has no
+  other way to show where one session's windows end. It costs no extra rows: it
+  is the padding that was already there, and it ends where the command column
+  begins, so a session's metadata lines up with its windows' commands. It turns
+  itself off on a popup too narrow to have a command column, and entirely with
+  `@interdimux-session-rule 'off'`
 - `├─` / `└─` tree branches for windows; `├╴` / `└╴` for panes
 - Window/pane rows carry their (dimmed) session name, so rows stay
   identifiable while filtering and compound queries work
@@ -291,6 +332,16 @@ set -g @interdimux-show-full-command 'on'
 
 # Show git branch in tree display (default: on)
 set -g @interdimux-show-git-branch 'on'
+
+# Draw the group rule after a session name (default: on).  Costs no extra
+# rows, and switches itself off on a popup too narrow to keep a command
+# column.  'off' restores the plain session header row.
+set -g @interdimux-session-rule 'on'
+
+# Dim the columns the current Ctrl-] scope does NOT search (default: on,
+# fzf >= 0.58).  All-or-nothing: fzf cannot re-issue colours mid-session,
+# so at the default 'name+cmd' scope the path column is permanently faint.
+set -g @interdimux-scope-highlight 'on'
 
 # Session ordering: 'mru' (most recently used first, current session
 # last) or 'index' (tmux native order)  (default: mru)

@@ -77,7 +77,20 @@ pub fn ctx_field(
 }
 
 /// Session header row identity column.
-pub fn session_ident(name: &str, current: bool, w: &Widths, p: &Palette) -> (String, String) {
+///
+/// With `rule` on, the padding that would follow the name becomes a run of `─`
+/// instead — the group separator the flat list otherwise has no way to draw.
+/// It has to live entirely in field 1: field 2 is not matched by the default
+/// `--nth=1,3`, so a rule split across the two renders at two different
+/// intensities once `--color nth:` is on, and the TAB between them shows as a
+/// one-cell nick in the line.  Costs no extra rows.
+pub fn session_ident(
+    name: &str,
+    current: bool,
+    w: &Widths,
+    p: &Palette,
+    rule: bool,
+) -> (String, String) {
     let marker = if current {
         format!("{}*{}", p.marker, RST)
     } else {
@@ -89,6 +102,12 @@ pub fn session_ident(name: &str, current: bool, w: &Widths, p: &Palette) -> (Str
     }
     let body = format!("{} {}▸{} {}{}{}", marker, p.dim_tree, RST, BOLD, sdisp, RST);
     let plain = 1 + 3 + width(&sdisp);
+    // one space before the run, two after it, so the meta never touches the rule
+    let dashes = w.rule.saturating_sub(plain + 3);
+    if rule && dashes >= 3 {
+        let body = format!("{} {}{}{}  ", body, p.dim_tree, "─".repeat(dashes), RST);
+        return (body, sdisp);
+    }
     (pad_to(&body, plain, w.ident), sdisp)
 }
 
@@ -246,7 +265,7 @@ mod tests {
     #[test]
     fn every_identity_column_pads_to_exactly_ident_width() {
         let (w, p) = setup();
-        let (s, sdisp) = session_ident("proj", true, &w, &p);
+        let (s, sdisp) = session_ident("proj", true, &w, &p, false);
         assert_eq!(width(&visible(&s)), w.ident);
         let win = window_ident(&sdisp, "0", "editor", false, false, &w, &p);
         assert_eq!(width(&visible(&win)), w.ident);
@@ -259,7 +278,7 @@ mod tests {
     #[test]
     fn long_names_are_truncated_not_overflowed() {
         let (w, p) = setup();
-        let (s, _) = session_ident(&"x".repeat(200), false, &w, &p);
+        let (s, _) = session_ident(&"x".repeat(200), false, &w, &p, false);
         assert_eq!(width(&visible(&s)), w.ident);
         assert!(visible(&s).contains('…'));
     }
@@ -267,7 +286,7 @@ mod tests {
     #[test]
     fn wide_characters_do_not_break_the_column() {
         let (w, p) = setup();
-        let (s, _) = session_ident("日本語プロジェクト", false, &w, &p);
+        let (s, _) = session_ident("日本語プロジェクト", false, &w, &p, false);
         // This is precisely what bash gets wrong: it would pad by char count.
         assert_eq!(width(&visible(&s)), w.ident);
     }
@@ -275,8 +294,8 @@ mod tests {
     #[test]
     fn the_current_marker_appears_only_when_current() {
         let (w, p) = setup();
-        let (yes, _) = session_ident("a", true, &w, &p);
-        let (no, _) = session_ident("a", false, &w, &p);
+        let (yes, _) = session_ident("a", true, &w, &p, false);
+        let (no, _) = session_ident("a", false, &w, &p, false);
         assert!(visible(&yes).starts_with('*'));
         assert!(visible(&no).starts_with(' '));
     }
@@ -286,6 +305,38 @@ mod tests {
         let (w, p) = setup();
         assert!(visible(&window_ident("s", "0", "n", true, false, &w, &p)).contains('└'));
         assert!(visible(&window_ident("s", "0", "n", false, false, &w, &p)).contains('├'));
+    }
+
+    #[test]
+    fn the_session_rule_fills_exactly_the_rule_width() {
+        let (w, p) = setup();
+        // Long and short names must land the meta in the SAME column, which is
+        // the whole point of the rule — otherwise it is decoration.
+        for name in ["a", "proj", "a-fairly-long-name"] {
+            let (s, _) = session_ident(name, false, &w, &p, true);
+            let v = visible(&s);
+            assert_eq!(width(&v), w.rule, "name {:?}", name);
+            assert!(v.contains("──"), "name {:?} drew no rule: {:?}", name, v);
+            assert!(v.ends_with("  "), "the meta would touch the rule: {:?}", v);
+        }
+    }
+
+    #[test]
+    fn the_session_rule_lands_the_meta_in_the_command_column() {
+        let (w, p) = setup();
+        let mut g = GitCache::new();
+        // window row:  ident TAB ctx TAB cmd     — cmd starts at ident+1+ctx+1
+        // session row: rule  TAB meta            — meta starts at rule+1
+        let ctx = ctx_field("/tmp", false, false, false, &w, &p, "/home/u", &mut g, false);
+        assert_eq!(w.ident + 1 + width(&visible(&ctx)) + 1, w.rule + 1);
+    }
+
+    #[test]
+    fn the_rule_is_off_by_request_and_the_row_is_unchanged() {
+        let (w, p) = setup();
+        let (off, _) = session_ident("proj", false, &w, &p, false);
+        assert_eq!(width(&visible(&off)), w.ident);
+        assert!(!visible(&off).contains('─'));
     }
 
     #[test]
@@ -310,7 +361,7 @@ mod tests {
     fn no_rendered_field_can_contain_the_unit_separator() {
         let (w, p) = setup();
         let mut g = GitCache::new();
-        let (s, sd) = session_ident("a\u{1f}b", false, &w, &p);
+        let (s, sd) = session_ident("a\u{1f}b", false, &w, &p, false);
         let c = ctx_field("/tm\u{1f}p", false, false, false, &w, &p, "", &mut g, false);
         // US in a NAME cannot happen (tmux rejects it) but a path can carry one;
         // the row contract only breaks on TAB and newline, which we replace.

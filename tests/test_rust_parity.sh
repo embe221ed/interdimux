@@ -116,11 +116,18 @@ run_case "preview on (half width)"      INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW
 run_case "index ordering"               INTERDIMUX_SHOW_DIRS=off INTERDIMUX_ORDER=index
 run_case "directory rows on"            INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off
 run_case "directory rows + git"         INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_GIT_BRANCH=on
+# The session rule is a second layout regime: it moves the meta into the command
+# column when there is one, and switches itself off when the squeeze runs out of
+# room.  Both renderers have to agree about WHICH regime they are in.
+run_case "session rule off"             INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SESSION_RULE=off
 run_case "custom palette (hex)"         INTERDIMUX_SHOW_DIRS=off INTERDIMUX_COLOR_ACCENT='#e78a4e' INTERDIMUX_COLOR_PATH='#d8a657'
 run_case "palette inherit (-1)"         INTERDIMUX_SHOW_DIRS=off INTERDIMUX_COLOR_ACCENT=-1 INTERDIMUX_COLOR_TREE=default
 
 # widths are the most output-sensitive input: sweep the popup geometry
-for cols in 60 80 100 120 160 200 260; do
+# 40/44/52 sit BELOW the width where the squeeze still fits a command column,
+# which is exactly where the session rule turns itself off — the regime boundary
+# is the interesting place for two renderers to disagree.
+for cols in 40 44 52 60 80 100 120 160 200 260; do
   run_case "width ${cols} cols" INTERDIMUX_SHOW_DIRS=off FZF_COLUMNS="$cols"
 done
 for cols in 80 120 200; do

@@ -187,6 +187,77 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# The session group rule
+# ---------------------------------------------------------------------------
+#
+# A flat list has no way to show where one session's windows end and the next
+# begins — --gap rules between every row and zebra striping crosses the
+# boundaries.  Extending the session row's own padding into a run of '─' costs
+# no extra rows and marks it.  What has to hold:
+#
+#   * the run lands the session meta in the SAME column as the command on child
+#     rows, or it is decoration rather than structure
+#   * the run lives entirely inside field 1 (see rust/src/render.rs), so a
+#     ^]-scope cycle can never split it into two intensities
+#   * it turns itself OFF once the popup is too narrow for a command column,
+#     because there the meta would simply be clipped
+#
+# The byte-identical rust/bash question is tests/test_rust_parity.sh's; the
+# cell-exact layout is rust/tests/golden.rs'.  This is the bash renderer's own
+# behaviour, measured through a real tmux server.
+
+# Column (0-based) at which a row's SECOND field starts, on the rendered line.
+# fzf draws the tab as one cell at --tabstop=1, so this is what the eye sees.
+second_col() { awk -F'\t' 'NR==1 {print length($1) + 1}'; }
+
+rule_out=$(run_list "INTERDIMUX_USE_RUST=off FZF_COLUMNS=120")
+sess_col=$(printf '%s\n' "$rule_out" | grep $'\tS:alpha$' | second_col)
+win_line=$(printf '%s\n' "$rule_out" | grep $'\tW:alpha:0$')
+win_col=$(printf '%s' "$win_line" | awk -F'\t' '{print length($1) + 1 + length($2) + 1}')
+if [ -n "$sess_col" ] && [ "$sess_col" = "$win_col" ]; then
+  report "the rule lands the session meta in the command column ($sess_col)" pass
+else
+  report "the rule lands the session meta in the command column (meta $sess_col, command $win_col)" fail
+fi
+
+if printf '%s\n' "$rule_out" | grep $'\tS:alpha$' | grep -q '▸ alpha ──'; then
+  report "the rule is separated from the name by a space" pass
+else
+  report "the rule is separated from the name by a space" fail
+  ERRORS+="      --tiebreak=chunk demotes the session row if they are glued"$'\n'
+fi
+
+if printf '%s\n' "$rule_out" | grep $'\tS:alpha$' | awk -F'\t' '$2 ~ /─/ {exit 1}'; then
+  report "the rule stays inside field 1" pass
+else
+  report "the rule stays inside field 1" fail
+fi
+
+off_out=$(run_list "INTERDIMUX_USE_RUST=off INTERDIMUX_SESSION_RULE=off FZF_COLUMNS=120")
+if printf '%s\n' "$off_out" | grep $'\tS:alpha$' | grep -q '─'; then
+  report "@interdimux-session-rule=off draws no rule" fail
+else
+  report "@interdimux-session-rule=off draws no rule" pass
+fi
+
+# Below the width where the squeeze still fits a command column, the rule turns
+# itself off: measured, "2 win ● 2h" became "2 win…" at ~45 popup columns.
+tight_out=$(run_list "INTERDIMUX_USE_RUST=off FZF_COLUMNS=44")
+if printf '%s\n' "$tight_out" | grep $'\tS:alpha$' | grep -q '─'; then
+  report "the rule switches itself off on a narrow popup" fail
+  ERRORS+="      $(printf '%s\n' "$tight_out" | grep $'\tS:alpha$' | head -1)"$'\n'
+else
+  report "the rule switches itself off on a narrow popup" pass
+fi
+# ...and the control: it really was drawing at the wide width, so "off
+# everywhere" cannot pass the pair.
+if printf '%s\n' "$rule_out" | grep $'\tS:alpha$' | grep -q '──'; then
+  report "control: it does draw at 120 columns" pass
+else
+  report "control: it does draw at 120 columns" fail
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

@@ -122,6 +122,7 @@ fn gather() {
     let preview_on = env_is("INTERDIMUX_SHOW_PREVIEW", "on");
     let mru = env_or("INTERDIMUX_ORDER", "mru") == "mru";
     let cols: usize = env_or("INTERDIMUX_COLS", "80").parse().unwrap_or(80);
+    let session_rule = env_is("INTERDIMUX_SESSION_RULE", "on");
     let now: i64 = env_or("INTERDIMUX_NOW", "0").parse().unwrap_or(0);
 
     let mut cur = cur_raw.splitn(3, US);
@@ -243,7 +244,7 @@ fn gather() {
 
     for s in &sessions {
         let is_cur = s.name == current_session;
-        let (ident, sdisp_full) = render::session_ident(&s.name, is_cur, &w, &p);
+        let (ident, sdisp_full) = render::session_ident(&s.name, is_cur, &w, &p, session_rule);
         let age = age_of(s.last, now);
         let meta = render::session_meta(&s.windows, s.attached, &age, &p);
         writeln!(out, "{}\t{}\t\tS:{}", ident, meta, s.name).ok();

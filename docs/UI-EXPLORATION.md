@@ -59,9 +59,13 @@ fzf 0.74 has a sticky `--footer` that is unaffected by `--with-nth` and
 processes ANSI. Moving the per-row hints there puts the changing text at the
 bottom, where lazygit and k9s put keys, and leaves the top of the list still.
 
-Measured cost, precisely: **one list row.** 19 visible rows become 18, because
-the footer always draws its own separator line — `--footer-border=line` and no
-border option at all produced byte-identical output.
+Measured cost — and this entry got it **wrong** the first time, see the
+correction under "Landed" below: the default footer draws its own separator and
+costs **two** rows, not one. `--footer-border=none` costs exactly one, which is
+the row the `--header` was already spending, so the move is free only in that
+spelling. (`--footer-border=line` and no border option at all are byte-identical
+to each other; `=none` and `--no-footer-border` are byte-identical to each
+other.)
 
 ```
 today                                    with a footer
@@ -427,7 +431,106 @@ of them, and one squeeze rung for the path before the badge is zeroed.
 | 23 | The restorable-sessions tier is cheaper than the backlog assumes (forkless parse) | M/med |
 | 24 | **Hold the line**: no icon column, no query sigils, no custom TUI — each has a specific answer grounded in this codebase | — |
 
+---
+
 ## Landed from this pass
+
+Four of the candidates above are now in the tool: **1** (the footer), **2**
+(`--freeze-left`), **7** (the session rule) and the survey's **1** (the scope
+highlight). What follows is what shipped and, more usefully, the four claims in
+this document that measuring properly turned out to contradict.
+
+### What shipped
+
+* **The hint bar is a `--footer`** on fzf >= 0.63, tiered to the width instead
+  of truncated. Each hint carries a priority; the lowest is dropped and the line
+  rebuilt until it fits, so the tiers are generated rather than written out and
+  cannot drift from the bindings they describe. `enter` goes first (nothing has
+  to advertise Enter), `^] scope` survives longest. Below the last rung the bar
+  is empty — and an empty transform removes the footer section outright, so the
+  floor costs no row.
+* **`--freeze-left=1`** on fzf >= 0.67, `--no-hscroll` below it.
+* **The session rule**, in both renderers, byte-identical, gated by
+  `@interdimux-session-rule`.
+* **`fg:dim,nth:regular`** on fzf >= 0.58, gated by
+  `@interdimux-scope-highlight`.
+
+### Four corrections
+
+**1. The footer costs two rows, not one.** The claim above ("one list row, 19
+become 18") counted the footer text and missed that its default border draws a
+separator as well. Re-measured at 20 rows, same input, same geometry:
+
+```
+no bar at all              18 items
+--header=X                 17 items      <- what the tool spent before
+--footer=X                 16 items      <- default border: text + separator
+--footer=X --footer-border=none
+                           17 items      <- what it spends now
+--footer=X --footer-border=inline
+                           16 items
+```
+
+So the move is free, but only borderless. `--footer-border=none` is now in the
+shared theme.
+
+**2. `FZF_COLUMNS` does not shrink when the preview opens — but the footer
+does.** `compute_widths` has carried a comment for a long time saying fzf
+"reports the FULL terminal width in FZF_COLUMNS either way", and that is exactly
+right; the row widths have always halved it by hand. The footer is drawn inside
+the *list* column, so it needs the same halving, and nothing was there to do it:
+
+```
+pane 100, no preview          footer field 97 = W - 3
+pane 100, --preview right,50% footer field 47 = W/2 - 3   (FZF_COLUMNS still 100)
+pane 100, --preview up,50%    footer field 97             (vertical: unchanged)
+```
+
+`FZF_PREVIEW_COLUMNS` is set exactly while the preview is visible, which is the
+fork-free way to ask. The inline snippet reads it, so the bar re-tiers on `^/`
+with no extra process.
+
+**3. `--freeze-left` right-trims the frozen region.** The frozen prefix keeps
+its interior spacing but loses its trailing padding at the cut, so the ellipsis
+lands at a different column on every scrolled row and the grid is ragged while
+hscrolled. Every *matching* row scrolls, not just the one under the cursor. This
+is a real cost and it is worth stating next to the benefit — but the benefit is
+that the row still says which pane it is, and an aligned anonymous row is worth
+less than a ragged identified one.
+
+**4. The space between the session name and the rule is load-bearing.** Gluing
+them (`▸ proj────────`) makes the whitespace chunk 50-odd cells instead of 4,
+and `--tiebreak=chunk` then scores the exact-name session row *below* every one
+of its own window rows — measured, `proj` fell from rank 1 to rank 11. One space
+fixes it completely. Nothing about the rendering hints at this.
+
+### One thing the rule had to learn
+
+It only draws while there is a command column to line up with. The whole idea is
+that a session's metadata sits where its windows' commands sit; once the squeeze
+runs out of room, the metadata is simply clipped instead:
+
+```
+60 cols   ▌ ▸ dotfiles ────────────────────────   1 win now
+45 cols   ▌ ▸ dotfiles ────────────────────────   1 win…      <- before the fix
+45 cols   ▌ ▸ dotfiles         1 win now                      <- after
+```
+
+So the rule switches itself off on exactly the condition the squeeze loop
+already computes — `ident + ctx + 2 + CMD_MIN <= avail` — and the row goes back
+to the plain layout. Both renderers compute it the same way, and the golden
+suite asserts that the session row is either the command column or the plain
+identity column, never a third thing, at every width from 40 to 200.
+
+### And one that has no answer yet
+
+The rule is drawn in `@interdimux-color-tree` (240 by default) and fzf's own
+separator under the prompt is `@interdimux-color-border` (238). They are close
+enough in weight that the group rule can read as more fzf chrome. It is
+indented and starts after a bold session name, which is probably enough
+distinction — but it was noticed while measuring, so it is written down.
+
+### Landed in the pass before this one
 
 * The dashboard greys out entries that cannot act (`Jobs` with an empty queue,
   both scheduling entries without `at`) and shows the queue count in the label.
