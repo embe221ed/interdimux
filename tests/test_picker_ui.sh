@@ -63,12 +63,18 @@ drive() { # $1.. = args to the script; opens it under a real client
     "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_DATA_HOME='$TMPD/data' \
          INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
          INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_PROJECT_DIRS='$TMPD' \
-         bash '$SCRIPT' $*; sleep 15"
+         bash '$SCRIPT' $*; sleep 40"
+  # 25 s, not 8: the swap picker runs a full gather_targets before fzf can draw,
+  # and under a loaded box that outran the old wait — the suite then reported
+  # "the swap picker opens" as a failure of the picker rather than of the wait.
+  # The pane's trailing sleep is longer than this wait on purpose, so a slow
+  # start cannot be mistaken for a pane that has already exited.
   local i
-  for i in $(seq 1 80); do
+  for i in $(seq 1 250); do
     tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | grep -q '❯' && return 0
     sleep 0.1
   done
+  ERRORS+="    screen after 25s: $(tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -v '^ *$' | head -3 | tr '\n' '|')"$'\n'
   return 1
 }
 prompt() { tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -m1 '❯'; }
