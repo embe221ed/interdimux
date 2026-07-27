@@ -11,6 +11,7 @@
 mod dirs;
 mod format;
 mod git;
+mod macproc;
 mod palette;
 mod proc;
 mod render;

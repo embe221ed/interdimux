@@ -4,13 +4,16 @@
 //! command the user typed).  Never walk deeper — grandchildren are the
 //! command's own subprocesses (LSPs, formatters) and showing those misleads.
 //!
-//! Two backends, mirroring the bash script:
+//! Three backends, each fork-free per pane where possible:
 //!   * `/proc` (Linux): one lazy read per pane, no fork, cost scales with panes.
-//!   * `ps` (macOS/BSD, or when `/proc` is forced off): a single `ps -eo` snapshot
-//!     built once, then walked in-process.  bash used to do this walk itself and
-//!     hand the Rust core nothing, which meant the whole render fell back to bash
-//!     on any host without `/proc`.  Owning it here lets the fast renderer run
-//!     everywhere.
+//!   * libproc (macOS): sysctl(KERN_PROCARGS2) + proc_listpids, per pane — the
+//!     native equivalent of the `/proc` path (see macproc.rs).  This is the
+//!     default off-Linux; it forks nothing.
+//!   * `ps` (other BSDs, when libproc can't read argv, or INTERDIMUX_FORCE_PS=1):
+//!     a single `ps -eo` snapshot built lazily, then walked in-process.  bash
+//!     used to do this walk itself and hand the Rust core nothing, which meant
+//!     the whole render fell back to bash on any host without `/proc`.  Owning
+//!     it here lets the fast renderer run everywhere.
 //!
 //! Three traps this reproduces deliberately, each of which silently broke a
 //! bash prototype:
@@ -26,6 +29,8 @@
 
 use std::collections::HashMap;
 use std::fs;
+
+use crate::macproc;
 
 /// Does this look like a login/interactive shell?  Mirrors SHELLS_PATTERN:
 /// `^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$`
@@ -124,26 +129,44 @@ fn take_word(s: &str) -> Option<(&str, &str)> {
 
 pub struct Resolver {
     proc_ok: bool,          // Linux /proc backend
-    ps: Option<PsTable>,    // macOS/BSD ps backend (taken lazily)
+    libproc: bool,          // macOS native backend (sysctl + proc_listpids)
+    ps: Option<PsTable>,    // ps snapshot backend (FORCE_PS / other BSD, lazy)
     ps_tried: bool,         // the ps snapshot has been attempted
-    cache: HashMap<u32, String>, // /proc cmdline memo (unused by the ps backend)
+    cache: HashMap<u32, String>, // argv memo (proc & libproc; ps holds its own map)
+    mac_buf: Vec<u8>,       // reusable KERN_PROCARGS2 scratch buffer (libproc only)
 }
 
 impl Resolver {
     pub fn new() -> Self {
         let pid = std::process::id();
-        let proc_ok = !force_ps()
-            && fs::metadata(format!("/proc/{}/task/{}/children", pid, pid)).is_ok();
-        // Construction is cheap: the ps snapshot is deferred to the first
-        // full_command() call (see ensure_ps).  A list rendered with
-        // SHOW_FULL_COMMAND=off never resolves a command, so it must never fork
-        // ps — the resolver is constructed unconditionally in gather().
-        Resolver { proc_ok, ps: None, ps_tried: false, cache: HashMap::new() }
+        let forced_ps = force_ps();
+        let proc_ok =
+            !forced_ps && fs::metadata(format!("/proc/{}/task/{}/children", pid, pid)).is_ok();
+        let mut r = Resolver {
+            proc_ok,
+            libproc: false,
+            ps: None,
+            ps_tried: false,
+            cache: HashMap::new(),
+            mac_buf: Vec::new(),
+        };
+        // Construction stays cheap.  On Linux /proc handles it (lazy per-pid).
+        // Otherwise prefer the native macOS backend (fork-free, O(panes)) — but
+        // NOT when ps is forced, and only if it can actually read argv here.  The
+        // ps snapshot is the last resort (other BSDs, sandboxed libproc) and is
+        // itself deferred to first use (ensure_ps), so a SHOW_FULL_COMMAND=off
+        // list forks nothing.
+        if !proc_ok && !forced_ps && macproc::available() {
+            r.libproc = true;
+            r.mac_buf = vec![0u8; macproc::argmax()];
+        }
+        r
     }
 
-    /// Take the one ps snapshot, the first time a command is actually resolved.
+    /// Take the one ps snapshot, the first time a command is actually resolved,
+    /// and only when no fork-free backend is active.
     fn ensure_ps(&mut self) {
-        if self.proc_ok || self.ps_tried {
+        if self.proc_ok || self.libproc || self.ps_tried {
             return;
         }
         self.ps_tried = true;
@@ -152,7 +175,7 @@ impl Resolver {
 
     #[allow(dead_code)] // used by tests
     pub fn available(&self) -> bool {
-        self.proc_ok || self.ps.is_some()
+        self.proc_ok || self.libproc || self.ps.is_some()
     }
 
     /// Space-joined argv of `pid`, ps-style.  Empty when the process is gone —
@@ -188,6 +211,14 @@ impl Resolver {
     /// verbatim (ps already sanitized it) so it is byte-identical to bash's
     /// `PS_ARGS[$pid]`; /proc is read and sanitized lazily.
     fn args_of(&mut self, pid: u32) -> String {
+        if self.libproc {
+            if let Some(v) = self.cache.get(&pid) {
+                return v.clone();
+            }
+            let v = macproc::pid_argv(pid, &mut self.mac_buf).unwrap_or_default();
+            self.cache.insert(pid, v.clone());
+            return v;
+        }
         if let Some(t) = &self.ps {
             return t.args.get(&pid).cloned().unwrap_or_default();
         }
@@ -199,6 +230,9 @@ impl Resolver {
 
     /// The pid of the shell's first child, in the same order bash would pick.
     fn first_child(&self, pid: u32) -> Option<u32> {
+        if self.libproc {
+            return macproc::first_child(pid);
+        }
         if let Some(t) = &self.ps {
             return t.children.get(&pid).and_then(|v| v.first()).copied();
         }
@@ -214,9 +248,12 @@ impl Resolver {
     /// by both backends and mirrors bash `resolve_command`: tab->space, trim,
     /// and fall back to the short command when the result is empty.
     pub fn full_command(&mut self, pid: u32, short: &str) -> String {
-        self.ensure_ps();
-        if !self.proc_ok && self.ps.is_none() {
-            return short.replace('\t', " ");
+        // Only fork ps when neither fork-free backend is active.
+        if !self.proc_ok && !self.libproc {
+            self.ensure_ps();
+            if self.ps.is_none() {
+                return short.replace('\t', " ");
+            }
         }
         let own = self.args_of(pid);
         let argv0 = own.split(' ').next().unwrap_or("");
@@ -255,9 +292,11 @@ mod tests {
         }
         Resolver {
             proc_ok: false,
+            libproc: false,
             ps: Some(PsTable { args, children }),
             ps_tried: true,
             cache: HashMap::new(),
+            mac_buf: Vec::new(),
         }
     }
 
@@ -299,9 +338,11 @@ mod tests {
     fn pid_zero_never_reads_the_kernel_cmdline() {
         let mut r = Resolver {
             proc_ok: true,
+            libproc: false,
             ps: None,
             ps_tried: false,
             cache: HashMap::new(),
+            mac_buf: Vec::new(),
         };
         assert_eq!(r.cmdline(0), "");
     }
@@ -324,7 +365,14 @@ mod tests {
         // A resolver that never resolves a command must never take the snapshot,
         // so SHOW_FULL_COMMAND=off does not fork ps.  (On a /proc host proc_ok is
         // true and ps is never used at all; this asserts the off-Linux path.)
-        let r = Resolver { proc_ok: false, ps: None, ps_tried: false, cache: HashMap::new() };
+        let r = Resolver {
+            proc_ok: false,
+            libproc: false,
+            ps: None,
+            ps_tried: false,
+            cache: HashMap::new(),
+            mac_buf: Vec::new(),
+        };
         assert!(!r.ps_tried, "construction must not attempt the ps snapshot");
         assert!(r.ps.is_none());
     }
