@@ -578,6 +578,47 @@ documented in `macproc.rs`, neither reachable by a real command nor able to brea
 
 ---
 
+## Tier 8 — what the footer hint bar cost, and how it was paid back (2026-07-27)
+
+Moving the key hints to a `--footer` and tiering them to the width added work to
+the one path this document exists to protect: the navigator's, before fzf can
+draw a first frame. Measured with a stub `fzf` on `PATH` that records its argv
+and exits, min of 30 interleaved runs, so the number is the script's own cost
+with fzf's startup removed.
+
+```
+before the change                                     41.8 ms
+naive implementation                                  50.5 ms   (+21%)
+  hint_cols (stty)                                     2.3-4.0 ms
+  five ladders                                         6.3-8.6 ms
+after the two fixes below                             43.5 ms   (+4%)
+```
+
+Two things were paying for it, and both had a cheap answer.
+
+**The width measurement forked twice.** `hint_cols` needs the popup width, and
+`$(term_cols)` is a subshell *plus* an `stty size` exec. The launch path already
+made that call once — `INTERDIMUX_COLS` for the renderer — so the second one was
+pure duplication. `term_cols_r` (REPLY-style, the idiom this file already uses
+everywhere) plus a process-global memo makes it one exec again. Safe because the
+only long-lived process is the navigator, and every event that can change the
+width ends in a reload, which is a fresh child that measures again.
+
+**The ladders were rebuilt from their parts, rung by rung.** Five row types × up
+to eight rungs, each rung re-styling the same seven strings: O(rungs × hints).
+Two changes, no behaviour difference (the packed ladders are byte-identical):
+
+* style each hint **once**, then build each rung by CUTTING one fragment out of
+  the previous one — one substitution per rung instead of a full rebuild;
+* compute the drop order **once** with an insertion sort over ≤8 items, instead
+  of re-scanning for the lowest priority on every rung. This was the bigger half:
+  the re-scan was ~21 statements per rung and dominated the function.
+
+The residual ~1.7 ms is the ladders themselves, and it buys a bar that fits at
+every width and re-tiers on `^/` and on a resize with **no** process per cursor
+move — which is the property Tier 2 spent its whole budget acquiring, so
+spending a process here would have been the wrong trade.
+
 ## Suggested rollout
 
 1. **Tier 0 (0.1 + 0.2 + 0.3)** in one pass — pure fork removal, no gate, test-covered. This

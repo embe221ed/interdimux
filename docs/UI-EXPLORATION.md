@@ -452,8 +452,12 @@ this document that measuring properly turned out to contradict.
 * **`--freeze-left=1`** on fzf >= 0.67, `--no-hscroll` below it.
 * **The session rule**, in both renderers, byte-identical, gated by
   `@interdimux-session-rule`.
-* **`fg:dim,nth:regular`** on fzf >= 0.58, gated by
-  `@interdimux-scope-highlight`.
+* **`fg:dim,nth:regular`** gated by `@interdimux-scope-highlight` — and gated at
+  fzf **0.66**, not the 0.58 that introduced `nth:`. fzf's own CHANGELOG records
+  against 0.65.1: *"Fixed a highlighting bug when using `--color fg:dim,nth:regular`
+  pattern over ANSI-colored items."* Every row here is ANSI-coloured, so 0.58
+  through 0.65.0 would have shipped the bug. `fzf_ge` compares the minor only,
+  so 65 would still admit 0.65.0.
 
 ### Four corrections
 
@@ -521,6 +525,54 @@ already computes — `ident + ctx + 2 + CMD_MIN <= avail` — and the row goes b
 to the plain layout. Both renderers compute it the same way, and the golden
 suite asserts that the session row is either the command column or the plain
 identity column, never a third thing, at every width from 40 to 200.
+
+### Three the review found after it shipped
+
+An adversarial pass over the diff — five reviewers and a skeptic, each driving a
+real pty — confirmed thirteen findings. The three that were behaviour:
+
+* **The fallback callback path never re-fitted the bar after `^/`.** The inline
+  snippet re-tiers because `^/` ends in a reload and a reload fires `result`;
+  the `--footer-for` path has no `result` bind, and `focus` does **not** fire on
+  that reload. So the bar stayed at the launch rung and fzf truncated it —
+  cutting `^] scope` first, which is the exact failure the ladder was built to
+  remove, still live on the path that is supposed to be its safety net. One
+  `+transform-…` on the two binds that change the width.
+* **Ten call sites passed a literal `--footer=` when nothing fitted.** Only the
+  navigator had the guard, and its own comment explained why the guard was
+  needed. `--footer=''` draws the section blank; omitting the flag does not.
+* **`--doctor` green-ticked junk in both new options.** Every other on/off option
+  is validated; these two were not added to the arm, and a junk value silently
+  disables the feature.
+
+The rest were test gaps, all now closed by `tests/test_rendered_ui.sh`, which
+asserts against fzf's actual argv (via a stub on `PATH`) and against a rendered
+screen. Seven mutations of the shipped code were run against it; all seven were
+caught, including deleting `--freeze-left`, which reproduces the original defect
+exactly:
+
+```
+▌ …   buildtool --config set-rtp+=share/x --stage …/servers/zebra.lua 900
+  ^^^ which pane is this?
+```
+
+### One place the bash fallback now declines to draw
+
+The bash renderer measures with `${#var}`, which counts CHARACTERS. That has
+always shifted its columns for a wide-glyph name — it is why the Rust core
+exists — but the rule turned a shift into something worse: an over-long run
+pushes the session meta off the right edge, where fzf clips it away entirely. So
+bash draws the rule only for a name it can measure, and a CJK or emoji session
+name falls back to the plain row. Conservative (an accented Latin-1 name would
+measure fine), and it applies only when the binary is absent; such a name
+already renders differently between the two renderers, which is the older bug
+this defers to.
+
+Worth stating plainly, because it is the shape of a whole class: the rule made
+session rows depend on `MAX_PATH` for the first time, so a wide-glyph *path* now
+propagates a pre-existing bash/Rust disagreement into a row class that used to
+be immune. The parity suite cannot see it — every name and path in its bench is
+ASCII. That is the gap to close if the char/cell bug is ever taken seriously.
 
 ### And one that has no answer yet
 

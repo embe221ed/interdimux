@@ -257,6 +257,32 @@ else
   report "control: it does draw at 120 columns" fail
 fi
 
+# The bash renderer measures with ${#var}, which counts CHARACTERS, so it cannot
+# size a rule after a wide glyph — and an over-long run does not merely shift the
+# column, it pushes the meta off the right edge where fzf clips it away.  So bash
+# declines to draw one there.  (The Rust core measures cells and has no such
+# limit; a wide-glyph name already renders differently between the two.)
+tmux_cmd new-session -d -s '日本語日本語日本語' -x 200 -y 50
+sleep 0.3
+cjk_out=$(run_list "INTERDIMUX_USE_RUST=off FZF_COLUMNS=120")
+if printf '%s\n' "$cjk_out" | grep $'\tS:日本語日本語日本語$' | grep -q '─'; then
+  report "bash draws no rule after a name it cannot measure" fail
+else
+  report "bash draws no rule after a name it cannot measure" pass
+fi
+# ...and the truncation ellipsis is NOT such a glyph: it is one char and one
+# cell, so a merely-long ASCII name must keep its rule.  Testing for non-ASCII
+# after truncation instead of before dropped the rule from every long name, and
+# the parity suite is what noticed.
+tmux_cmd new-session -d -s 'a-very-long-ascii-session-name-that-gets-truncated' -x 200 -y 50
+sleep 0.3
+long_out=$(run_list "INTERDIMUX_USE_RUST=off FZF_COLUMNS=120")
+if printf '%s\n' "$long_out" | grep $'\tS:a-very-long-ascii-session-name-that-gets-truncated$' | grep -q '─'; then
+  report "a long ASCII name keeps its rule (the ellipsis is not a wide glyph)" pass
+else
+  report "a long ASCII name keeps its rule (the ellipsis is not a wide glyph)" fail
+fi
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

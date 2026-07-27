@@ -499,7 +499,11 @@ build_fzf_colors() {
   # rendering is terminal-dependent.  `regular` clears the inherited dim, `bold`
   # puts back the line-wide bold, and the result is byte-identical to today's
   # current row.  Measured, both halves of it.
-  if [ "$SCOPE_HIGHLIGHT" = "on" ] && fzf_ge 58; then
+  # 66, not 58, even though `nth:` landed in 0.58: fzf's own CHANGELOG records
+  # "Fixed a highlighting bug when using --color fg:dim,nth:regular pattern over
+  # ANSI-colored items" against 0.65.1, and every row here is --ansi coloured.
+  # fzf_ge compares the minor only, so 65 would still admit the buggy 0.65.0.
+  if [ "$SCOPE_HIGHLIGHT" = "on" ] && fzf_ge 66; then
     FZF_COLORS+=",fg:dim,nth:regular,fg+:${COLOR_QUERY}:regular:bold"
   else
     FZF_COLORS+=",fg+:${COLOR_QUERY}"
@@ -580,21 +584,29 @@ HINT_PREVIEW_PCT=""
 # FZF_COLUMNS stays at the full window width (measured), so the preview state
 # has to be folded in by hand; FZF_PREVIEW_COLUMNS is set exactly while the
 # preview is visible, which is the fork-free way to ask.  Sets REPLY.
+_hint_cols_cached=""
 hint_cols() {
+  if [ -n "$_hint_cols_cached" ]; then REPLY="$_hint_cols_cached"; return 0; fi
   local c pct="$HINT_PREVIEW_PCT"
-  c=$(term_cols)
+  term_cols_r; c="$REPLY"
   if [ -z "$pct" ]; then
     pct=0
     if [ -n "${FZF_PREVIEW_COLUMNS:-}" ]; then
       pct=50
-    elif [ -z "${FZF_COLUMNS:-}" ] && [ "$(live_preview_state)" = "on" ]; then
+    elif [ -z "${FZF_COLUMNS:-}" ]; then
       # launch time: there is no fzf yet, so ask the state file the way the
       # renderer does
-      pct=50
+      live_preview_state_r
+      [ "$REPLY" = "on" ] && pct=50
     fi
   fi
   REPLY=$(( c - c * pct / 100 - 3 ))
   [ "$REPLY" -lt 0 ] && REPLY=0
+  # Memoised because this runs on the navigator's pre-first-frame path, where
+  # every fork is counted (docs/PERFORMANCE.md).  Safe: a picker sets
+  # HINT_PREVIEW_PCT once, before its first call, and the callbacks that DO need
+  # a fresh width are separate processes.
+  _hint_cols_cached="$REPLY"
   return 0
 }
 
@@ -630,23 +642,58 @@ hint_set() {
 # which is what keeps the bar correct across ^/ (the preview halves the list)
 # and a client resize without paying a process per cursor move.  Sets REPLY.
 hint_tiers() {
-  local -a hk=() hl=() hp=() args=()
-  while [ $# -ge 3 ]; do hk+=("$1"); hl+=("$2"); hp+=("$3"); shift 3; done
-  local i n="${#hk[@]}" lo loi packed=""
+  # Each hint is styled ONCE and the rungs are joins of the survivors.  The
+  # obvious form — rebuild the whole line with hint_r for every rung — restyles
+  # the same seven strings eight times over, five times per open, on the path
+  # that runs before fzf can draw its first frame.
+  local -a hp=() frag=() w=()
+  local i n=0 live=0 lo loi packed="" line lw first
+  while [ $# -ge 3 ]; do
+    frag+=("${ACCENT_ESC}${1}"$'\033[0m\033[2m '"${2}"$'\033[0m')
+    w+=($(( ${#1} + 1 + ${#2} )))
+    hp+=("$3")
+    n=$(( n + 1 )); live=$(( live + 1 ))
+    shift 3
+  done
+  # Build the widest rung once, then CUT one fragment out of it per rung rather
+  # than rebuilding the line from its parts each time.  Rebuilding is
+  # O(rungs x hints) and measured at 6-9 ms for the five ladders the navigator
+  # packs before it can draw a first frame; one substitution per rung is O(rungs)
+  # and lands around 2.  Fragments are unique (no two hints share a key AND a
+  # label), so the substitution can only ever match the one meant.
+  line="" lw=0 first=1
+  for (( i = 0; i < n; i++ )); do
+    if [ "$first" = 1 ]; then first=0; else line+="  "; lw=$(( lw + 2 )); fi
+    line+="${frag[i]}"; lw=$(( lw + w[i] ))
+  done
+  # The drop order, once.  Re-scanning for the lowest priority on every rung is
+  # O(rungs x hints) and was measured as the bulk of this function's cost; an
+  # insertion sort over at most eight items pays that scan a single time.
+  local -a order=()
+  local j k
+  for (( i = 0; i < n; i++ )); do
+    for (( j = ${#order[@]}; j > 0; j-- )); do
+      k="${order[j-1]}"
+      [ "${hp[k]}" -le "${hp[i]}" ] && break
+      order[j]="$k"
+    done
+    order[j]="$i"
+  done
+
+  local cut
   while :; do
-    args=()
-    for (( i = 0; i < n; i++ )); do
-      [ -n "${hk[i]}" ] && args+=("${hk[i]}" "${hl[i]}")
-    done
-    hint_r ${args[@]+"${args[@]}"}
-    packed+="${REPLY_W}:${REPLY}|"
-    [ "${#args[@]}" -eq 0 ] && break
-    lo=999999 loi=-1
-    for (( i = 0; i < n; i++ )); do
-      [ -n "${hk[i]}" ] || continue
-      if [ "${hp[i]}" -lt "$lo" ]; then lo="${hp[i]}"; loi="$i"; fi
-    done
-    hk[loi]=""
+    packed+="${lw}:${line}|"
+    [ "$live" -eq 0 ] && break
+    loi="${order[n - live]}"
+    cut="${frag[loi]}"
+    live=$(( live - 1 ))
+    if [ "${line/"$cut  "/}" != "$line" ]; then
+      line="${line/"$cut  "/}"; lw=$(( lw - w[loi] - 2 ))
+    elif [ "${line/"  $cut"/}" != "$line" ]; then
+      line="${line/"  $cut"/}"; lw=$(( lw - w[loi] - 2 ))
+    else
+      line="${line/"$cut"/}"; lw=$(( lw - w[loi] ))
+    fi
   done
   REPLY="${packed%|}"
 }
@@ -666,13 +713,26 @@ hint_pick() {
   return 0
 }
 
-# One fitted bar for a picker that has no per-row variation.  Prints it.
-hint_bar() {
+# One fitted bar for a picker that has no per-row variation.  Sets REPLY.
+hint_bar_r() {
   local w
   hint_cols; w="$REPLY"
   hint_tiers "$@"
   hint_pick "$w" "$REPLY"
-  printf '%s' "$REPLY"
+}
+
+# The bar FLAG for such a picker, as an array — empty when nothing fits, because
+# `--footer=''` still draws the section (measured: one blank list row) where
+# omitting the flag entirely does not.  Sets HINT_FLAG.
+#
+# An array rather than a string so the call sites need no command substitution:
+# these run before the first frame, and $( ) there is a fork the old code did
+# not pay.
+hint_flag() {
+  hint_bar_r "$@"
+  HINT_FLAG=()
+  [ -n "$REPLY" ] && HINT_FLAG=(--"$HINT_BAR"="$REPLY")
+  return 0
 }
 
 # Shared fzf theme — applied to all pickers for consistency.  Built once,
@@ -737,7 +797,7 @@ fzf_ge 63 && HINT_BAR=footer
 # Off when: fzf is too old for --with-shell (< 0.51), or the user set their own
 # --with-shell in @interdimux-fzf-opts — user opts are appended last and win, so
 # the snippet could land in a shell with no POSIX `case` (fish).  Either way the
-# --header-for / --scope-prompt handlers below remain as the fallback.
+# --footer-for / --scope-prompt handlers below remain as the fallback.
 INLINE_CALLBACKS=0
 if fzf_ge 51; then
   case "$FZF_USER_OPTS" in
@@ -1509,22 +1569,42 @@ age_of() {
 
 # Terminal width of the popup tty (falls back to 80 without a tty,
 # e.g. in tests/CI)
+# REPLY-setting form, for callers on a path that counts its forks.  $(term_cols)
+# is a subshell AND an `stty` exec — measured at ~3 ms — and the navigator now
+# asks TWICE before it can draw a first frame: once to size the hint bar, once
+# for the INTERDIMUX_COLS it hands the renderer.  Memoised so that is one exec,
+# the same number the launch path paid before the bar existed.
+#
+# Safe within a process: the only long-lived one is the navigator, and every
+# event that can change the width (resize, ^/) ends in a reload, which is a
+# fresh child that measures again.
+_term_cols_cached=""
+term_cols_r() {
+  if [[ "${FZF_COLUMNS:-}" =~ ^[1-9][0-9]*$ ]]; then
+    REPLY="$FZF_COLUMNS"
+    return 0
+  fi
+  if [ -n "$_term_cols_cached" ]; then REPLY="$_term_cols_cached"; return 0; fi
+  local dims
+  REPLY=80
+  if dims=$({ stty size </dev/tty; } 2>/dev/null); then
+    REPLY="${dims#* }"
+  fi
+  [[ "$REPLY" =~ ^[0-9]+$ ]] || REPLY=80
+  _term_cols_cached="$REPLY"
+  return 0
+}
+
 term_cols() {
+  # The printing form, kept for the callers that interpolate it.  It goes
+  # through term_cols_r so both share the one measurement.
   # fzf exports FZF_COLUMNS to the children it spawns (reload, preview,
   # execute), so every ctrl-r reload can skip the stty fork.  It reads 0
   # during fzf's own `start` event, hence the numeric guard rather than a
   # bare emptiness test.  The initial launch-time gather has no fzf parent
   # and still falls back to stty.
-  if [[ "${FZF_COLUMNS:-}" =~ ^[1-9][0-9]*$ ]]; then
-    printf '%s' "$FZF_COLUMNS"
-    return 0
-  fi
-  local dims cols=80
-  if dims=$({ stty size </dev/tty; } 2>/dev/null); then
-    cols="${dims#* }"
-  fi
-  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
-  printf '%s' "$cols"
+  term_cols_r
+  printf '%s' "$REPLY"
 }
 
 # Column widths for the navigator tree.  Sized to the ACTUAL content
@@ -1586,6 +1666,15 @@ measure_widths() {
 # The live preview state ("on"/"off").  ctrl-/ writes the new value to
 # $INTERDIMUX_PREVIEW_STATE so a reload child can size its columns for the
 # geometry the user is actually looking at.
+# REPLY-setting form; same reason as term_cols_r.
+live_preview_state_r() {
+  REPLY="$SHOW_PREVIEW"
+  if [ -n "${INTERDIMUX_PREVIEW_STATE:-}" ] && [ -s "${INTERDIMUX_PREVIEW_STATE}" ]; then
+    { read -r REPLY < "$INTERDIMUX_PREVIEW_STATE"; } 2>/dev/null || :
+  fi
+  return 0
+}
+
 live_preview_state() {
   local st="$SHOW_PREVIEW"
   if [ -n "${INTERDIMUX_PREVIEW_STATE:-}" ] && [ -s "${INTERDIMUX_PREVIEW_STATE}" ]; then
@@ -2064,7 +2153,7 @@ IMUX_SECTIONS
     fi
   done <<< "$all_panes_raw"
 
-  local sla sname swins sattach marker meta age sdisp rule_n rule_run
+  local sla sname swins sattach marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
   local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
@@ -2079,6 +2168,11 @@ IMUX_SECTIONS
     # The name is capped so the row never exceeds the identity column
     # (4 = marker + space + ▸ + space).
     sdisp="${sname//$'\t'/ }"
+    # Before truncation: the ellipsis this may append is itself non-ASCII, but
+    # it is one char and one cell, so it measures fine.  Testing after would have
+    # dropped the rule from every long name — which the parity suite caught.
+    rule_ok=1
+    [[ "$sdisp" == *[![:ascii:]]* ]] && rule_ok=0
     [ "${#sdisp}" -gt $(( IDENT_W - 4 )) ] && sdisp="${sdisp:0:IDENT_W-5}…"
     fld_reset
     fld_add "$marker" 1
@@ -2094,8 +2188,17 @@ IMUX_SECTIONS
     # name makes that chunk 50-odd cells instead of 4.  Measured — querying
     # "proj" dropped the `proj` session row from rank 1 to rank 11, below every
     # window row.
+    #
+    # ASCII only, and only here: bash measures with ${#var}, which counts
+    # CHARACTERS, so a wide glyph makes FLD_LEN too small and the run too long —
+    # and where the pre-existing char/cell confusion merely SHIFTS the other
+    # columns, an over-long rule pushes the session meta off the right edge and
+    # fzf clips it away entirely.  Conservative (an accented Latin-1 name would
+    # measure fine) because there is no width table in bash to be less so.  The
+    # Rust core measures cells and has no such limit; a wide-glyph name already
+    # renders differently between the two, which is the bug this defers to.
     rule_n=$(( SESS_RULE_W - FLD_LEN - 3 ))
-    if [ "$SESSION_RULE" = "on" ] && [ "$rule_n" -ge 3 ]; then
+    if [ "$SESSION_RULE" = "on" ] && [ "$rule_n" -ge 3 ] && [ "$rule_ok" = 1 ]; then
       printf -v rule_run '%*s' "$rule_n" ''
       fld_add " ${DIM_TREE}${rule_run// /─}${RST}  " $(( rule_n + 3 ))
     else
@@ -3888,6 +3991,7 @@ if [ "${1:-}" = "--action" ]; then
       HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
       _swap_freeze=(--no-hscroll)
       fzf_ge 67 && _swap_freeze=(--freeze-left=1)
+      hint_flag enter 'swap destination' 2 esc cancel 1
       dest=$(printf '%s\n' "$swap_list" | fzf \
         "${FZF_THEME[@]}" \
         "${_swap_freeze[@]}" \
@@ -3895,7 +3999,7 @@ if [ "${1:-}" = "--action" ]; then
         --with-nth=1..3 \
         --nth=1,3 \
         --prompt="swap $_swap_src with ❯ " \
-        --"$HINT_BAR"="$(hint_bar enter 'swap destination' 2 esc cancel 1)" \
+        ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
       ) || exit 0
 
       dest_spec="${dest##*	}"
@@ -3933,7 +4037,8 @@ if [ "${1:-}" = "--dirs-hints" ]; then
     # hatch they would otherwise lose (^r) is on the prompt as well.
     deep)   printf '%s%s\n' "$(hint '🔎 deep search' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
     browse) printf '%s%s\n' "$(hint '⤷ browsing' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
-    *)      hint_bar enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1; echo ;;
+    *)      hint_bar_r enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1
+            [ -n "$REPLY" ] && printf '%s\n' "$REPLY" ;;
   esac
   exit 0
 fi
@@ -3986,10 +4091,10 @@ if [ "${1:-}" = "--dirs" ]; then
 
   # The default header is static and this process already has the builder —
   # re-exec'ing the whole script for it cost ~18 ms of dead time before the
-  # picker could open.  (The ctrl-f/ctrl-g binds still call --dirs-header:
+  # picker could open.  (The ctrl-f/ctrl-g binds still call --dirs-hints:
   # theirs are per-mode and carry the live query.)
   HINT_PREVIEW_PCT=40
-  DIRS_HINTS="$(hint_bar enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1)"
+  hint_flag enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1
 
   # pipefail off for THIS pipeline only, exactly as the navigator's
   # `gather_targets | fzf` needs it.  --dirs-list is a slow STREAMING producer --
@@ -4014,7 +4119,7 @@ if [ "${1:-}" = "--dirs" ]; then
     --with-nth=1..2 \
     --nth=1 \
     --prompt='new session ❯ ' \
-    --"$HINT_BAR"="$DIRS_HINTS" \
+    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
     --preview="bash '$SCRIPT_PATH' --dirs-preview {-1}" \
     --preview-window="right,40%,border-left,nowrap" \
     --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints deep {q})${ctrl_f_extra}" \
@@ -4098,8 +4203,10 @@ if [ "${1:-}" = "--footer-for" ]; then
   spec="${2:-}"
   spec="${spec%%	*}"
   hint_set "${spec%%:*}"
-  hint_bar ${HINT_SET[@]+"${HINT_SET[@]}"}
-  echo
+  hint_bar_r ${HINT_SET[@]+"${HINT_SET[@]}"}
+  # Nothing, not a bare newline: an EMPTY transform removes the footer section
+  # and the list reflows into the row, where "\n" leaves a blank bar drawn.
+  [ -n "$REPLY" ] && printf '%s\n' "$REPLY"
   exit 0
 fi
 
@@ -4256,9 +4363,10 @@ if [ "${1:-}" = "--doctor" ]; then
   if command -v fzf >/dev/null 2>&1; then
     if   [ "$FZF_MINOR" -ge 74 ]; then _ok "fzf $(fzf --version | awk '{print $1}') (raw filter mode available)"
     elif [ "$FZF_MINOR" -ge 67 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.74 adds raw mode, which stops the tree collapsing as you type"
-    elif [ "$FZF_MINOR" -ge 63 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.67 adds --freeze-left, which keeps a row's identity while a long command scrolls"
+    elif [ "$FZF_MINOR" -ge 66 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.67 adds --freeze-left, which keeps a row's identity while a long command scrolls"
+    elif [ "$FZF_MINOR" -ge 63 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.66 dims the columns the ^] scope is not searching"
     elif [ "$FZF_MINOR" -ge 58 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.63 moves the key hints to a footer, so the top of the list stops twitching"
-    else _warn "fzf $(fzf --version | awk '{print $1}') — old, but supported (0.58 adds the ^] scope highlight)"
+    else _warn "fzf $(fzf --version | awk '{print $1}') — old, but supported (0.58 adds the ^] match scope)"
     fi
   else
     _bad "fzf is not on PATH"
@@ -4383,7 +4491,7 @@ if [ "${1:-}" = "--doctor" ]; then
     local n="$1" v="$2"
     [ -n "$v" ] || return 0
     case "$n" in
-      show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw)
+      show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw|session-rule|scope-highlight)
         case "$v" in on|off) ;; *) printf "expected 'on' or 'off'" ;; esac ;;
       order)
         case "$v" in mru|index) ;; *) printf "expected 'mru' or 'index'" ;; esac ;;
@@ -4592,6 +4700,7 @@ if [ "${1:-}" = "--jobs" ]; then
   _jwait=""
   fzf_ge 74 && _jwait="wait+"
   HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
+  hint_flag enter cancel 3 ^r reload 1 esc quit 2
   # Same guard as the other two pickers: under `set -o pipefail` an accept that
   # closes the pipe early makes the producer's SIGPIPE (141) mask fzf's status.
   # Nothing reads that status here, but the invariant is the point — the next
@@ -4603,7 +4712,7 @@ if [ "${1:-}" = "--jobs" ]; then
     --with-nth=1 \
     --no-sort \
     --prompt='jobs ❯ ' \
-    --"$HINT_BAR"="$(hint_bar enter cancel 3 ^r reload 1 esc quit 2)" \
+    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
     --bind="enter:${_jwait}execute(bash '$SQ_SCRIPT' --job-cancel {-1})+reload($_jl)" \
     --bind="ctrl-r:reload($_jl)" \
     >/dev/null 2>&1
@@ -4740,6 +4849,7 @@ if [ "${1:-}" = "--dashboard" ]; then
     "jobs"   "Jobs"         "See and cancel scheduled commands")
 
   HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
+  hint_flag enter select 2 esc quit 1
   choice=$(printf '%s\n' "$items" | fzf \
     "${FZF_THEME[@]}" \
     --no-sort \
@@ -4747,7 +4857,7 @@ if [ "${1:-}" = "--dashboard" ]; then
     --delimiter=$'\t' \
     --with-nth=2 \
     --prompt='interdimux ❯ ' \
-    --"$HINT_BAR"="$(hint_bar enter select 2 esc quit 1)" \
+    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
   ) || exit 0
 
   action="${choice%%	*}"
@@ -4896,51 +5006,58 @@ while true; do
   fzf_ge 74 && _wait="wait+"
   case "$INTERDIMUX_MODE" in
     kill)
+      hint_flag enter kill 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='kill ❯ '
-        --"$HINT_BAR"="$(hint_bar enter kill 3 ^r reload 1 esc quit 2)"
+        ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
       )
       ;;
     rename)
+      hint_flag enter rename 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='rename ❯ '
-        --"$HINT_BAR"="$(hint_bar enter rename 3 ^r reload 1 esc quit 2)"
+        ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
       )
       ;;
     zoom)
+      hint_flag enter 'toggle zoom' 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='zoom ❯ '
-        --"$HINT_BAR"="$(hint_bar enter 'toggle zoom' 3 ^r reload 1 esc quit 2)"
+        ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
       )
       ;;
     swap)
+      hint_flag enter swap 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='swap ❯ '
-        --"$HINT_BAR"="$(hint_bar enter swap 3 ^r reload 1 esc quit 2)"
+        ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
       )
       ;;
     detach)
+      hint_flag enter detach 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='detach ❯ '
-        --"$HINT_BAR"="$(hint_bar enter detach 3 ^r reload 1 esc quit 2)"
+        ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
       )
       ;;
     send)
+      hint_flag enter 'send keys' 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='send ❯ '
-        --"$HINT_BAR"="$(hint_bar enter 'send keys' 3 ^r reload 1 esc quit 2)"
+        ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
       )
       ;;
     schedule)
+      hint_flag enter 'schedule a command' 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='schedule ❯ '
-        --"$HINT_BAR"="$(hint_bar enter 'schedule a command' 3 ^r reload 1 esc quit 2)"
+        ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute($ACTION_CMD schedule {-1})+reload($LIST_CMD)"
       )
       ;;
@@ -4961,6 +5078,15 @@ while true; do
       # be told the string before it can draw a first frame.
       hint_pick "$_hint_w" "$INTERDIMUX_HINTS_X"; _hint_x="$REPLY"
 
+      # On the fallback path nothing else re-fits the bar: the `result` bind that
+      # does it inline is gated on INLINE_CALLBACKS, and `focus` does NOT fire on
+      # the reload that ^/ triggers — measured, the bar stayed at the launch rung
+      # and fzf truncated it, which is the exact failure the ladder exists to
+      # remove.  So the two events that change the list width ask for it.
+      _refit=""
+      [ "$INLINE_CALLBACKS" = 1 ] || \
+        _refit="+transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})"
+
       fzf_opts+=(
         --prompt='❯ '
         --print-query
@@ -4976,8 +5102,8 @@ while true; do
         # the reload the rows stay sized for the old geometry (IDEAS #26).
         # A reload used to cost ~195ms, which is why this was deferred; it is
         # ~25ms now.
-        --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload($LIST_CMD)"
-        --bind='resize:reload('"$LIST_CMD"')'
+        --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload($LIST_CMD)$_refit"
+        --bind="resize:reload($LIST_CMD)$_refit"
       )
       # An empty bar means nothing fits at this width.  Passing --footer='' still
       # costs a row (measured — the section is drawn, blank), so omit the flag
@@ -5020,7 +5146,8 @@ while true; do
       _hint_case+=' *) t=$INTERDIMUX_HINTS_X;; esac;'
       _hint_case+=' while [ -n "$t" ]; do x=${t%%|*};'
       _hint_case+=' [ "$x" = "$t" ] && t= || t=${t#*|};'
-      _hint_case+=' [ "${x%%:*}" -le "$c" ] && { printf "%s\n" "${x#*:}"; break; };'
+      _hint_case+=' [ "${x%%:*}" -le "$c" ] || continue;'
+      _hint_case+=' f=${x#*:}; [ -n "$f" ] && printf "%s\n" "$f"; break;'
       _hint_case+=' done'
       if [ "$INLINE_CALLBACKS" = 1 ] && fzf_ge 63; then
         fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR:$_hint_case")
@@ -5028,12 +5155,8 @@ while true; do
         fzf_opts+=(--bind="focus:transform-$HINT_BAR:$_hint_case")
       elif fzf_ge 63; then
         fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
-        # Without the inline path there is no `result` bind to re-fit the bar,
-        # so the two events that change the width have to say so themselves.
-        fzf_opts+=(--bind="resize:reload($LIST_CMD)+transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
       else
         fzf_opts+=(--bind="focus:transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
-        fzf_opts+=(--bind="resize:reload($LIST_CMD)+transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
       fi
       if fzf_ge 58; then
         # Same treatment for the match-scope prompt: FZF_NTH already holds the

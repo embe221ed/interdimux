@@ -50,8 +50,8 @@ A portal gun for your tmux sessions.
 - `tmux` >= 3.2 — popups; >= 3.3 adds popup titles, >= 3.4 the native
   dashboard menu, >= 3.6 live border accents
 - `fzf` >= 0.40 — newer versions unlock extra polish automatically
-  (0.52 full-line highlight, 0.58 match-scope cycling and the scope
-  highlight, 0.61 ghost text, 0.63 the footer hint bar, 0.67 the frozen
+  (0.52 full-line highlight, 0.58 match-scope cycling, 0.61 ghost text,
+  0.63 the footer hint bar, 0.66 the scope highlight, 0.67 the frozen
   identity column, 0.74 raw filter mode)
 - `bash` >= 4.0
 - `fd` or `find` (for directory picker)
@@ -159,7 +159,7 @@ Two more things the picker does with what you can and cannot see:
   (the default) the path column is dimmed; press `Ctrl-]` and the bright band
   moves to whatever the new scope matches. The prompt names the scope, but the
   rows show it. Turn it off with `@interdimux-scope-highlight 'off'`
-  (needs fzf >= 0.58).
+  (needs fzf >= 0.66 — 0.65.1 fixed this exact pattern over coloured rows).
 - **A long command scrolls without taking the row's identity with it.** Matching
   a token deep inside a full command line makes fzf scroll that row sideways;
   the identity column stays pinned, so you can still see which pane you are
@@ -339,7 +339,7 @@ set -g @interdimux-show-git-branch 'on'
 set -g @interdimux-session-rule 'on'
 
 # Dim the columns the current Ctrl-] scope does NOT search (default: on,
-# fzf >= 0.58).  All-or-nothing: fzf cannot re-issue colours mid-session,
+# fzf >= 0.66).  All-or-nothing: fzf cannot re-issue colours mid-session,
 # so at the default 'name+cmd' scope the path column is permanently faint.
 set -g @interdimux-scope-highlight 'on'
 
@@ -348,7 +348,12 @@ set -g @interdimux-scope-highlight 'on'
 set -g @interdimux-order 'mru'
 
 # Extra fzf flags appended to every picker (advanced; applied after the
-# built-in theme so your colors win)
+# built-in theme so your colors win).
+#
+# Two notes now the hints live at the bottom: your own `--header` no longer
+# replaces them, it draws as well — so the picker spends a second chrome row.
+# And a `--with-shell` of your own turns off the inline callbacks, which costs
+# a process per cursor move (see docs/PERFORMANCE.md); everything still works.
 set -g @interdimux-fzf-opts '--color=bg+:237'
 
 # Colon-separated list of directories to search for new sessions (ctrl-o)

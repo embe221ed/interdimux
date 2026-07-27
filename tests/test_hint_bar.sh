@@ -315,7 +315,7 @@ for nth in ${cycle_states[@]+"${cycle_states[@]}"} ""; do
   fi
 done
 
-# The scope is announced in the ROWS too (fzf >= 0.58): `nth:` restyles the
+# The scope is announced in the ROWS too (fzf >= 0.66): `nth:` restyles the
 # searchable fields, so the bright band is the answer to "what am I matching?".
 # --color is parsed at startup and an unknown key is FATAL, so the token has to
 # be exactly right or every picker dies before it draws.
