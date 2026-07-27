@@ -272,6 +272,31 @@ else
   ERRORS+="    got : $(printf '%s' "$caught" | cat -A)"$'\n'
 fi
 
+# --- the at job-runner heads-up: warn when it is down, never block ----------------
+# macOS ships atrun disabled, so an `at`-backed submit there would queue a job
+# that never fires.  interdimux must SAY so — but still queue it (detection is not
+# authoritable enough on every host to justify refusing a real submit).  Drive the
+# state with INTERDIMUX_AT_DAEMON so this does not depend on the host's daemon.
+out=$(INTERDIMUX_AT_DAEMON=down bash "$SCRIPT" --send-at "now + 1 hour" '=target:0' 'echo DOWN_MARKER' 2>&1) || true
+jidd=$(printf '%s' "$out" | grep -oE 'job [0-9]+' | head -1 | awk '{print $2}')
+[ -n "$jidd" ] && SUBMITTED+=("$jidd")
+if [ -n "$jidd" ] && printf '%s' "$out" | grep -qi 'heads-up' \
+   && printf '%s' "$out" | grep -q 'enable it:'; then
+  report "a down job-runner still queues the job but warns it will not fire" pass
+else
+  report "a down job-runner still queues the job but warns it will not fire" fail
+  ERRORS+="$(printf '%s' "$out" | sed 's/^/    /')"$'\n'
+fi
+
+out=$(INTERDIMUX_AT_DAEMON=up bash "$SCRIPT" --send-at "now + 1 hour" '=target:0' 'echo UP_MARKER' 2>&1) || true
+jidu=$(printf '%s' "$out" | grep -oE 'job [0-9]+' | head -1 | awk '{print $2}')
+[ -n "$jidu" ] && SUBMITTED+=("$jidu")
+if [ -n "$jidu" ] && ! printf '%s' "$out" | grep -qi 'heads-up'; then
+  report "an up job-runner submits with no heads-up noise" pass
+else
+  report "an up job-runner submits with no heads-up noise" fail
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

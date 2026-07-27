@@ -186,6 +186,26 @@ else
   report "the confirmation screen shows the resolved fire time" fail
 fi
 
+# The Scheduled dialog must not promise a job it cannot keep: when at's job-runner
+# is off (macOS ships atrun disabled) a bare green ✓ is a lie, so the dialog gains
+# a red "won't fire" line.  INTERDIMUX_AT_DAEMON drives the probe so this does not
+# depend on the host's daemon; it must be EXPORTED to reach the --action child.
+export INTERDIMUX_AT_DAEMON=down
+run_schedule "P:sched:0:0" '11h' 'echo SCHEDUI_DAEMON_DOWN' 'x'
+if [ -n "$NEW_JOB" ] && grep -q "won't fire" "$OUT_FILE" 2>/dev/null; then
+  report "the Scheduled dialog warns when at's job-runner is off" pass
+else
+  report "the Scheduled dialog warns when at's job-runner is off" fail
+fi
+export INTERDIMUX_AT_DAEMON=up
+run_schedule "P:sched:0:0" '12h' 'echo SCHEDUI_DAEMON_UP' 'x'
+if [ -n "$NEW_JOB" ] && ! grep -q "won't fire" "$OUT_FILE" 2>/dev/null; then
+  report "the Scheduled dialog stays quiet when the job-runner is up" pass
+else
+  report "the Scheduled dialog stays quiet when the job-runner is up" fail
+fi
+unset INTERDIMUX_AT_DAEMON
+
 # ---------------------------------------------------------------------------
 # 2. a window row narrows to that window's ACTIVE pane — it does not broadcast
 # ---------------------------------------------------------------------------

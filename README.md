@@ -392,12 +392,19 @@ and skips (with a message) rather than misfire.
 Two more things worth knowing. interdimux uses its own `at` queue, so
 `--sched-list` and `--sched-cancel` can never see or delete your unrelated `at`
 jobs. And job output goes to
-`~/.local/state/interdimux/scheduled.log` — `atd` mails it otherwise, which on a
-box with no MTA means it is destroyed and the job merely *looks* like it never
-ran.
+`~/.local/state/interdimux/scheduled.log` — the `at` daemon (`atd` on Linux,
+`atrun` on macOS) mails it otherwise, which on a box with no MTA means it is
+destroyed and the job merely *looks* like it never ran.
 
 Sub-minute jobs use `run-shell -d`, which lives inside the tmux server: they are
 lost if the server exits. `at` jobs survive a reboot.
+
+`at`-backed jobs (anything ≥ 1 minute) only fire if the OS `at` daemon is
+running. **macOS ships `atrun` disabled by default**, so a freshly scheduled job
+queues but never runs; enable it once with
+`sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.atrun.plist`
+(Linux: `sudo systemctl enable --now atd`). Run `--doctor` to check — it reports
+whether the job-runner is active.
 
 ### Startup commands
 

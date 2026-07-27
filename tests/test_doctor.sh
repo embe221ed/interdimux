@@ -41,6 +41,14 @@ export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -a -F '#{pane_id}' | head -1)"
 export XDG_DATA_HOME="$TMPD/data" XDG_STATE_HOME="$TMPD/state"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307
+# --doctor probes the live `at` job-runner (atd/atrun).  Its real state is a
+# machine-global toggle that lives outside the repo — on a box with `at`
+# installed but its daemon stopped (a default macOS is exactly this), the probe
+# says "not active" and --doctor exits 1, which would make "a healthy install
+# exits 0" flake for reasons the suite does not control.  Pin it, the same way
+# INTERDIMUX_FZF_MINOR/TMUX_VNUM pin the version probes; the down/unknown paths
+# get their own assertions below that override it locally.
+export INTERDIMUX_AT_DAEMON=up
 
 setopt()   { tmux -L "$SOCK" set -g "@interdimux-$1" "$2"; }
 unsetopt() { tmux -L "$SOCK" set -gu "@interdimux-$1" 2>/dev/null || true; }
@@ -303,6 +311,43 @@ for v in 'deep' '40'; do
   fi
   unsetopt scan-depth
 done
+
+# --- the at job-runner check reports each state correctly ------------------------
+# Only meaningful where `at` is installed; where it is not, --doctor takes the
+# "at is not installed" warning branch and never probes the daemon at all.
+if command -v at >/dev/null 2>&1; then
+  # down: a real problem — flagged red, with the enable command, and it makes
+  # --doctor exit non-zero (a queued job that never fires is the whole point).
+  out=$(INTERDIMUX_AT_DAEMON=down doctor)
+  if printf '%s' "$out" | grep -q "✗ at's job-runner is not active" \
+     && printf '%s' "$out" | grep -q 'enable it:'; then
+    report "a stopped at job-runner is flagged with how to fix it" pass
+  else
+    report "a stopped at job-runner is flagged with how to fix it" fail
+    ERRORS+="$(printf '%s' "$out" | grep -i 'job-runner\|enable' | sed 's/^/    /')"$'\n'
+  fi
+  if [ "$(INTERDIMUX_AT_DAEMON=down doctor_rc)" = 1 ]; then
+    report "a stopped at job-runner makes --doctor exit non-zero" pass
+  else
+    report "a stopped at job-runner makes --doctor exit non-zero" fail
+  fi
+  # unknown (BSD / no pgrep): we cannot tell, so it is a NOTE, never a failure —
+  # the false "not active" alarm is exactly what this must not do.
+  out=$(INTERDIMUX_AT_DAEMON=unknown doctor)
+  if printf '%s' "$out" | grep -q 'could not verify' \
+     && ! printf '%s' "$out" | grep -q "✗ at's job-runner"; then
+    report "an unverifiable at job-runner is a note, not an alarm" pass
+  else
+    report "an unverifiable at job-runner is a note, not an alarm" fail
+  fi
+  if [ "$(INTERDIMUX_AT_DAEMON=unknown doctor_rc)" = 0 ]; then
+    report "an unverifiable at job-runner does not fail --doctor" pass
+  else
+    report "an unverifiable at job-runner does not fail --doctor" fail
+  fi
+else
+  echo "  (skipped at job-runner checks: 'at' is not installed)"
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

@@ -2562,6 +2562,57 @@ at_mail_flag() {
   printf '%s' "$_AT_MFLAG"
 }
 
+# The state of the daemon that RUNS queued `at` jobs, echoed as up|down|unknown.
+# Without an active runner `at` still ACCEPTS and queues jobs — submission
+# succeeds — but nothing ever fires them: the silent scheduled-deploy-that-never-
+# happens.  The runner, and how you ask after it, differ by OS:
+#   Linux (atd):  a persistent process, so `pgrep -x atd` is the tell.
+#   macOS (atrun): launchd spawns /usr/libexec/atrun on a 30s StartInterval and
+#     it exits between ticks, so it is NOT a persistent process — pgrep is blind
+#     to it, and `launchctl list com.apple.atrun` returns 113 for a SYSTEM-domain
+#     job unless you are root (the check that wrongly read "disabled" even once it
+#     was enabled).  `launchctl print system/<label>` reads the system domain
+#     WITHOUT root and exits 0 only when the job is bootstrapped = will run on its
+#     interval; 113 when it is not.  Verified against a real firing.  Key on the
+#     EXIT CODE, never on "state = running" — atrun is "not running" at most
+#     instants by design.  macOS ships atrun disabled by default.  (Bootstrapped
+#     is not quite "enabled": a job you `launchctl disable` while still loaded can
+#     print 0 yet not run.  That is a deliberate, self-inflicted state; the common
+#     enabled/disabled cases both map correctly, so we accept the tiny blind spot
+#     rather than pay a second launchctl round-trip on every schedule.)
+#   BSD / no pgrep:  the runner is cron's own atrun and there is no atd process to
+#     find, or we simply cannot look — report "unknown" and never cry wolf, rather
+#     than assert a false "down" the way a bare pgrep check would.
+# INTERDIMUX_AT_DAEMON overrides the probe (up|down|unknown) so tests can drive
+# every branch without a machine-global daemon toggle.
+at_daemon_state() {
+  case "${INTERDIMUX_AT_DAEMON:-}" in
+    up|on|1|yes)   printf up;      return ;;
+    down|off|0|no) printf down;    return ;;
+    unknown)       printf unknown; return ;;
+  esac
+  case "$(uname -s)" in
+    Darwin)
+      if launchctl print system/com.apple.atrun >/dev/null 2>&1; then printf up; else printf down; fi ;;
+    Linux)
+      command -v pgrep >/dev/null 2>&1 || { printf unknown; return; }
+      if pgrep -x atd >/dev/null 2>&1; then printf up; else printf down; fi ;;
+    *) printf unknown ;;
+  esac
+}
+
+# The one-time command that enables at's job-runner.  Only ever shown for a
+# CONFIRMED-down runner, which is macOS or Linux — BSD/unknown never reaches here.
+# macOS `load -w` is nominally deprecated but still works (verified — a job fired
+# afterwards).
+at_enable_hint() {
+  case "$(uname -s)" in
+    Darwin) printf '%s' 'sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.atrun.plist' ;;
+    Linux)  printf '%s' 'sudo systemctl enable --now atd' ;;
+    *)      printf '%s' "ensure your system's at job-runner (atd, or cron's atrun) is enabled" ;;
+  esac
+}
+
 # Resolve a user-supplied target to a stable pane id, plus the socket and the
 # server pid the job will be validated against.  Sets SCHED_PANE/SOCK/SRVPID.
 sched_resolve() {
@@ -2727,6 +2778,16 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
   printf 'interdimux: %s -> %s (%s)\n' \
     "$(printf '%s' "$_out" | sed -n 's/^job \([0-9]*\) at \(.*\)$/job \1 at \2/p' | head -1)" \
     "$SCHED_LABEL" "$SCHED_PANE"
+  # The job is QUEUED, not guaranteed to fire: with at's job-runner inactive
+  # (atd on Linux; atrun on macOS, which ships disabled) it sits in the queue
+  # forever.  Warn, never fail — the success line above stays on stdout so the
+  # dashboard and tests still parse it, and a queued job is a real job; refusing
+  # a submit on a check we cannot make authoritative on every host would be worse
+  # than the heads-up.
+  if [ "$(at_daemon_state)" = down ]; then
+    echo "interdimux: heads-up — at's job-runner is not active, so this will queue but not fire." >&2
+    echo "  enable it: $(at_enable_hint)" >&2
+  fi
   exit 0
 fi
 
@@ -3455,7 +3516,7 @@ if [ "${1:-}" = "--action" ]; then
     schedule)
       if ! command -v at >/dev/null 2>&1; then
         info_flash "$BOLD_AMBER" "Schedule" "'at' is not installed." \
-          "Without it only sub-minute delays work." "Install it, then enable atd."
+          "Without it only sub-minute delays work." "Install it, then enable its job-runner."
         exit 0
       fi
 
@@ -3547,10 +3608,19 @@ if [ "${1:-}" = "--action" ]; then
         # is tomorrow, and "13:00" typed at 13:31 is also tomorrow.  Undo is
         # offered here rather than making the user go find the Jobs view, which
         # is where they would only look if they already suspected a mistake.
-        dialog_open "$BOLD_AMBER" "Scheduled" \
-          "${GREEN}✓${RST} ${BOLD}${sched_at}${RST}" \
-          "${DIM}→${RST} ${SCHED_LABEL} ${DIM}(${SCHED_PANE})${RST}" \
+        sched_dlg=(
+          "${GREEN}✓${RST} ${BOLD}${sched_at}${RST}"
+          "${DIM}→${RST} ${SCHED_LABEL} ${DIM}(${SCHED_PANE})${RST}"
           "${DIM}\$${RST} ${sched_cmd_disp}"
+        )
+        # The job is queued; it only RUNS if at's job-runner is active (atd, or
+        # atrun on macOS — which ships disabled).  A bare green ✓ would be a lie
+        # on such a host, so surface the one thing between "scheduled" and "ran".
+        # Only when the runner is CONFIRMED down — never on an "unknown" probe.
+        if [ "$(at_daemon_state)" = down ]; then
+          sched_dlg+=( "${RED}won't fire — at's job-runner is off (see --doctor)${RST}" )
+        fi
+        dialog_open "$BOLD_AMBER" "Scheduled" "${sched_dlg[@]}"
         dialog_status "$(hint u undo 'any key' close)"
         drain_input
         sched_key=""
@@ -3974,20 +4044,21 @@ if [ "${1:-}" = "--doctor" ]; then
 
   if command -v at >/dev/null 2>&1; then
     _ok "at is installed (Schedule, --send-at / --send-in beyond a minute)"
-    # `at` without a running atd accepts jobs, queues them, and never fires
+    # `at` without its job-runner accepts jobs, queues them, and never fires
     # them — silently.  The only symptom is a command that did not run, hours
-    # later, which is exactly the failure this tool must not have.
-    if command -v pgrep >/dev/null 2>&1; then
-      if pgrep -x atd >/dev/null 2>&1; then
-        _ok "atd is running — scheduled jobs will fire"
-      else
-        _bad "atd is not running — scheduled jobs will queue but never fire"
-        _note "start it: sudo systemctl enable --now atd"
-      fi
-    fi
+    # later, which is exactly the failure this tool must not have.  The runner is
+    # atd on Linux and atrun (launchd) on macOS; at_daemon_state knows the
+    # difference and reads each without root, and says so honestly when it cannot
+    # tell (BSD's cron-atrun, or a host without pgrep) rather than crying wolf.
+    case "$(at_daemon_state)" in
+      up)   _ok "at's job-runner is active — scheduled jobs will fire" ;;
+      down) _bad "at's job-runner is not active — jobs would queue but never fire"
+            _note "enable it: $(at_enable_hint)" ;;
+      *)    _note "could not verify at's job-runner from here — ensure it is enabled" ;;
+    esac
   else
     _warn "at is not installed — only sub-minute delays work (tmux's own timer)"
-    _note "install it, then enable atd, for the Schedule entry in the dashboard"
+    _note "install it, then enable its job-runner, for the dashboard's Schedule entry"
   fi
 
   # A '#' is handled (SQ_SCRIPT_FMT doubles it, so tmux's format expansion gives
