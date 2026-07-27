@@ -2561,8 +2561,18 @@ sched_job_body() {
   shq "$srvpid";       q_want="$REPLY"
   shq "$pane";         q_pane="$REPLY"
   shq "$keys";         q_keys="$REPLY"
+  # One field per line, each "rest of line".  The single-line form packed all
+  # three into "pane=… target=… desc=…", which stops being parseable the moment
+  # a session name contains a space or the literal "desc=" — and tmux allows
+  # both.  The marker line keeps its trailing text so `grep '^# imux:v1 '` still
+  # identifies one of our jobs.
+  local q_desc
+  q_desc=$(printf '%s' "$keys" | tr '\n' ' ')
   printf '%s\n' \
-    "# imux:v1 pane=${pane} target=${label} desc=$(printf '%s' "$keys" | tr '\n' ' ')" \
+    "# imux:v1 interdimux scheduled keys" \
+    "# imux-pane: ${pane}" \
+    "# imux-target: ${label}" \
+    "# imux-desc: ${q_desc}" \
     "# atd tries to MAIL a job's output.  With no MTA installed that output is" \
     "# destroyed and leaves only 'Exec failed for mail command' in the journal --" \
     "# which reads exactly like 'my job never ran'.  Log instead of discarding." \
@@ -2581,6 +2591,47 @@ sched_job_body() {
     "fi" \
     "tmux -S \"\$sock\" send-keys -t \"\$pane\" -- ${q_keys} 2>/dev/null || exit 0" \
     "tmux -S \"\$sock\" send-keys -t \"\$pane\" Enter 2>/dev/null"
+}
+
+# One line per queued interdimux job:  id US when US target US pane US desc
+#
+# --sched-list (human columns), the Jobs picker, and the cancel dialog all read
+# this, so the `at -c` parsing lives in exactly one place.
+#
+# Two things this gets right that the inline version did not:
+#   * atq's default time column starts with the DAY NAME, so `sort -k2` ordered
+#     jobs Fri < Mon < Sat rather than chronologically.  -o gives a sortable
+#     stamp.  BSD at (macOS) has no -o, so fall back to its own ordering.
+#   * the header fields are read positionally from their own lines, so a session
+#     name containing a space or "desc=" cannot shift them.
+sched_rows() {
+  local rows id when ln pane target desc seen
+  if rows=$(atq -q "$SCHED_QUEUE" -o '%Y-%m-%d %H:%M' 2>/dev/null); then
+    rows=$(printf '%s\n' "$rows" | sort -k2)
+  else
+    rows=$(atq -q "$SCHED_QUEUE" 2>/dev/null)
+  fi
+  while IFS=$'\t' read -r id when; do
+    [ -n "$id" ] || continue
+    when="${when%" $SCHED_QUEUE "*}"     # drop the trailing "<queue> <user>"
+    pane="" target="" desc="" seen=0
+    while IFS= read -r ln; do
+      # at -c replays the whole submitting environment first, and one of those
+      # values could contain a line that looks like a header field.  Only trust
+      # what follows our own marker, and stop at the first line that is not one.
+      if [ "$seen" = 0 ]; then
+        case "$ln" in '# imux:v1 '*) seen=1 ;; esac
+        continue
+      fi
+      case "$ln" in
+        '# imux-pane: '*)   pane="${ln#\# imux-pane: }" ;;
+        '# imux-target: '*) target="${ln#\# imux-target: }" ;;
+        '# imux-desc: '*)   desc="${ln#\# imux-desc: }" ;;
+        *) break ;;
+      esac
+    done < <(at -c "$id" 2>/dev/null)
+    printf '%s\n' "$id$US$when$US${target:-?}$US${pane:-?}$US${desc:-?}"
+  done < <(printf '%s\n' "$rows")
 }
 
 if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
@@ -2642,13 +2693,11 @@ if [ "${1:-}" = "--sched-list" ]; then
   set +e
   command -v atq >/dev/null 2>&1 || { echo "interdimux: 'at' is not installed" >&2; exit 1; }
   _n=0
-  while read -r _id _rest; do
+  while IFS="$US" read -r _id _when _tgt _pane _desc; do
     [ -n "$_id" ] || continue
     _n=$((_n + 1))
-    _desc=$(at -c "$_id" 2>/dev/null | sed -n 's/^# imux:v1 .*desc=//p' | head -1)
-    _tgt=$(at -c "$_id" 2>/dev/null | sed -n 's/^# imux:v1 pane=[^ ]* target=\([^ ]*\).*/\1/p' | head -1)
-    printf '%-6s %-30s %-22s %s\n' "$_id" "${_rest% i *}" "${_tgt:-?}" "${_desc:-?}"
-  done < <(atq -q "$SCHED_QUEUE" 2>/dev/null | sort -k2)
+    printf '%-6s %-18s %-22s %-6s %s\n' "$_id" "$_when" "$_tgt" "$_pane" "$_desc"
+  done < <(sched_rows)
   [ "$_n" -eq 0 ] && echo "interdimux: no scheduled keys"
   exit 0
 fi
@@ -2916,7 +2965,7 @@ dialog_open() {
       printf '\033[%d;%dH%s' "$r" $(( DLG_LEFT + 4 )) "$REPLY"
       r=$(( r + 1 ))
     done
-  } >"$tty_out"
+  } >>"$tty_out"
 }
 
 # Write a hint/status line on the reserved row inside the box
@@ -2927,18 +2976,42 @@ dialog_status() {
   dlg_fit "$text" $(( DLG_W - 8 ))
   printf '\033[%d;%dH%s\033[%d;%dH%s' \
     "$r" $(( DLG_LEFT + 4 )) "$sp" \
-    "$r" $(( DLG_LEFT + 4 )) "$REPLY" >"$tty_out"
+    "$r" $(( DLG_LEFT + 4 )) "$REPLY" >>"$tty_out"
 }
 
 dialog_close() {
-  printf '\033[?25h' >"$tty_out"
+  # >> not >, for the same reason _action_cleanup uses it: INTERDIMUX_TTY_OUT can
+  # be a regular file (that is how the dialogs are tested) and > TRUNCATES it, so
+  # closing a dialog silently erased every frame the flow had drawn.  Identical
+  # on a real tty.
+  printf '\033[?25h' >>"$tty_out"
+}
+
+# ONE input fd for the whole process, opened on first use.
+#
+# `read < "$tty_in"` per call is correct for a tty — each open continues the
+# terminal's key queue — but it REWINDS a regular file to offset 0, so a flow
+# with two prompts read its first answer forever.  input_dialog already knew
+# this and held one fd for the duration of a single call; a flow like Schedule
+# asks twice, so the fd has to outlive the call.  Left open until exit.
+#
+# Sets REPLY to the fd number.  Returns non-zero if the source cannot be opened,
+# which the callers treat as "no input" rather than blocking.
+_tty_fd=""
+tty_fd() {
+  if [ -z "$_tty_fd" ]; then
+    exec {_tty_fd}<"$tty_in" 2>/dev/null || { _tty_fd=""; return 1; }
+  fi
+  REPLY="$_tty_fd"
 }
 
 # Drain pending input (only on a real tty — a test fixture file would
 # be consumed by the read loop)
 drain_input() {
   [ -c "$tty_in" ] || return 0
-  while IFS= read -rsn1 -t 0.01 _ <"$tty_in"; do :; done
+  tty_fd || return 0
+  local fd="$REPLY"
+  while IFS= read -rsn1 -t 0.01 -u "$fd" _; do :; done
 }
 
 # confirm_dialog ACCENT TITLE [BODY...] → 0 when confirmed with y/Y
@@ -2948,8 +3021,14 @@ confirm_dialog() {
   dialog_open "$accent" "$title" "$@"
   dialog_status "$(hint y confirm n/esc cancel)"
   drain_input
-  local key=""
-  IFS= read -rsn1 key <"$tty_in" 2>/dev/null
+  local key="" fd
+  tty_fd || return 1        # nothing to read from → treat as "not confirmed"
+  fd="$REPLY"
+  # -u BEFORE the variable name: bash stops parsing options at the first
+  # non-option word, so `read -rsn1 key -u "$fd"` reads STDIN and treats -u and
+  # the fd number as two more variable names.  It fails silently — the key comes
+  # back empty, which here reads as "the user did not confirm".
+  IFS= read -rsn1 -u "$fd" key 2>/dev/null
   if [ "$key" = $'\x1b' ]; then
     drain_input   # swallow escape-sequence tails (arrow keys, etc.)
     return 1
@@ -2957,8 +3036,13 @@ confirm_dialog() {
   [[ "$key" =~ ^[yY]$ ]]
 }
 
-# input_dialog ACCENT TITLE PROMPT INITIAL — a single-line text editor drawn
-# inside the dialog box.  Sets REPLY (empty = cancelled).
+# input_dialog ACCENT TITLE PROMPT INITIAL [NOTE] — a single-line text editor
+# drawn inside the dialog box.  Sets REPLY (empty = cancelled).
+#
+# NOTE, when given, is drawn as a second body row under the field.  It goes
+# there rather than in the status line because dialog_open sizes the box to fit
+# its body rows, so a format hint widens the frame — while dialog_status is
+# clamped to whatever width the box already has and would ellipsise it.
 #
 # Hand-rolled instead of `read -e`: readline owns the whole physical terminal
 # line (column 0 → terminal width) and knows nothing about the box, so it
@@ -2969,7 +3053,12 @@ confirm_dialog() {
 # Runs under the --action handler's `set +e`, so bare (( … )) tests are safe.
 input_dialog() {
   local accent="$1" title="$2" prompt="$3" initial="$4"
-  dialog_open "$accent" "$title" ""
+  local note="${5:-}"
+  if [ -n "$note" ]; then
+    dialog_open "$accent" "$title" "" "$note"
+  else
+    dialog_open "$accent" "$title" ""
+  fi
   dialog_status "${DIM}enter apply · esc cancel${RST}"
 
   local irow=$(( DLG_TOP + 2 ))
@@ -2981,16 +3070,16 @@ input_dialog() {
 
   # The prompt is static — draw it once; the loop only repaints the field.
   printf '\033[%d;%dH%s%s%s\033[?25h' \
-    "$irow" "$col_prompt" "$accent" "$prompt" "$RST" >"$tty_out"
+    "$irow" "$col_prompt" "$accent" "$prompt" "$RST" >>"$tty_out"
 
   local buf="$initial" pos=${#initial} scroll=0
   drain_input
 
-  # Read the input source through ONE fd.  Re-opening `<"$tty_in"` per read
-  # works for a tty (each open reads the next queued key) but rewinds a regular
-  # file to offset 0 every time — an infinite loop when input comes from a
-  # fixture file (tests) or any non-tty.  A single fd advances for both.
-  local ifd; exec {ifd}<"$tty_in"
+  # Read the input source through the process-wide fd (see tty_fd): re-opening
+  # `<"$tty_in"` rewinds a regular file to offset 0, which is an infinite loop
+  # within one call and a repeated first answer across two.
+  local ifd
+  if tty_fd; then ifd="$REPLY"; else REPLY=""; return 0; fi
   # On a real terminal, edit in raw/no-echo mode for the duration so fast keys
   # arriving between reads aren't echoed over the box, and Ctrl-C cancels
   # cleanly (delivered as a byte, not SIGINT).  Skipped for non-ttys.
@@ -3003,6 +3092,12 @@ input_dialog() {
     [ -n "$saved_stty" ] && stty -echo -icanon -isig min 1 time 0 <"$tty_in" 2>/dev/null
   fi
 
+  # Published so a caller that LOOPS on this dialog can tell "the user pressed
+  # Enter" from "the input source is exhausted".  Without it, the Schedule
+  # retry loop re-submitted the same rejected time forever on a closed stdin —
+  # EOF is accepted below as "take what we have", which is right for one prompt
+  # and non-terminating for a loop.
+  _input_eof=0
   local c c2 c3 c4 vis pad len
   while true; do
     len=${#buf}
@@ -3015,9 +3110,9 @@ input_dialog() {
     # [field_start, field_end], so the borders are never touched
     printf '\033[%d;%dH%s%s\033[%d;%dH' \
       "$irow" "$field_start" "$vis" "$pad" \
-      "$irow" $(( field_start + pos - scroll )) >"$tty_out"
+      "$irow" $(( field_start + pos - scroll )) >>"$tty_out"
 
-    IFS= read -rsN1 -u "$ifd" c || c=$'\n'   # EOF → accept what we have
+    IFS= read -rsN1 -u "$ifd" c || { _input_eof=1; c=$'\n'; }   # EOF → accept what we have
     case "$c" in
       $'\n'|$'\r') break ;;                                  # accept
       $'\x1b')                                               # ESC: a sequence, or lone → cancel
@@ -3056,7 +3151,7 @@ input_dialog() {
 
   [ -n "$saved_stty" ] && stty "$saved_stty" <"$tty_in" 2>/dev/null
   _saved_stty_global=""
-  exec {ifd}<&-
+  # NOT closed: the fd is shared with every other dialog in this process.
   REPLY="$buf"
 }
 
@@ -3316,6 +3411,128 @@ if [ "${1:-}" = "--action" ]; then
       dialog_close
       ;;
 
+    schedule)
+      if ! command -v at >/dev/null 2>&1; then
+        info_flash "$BOLD_AMBER" "Schedule" "'at' is not installed." \
+          "Without it only sub-minute delays work." "Install it, then enable atd."
+        exit 0
+      fi
+
+      # A scheduled command fires into ONE pane, and the job body carries one
+      # pane id.  Fanning it out the way ctrl-t's send does is almost never what
+      # you meant for something that runs unattended an hour later, so a window
+      # or session row resolves to its ACTIVE pane — and the dialog names the
+      # pane it chose, so the narrowing is never silent.
+      case "$SPEC_TYPE" in
+        S) sched_pick="=${SPEC_SESSION}:" ;;
+        *) sched_pick="$target" ;;
+      esac
+      if ! sched_resolve "$sched_pick"; then
+        info_flash "$BOLD_AMBER" "Schedule" "Could not resolve a pane for ${label}."
+        exit 0
+      fi
+
+      sched_when="" sched_cmd="" sched_out="" sched_rc=0
+      sched_note="${DIM}5m · 90m · 2h · 17:30 · 1:10am · noon tomorrow${RST}"
+      while true; do
+        input_dialog "$BOLD_AMBER" "Schedule → ${SCHED_LABEL}" "when ❯ " "$sched_when" "$sched_note"
+        sched_when="$REPLY"
+        [ -n "$sched_when" ] || { dialog_close; exit 0; }
+
+        # Asked once and kept across a retry: a rejected time must not cost the
+        # user the command they already typed.
+        if [ -z "$sched_cmd" ]; then
+          input_dialog "$BOLD_AMBER" "Schedule ${sched_when} → ${SCHED_LABEL}" "❯ " "" \
+            "${DIM}sent as keys, then Enter${RST}"
+          sched_cmd="$REPLY"
+          [ -n "$sched_cmd" ] || { dialog_close; exit 0; }
+        fi
+
+        # Relative shorthand.  `at` rejects a bare 1-3 digit number outright
+        # ("Garbled time" — probed on this host) and needs four digits for HHMM,
+        # so reading 1-3 digits as MINUTES extends its grammar without shadowing
+        # anything it accepts: 1730 still means 17:30.  10# because a leading
+        # zero would otherwise be parsed as octal, and 09 is not a number.
+        sched_secs=""
+        if [[ "$sched_when" =~ ^([0-9]+)([smhd])$ ]]; then
+          case "${BASH_REMATCH[2]}" in
+            s) sched_secs=$(( 10#${BASH_REMATCH[1]} )) ;;
+            m) sched_secs=$(( 10#${BASH_REMATCH[1]} * 60 )) ;;
+            h) sched_secs=$(( 10#${BASH_REMATCH[1]} * 3600 )) ;;
+            d) sched_secs=$(( 10#${BASH_REMATCH[1]} * 86400 )) ;;
+          esac
+        elif [[ "$sched_when" =~ ^[0-9]{1,3}$ ]]; then
+          sched_secs=$(( 10#$sched_when * 60 ))
+        fi
+
+        # Submit through our own CLI rather than re-implementing the job body:
+        # the server-pid guard, the explicit socket, and the POSIX quoting for
+        # atd's /bin/sh all live there and must not be forked into two copies.
+        if [ -n "$sched_secs" ]; then
+          sched_out=$(bash "$SCRIPT_PATH" --send-in "$sched_secs" "$SCHED_PANE" "$sched_cmd" 2>&1)
+        else
+          sched_out=$(bash "$SCRIPT_PATH" --send-at "$sched_when" "$SCHED_PANE" "$sched_cmd" 2>&1)
+        fi
+        sched_rc=$?
+        [ "$sched_rc" -eq 0 ] && break
+
+        # Nothing left to read: retrying would resubmit the same rejected spec
+        # forever, because input_dialog accepts at EOF rather than cancelling.
+        if [ "${_input_eof:-0}" = 1 ]; then
+          dialog_status "${RED}✗ ${sched_when} was refused${RST}"
+          dialog_close
+          exit 0
+        fi
+
+        # at's own complaint is the useful one ("Problem in hours
+        # specification…"); our "at rejected the time spec" line only repeats
+        # what the user just typed.  Re-open the field that was wrong, keeping
+        # its value so a one-character typo is a one-character fix.
+        sched_msg=$(printf '%s\n' "$sched_out" | grep -v '^interdimux:' | head -1)
+        [ -n "$sched_msg" ] || sched_msg=$(printf '%s\n' "$sched_out" | head -1)
+        sched_note="${RED}✗ ${sched_msg}${RST}"
+      done
+
+      # "interdimux: job 5 at Mon Jul 28 01:10:00 2026 -> sess:0.0 (%3)"
+      sched_job="" sched_at=""
+      _sched_re='^interdimux: job ([0-9]+) at (.*) -> '
+      if [[ "$sched_out" =~ $_sched_re ]]; then
+        sched_job="${BASH_REMATCH[1]}"; sched_at="${BASH_REMATCH[2]}"
+      fi
+
+      dlg_fit "$sched_cmd" 60; sched_cmd_disp="$REPLY"
+      if [ -n "$sched_job" ]; then
+        # Showing the RESOLVED time is the whole point of this screen: "1:10am"
+        # is tomorrow, and "13:00" typed at 13:31 is also tomorrow.  Undo is
+        # offered here rather than making the user go find the Jobs view, which
+        # is where they would only look if they already suspected a mistake.
+        dialog_open "$BOLD_AMBER" "Scheduled" \
+          "${GREEN}✓${RST} ${BOLD}${sched_at}${RST}" \
+          "${DIM}→${RST} ${SCHED_LABEL} ${DIM}(${SCHED_PANE})${RST}" \
+          "${DIM}\$${RST} ${sched_cmd_disp}"
+        dialog_status "$(hint u undo 'any key' close)"
+        drain_input
+        sched_key=""
+        tty_fd && IFS= read -rsn1 -u "$REPLY" sched_key 2>/dev/null
+        if [[ "$sched_key" =~ ^[uU]$ ]]; then
+          if bash "$SCRIPT_PATH" --sched-cancel "$sched_job" >/dev/null 2>&1; then
+            dialog_status "${GREEN}✓ cancelled job ${sched_job}${RST}"
+          else
+            dialog_status "${RED}✗ could not cancel job ${sched_job}${RST}"
+          fi
+          sleep 0.5
+        fi
+      else
+        # The sub-minute path runs on a tmux timer, which has no job id to
+        # cancel and dies with the server.  Say so rather than imply a queue.
+        info_flash "$BOLD_AMBER" "Scheduled" \
+          "${GREEN}✓${RST} in ${sched_when} ${DIM}→${RST} ${SCHED_LABEL} ${DIM}(${SCHED_PANE})${RST}" \
+          "${DIM}\$${RST} ${sched_cmd_disp}" \
+          "${DIM}tmux timer — cannot be cancelled, lost if the server exits${RST}"
+      fi
+      dialog_close
+      ;;
+
     swap)
       case "$SPEC_TYPE" in
         W|P) ;;
@@ -3346,7 +3563,7 @@ if [ "${1:-}" = "--action" ]; then
       # A session name can contain a newline, which a prompt cannot.
       _swap_src="${_swap_src//$'\n'/ }"
 
-      printf '\033[2J\033[H' >"$tty_out"
+      printf '\033[2J\033[H' >>"$tty_out"
       dest=$(printf '%s\n' "$swap_list" | fzf \
         "${FZF_THEME[@]}" \
         --delimiter=$'\t' \
@@ -3714,9 +3931,23 @@ if [ "${1:-}" = "--doctor" ]; then
     _note "build it with: (cd '$_repo/rust' && cargo build --release)"
   fi
 
-  command -v at >/dev/null 2>&1 \
-    && _ok "at is installed (--send-at / --send-in beyond a minute)" \
-    || _warn "at is not installed — only sub-minute --send-in works (tmux's own timer)"
+  if command -v at >/dev/null 2>&1; then
+    _ok "at is installed (Schedule, --send-at / --send-in beyond a minute)"
+    # `at` without a running atd accepts jobs, queues them, and never fires
+    # them — silently.  The only symptom is a command that did not run, hours
+    # later, which is exactly the failure this tool must not have.
+    if command -v pgrep >/dev/null 2>&1; then
+      if pgrep -x atd >/dev/null 2>&1; then
+        _ok "atd is running — scheduled jobs will fire"
+      else
+        _bad "atd is not running — scheduled jobs will queue but never fire"
+        _note "start it: sudo systemctl enable --now atd"
+      fi
+    fi
+  else
+    _warn "at is not installed — only sub-minute delays work (tmux's own timer)"
+    _note "install it, then enable atd, for the Schedule entry in the dashboard"
+  fi
 
   # A '#' is handled (SQ_SCRIPT_FMT doubles it, so tmux's format expansion gives
   # the path back).  A single quote is NOT: verified by driving a real key press
@@ -3879,6 +4110,8 @@ if [ "${1:-}" = "--launch" ]; then
     detach) title=' interdimux · detach ' ;;
     send)   title=' interdimux · send keys ' ;;
     dirs)   title=' interdimux · new session ' ;;
+    schedule) title=' interdimux · schedule ' ;;
+    jobs)     title=' interdimux · scheduled jobs ' ;;
   esac
 
   sp="$SQ_SCRIPT"
@@ -3903,6 +4136,8 @@ if [ "${1:-}" = "--launch" ]; then
       # display-popup to run-shell as a "returned 1" status message —
       # absorb it here
       dirs)   chrome+=(-e "INTERDIMUX_MODE=dirs"); cmd="bash '$sp' --dirs || true" ;;
+      # Not a picker over tmux targets — its own list, its own handler.
+      jobs)   cmd="bash '$sp' --jobs" ;;
       switch) cmd="bash '$sp'" ;;
       *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="bash '$sp'" ;;
     esac
@@ -3910,6 +4145,7 @@ if [ "${1:-}" = "--launch" ]; then
     env_fwd=$(build_env_fwd)
     case "$mode" in
       dirs)   cmd="$env_fwd bash '$sp' --dirs || true" ;;
+      jobs)   cmd="$env_fwd bash '$sp' --jobs" ;;
       switch) cmd="$env_fwd bash '$sp'" ;;
       *)      cmd="$env_fwd INTERDIMUX_MODE=$mode bash '$sp'" ;;
     esac
@@ -3917,6 +4153,111 @@ if [ "${1:-}" = "--launch" ]; then
 
   exec tmux display-popup -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
     ${chrome[@]+"${chrome[@]}"} -E "$cmd"
+fi
+
+# ---------------------------------------------------------------------------
+# Scheduled jobs picker
+# ---------------------------------------------------------------------------
+#
+# Scheduling without a way to see and undo what you scheduled is a trap: the
+# only other exit is `atrm` on the command line, and by then you have to know
+# the queue letter.  Deliberately placed AFTER the dialog helpers — these blocks
+# execute during the top-to-bottom pass, so a handler above dlg_fit's definition
+# would call a function that does not exist yet.
+
+# Rows for the picker: "<display>\t<pane>\t<id>", the last field being what
+# {-1} hands to the cancel binding.
+if [ "${1:-}" = "--jobs-list" ]; then
+  set +e
+  command -v atq >/dev/null 2>&1 || exit 0
+  while IFS="$US" read -r _id _when _tgt _pane _desc; do
+    [ -n "$_id" ] || continue
+    # Pad the FITTED text, not the raw text: %-20s counts escape bytes as
+    # columns, and a CJK session name draws at twice the width bash measures.
+    dlg_fit "$_when" 18; _c1="$REPLY"; dlg_width "$_c1"
+    printf -v _p1 '%*s' $(( 18 - REPLY )) ''
+    dlg_fit "$_tgt" 20; _c2="$REPLY"; dlg_width "$_c2"
+    printf -v _p2 '%*s' $(( 20 - REPLY )) ''
+    printf '%s%s%s%s  %s%s%s%s  %s\t%s\t%s\n' \
+      "$ACCENT_ESC" "$_c1" "$_p1" "$RST" \
+      "$DIM" "$_c2" "$_p2" "$RST" \
+      "$_desc" "$_pane" "$_id"
+  done < <(sched_rows)
+  exit 0
+fi
+
+if [ "${1:-}" = "--job-cancel" ]; then
+  set +e
+  _jid="${2:-}"
+  [ -n "$_jid" ] || exit 0
+  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
+  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
+  trap 'printf "\033[?25h" >>"$tty_out" 2>/dev/null' EXIT
+
+  _when="" _tgt="" _desc=""
+  while IFS="$US" read -r _i _w _t _p _d; do
+    [ "$_i" = "$_jid" ] && { _when="$_w"; _tgt="$_t"; _desc="$_d"; break; }
+  done < <(sched_rows)
+  if [ -z "$_when" ]; then
+    info_flash "$BOLD_AMBER" "Cancel" "Job $_jid is no longer queued."
+    dialog_close
+    exit 0
+  fi
+
+  if confirm_dialog "$BOLD_AMBER" "Cancel job ${_jid}?" \
+       "${DIM}${_when} →${RST} ${_tgt}" "${DIM}\$${RST} ${_desc}"; then
+    # Through --sched-cancel so the "never touch a job outside our own queue"
+    # guard stays in one place.
+    if bash "$SCRIPT_PATH" --sched-cancel "$_jid" >/dev/null 2>&1; then
+      dialog_status "${GREEN}✓ cancelled${RST}"
+    else
+      dialog_status "${RED}✗ could not cancel job ${_jid}${RST}"
+    fi
+    sleep 0.35
+  fi
+  dialog_close
+  exit 0
+fi
+
+if [ "${1:-}" = "--jobs" ]; then
+  set +e
+  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
+  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
+  if ! command -v atq >/dev/null 2>&1; then
+    info_flash "$BOLD_AMBER" "Scheduled jobs" "'at' is not installed." \
+      "Scheduling beyond a minute needs it."
+    dialog_close
+    exit 0
+  fi
+  _jl="bash '$SQ_SCRIPT' --jobs-list"
+  # Read once, not twice: --jobs-list costs an `at -c` per job, and the
+  # emptiness check and the picker want the same rows.
+  _jrows=$(bash "$SCRIPT_PATH" --jobs-list)
+  if [ -z "$_jrows" ]; then
+    info_flash "$BOLD_AMBER" "Scheduled jobs" "Nothing is scheduled." \
+      "Schedule one from the dashboard."
+    dialog_close
+    exit 0
+  fi
+  _jwait=""
+  fzf_ge 74 && _jwait="wait+"
+  # Same guard as the other two pickers: under `set -o pipefail` an accept that
+  # closes the pipe early makes the producer's SIGPIPE (141) mask fzf's status.
+  # Nothing reads that status here, but the invariant is the point — the next
+  # picker to be pasted from this one inherits the shape.
+  set +o pipefail
+  printf '%s\n' "$_jrows" | fzf \
+    "${FZF_THEME[@]}" \
+    --delimiter=$'\t' \
+    --with-nth=1 \
+    --no-sort \
+    --prompt='jobs ❯ ' \
+    --header="$(hint enter cancel ^r reload esc quit)" \
+    --bind="enter:${_jwait}execute(bash '$SQ_SCRIPT' --job-cancel {-1})+reload($_jl)" \
+    --bind="ctrl-r:reload($_jl)" \
+    >/dev/null 2>&1
+  set -o pipefail
+  exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -3950,7 +4291,10 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       'Zoom'        z "run-shell -b \"bash '$menu_sp' --launch zoom\"" \
       '' \
       'Detach'      d "run-shell -b \"bash '$menu_sp' --launch detach\"" \
-      'Send keys'   t "run-shell -b \"bash '$menu_sp' --launch send\""
+      'Send keys'   t "run-shell -b \"bash '$menu_sp' --launch send\"" \
+      '' \
+      'Schedule'    a "run-shell -b \"bash '$menu_sp' --launch schedule\"" \
+      'Jobs'        j "run-shell -b \"bash '$menu_sp' --launch jobs\""
   else
     chrome=()
     cmd="$(build_env_fwd) bash '$sp' --dashboard"
@@ -3961,7 +4305,9 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       chrome+=("${ENV_FWD_FLAGS[@]}")
       cmd="bash '$sp' --dashboard"
     fi
-    tmux display-popup -w 64 -h 17 ${chrome[@]+"${chrome[@]}"} \
+    # 10 entries + fzf's prompt, header and border; too short and fzf scrolls
+    # the menu, which hides the entries added last.
+    tmux display-popup -w 64 -h 19 ${chrome[@]+"${chrome[@]}"} \
       -E "$cmd"
   fi
   exit 0
@@ -3979,7 +4325,9 @@ if [ "${1:-}" = "--dashboard" ]; then
     "zoom"   "Zoom"         "Toggle pane zoom" \
     "swap"   "Swap"         "Swap windows or panes" \
     "detach" "Detach"       "Detach clients from session" \
-    "send"   "Send keys"    "Send a command to a pane")
+    "send"   "Send keys"    "Send a command to a pane" \
+    "schedule" "Schedule"   "Run a command later, via at" \
+    "jobs"   "Jobs"         "See and cancel scheduled commands")
 
   choice=$(printf '%s\n' "$items" | fzf \
     "${FZF_THEME[@]}" \
@@ -4153,6 +4501,13 @@ while true; do
         --prompt='send ❯ '
         --header="$(hint enter 'send keys' ^r reload esc quit)"
         --bind="enter:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
+      )
+      ;;
+    schedule)
+      fzf_opts+=(
+        --prompt='schedule ❯ '
+        --header="$(hint enter 'schedule a command' ^r reload esc quit)"
+        --bind="enter:${_wait}execute($ACTION_CMD schedule {-1})+reload($LIST_CMD)"
       )
       ;;
     *)

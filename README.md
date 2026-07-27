@@ -88,17 +88,19 @@ There are two entry points:
 ### Dashboard (`prefix + g`)
 
 A menu that provides access to all features — rendered as a native tmux
-menu on tmux >= 3.4 (one keypress per action: `s`, `n`, `r`, `k`, `w`,
-`z`, `d`, `t`), or as a compact fzf menu on older tmux:
+menu on tmux >= 3.4 (one keypress per action: `s`, `n`, `r`, `i`, `w`,
+`z`, `d`, `t`, `a`, `j`), or as a compact fzf menu on older tmux:
 
-- **Switch** — Navigate & jump to target
-- **New session** — Create session from directory
-- **Rename** — Rename a session or window
-- **Kill** — Remove sessions, windows, or panes
-- **Swap** — Swap windows or panes
-- **Zoom** — Toggle pane zoom
-- **Detach** — Detach clients from session
-- **Send keys** — Send a command to a pane
+- **Switch** (`s`) — Navigate & jump to target
+- **New session** (`n`) — Create session from directory
+- **Rename** (`r`) — Rename a session or window
+- **Kill** (`i`) — Remove sessions, windows, or panes
+- **Swap** (`w`) — Swap windows or panes
+- **Zoom** (`z`) — Toggle pane zoom
+- **Detach** (`d`) — Detach clients from session
+- **Send keys** (`t`) — Send a command to a pane
+- **Schedule** (`a`) — Run a command later, via `at`
+- **Jobs** (`j`) — See and cancel scheduled commands
 
 Select an action to launch the corresponding tool. Action modes open the navigator with a modified prompt — `Enter` performs the action on the selected target, and the list reloads in place so you can repeat. Press `Esc` when done.
 
@@ -333,6 +335,33 @@ set -g @interdimux-startup-command 'nvim .'
 ### Scheduled keys
 
 Send a command to a pane at a future time.
+
+**From the dashboard:** `prefix + g`, then `a`. Pick the target in the usual
+picker, type when, type the command. A window or session row narrows to that
+window's *active* pane — a scheduled command fires into one pane, never
+broadcast, because a fan-out you are not watching two hours later is a
+different thing from one you are.
+
+The confirmation screen shows the **resolved** absolute time, which is the
+detail that matters: `1:10am` is tomorrow, and so is `13:00` typed at 13:31.
+Press `u` there to undo. `prefix + g`, then `j` lists what is pending and
+cancels with `Enter`.
+
+The time field takes anything `at` understands, plus a relative shorthand:
+
+| Typed | Means |
+|-------|-------|
+| `30s` `5m` `2h` `1d` | that far from now |
+| `90` | 90 **minutes** (a bare 1–3 digit number is minutes) |
+| `1730` | 17:30 — four digits are `at`'s own `HHMM` |
+| `17:30` `1:10am` `noon tomorrow` `now + 2 hours` | passed to `at` verbatim |
+
+The shorthand does not shadow anything `at` accepts: `at` rejects a bare
+one-to-three digit number outright, and reads four digits as a clock time. If
+`at` refuses the time, the field reopens with what you typed and **keeps the
+command**, so a typo costs one keystroke rather than the whole entry.
+
+**From the command line:**
 
 ```sh
 # absolute or relative times — anything `at` understands

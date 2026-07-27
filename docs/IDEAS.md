@@ -77,6 +77,27 @@ because the *class* is what is worth remembering, not the individual line.
 | Every action prompted for a target that was gone | stale snapshot | "Kill session 'victim'?" for a session that no longer existed, failing only after you confirmed. |
 | An unanchored tmux target prefix-matches | test bug, same root | `kill-session -t tiny` killed the `tinysrc` fixture. The product code anchors every target (`=name`); the test did not, and the resulting "gone" dialog looked like a broken feature. |
 
+Found while building the Schedule flow — the first dialog flow with **two**
+prompts, which is what exposed all of these:
+
+| Bug | Class | How it presented |
+|---|---|---|
+| `dialog_close` used `>` on `$tty_out` | wrong redirect | It **truncated** the file, erasing every frame the flow had drawn. `_action_cleanup` already carried a comment about exactly this, for exactly this reason; five other sites had the same `>`. Invisible on a tty, and it meant no dialog's *content* could be asserted beyond its last frame — which is why the confirmation screen had no test. |
+| `read -rsn1 key -u "$fd"` | option order | Bash stops parsing options at the first non-option word, so `-u` and the fd number became two more *variable names* and the read took **stdin**. It fails quietly: the key comes back empty, which the confirm reads as "the user said no". The `n` assertion passed for the wrong reason; only the `y` one caught it. |
+| `input_dialog` re-opened its input per call | seekable vs stream | Correct for a tty (each open continues the key queue), but a regular file **rewinds to offset 0** — so the second prompt re-read the first answer. The function already knew this *within* one call; a two-prompt flow needs the fd to outlive the call. |
+| EOF accepted as if it were Enter | EOF ≠ confirm | Right for a single prompt, non-terminating for a loop: the retry loop resubmitted the same rejected time forever on a closed stdin, spinning at 100% CPU. Needed an explicit `_input_eof` flag, because "accept what we have" and "there is nothing left" are different answers. |
+| The `at` job header packed three fields onto one line | ambiguous encoding | `pane=%3 target=sess:0.0 desc=cmd` cannot be parsed back once a session name contains a space or the literal `desc=` — and tmux allows both. One field per line, read positionally. |
+| `atq \| sort -k2` was not chronological | wrong sort key | atq's default time column starts with the **day name**, so text-sorting it ordered Fri before Mon. `atq -o` gives a sortable stamp (absent on BSD `at`, so it falls back). |
+
+A third lesson, from the harness rather than the product:
+
+3. **`timeout` signals its direct child, not the process tree.** Wrapping the
+   command under test in `bash -c` left the real process spinning after the
+   wrapper died — and because the orphan had inherited the suite's stdout, the
+   pipe never closed and the whole run looked like a silent hang with no output
+   at all. Run the thing being timed as `timeout`'s direct child, and give it
+   its own stdout.
+
 Two recurring lessons, both of which cost real time here:
 
 1. **A test that measures with the code's own expression proves nothing.** The
