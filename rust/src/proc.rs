@@ -124,8 +124,8 @@ fn take_word(s: &str) -> Option<(&str, &str)> {
 
 pub struct Resolver {
     proc_ok: bool,          // Linux /proc backend
-    ps: Option<PsTable>,    // macOS/BSD ps backend
-    available: bool,
+    ps: Option<PsTable>,    // macOS/BSD ps backend (taken lazily)
+    ps_tried: bool,         // the ps snapshot has been attempted
     cache: HashMap<u32, String>, // /proc cmdline memo (unused by the ps backend)
 }
 
@@ -134,19 +134,25 @@ impl Resolver {
         let pid = std::process::id();
         let proc_ok = !force_ps()
             && fs::metadata(format!("/proc/{}/task/{}/children", pid, pid)).is_ok();
-        if proc_ok {
-            return Resolver { proc_ok: true, ps: None, available: true, cache: HashMap::new() };
+        // Construction is cheap: the ps snapshot is deferred to the first
+        // full_command() call (see ensure_ps).  A list rendered with
+        // SHOW_FULL_COMMAND=off never resolves a command, so it must never fork
+        // ps — the resolver is constructed unconditionally in gather().
+        Resolver { proc_ok, ps: None, ps_tried: false, cache: HashMap::new() }
+    }
+
+    /// Take the one ps snapshot, the first time a command is actually resolved.
+    fn ensure_ps(&mut self) {
+        if self.proc_ok || self.ps_tried {
+            return;
         }
-        // No /proc (macOS/BSD), or the ps backend was forced: one ps snapshot.
-        match PsTable::snapshot() {
-            Some(t) => Resolver { proc_ok: false, ps: Some(t), available: true, cache: HashMap::new() },
-            None => Resolver { proc_ok: false, ps: None, available: false, cache: HashMap::new() },
-        }
+        self.ps_tried = true;
+        self.ps = PsTable::snapshot();
     }
 
     #[allow(dead_code)] // used by tests
     pub fn available(&self) -> bool {
-        self.available
+        self.proc_ok || self.ps.is_some()
     }
 
     /// Space-joined argv of `pid`, ps-style.  Empty when the process is gone —
@@ -208,7 +214,8 @@ impl Resolver {
     /// by both backends and mirrors bash `resolve_command`: tab->space, trim,
     /// and fall back to the short command when the result is empty.
     pub fn full_command(&mut self, pid: u32, short: &str) -> String {
-        if !self.available {
+        self.ensure_ps();
+        if !self.proc_ok && self.ps.is_none() {
             return short.replace('\t', " ");
         }
         let own = self.args_of(pid);
@@ -249,7 +256,7 @@ mod tests {
         Resolver {
             proc_ok: false,
             ps: Some(PsTable { args, children }),
-            available: true,
+            ps_tried: true,
             cache: HashMap::new(),
         }
     }
@@ -293,7 +300,7 @@ mod tests {
         let mut r = Resolver {
             proc_ok: true,
             ps: None,
-            available: true,
+            ps_tried: false,
             cache: HashMap::new(),
         };
         assert_eq!(r.cmdline(0), "");
@@ -301,11 +308,25 @@ mod tests {
 
     #[test]
     fn resolves_this_process() {
+        // full_command triggers the lazy ps snapshot (or uses /proc); our own
+        // process is not a shell, so it resolves to our real, non-empty argv
+        // rather than the short fallback.
         let mut r = Resolver::new();
-        assert!(r.available(), "some backend should be available on the test host");
-        // both /proc and ps snapshots include our own pid
         let me = std::process::id();
-        assert!(!r.args_of(me).is_empty(), "should resolve our own argv");
+        let got = r.full_command(me, "\u{0}unlikely-fallback");
+        assert!(r.available(), "a backend should be available on the test host");
+        assert!(!got.is_empty() && got != "\u{0}unlikely-fallback",
+                "should resolve our own argv, got {:?}", got);
+    }
+
+    #[test]
+    fn ps_snapshot_is_deferred_until_first_resolution() {
+        // A resolver that never resolves a command must never take the snapshot,
+        // so SHOW_FULL_COMMAND=off does not fork ps.  (On a /proc host proc_ok is
+        // true and ps is never used at all; this asserts the off-Linux path.)
+        let r = Resolver { proc_ok: false, ps: None, ps_tried: false, cache: HashMap::new() };
+        assert!(!r.ps_tried, "construction must not attempt the ps snapshot");
+        assert!(r.ps.is_none());
     }
 
     // --- ps-backend parsing + resolution ------------------------------------
