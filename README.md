@@ -42,6 +42,8 @@ A portal gun for your tmux sessions.
 - Create new sessions from a directory picker
 - Key hints in a footer, out of the anchor zone at the top, tiered to the
   width available instead of truncated — and they change with the selection
+- A health check in the dashboard, `:checkhealth` style — a popup you can page,
+  search and re-run, leading with the verdict
 - Dedicated modes for kill, rename, zoom, swap, detach, and send operations
 - Configurable key binding, popup size, ordering, preview, and extra fzf flags
 
@@ -95,7 +97,7 @@ There are two entry points:
 
 A menu that provides access to all features — rendered as a native tmux
 menu on tmux >= 3.4 (one keypress per action: `s`, `n`, `r`, `i`, `w`,
-`z`, `d`, `t`, `a`, `j`), or as a compact fzf menu on older tmux:
+`z`, `d`, `t`, `a`, `o`, `h`), or as a compact fzf menu on older tmux:
 
 - **Switch** (`s`) — Navigate & jump to target
 - **New session** (`n`) — Create session from directory
@@ -106,7 +108,8 @@ menu on tmux >= 3.4 (one keypress per action: `s`, `n`, `r`, `i`, `w`,
 - **Detach** (`d`) — Detach clients from session
 - **Send keys** (`t`) — Send a command to a pane
 - **Schedule** (`a`) — Run a command later, via `at`
-- **Jobs** (`j`) — See and cancel scheduled commands
+- **Jobs** (`o`) — See and cancel scheduled commands
+- **Health** (`h`) — Check the setup, like nvim's `:checkhealth`
 
 `Kill` is drawn in the danger colour, and on tmux >= 3.4 an entry that cannot do
 anything is greyed out and loses its key rather than opening a popup to say so:
@@ -270,13 +273,30 @@ The preview shows project type, git branch/status/last commit, a README excerpt,
 
 ## Checking your setup
 
+**`prefix + g`, then `h`** — the Health entry pages the report in a popup, `^r`
+re-runs the checks after you fix something, `Esc` closes. Or from a shell:
+
 ```sh
 bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --doctor
 ```
 
+It opens with the verdict, because in a popup the first line is the one you
+actually read:
+
+```
+interdimux doctor                                    23 ok, 2 warn, 1 problem
+────────────────────────────────────────────────────────────────────────────
+1 problem needs attention
+```
+
 Reports what tmux, fzf and interdimux itself can see: versions and the features
-they gate, whether the Rust helper is built, whether the key bindings are
-actually installed, whether the state directories are writable — and every
+they gate, whether the Rust helper is built *and newer than its sources*, whether
+the key bindings are actually installed, whether the state directories are
+writable, whether your locale is UTF-8 (the tree glyphs and every column width
+assume it), whether `sort -s` works (the session order is stable and locale-free
+only because of it), whether `$FZF_DEFAULT_OPTS` contains a flag that moves fzf's
+geometry without moving `FZF_COLUMNS` — which is what the columns are sized from
+— and which of the two dashboards your client is tall enough for. Plus every
 `@interdimux-*` option you have set, with its value checked.
 
 That last part is the one worth running. tmux user options are free-form, so a
@@ -296,6 +316,12 @@ status line and to `$XDG_STATE_HOME/interdimux/errors.log` rather than to the
 popup — anything written to a popup's stderr is painted over the rendered rows
 and then vanishes with the popup, which is how several silent failures stayed
 silent. `--doctor` reports the log and quotes the most recent entry.
+
+A hide pattern that matches no session is called out too, and so is one whose
+only match is the session you are in — that one never gets hidden, so the pattern
+is doing nothing. `@interdimux-hide` is free-form, so a typo in it looks exactly
+like a pattern whose session simply is not running: the list looks normal either
+way.
 
 ## Configuration
 

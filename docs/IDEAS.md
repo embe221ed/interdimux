@@ -72,6 +72,9 @@ because the *class* is what is worth remembering, not the individual line.
 | Emoji clusters measured per character | wrong oracle | `❤️` counted 1 cell but drew 2; `👨‍💻` counted 4 and drew 2. **The golden test that guards alignment used the same expression as the code**, so it could not fail. |
 | A junk `@interdimux-recent-limit` printed errors onto the popup | unvalidated option | `[ "$count" -ge "lots" ]` → "integer expression expected", painted over the list. A junk `dirs-limit` made the Rust renderer drop every directory row. |
 | An unwritable `$XDG_DATA_HOME` printed three errors onto the popup | best-effort not enforced | `mkdir`, `mktemp` and `echo > ""` all complained. Remembering a directory is a convenience; it must not cost the switch. |
+| The MRU order differed between the two renderers, but only outside `C.UTF-8` | unstable sort | `session_last_attached` has one-second resolution so ties are routine, and GNU `sort` breaks a tie with its "last-resort comparison" — which compares the WHOLE LINE under the user's collation. The Rust core sorts stably and keeps tmux's order. glibc's `en_US` ignores punctuation at the first level, so `has space` and `has"quote` compare as `hasspace` vs `hasquote` and swap. **The parity suite passed 30/30 under `C.UTF-8` and failed 20/30 on an ordinary desktop** — it had only ever been run in the one locale where the bug hides. `sort -s` disables the last-resort comparison, so the order is stable AND locale-free. |
+| `@interdimux-hide 'floax-*'` hid nothing, depending on which directory the popup was opened from | pathname expansion | `for _hp in $HIDE_PATTERNS` needs the word splitting and got globbing with it, so the pattern was expanded against the CWD before it ever reached a session name. In a directory containing a file called `floax-notes` the pattern became that filename; in a directory with no match, bash left the word alone and it worked. `set -f` around the loops. The test that "covered" this used a decoy file named exactly like the session, so the glob produced the right answer and the assertion passed with the bug present — the decoy has to match the pattern WITHOUT matching the session. |
+| Everything misaligns in a non-UTF-8 locale, and always has | wrong unit | The bash renderer measures with `${#var}`, which counts CHARACTERS in a UTF-8 locale and **BYTES** in `C` — so under `LC_ALL=C` every multibyte glyph (`├─`, `▸`, the truncation `…`) is measured at 3 and drawn at 1, and its column comes up short. Measured: the full suite is 427/36 at `HEAD` under `LC_ALL=C` against 523/0 under `C.UTF-8`. Not new, and not made worse by the session rule despite its rendering far more of the same glyphs — the working tree is 486/29, i.e. better than HEAD. Not fixable without the cell-width table that is the reason the Rust core exists; `--doctor` now says so out loud rather than leaving it to be discovered. |
 | A `--color` key the running fzf does not know kills every picker | version gate, fails loud | `--color=footer:246` on fzf < 0.63 is not ignored — fzf prints `invalid color specification` and exits 2 before drawing anything, so the popup is a dead key. Same for an unknown flag (`--freeze-left` below 0.67 → `unknown option`, exit 2). Every capability token added to the shared theme or palette needs a `fzf_ge` gate, and "it degrades gracefully" is the wrong assumption. |
 | Dialogs overran a short popup | escapes counted as width | `${#text}` counts SGR bytes, so a coloured message that "fit" wrapped and overwrote the bottom border. |
 | Dialogs measured characters, not cells | wrong unit | A 26-character CJK session name produced an 87-cell title inside a 66-cell box, destroying the right border. Same class as the emoji bug in the list — found the same way, with tmux's `#{cursor_x}`. |
@@ -106,6 +109,21 @@ Two recurring lessons, both of which cost real time here:
 2. **A fixed sleep is a load-dependent assertion.** Four suites passed alone
    and failed in a batch; every one was a `sleep` that should have been a
    poll for the condition the test actually depended on.
+
+   `tests/test_hydration.sh` is the one that still has them — seven, at 1.5 s to
+   2.5 s, and one of its own comments records that an eighth had to be converted
+   because "under load `clear` had" not landed in time. It fails roughly one run
+   in four when the box is busy (measured: green three times alone, red once in a
+   batch while four other agents were running suites) and green every time on its
+   own. That is not flakiness in the product; it is the assertion being about the
+   machine's spare capacity. Converting those seven to condition-polls is the
+   remaining work on this lesson.
+
+3. **The suite is not safe to run concurrently with itself.** `at`'s queue is
+   machine-global, so two copies of `test_schedule_ui.sh` see each other's jobs:
+   running two full suites at once gave 6 failures there and 0 in either alone.
+   Nothing guards against it — a note for whoever tries to parallelise the
+   suite, and a reason not to.
 
 ## 5. Nice-to-haves
 

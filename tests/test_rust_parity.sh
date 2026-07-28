@@ -134,6 +134,100 @@ for cols in 80 120 200; do
   run_case "width ${cols} cols + preview" INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_PREVIEW=on FZF_COLUMNS="$cols"
 done
 
+# --- locale: neither renderer may depend on it ---------------------------------
+#
+# This suite was developed under C.UTF-8 and passed 30/30 there while failing
+# 20/30 on an ordinary desktop, which is as close to useless as a parity suite
+# gets.  The cause: the MRU key is `session_last_attached`, which has one-second
+# resolution, so ties are routine — and GNU sort breaks a tie with its
+# "last-resort comparison", which compares the WHOLE LINE under the user's
+# collation.  The Rust core sorts stably and keeps tmux's order.  glibc's en_US
+# ignores punctuation at the first collation level, so `has space` and
+# `has"quote` compare as `hasspace` vs `hasquote` and swap; under C.UTF-8 they
+# do not.  Both of those names are in the bench above, which is why it showed up
+# at all.
+#
+# The locale is chosen by PROBING for the property that matters — a collation
+# that differs from C's — rather than by parsing `locale -a`, whose spelling
+# varies (`en_US.utf8` vs `en_US.UTF-8`) and whose presence does not imply the
+# collation is actually different.
+collation_differs() { # $1 = locale name
+  local c alt
+  c=$(printf 'has space\nhas"quote\n' | LC_ALL=C sort 2>/dev/null | head -1)
+  alt=$(printf 'has space\nhas"quote\n' | LC_ALL="$1" sort 2>/dev/null | head -1)
+  [ -n "$alt" ] && [ "$c" != "$alt" ]
+}
+ALT_LOCALE=""
+for _l in en_US.UTF-8 en_US.utf8 en_GB.UTF-8 de_DE.UTF-8 fr_FR.UTF-8 C.UTF-8; do
+  if collation_differs "$_l"; then ALT_LOCALE="$_l"; break; fi
+done
+# The BASELINE is probed too, not hardcoded.  `C.UTF-8` does not exist on macOS —
+# setlocale falls back to `C` there, so a hardcoded baseline would silently be
+# comparing something other than what it says it is.  Both members of the pair
+# have to be locales this box actually has.
+BASE_LOCALE=C
+for _l in C.UTF-8 C.utf8; do
+  if [ "$(LC_ALL="$_l" locale charmap 2>/dev/null)" = "UTF-8" ]; then BASE_LOCALE="$_l"; break; fi
+done
+
+# The `-s` itself, asserted structurally and unconditionally.  Everything below
+# needs a second locale to exist, and on a musl or C-only box none does — which
+# would silently take the whole regression suite for this fix with it (measured:
+# 31 assertions instead of 36, exit 0, with the `-s` also removed).  This one
+# assertion cannot be skipped, and it covers BOTH sort sites — the kill-fallback
+# MRU hop is not reachable from any case below.
+unstable=$(grep -n "sort .*-k1,1nr" "$SCRIPT" | grep -v 'sort -s' || true)
+if [ -z "$unstable" ]; then
+  report "every MRU sort is stable (-s), including the kill-fallback hop" pass
+else
+  report "every MRU sort is stable (-s), including the kill-fallback hop" fail
+  ERRORS+="$(printf '%s\n' "$unstable" | sed 's/^/     /')"$'\n'
+fi
+
+if [ -z "$ALT_LOCALE" ]; then
+  # An echo, not a passing assertion: a skip dressed as a ✓ is how a suite comes
+  # to report success for work it did not do.
+  echo "  (skipped the locale cases: no installed locale collates differently from C)"
+else
+  report "comparing $BASE_LOCALE against $ALT_LOCALE, whose collation differs" pass
+
+  # The direct regression: the two renderers must still agree under it.
+  run_case "collation locale ($ALT_LOCALE)"          INTERDIMUX_SHOW_DIRS=off LC_ALL="$ALT_LOCALE"
+  run_case "collation locale + dir rows"             INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off LC_ALL="$ALT_LOCALE"
+  run_case "collation locale, index ordering"        INTERDIMUX_SHOW_DIRS=off INTERDIMUX_ORDER=index LC_ALL="$ALT_LOCALE"
+
+  # ...and the stronger statement, which is the one that would have caught this
+  # even with a single renderer: the OUTPUT itself must not move with the
+  # locale.  Checked for each renderer separately, so a divergence names which.
+  # The clock is PINNED across the pair.  Unlike run_case, this comparison has no
+  # bash-vs-bash control to notice churn, and the rows carry age_of's token, which
+  # flips at 90 s and then every 60 s — so a boundary landing between the two
+  # renders would be reported as a locale failure.  INTERDIMUX_NOW is the seam the
+  # renderer already exposes for exactly this (see the comment above age_of).
+  _pin=$(date +%s)
+  for _r in "rust:" "bash:INTERDIMUX_USE_RUST=off"; do
+    _label="${_r%%:*}"; _env="${_r#*:}"
+    _c="$TMPD/loc_c" _a="$TMPD/loc_alt"
+    # shellcheck disable=SC2086
+    env $_env INTERDIMUX_SHOW_DIRS=off INTERDIMUX_NOW="$_pin" LC_ALL="$BASE_LOCALE" bash "$SCRIPT" --list > "$_c" 2>/dev/null || true
+    # shellcheck disable=SC2086
+    env $_env INTERDIMUX_SHOW_DIRS=off INTERDIMUX_NOW="$_pin" LC_ALL="$ALT_LOCALE" bash "$SCRIPT" --list > "$_a" 2>/dev/null || true
+    if [ ! -s "$_c" ]; then
+      report "the $_label renderer produced rows to compare across locales" fail
+    elif cmp -s "$_c" "$_a"; then
+      report "the $_label renderer renders identically under $BASE_LOCALE and $ALT_LOCALE" pass
+    else
+      report "the $_label renderer renders identically under $BASE_LOCALE and $ALT_LOCALE" fail
+      ERRORS+="$(diff <(sed 's/\x1b\[[0-9;]*m//g' "$_c") <(sed 's/\x1b\[[0-9;]*m//g' "$_a") | head -6 || true)"$'\n'
+    fi
+  done
+fi
+
+# The directory PICKER's tiers are still locale-collated (`sort -u` in
+# emit_sorted_tiers) and deliberately so: that list has no second
+# implementation to disagree with, and sorting a user's directory names by their
+# own collation is the behaviour they want.  Only the tmux tree is pinned.
+
 # --- failure modes: the binary must never turn into an empty picker ---------
 broken="$TMPD/broken"; printf '#!/bin/sh\nexit 7\n' > "$broken"; chmod +x "$broken"
 silent="$TMPD/silent"; printf '#!/bin/sh\nexit 0\n' > "$silent"; chmod +x "$silent"

@@ -1607,6 +1607,28 @@ term_cols() {
   printf '%s' "$REPLY"
 }
 
+# The pressing client's width or height in cells, or 0 when it cannot be read.
+# Sets REPLY.
+#
+# Targeted first, so the answer is the pressing client's when several are
+# attached; untargeted second, because a TMUX_PANE inherited from a DIFFERENT
+# server does not resolve here and would otherwise read as "unknown".
+client_dim() {
+  local fmt="$1" v
+  v=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$fmt" 2>/dev/null)
+  case "$v" in ''|*[!0-9]*) v=$(tmux display-message -p "$fmt" 2>/dev/null) ;; esac
+  case "$v" in ''|*[!0-9]*) v=0 ;; esac
+  REPLY="$v"
+}
+
+# How many rows the dashboard's native menu needs: its items plus two borders.
+# display-menu SILENTLY draws nothing and exits 0 when it does not fit — no
+# message, no error, prefix+g simply becomes a dead key — so the number has to
+# be kept in step with the menu by hand.  tests/test_dashboard.sh parses the menu
+# and fails if this disagrees with it, and --doctor reports which of the two
+# dashboards the current client is going to get.
+MENU_ROWS=17
+
 # Column widths for the navigator tree.  Sized to the ACTUAL content
 # (longest session name / window name / path) so the important window
 # names are never starved by a long, redundant session prefix, then
@@ -1988,6 +2010,16 @@ gather_targets() {
   # matches, so find-or-create runs, and connect_dir switches to the existing
   # session rather than making a new one.
   if [ -n "${HIDE_PATTERNS:-}" ]; then
+    # `for _hp in $HIDE_PATTERNS` needs the word splitting and would also get
+    # PATHNAME EXPANSION, which is not a stylistic quibble: a pattern of
+    # `floax-*` was expanded against the CWD before it was ever compared to a
+    # session name, so in a directory containing `floax-notes` the tool tried to
+    # hide a session called `floax-notes` and hid nothing at all — and in a
+    # directory containing no match, bash left the word alone and it happened to
+    # work.  The behaviour therefore depended on where the popup was opened from.
+    # set -f for the whole block; the same idiom is used around the RS split in
+    # gather_targets.
+    set -f
     local _hp _hname _hkeep _hout=""
     while IFS= read -r _hline; do
       [ -n "$_hline" ] || continue
@@ -2033,6 +2065,7 @@ gather_targets() {
       [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
     done <<< "$all_panes_raw"
     all_panes_raw="${_hout%$'\n'}"
+    set +f
   fi
 
   # Hand the whole render to the Rust core when it is present.  This is the part
@@ -2112,7 +2145,24 @@ IMUX_SECTIONS
   # current session's windows one ↑ away.
   if [ "$ORDER" = "mru" ]; then
     local sorted current_line="" other_lines="" line sn_check
-    sorted=$(printf '%s\n' "$sessions_raw" | sort -t"$US" -k1,1nr)
+    # -s is not optional.  Two sessions share a timestamp routinely — the field
+    # has one-second resolution — and without -s GNU sort breaks the tie with its
+    # "last-resort comparison", which compares the WHOLE LINE under the user's
+    # collation.  The Rust core uses a stable sort, so it keeps tmux's order for
+    # ties; bash re-ordered them by locale, and the two renderers listed sessions
+    # differently for the same server.
+    #
+    # (`-k1,1nr` itself is only incidentally locale-safe: `sort -n` DOES read the
+    # locale's thousands separator, so `1,785` sorts differently under en_US than
+    # under C.  It cannot bite here because the key is bare epoch digits — but it
+    # would the moment that field grew a separator or a fraction.)
+    #
+    # Reproduced: glibc's en_US collation ignores punctuation at the first level,
+    # so `has space` and `has"quote` compare as `hasspace` vs `hasquote` and swap.
+    # Under C.UTF-8 they do not, which is why 20 of 30 parity cases failed on a
+    # normal desktop and every one of them passed here.  -s disables the
+    # last-resort comparison outright, so the order is stable AND locale-free.
+    sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k1,1nr)
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       sn_check="${line#*"$US"}"
@@ -3676,7 +3726,7 @@ if [ "${1:-}" = "--action" ]; then
             # other sessions exist — hop them to the next MRU session
             # first so the stay-open kill workflow survives.
             fallback=$(tmux list-sessions -F "#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}" 2>/dev/null \
-              | sort -t "$US" -k1,1nr | cut -d "$US" -f2- \
+              | sort -s -t "$US" -k1,1nr | cut -d "$US" -f2- \
               | grep -vxF -- "$SPEC_SESSION" | head -1)
             if [ -n "$fallback" ]; then
               while IFS= read -r c; do
@@ -4344,12 +4394,54 @@ build_env_fwd() {
 if [ "${1:-}" = "--doctor" ]; then
   set +e
   _doc_fail=0
-  _ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
-  _warn() { printf '  \033[33m⚠\033[0m %s\n' "$1"; }
-  _bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; _doc_fail=1; }
-  _note() { printf '      \033[2m%s\033[0m\n' "$1"; }
 
-  printf '\033[1minterdimux doctor\033[0m\n\n\033[1menvironment\033[0m\n'
+  # Buffered rather than streamed, so the SUMMARY can come first.  In a popup the
+  # first line is the one you actually read, and "3 problems" up top is the whole
+  # point of running this; a count at the bottom of a scrolling report is a count
+  # you have to go looking for.  The checks take well under 100 ms, so there is
+  # nothing to stream.
+  # Appended, not printf'd: a command substitution per check is ~30 forks for a
+  # report, and this file does not spend forks it does not have to.
+  # Buffering stdout is not enough: a check that writes to STDERR streams
+  # straight past the buffer and lands ABOVE the title, so the first line of the
+  # Health popup becomes a bash error.  Divert it for the duration of the checks
+  # and fold whatever arrives into the report, where it belongs — a check that
+  # errors is itself a finding.
+  _derr="${TMPDIR:-/tmp}/interdimux-doctor-err.$$"
+  if : > "$_derr" 2>/dev/null; then exec 3>&2 2>"$_derr"; else _derr=""; fi
+
+  _doc="" _n_ok=0 _n_warn=0 _n_bad=0
+  _ok()   { _doc+=$'  \033[32m✓\033[0m '"$1"$'\n'; _n_ok=$((_n_ok + 1)); }
+  _warn() { _doc+=$'  \033[33m⚠\033[0m '"$1"$'\n'; _n_warn=$((_n_warn + 1)); }
+  _bad()  { _doc+=$'  \033[31m✗\033[0m '"$1"$'\n'; _n_bad=$((_n_bad + 1)); _doc_fail=1; }
+  _note() { _doc+=$'      \033[2m'"$1"$'\033[0m\n'; }
+  # A run of '─', fork-free.  Sets REPLY.
+  _rule() { local n="$1"; [ "$n" -lt 0 ] && n=0; printf -v REPLY '%*s' "$n" ''; REPLY="${REPLY// /─}"; }
+  # A section heading, with a rule out to the report width.
+  _sec()  {
+    _rule $(( _doc_w - ${#1} - 1 ))
+    _doc+=$'\n\033[1m'"$1"$'\033[0m \033[2m'"$REPLY"$'\033[0m\n'
+  }
+
+  # Width to lay the report out in.  In a popup this is the popup; fzf keeps a
+  # couple of columns for its gutter and scrollbar, hence the margin.  Capped
+  # because a rule 150 cells wide is not structure, it is noise.
+  # -6, not -4: in the Health popup this is drawn INSIDE fzf, which takes two
+  # cells of gutter and keeps the last column for its scrollbar.  At -4 the title
+  # row was one cell over on a 44-column popup and fzf ellipsized the summary the
+  # whole rewrite exists to put first.
+  term_cols_r; _doc_w=$(( REPLY - 6 ))
+  [ "$_doc_w" -gt 96 ] && _doc_w=96
+  # No floor beyond 1.  A floor is the wrong shape for this: any floor WIDER than
+  # the display puts the ellipsis back, which is the one thing the layout has to
+  # avoid, and it does so on exactly the narrow popup a floor was meant to help.
+  [ "$_doc_w" -lt 1 ] && _doc_w=1
+
+  # Read once here: the scheduling note below wants it, and the key-bindings
+  # section further down re-reads it in its own idiom.
+  _dk_early=$(tmux show-option -gqv @interdimux-dashboard-key 2>/dev/null); _dk_early="${_dk_early:-g}"
+
+  _sec environment
 
   if [ "$TMUX_VNUM" -ge 304 ]; then
     _ok "tmux $(tmux -V 2>/dev/null | awk '{print $2}') (fast prefix-key binding available)"
@@ -4388,6 +4480,84 @@ if [ "${1:-}" = "--doctor" ]; then
     _note "build it with: (cd '$_repo/rust' && cargo build --release)"
   fi
 
+  # The MRU order is stable only because the sort is: without `-s`, GNU sort
+  # breaks a tie in session_last_attached (one-second resolution, so ties are
+  # routine) with its last-resort comparison, which orders by the user's
+  # COLLATION — and the Rust core, which sorts stably, then disagrees with the
+  # bash fallback about the order of the list.  `-s` is the one non-POSIX flag
+  # this file relies on (GNU, BSD and busybox all have it), and a sort that
+  # rejected it would empty the session list outright, so it is verified rather
+  # than assumed.
+  if printf 'b\na\n' | sort -s >/dev/null 2>&1; then
+    _ok "sort -s is supported (the session order is stable, and locale-free)"
+  else
+    _bad "this sort rejects -s — the session list would come out empty"
+    _note "the MRU sort needs it; it is present in GNU, BSD and busybox sort"
+  fi
+
+  # The tree glyphs and every width calculation assume UTF-8.  Without it the
+  # box-drawing characters arrive as mojibake and the column arithmetic — which
+  # counts CELLS — is measuring something the terminal is not drawing.
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]*8*) _ok "character encoding is UTF-8 (${LC_ALL:-${LC_CTYPE:-$LANG}})" ;;
+    '')  _warn "no locale is set — the tree glyphs need a UTF-8 one"
+         _note "export LANG=C.UTF-8 (or your own) where the tmux SERVER can see it" ;;
+    *)   _warn "locale '${LC_ALL:-${LC_CTYPE:-$LANG}}' is not UTF-8 — the tree glyphs will be mojibake"
+         _note "the column widths count cells, so a non-UTF-8 terminal misaligns them" ;;
+  esac
+
+  # $FZF_DEFAULT_OPTS is applied to every picker before this tool's own flags and
+  # is invisible to the option validator below, which only reads
+  # @interdimux-fzf-opts.  Three of its flags are not a matter of taste:
+  #   --border/--margin/--padding shrink fzf's window WITHOUT shrinking
+  #     FZF_COLUMNS, which is what the column widths and the hint bar are sized
+  #     from, so every row comes out too wide and gets clipped;
+  #   --with-shell replaces the shell that runs the inline callbacks, and unlike
+  #     the same flag in @interdimux-fzf-opts it does NOT switch this tool to its
+  #     re-exec fallback — so a fish there gets POSIX snippets it cannot parse;
+  #   --height turns off full-screen mode inside a popup that is already sized.
+  if [ -n "${FZF_DEFAULT_OPTS:-}" ]; then
+    # Normalise the whitespace first.  fzf splits these on ANY of it, and a long
+    # one is usually written across several LINES — matched against spaces only,
+    # every flag in the multi-line form reported clean.
+    _fzfopts=" ${FZF_DEFAULT_OPTS//[$'\n\t']/ } "
+    _fzfhaz=""
+    for _f in --border --margin --padding --height --with-shell --style; do
+      case "$_fzfopts" in *" $_f"*) _fzfhaz+=" $_f" ;; esac
+    done
+    if [ -n "$_fzfhaz" ]; then
+      _warn "\$FZF_DEFAULT_OPTS sets${_fzfhaz} — those change fzf's geometry or its shell"
+      _note "this tool sizes its columns from FZF_COLUMNS, which those flags do not move"
+      _note "keep them out of the global opts, or move them to @interdimux-fzf-opts"
+    else
+      _ok "\$FZF_DEFAULT_OPTS is set, and none of it changes fzf's geometry"
+    fi
+  fi
+  # Its own statement, not a note under the line above: fzf reads this file even
+  # when $FZF_DEFAULT_OPTS is empty, and claiming "none of it changes fzf's
+  # geometry" while an unread file sets the geometry is worse than saying nothing.
+  if [ -n "${FZF_DEFAULT_OPTS_FILE:-}" ]; then
+    _warn "\$FZF_DEFAULT_OPTS_FILE is set — fzf reads it, and its contents are not checked here"
+    _note "$FZF_DEFAULT_OPTS_FILE"
+  fi
+
+  # A binary older than the sources it was built from renders differently from
+  # the bash fallback, and the difference is silent — the picker still opens.
+  # Only when the binary belongs to THIS checkout.  One installed elsewhere has
+  # no relationship to these sources, and a fresh clone — which stamps every
+  # source with the checkout time — would otherwise report it stale for ever.
+  # -type f as well, or find returns the start directory and it takes one of the
+  # three slots below.
+  if [ -n "${IMUX_BIN:-}" ] && [ -x "$IMUX_BIN" ] && [ -d "$_repo/rust/src" ] \
+     && case "$IMUX_BIN" in "$_repo"/*) true ;; *) false ;; esac; then
+    _newer=$(find "$_repo/rust/src" "$_repo/rust/Cargo.toml" -type f -newer "$IMUX_BIN" 2>/dev/null | head -3)
+    if [ -n "$_newer" ]; then
+      _warn "the rust helper is older than its sources — it is rendering last build's layout"
+      while IFS= read -r _nf; do [ -n "$_nf" ] && _note "newer: ${_nf#"$_repo/"}"; done <<< "$_newer"
+      _note "rebuild with: (cd '$_repo/rust' && cargo build --release)"
+    fi
+  fi
+
   if command -v at >/dev/null 2>&1; then
     _ok "at is installed (Schedule, --send-at / --send-in beyond a minute)"
     # `at` without its job-runner accepts jobs, queues them, and never fires
@@ -4396,6 +4566,12 @@ if [ "${1:-}" = "--doctor" ]; then
     # atd on Linux and atrun (launchd) on macOS; at_daemon_state knows the
     # difference and reads each without root, and says so honestly when it cannot
     # tell (BSD's cron-atrun, or a host without pgrep) rather than crying wolf.
+    _npend=$(atq -q "$SCHED_QUEUE" 2>/dev/null | grep -c . || true)
+    case "${_npend:-0}" in
+      0) ;;
+      1) _note "1 command is scheduled — see it under Jobs on the dashboard" ;;
+      *) _note "$_npend commands are scheduled — see them under Jobs on the dashboard" ;;
+    esac
     case "$(at_daemon_state)" in
       up)   _ok "at's job-runner is active — scheduled jobs will fire" ;;
       down) _bad "at's job-runner is not active — jobs would queue but never fire"
@@ -4440,7 +4616,7 @@ if [ "${1:-}" = "--doctor" ]; then
   done
 
   # --- key bindings -----------------------------------------------------------
-  printf '\n\033[1mkey bindings\033[0m\n'
+  _sec 'key bindings'
   _k=$(tmux show-option -gqv @interdimux-key);           _k="${_k:-f}"
   _dk=$(tmux show-option -gqv @interdimux-dashboard-key); _dk="${_dk:-g}"
   # Read the table once and match the key column ourselves: `list-keys -T prefix
@@ -4463,8 +4639,27 @@ if [ "${1:-}" = "--doctor" ]; then
     _note "run: bash '$SCRIPT_PATH' --bind-keys"
   fi
 
+  # The dashboard is a native menu when it fits and an fzf popup when it does
+  # not, and BOTH have silently drawn nothing in the past when the client was too
+  # short: display-menu exits 0 without painting, display-popup refuses a size
+  # larger than the client.  Both are guarded now, so this is not a failure — but
+  # it is worth saying which one the user is about to get, because they look
+  # different and "prefix+g looks wrong" is otherwise unexplainable.
+  client_dim '#{client_height}'; _dh="$REPLY"
+  client_dim '#{client_width}';  _dwid="$REPLY"
+  if [ "$_dh" = 0 ]; then
+    _note "no client attached here, so the dashboard's size could not be checked"
+  elif ! tmux_ge 304; then
+    _note "tmux < 3.4: the dashboard is the fzf popup, not a native menu"
+  elif [ "$_dh" -ge "$MENU_ROWS" ]; then
+    _ok "the client is ${_dwid}x${_dh} — the dashboard draws as a native menu"
+  else
+    _warn "the client is only $_dh rows — the dashboard falls back to the fzf popup"
+    _note "the native menu needs $MENU_ROWS rows; the popup version scrolls instead"
+  fi
+
   # --- options ----------------------------------------------------------------
-  printf '\n\033[1moptions\033[0m\n'
+  _sec options
   # Names the code understands but that are not in OPT_MAP: they are read
   # directly rather than forwarded to the popup.
   _known=("${OPT_NAMES[@]}" key dashboard-key binary project-dirs jump-keys)
@@ -4506,6 +4701,10 @@ if [ "${1:-}" = "--doctor" ]; then
           default|-1) ;;
           '#'*) [ "${#v}" -eq 7 ] || printf 'a hex colour must be #rrggbb' ;;
           ''|*[!0-9]*) printf 'expected #rrggbb, a 0-255 index, or default' ;;
+          # Length first: `[ "$v" -le 255 ]` on a 26-digit number is not false,
+          # it is "integer expression expected" ON STDERR — which used to land
+          # above the report's own title.
+          ????*) printf 'a colour index must be 0-255' ;;
           *) [ "$v" -le 255 ] || printf 'a colour index must be 0-255' ;;
         esac ;;
       key|dashboard-key)
@@ -4544,8 +4743,149 @@ if [ "${1:-}" = "--doctor" ]; then
             | grep '^@interdimux-' | sort -u )
   [ "$_seen" = 0 ] && _note 'nothing set — every option is at its default'
 
-  printf '\n'
+  # A hide pattern that matches no session is indistinguishable from a working
+  # one: the list simply looks normal.  Naming the dead pattern is the only way a
+  # typo ever surfaces.
+  # Read from tmux, not from $HIDE_PATTERNS.  In the Health popup the latter is
+  # the value forwarded at launch, so this could contradict the option list
+  # printed immediately above it — which does read tmux.  Session scope first,
+  # then global, matching get_opt.
+  _hv=$(tmux show-option -qv @interdimux-hide 2>/dev/null)
+  [ -n "$_hv" ] || _hv=$(tmux show-option -gqv @interdimux-hide 2>/dev/null)
+  if [ -n "$_hv" ]; then
+    _snames=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+    _cur_s=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S' 2>/dev/null)
+    # set -f for the same reason the hide loops themselves need it: unquoted, the
+    # patterns would be pathname-expanded against the cwd first, and this check
+    # would then report the FILENAMES it found rather than the patterns the user
+    # set — which is how that bug was noticed.
+    set -f
+    for _hp in $_hv; do
+      _hit=0 _hit_cur=0
+      while IFS= read -r _sn; do
+        [ -n "$_sn" ] || continue
+        # shellcheck disable=SC2254  # the pattern is the point
+        case "$_sn" in
+          $_hp) if [ "$_sn" = "$_cur_s" ]; then _hit_cur=1; else _hit=1; break; fi ;;
+        esac
+      done <<< "$_snames"
+      if [ "$_hit" = 1 ]; then
+        _ok "@interdimux-hide pattern '$_hp' matches a session"
+      elif [ "$_hit_cur" = 1 ]; then
+        # The current session is NEVER hidden — the row marker, the popup title
+        # and MRU's move-to-end all key off it — so a pattern whose only match is
+        # the session you are standing in does nothing at all, and "matches a
+        # session" would be a true sentence about a filter that is not running.
+        _warn "@interdimux-hide pattern '$_hp' matches only the session you are in"
+        _note "the current session is never hidden, so this pattern is doing nothing here"
+      else
+        _warn "@interdimux-hide pattern '$_hp' matches no session right now"
+        _note "harmless if that session is not running; a typo looks exactly the same"
+      fi
+    done
+    set +f
+  fi
+
+  # Stop diverting before anything is printed, and report what was caught.
+  if [ -n "$_derr" ]; then
+    exec 2>&3 3>&-
+    if [ -s "$_derr" ]; then
+      # A warning, not a failure: this catches BOTH a bug in a check here and a
+      # legitimate complaint from something a check ran — fzf grumbling about the
+      # user's own $FZF_DEFAULT_OPTS_FILE arrives on exactly this channel — and
+      # from here the two are indistinguishable.  Either way it belongs in the
+      # report rather than above its title.
+      _sec 'stderr'
+      _warn "something the checks ran wrote to stderr"
+      _note "either a bug in --doctor, or a real complaint from a tool it called:"
+      while IFS= read -r _el; do [ -n "$_el" ] && _note "$_el"; done < "$_derr"
+    fi
+    rm -f "$_derr"
+  fi
+
+  # --- the report -------------------------------------------------------------
+  # Title, then the verdict, then the detail.  The verdict is a sentence rather
+  # than three counts: "everything is fine" and "two things need attention" are
+  # what you want to know, and the counts are right there beside it.
+  _verdict='' _vcol='32'
+  if [ "$_n_bad" -gt 0 ]; then
+    _vcol='31'
+    [ "$_n_bad" = 1 ] && _verdict='1 problem needs attention' \
+                      || _verdict="$_n_bad problems need attention"
+  elif [ "$_n_warn" -gt 0 ]; then
+    _vcol='33'
+    [ "$_n_warn" = 1 ] && _verdict='1 thing could be better' \
+                       || _verdict="$_n_warn things could be better"
+  else
+    _verdict='everything checks out'
+  fi
+  # ASCII separators: the counts are measured with ${#_counts} to right-align
+  # them, and ${#} counts BYTES in a non-UTF-8 locale — a '·' there is two, so
+  # the title came up short by one cell per separator on exactly the setups the
+  # locale check above is warning about.
+  _counts="${_n_ok} ok"
+  [ "$_n_warn" -gt 0 ] && _counts+=", ${_n_warn} warn"
+  [ "$_n_bad" -gt 0 ]  && _counts+=", ${_n_bad} problem"
+  [ "$_n_bad" -gt 1 ]  && _counts+="s"
+
+  _rule "$_doc_w"; _hr="$REPLY"
+  # Right-align the counts against the title, when there is room for it.
+  _title='interdimux doctor'
+  _pad=$(( _doc_w - ${#_title} - ${#_counts} ))
+  if [ "$_pad" -ge 1 ]; then
+    printf -v _gap '%*s' "$_pad" ''
+    printf '\033[1m%s\033[0m%s\033[2m%s\033[0m\n' "$_title" "$_gap" "$_counts"
+  else
+    # Too narrow for both.  Drop the counts rather than run past the edge and be
+    # ellipsized: the verdict on the very next line says the same thing in words,
+    # so nothing is actually lost.
+    printf '\033[1m%s\033[0m\n' "$_title"
+  fi
+  printf '\033[2m%s\033[0m\n' "$_hr"
+  printf '\033[%sm%s\033[0m\n' "$_vcol" "$_verdict"
+  printf '%s' "$_doc"
+  printf '\033[2m%s\033[0m\n' "$_hr"
+  # "then h" would be a lie on a short client: below MENU_ROWS the dashboard is
+  # the fzf fallback, where letters filter rather than select.  Name the entry.
+  printf '\033[2mrun again from the dashboard: prefix + %s, then Health\033[0m\n' "${_dk:-g}"
+
   [ "$_doc_fail" = 1 ] && exit 1
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# --doctor in a popup (the dashboard's Health entry)
+# ---------------------------------------------------------------------------
+#
+# fzf is the pager, not `less`: it is already a hard dependency, it is already
+# themed to match every other panel here, Esc already closes it, and search over
+# a health report is worth having rather than something to suppress.  On
+# fzf >= 0.74 --raw keeps the non-matching lines on screen, dimmed, so filtering
+# narrows the report instead of shredding the sections out of it.
+#
+# ^r re-runs the checks in place, which is the whole point after fixing one.
+if [ "${1:-}" = "--doctor-view" ]; then
+  set +e
+  _dv_extra=()
+  if fzf_ge 74; then
+    _dv_extra+=(--raw --gutter-raw=' ' --color="nomatch:${COLOR_TREE}:strip:dim")
+  fi
+  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
+  hint_flag '^r' recheck 2 esc close 1
+  # pipefail off for THIS pipeline, the same guard the other three pickers carry:
+  # --doctor exits 1 when it found a problem, and with pipefail on that status
+  # would mask fzf's.
+  set +o pipefail
+  bash "$SCRIPT_PATH" --doctor 2>&1 | fzf \
+    "${FZF_THEME[@]}" \
+    --no-sort \
+    --no-multi \
+    --prompt='health ❯ ' \
+    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
+    ${_dv_extra[@]+"${_dv_extra[@]}"} \
+    --bind="ctrl-r:reload(bash '$SQ_SCRIPT' --doctor)" \
+    >/dev/null 2>&1
+  set -o pipefail
   exit 0
 fi
 
@@ -4570,6 +4910,7 @@ if [ "${1:-}" = "--launch" ]; then
     dirs)   title=' interdimux · new session ' ;;
     schedule) title=' interdimux · schedule ' ;;
     jobs)     title=' interdimux · scheduled jobs ' ;;
+    doctor)   title=' interdimux · health ' ;;
   esac
 
   sp="$SQ_SCRIPT"
@@ -4596,6 +4937,7 @@ if [ "${1:-}" = "--launch" ]; then
       dirs)   chrome+=(-e "INTERDIMUX_MODE=dirs"); cmd="bash '$sp' --dirs || true" ;;
       # Not a picker over tmux targets — its own list, its own handler.
       jobs)   cmd="bash '$sp' --jobs" ;;
+      doctor) cmd="bash '$sp' --doctor-view" ;;
       switch) cmd="bash '$sp'" ;;
       *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="bash '$sp'" ;;
     esac
@@ -4604,6 +4946,7 @@ if [ "${1:-}" = "--launch" ]; then
     case "$mode" in
       dirs)   cmd="$env_fwd bash '$sp' --dirs || true" ;;
       jobs)   cmd="$env_fwd bash '$sp' --jobs" ;;
+      doctor) cmd="$env_fwd bash '$sp' --doctor-view" ;;
       switch) cmd="$env_fwd bash '$sp'" ;;
       *)      cmd="$env_fwd INTERDIMUX_MODE=$mode bash '$sp'" ;;
     esac
@@ -4724,20 +5067,6 @@ fi
 # Dashboard
 # ---------------------------------------------------------------------------
 
-# The pressing client's width or height in cells, or 0 when it cannot be read.
-# Sets REPLY.
-#
-# Targeted first, so the answer is the pressing client's when several are
-# attached; untargeted second, because a TMUX_PANE inherited from a DIFFERENT
-# server does not resolve here and would otherwise read as "unknown".
-client_dim() {
-  local fmt="$1" v
-  v=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$fmt" 2>/dev/null)
-  case "$v" in ''|*[!0-9]*) v=$(tmux display-message -p "$fmt" 2>/dev/null) ;; esac
-  case "$v" in ''|*[!0-9]*) v=0 ;; esac
-  REPLY="$v"
-}
-
 # Entry point for the prefix+g binding: a native styled menu on
 # tmux >= 3.4, otherwise a compact fzf menu in a popup.
 if [ "${1:-}" = "--dashboard-launch" ]; then
@@ -4745,14 +5074,12 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
   sp="$SQ_SCRIPT"
 
   # display-menu SILENTLY draws nothing and exits 0 when the menu is taller than
-  # the client.  Verified on 3.7b: this menu appears on a 15-row client and does
-  # not appear at all on a 14-row one — no message, no error, prefix+g simply
-  # becomes a dead key.  Menu height is items + 2 for the borders, and this menu
-  # is 13 items (10 entries + 3 separators), so it needs 15.
+  # the client.  Verified on 3.7b — no message, no error, prefix+g simply becomes
+  # a dead key.  MENU_ROWS (defined next to the other geometry helpers, because
+  # --doctor reports against it too) is items + 2 for the borders.
   #
   # The fzf fallback below has no such ceiling: its list scrolls.  So the tmux
   # version is not the only thing that decides which one to draw.
-  MENU_ROWS=15
   client_dim '#{client_height}'; _cli_h="$REPLY"
   client_dim '#{client_width}';  _cli_w="$REPLY"
   # Unknown height takes the fallback, not the menu: a popup where a menu would
@@ -4804,7 +5131,9 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       'Send keys'   t "run-shell -b \"bash '$menu_sp' --launch send\"" \
       '' \
       "$_m_sched"   a "run-shell -b \"bash '$menu_sp' --launch schedule\"" \
-      "$_m_jobs"    o "run-shell -b \"bash '$menu_sp' --launch jobs\""
+      "$_m_jobs"    o "run-shell -b \"bash '$menu_sp' --launch jobs\"" \
+      '' \
+      'Health'      h "run-shell -b \"bash '$menu_sp' --launch doctor\""
   else
     chrome=()
     cmd="$(build_env_fwd) bash '$sp' --dashboard"
@@ -4815,15 +5144,20 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       chrome+=("${ENV_FWD_FLAGS[@]}")
       cmd="bash '$sp' --dashboard"
     fi
-    # 10 entries + fzf's prompt, header and border; too short and fzf scrolls
-    # the menu, which hides the entries added last.
+    # Entries + 5: two border rows, the prompt, the rule under it, and the hint
+    # bar.  MEASURED rather than guessed — 11 entries show fully at -h 16, ten of
+    # them at 15, nine at 14 — because the number that was here before was slack
+    # nothing could distinguish from any other slack, and the entry added last is
+    # the one a too-short popup scrolls away.  tests/test_dashboard.sh derives it
+    # from the item list and fails if the two drift, exactly as it does for
+    # MENU_ROWS.
     #
     # Clamped to the client, because display-popup does NOT clamp: it fails with
     # "height too large" and draws nothing.  Verified — on a 14-row client `-h 14`
     # succeeds and `-h 15` errors, so the limit is exactly the client's size.  A
     # fixed 64x19 made this the same dead key as an oversized menu, reached by the
     # other path.  fzf's list scrolls, so a short popup is merely cramped.
-    _pop_w=64 _pop_h=19
+    _pop_w=64 _pop_h=16
     [ "$_cli_w" -gt 0 ] && [ "$_cli_w" -lt "$_pop_w" ] && _pop_w="$_cli_w"
     [ "$_cli_h" -gt 0 ] && [ "$_cli_h" -lt "$_pop_h" ] && _pop_h="$_cli_h"
     tmux display-popup -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
@@ -4846,7 +5180,8 @@ if [ "${1:-}" = "--dashboard" ]; then
     "detach" "Detach"       "Detach clients from session" \
     "send"   "Send keys"    "Send a command to a pane" \
     "schedule" "Schedule"   "Run a command later, via at" \
-    "jobs"   "Jobs"         "See and cancel scheduled commands")
+    "jobs"   "Jobs"         "See and cancel scheduled commands" \
+    "doctor" "Health"       "Check the setup, like :checkhealth")
 
   HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
   hint_flag enter select 2 esc quit 1

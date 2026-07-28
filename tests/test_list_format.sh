@@ -206,15 +206,28 @@ fi
 # cell-exact layout is rust/tests/golden.rs'.  This is the bash renderer's own
 # behaviour, measured through a real tmux server.
 
+# Cells, and a cell count needs a UTF-8 locale: awk's length() and bash's ${#}
+# both count BYTES under LC_ALL=C, and the rule row is almost entirely multibyte
+# while the window row is almost entirely not — so the two columns being compared
+# would be measured on different scales and disagree by ~90.  The PRODUCT is
+# locale-independent here (rust-vs-bash output is byte-identical under both C and
+# C.UTF-8, verified); this is the measuring instrument, not the thing measured.
+UTF8_LOCALE=""
+for _l in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do
+  [ "$(LC_ALL="$_l" locale charmap 2>/dev/null)" = "UTF-8" ] && { UTF8_LOCALE="$_l"; break; }
+done
 # Column (0-based) at which a row's SECOND field starts, on the rendered line.
 # fzf draws the tab as one cell at --tabstop=1, so this is what the eye sees.
-second_col() { awk -F'\t' 'NR==1 {print length($1) + 1}'; }
+second_col() { LC_ALL="${UTF8_LOCALE:-C}" awk -F'\t' 'NR==1 {print length($1) + 1}'; }
 
 rule_out=$(run_list "INTERDIMUX_USE_RUST=off FZF_COLUMNS=120")
 sess_col=$(printf '%s\n' "$rule_out" | grep $'\tS:alpha$' | second_col)
 win_line=$(printf '%s\n' "$rule_out" | grep $'\tW:alpha:0$')
-win_col=$(printf '%s' "$win_line" | awk -F'\t' '{print length($1) + 1 + length($2) + 1}')
-if [ -n "$sess_col" ] && [ "$sess_col" = "$win_col" ]; then
+win_col=$(printf '%s' "$win_line" \
+          | LC_ALL="${UTF8_LOCALE:-C}" awk -F'\t' '{print length($1) + 1 + length($2) + 1}')
+if [ -z "$UTF8_LOCALE" ]; then
+  echo "  (skipped the rule's column alignment: no UTF-8 locale to measure cells in)"
+elif [ -n "$sess_col" ] && [ "$sess_col" = "$win_col" ]; then
   report "the rule lands the session meta in the command column ($sess_col)" pass
 else
   report "the rule lands the session meta in the command column (meta $sess_col, command $win_col)" fail

@@ -234,8 +234,34 @@ else
   report "the scratch session is visible before hiding" fail
 fi
 
+# The glob case above passes for the wrong reason unless the CWD is stacked
+# against it.  `for _hp in $HIDE_PATTERNS` needs the word splitting, and without
+# `set -f` it gets PATHNAME EXPANSION too — so `floax-*` was expanded against the
+# current directory before it was ever compared to a session name.  In a
+# directory containing a FILE called `floax-one`, the pattern became that
+# filename and the session it was meant to hide stayed visible; in a directory
+# containing no match, bash left the word alone and it worked.  Which meant the
+# feature depended on where the popup was opened from, and this suite ran
+# somewhere it happened to work.
+#
+# The decoy must match the PATTERN without matching the SESSION.  A file named
+# `floax-one` — the obvious fixture — makes the glob expand to the session's own
+# name and the hide still works, so the assertion passes with the bug present.
+# Verified: with `floax-one` as the decoy, removing `set -f` from the hide loops
+# left this suite green.
+mkdir -p "$TMPD/globtrap"
+: > "$TMPD/globtrap/floax-DECOY"
+
 for renderer in rust bash; do
   [ "$renderer" = bash ] && export INTERDIMUX_USE_RUST=off || unset INTERDIMUX_USE_RUST
+  trapped=$(cd "$TMPD/globtrap" && INTERDIMUX_HIDE='scratchpad floax-*' specs_of)
+  if printf '%s\n' "$trapped" | grep -q 'scratchpad\|floax'; then
+    report "[$renderer] a hide pattern is not expanded against the cwd" fail
+    ERRORS+="    $(printf '%s' "$trapped" | tr '\n' ' ')"$'\n'
+  else
+    report "[$renderer] a hide pattern is not expanded against the cwd" pass
+  fi
+
   out=$(INTERDIMUX_HIDE='scratchpad floax-*' specs_of)
   if printf '%s\n' "$out" | grep -q 'scratchpad\|floax'; then
     report "[$renderer] @interdimux-hide removes matching sessions" fail

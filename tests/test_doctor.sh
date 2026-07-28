@@ -24,6 +24,12 @@ ERRORS=""
 cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$TMPD"; }
 trap cleanup EXIT
 
+# Every diagnostic below pipes through grep or sed, and the thing being
+# diagnosed is by definition sometimes absent — at which point grep exits 1,
+# `pipefail` promotes it, the assignment returns non-zero and `set -e` ends the
+# run.  A real regression then arrives as "suite did not finish" with no
+# Results line, which is the least useful shape a failure can take.  Hence the
+# `|| true` on each of them.
 report() {
   local name="$1" result="$2"
   if [ "$result" = "pass" ]; then
@@ -49,6 +55,13 @@ export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307
 # INTERDIMUX_FZF_MINOR/TMUX_VNUM pin the version probes; the down/unknown paths
 # get their own assertions below that override it locally.
 export INTERDIMUX_AT_DAEMON=up
+# Two more ambient inputs, for the same reason.  The report now checks the
+# LOCALE (a container with none, or LC_ALL=C, is normal) and $FZF_DEFAULT_OPTS
+# (most people have one) — and both feed assertions below about a HEALTHY
+# install.  Unpinned, this suite failed 2/62 under `LC_ALL=C` and 1/62 with a
+# --height in the developer's own fzf opts, neither of which is about the code.
+export LC_ALL=C.UTF-8 LANG=C.UTF-8
+unset FZF_DEFAULT_OPTS FZF_DEFAULT_OPTS_FILE
 
 setopt()   { tmux -L "$SOCK" set -g "@interdimux-$1" "$2"; }
 unsetopt() { tmux -L "$SOCK" set -gu "@interdimux-$1" 2>/dev/null || true; }
@@ -63,13 +76,13 @@ if [ "$(doctor_rc)" = 0 ]; then
   report "a healthy install exits 0" pass
 else
   report "a healthy install exits 0" fail
-  ERRORS+="$(doctor | grep '✗' | sed 's/^/    /')"$'\n'
+  ERRORS+="$(doctor | grep '✗' | sed 's/^/    /' || true)"$'\n'
 fi
 if doctor | grep -q '✓ prefix+f opens the navigator'; then
   report "the navigator binding is detected" pass
 else
   report "the navigator binding is detected" fail
-  ERRORS+="$(doctor | sed -n '/key bindings/,/^$/p' | sed 's/^/    /')"$'\n'
+  ERRORS+="$(doctor | sed -n '/key bindings/,/^$/p' | sed 's/^/    /' || true)"$'\n'
 fi
 
 # --- a missing binding is reported, not assumed ---------------------------------
@@ -88,7 +101,7 @@ if printf '%s' "$out" | grep -q 'unknown option @interdimux-fzf-opt'; then
   report "a mistyped option name is reported" pass
 else
   report "a mistyped option name is reported" fail
-  ERRORS+="$(printf '%s' "$out" | sed -n '/options/,$p' | sed 's/^/    /')"$'\n'
+  ERRORS+="$(printf '%s' "$out" | sed -n '/options/,$p' | sed 's/^/    /' || true)"$'\n'
 fi
 if printf '%s' "$out" | grep -q 'did you mean @interdimux-fzf-opts'; then
   report "...with the intended name suggested" pass
@@ -128,7 +141,7 @@ for opt in "${!BAD[@]}"; do
     report "@interdimux-$opt='${BAD[$opt]}' is rejected" pass
   else
     report "@interdimux-$opt='${BAD[$opt]}' is rejected" fail
-    ERRORS+="    $(doctor | grep "$opt" | sed 's/^ *//')"$'\n'
+    ERRORS+="    $(doctor | grep "$opt" | sed 's/^ *//' || true)"$'\n'
   fi
   unsetopt "$opt"
 done
@@ -152,7 +165,7 @@ if [ -z "$bad_good" ]; then
   report "a valid config produces no option complaints" pass
 else
   report "a valid config produces no option complaints" fail
-  ERRORS+="$(printf '%s' "$bad_good" | sed 's/^/    /')"$'\n'
+  ERRORS+="$(printf '%s' "$bad_good" | sed 's/^/    /' || true)"$'\n'
 fi
 for opt in "${!GOOD[@]}"; do unsetopt "$opt"; done
 
@@ -182,7 +195,7 @@ if [ -z "$err" ]; then
   report "an unwritable data dir produces no output on the popup" pass
 else
   report "an unwritable data dir produces no output on the popup" fail
-  ERRORS+="    stderr: $(printf '%s' "$err" | head -3 | tr '\n' '|')"$'\n'
+  ERRORS+="    stderr: $(printf '%s' "$err" | head -3 | tr '\n' '|' || true)"$'\n'
 fi
 # and the switch it was asked for still happened
 if tmux -L "$SOCK" has-session -t '=rwproj' 2>/dev/null; then
@@ -212,7 +225,7 @@ if printf '%s' "$out" | grep -q '✗ the navigator has logged 1 error'; then
   report "a logged error is surfaced by --doctor" pass
 else
   report "a logged error is surfaced by --doctor" fail
-  ERRORS+="$(printf '%s' "$out" | grep -i 'error' | sed 's/^/    /')"$'\n'
+  ERRORS+="$(printf '%s' "$out" | grep -i 'error' | sed 's/^/    /' || true)"$'\n'
 fi
 if printf '%s' "$out" | grep -q 'something went wrong'; then
   report "...and it quotes the most recent one" pass
@@ -274,7 +287,7 @@ for renderer in rust bash; do
       report "[$renderer] --list survives @interdimux-$o='$v' with no error output" pass
     else
       report "[$renderer] --list survives @interdimux-$o='$v' with no error output" fail
-      ERRORS+="    stderr: $(printf '%s' "$err" | head -2)"$'\n'
+      ERRORS+="    stderr: $(printf '%s' "$err" | head -2 || true)"$'\n'
     fi
     unsetopt "$o"
   done
@@ -307,7 +320,7 @@ for v in 'deep' '40'; do
     report "--dirs-list survives @interdimux-scan-depth='$v'" pass
   else
     report "--dirs-list survives @interdimux-scan-depth='$v'" fail
-    ERRORS+="    rc=$rc stderr: $(printf '%s' "$err" | head -2)"$'\n'
+    ERRORS+="    rc=$rc stderr: $(printf '%s' "$err" | head -2 || true)"$'\n'
   fi
   unsetopt scan-depth
 done
@@ -324,7 +337,7 @@ if command -v at >/dev/null 2>&1; then
     report "a stopped at job-runner is flagged with how to fix it" pass
   else
     report "a stopped at job-runner is flagged with how to fix it" fail
-    ERRORS+="$(printf '%s' "$out" | grep -i 'job-runner\|enable' | sed 's/^/    /')"$'\n'
+    ERRORS+="$(printf '%s' "$out" | grep -i 'job-runner\|enable' | sed 's/^/    /' || true)"$'\n'
   fi
   if [ "$(INTERDIMUX_AT_DAEMON=down doctor_rc)" = 1 ]; then
     report "a stopped at job-runner makes --doctor exit non-zero" pass
@@ -347,6 +360,296 @@ if command -v at >/dev/null 2>&1; then
   fi
 else
   echo "  (skipped at job-runner checks: 'at' is not installed)"
+fi
+
+# --- the report reads like a report -------------------------------------------
+#
+# The counts and the verdict are the first two lines because in a popup they are
+# the ones you actually read; a total at the bottom of a scrolling report is a
+# total you have to go looking for.  So their POSITION is the assertion, not
+# merely their presence.
+out=$(doctor)
+head1=$(printf '%s\n' "$out" | sed -n 1p)
+head3=$(printf '%s\n' "$out" | sed -n 3p)
+case "$head1" in
+  "interdimux doctor"*" ok"*) report "the first line is the title and the counts" pass ;;
+  *) report "the first line is the title and the counts (got: $head1)" fail ;;
+esac
+case "$head3" in
+  *"everything checks out"*|*"needs attention"*|*"could be better"*)
+    report "the verdict is on line 3, above the detail" pass ;;
+  *) report "the verdict is on line 3, above the detail (got: $head3)" fail ;;
+esac
+# A healthy install must say so in words, not only by exiting 0.
+case "$out" in
+  *"everything checks out"*) report "a healthy install says everything checks out" pass ;;
+  *) report "a healthy install says everything checks out" fail
+     ERRORS+="      $(printf '%s\n' "$out" | sed -n 3p || true)"$'\n' ;;
+esac
+# ...and a broken one counts the problems rather than just listing them.
+setopt order sideways
+bad_out=$(doctor)
+unsetopt order
+case "$bad_out" in
+  *"1 problem needs attention"*) report "one problem is counted as one problem" pass ;;
+  *) report "one problem is counted as one problem" fail
+     ERRORS+="      $(printf '%s\n' "$bad_out" | sed -n 3p || true)"$'\n' ;;
+esac
+case "$bad_out" in
+  *"1 problem"*) report "the count rides in the title too" pass ;;
+  *) report "the count rides in the title too" fail ;;
+esac
+# Every section still gets a heading, and the headings are ruled.
+missing=""
+for sec in environment "key bindings" options; do
+  printf '%s\n' "$out" | grep -q "^$sec ─" || missing+=" $sec"
+done
+[ -z "$missing" ] && report "every section is headed and ruled" pass \
+                  || report "every section is headed and ruled (missing:$missing)" fail
+# The layout width, asserted against the CAP and the FLOOR rather than against
+# the longest line — which is whatever absolute path happens to be in the report,
+# so it measured the checkout's depth and never reached either bound.  The rule
+# under the title is exactly _doc_w cells, and term_cols prefers FZF_COLUMNS, so
+# the width is drivable from here.
+rule_cells() { printf '%s\n' "$1" | awk 'NR==2 { print length($0) }'; }
+# The invariant is that the report NEVER exceeds what its display will show —
+# fzf keeps two cells of gutter and the last column for its scrollbar, so the
+# budget is `width - 6`.  A floor is the wrong shape here: any floor wider than
+# the display puts the ellipsis back on exactly the narrow popup it was meant to
+# help, which is how the 32 that used to be here was found.
+ok=1
+for cols in 200 120 100 96 80 60 44 40 34 24 12; do
+  rep=$(FZF_COLUMNS="$cols" doctor)
+  want=$(( cols - 6 )); [ "$want" -gt 96 ] && want=96; [ "$want" -lt 1 ] && want=1
+  got=$(rule_cells "$rep")
+  if [ "${got:-0}" != "$want" ]; then
+    ok=0
+    ERRORS+="     at $cols columns the rule is ${got:-0} cells, wanted $want"$'\n'
+  fi
+  # The TITLE row too, which is the one the counts are right-aligned against —
+  # at 34 columns it was the rule that fitted and the title that got the ellipsis.
+  # Lines 1-2 only: the verdict on line 3 is prose ("2 problems need attention"),
+  # and below about 31 columns nothing sensible fits, so letting fzf ellipsize it
+  # is the honest outcome.  What must never overrun is the chrome this code lays
+  # out itself.
+  widest=$(printf '%s\n' "$rep" | awk 'NR<=2 { if (length($0) > m) m = length($0) } END { print m+0 }')
+  # The one thing allowed to overrun is the title itself, on a popup too narrow
+  # for even that: "interdimux doctor" is 17 cells and cannot be shortened
+  # without losing what it says, and below ~23 columns the picker is unusable
+  # anyway.  Everything the layout computes must fit.
+  floor=17; [ "$want" -gt "$floor" ] && floor="$want"
+  if [ "$widest" -gt "$floor" ]; then
+    ok=0
+    ERRORS+="     at $cols columns the header block is $widest cells, over the $floor budget"$'\n'
+  fi
+done
+[ "$ok" = 1 ] && report "neither the title nor the rule outruns the display, at any width" pass \
+              || report "neither the title nor the rule outruns the display, at any width" fail
+# ...and the cap is real, not just "never wider": a 300-column terminal must not
+# get a 294-cell rule.
+got=$(rule_cells "$(FZF_COLUMNS=300 doctor)")
+[ "${got:-0}" = 96 ] && report "a very wide terminal is capped at 96 cells" pass \
+                     || report "a very wide terminal is capped at 96 cells (got ${got:-0})" fail
+
+# --- the checks added for the Health entry ------------------------------------
+
+# `sort -s` is the one non-POSIX flag the tool depends on, and without it the
+# session list would be EMPTY rather than merely misordered — so --doctor checks
+# it instead of assuming.  Simulated with a sort that rejects the flag.
+mkdir -p "$TMPD/nosort"
+printf '#!/bin/sh\ncase " $* " in *" -s "*) echo "sort: bad flag" >&2; exit 2 ;; esac\nexec /usr/bin/sort "$@"\n' \
+  > "$TMPD/nosort/sort"
+chmod +x "$TMPD/nosort/sort"
+case "$(PATH="$TMPD/nosort:$PATH" doctor)" in
+  *"rejects -s"*) report "a sort without -s is reported as a problem" pass ;;
+  *) report "a sort without -s is reported as a problem" fail
+     ERRORS+="      $(PATH="$TMPD/nosort:$PATH" doctor | grep -i 'sort' | head -2 || true)"$'\n' ;;
+esac
+case "$(doctor)" in
+  *"sort -s is supported"*) report "...and this one is confirmed to have it" pass ;;
+  *) report "...and this one is confirmed to have it" fail ;;
+esac
+
+# A non-UTF-8 locale is a warning, not a failure: the tool works, its tree
+# glyphs do not.
+case "$(LC_ALL=C LANG=C LC_CTYPE=C doctor)" in
+  *"is not UTF-8"*) report "a non-UTF-8 locale is reported" pass ;;
+  *) report "a non-UTF-8 locale is reported" fail ;;
+esac
+[ "$(LC_ALL=C LANG=C LC_CTYPE=C doctor_rc)" = 0 ] \
+  && report "...as a warning, not a failure" pass \
+  || report "...as a warning, not a failure" fail
+
+# $FZF_DEFAULT_OPTS is invisible to the option validator, and three of its flags
+# move fzf's geometry WITHOUT moving FZF_COLUMNS — which is what the column
+# widths and the hint bar are sized from.
+case "$(FZF_DEFAULT_OPTS='--border --margin=2' doctor)" in
+  *'$FZF_DEFAULT_OPTS sets'*--border*) report "a geometry flag in \$FZF_DEFAULT_OPTS is reported" pass ;;
+  *) report "a geometry flag in \$FZF_DEFAULT_OPTS is reported" fail
+     ERRORS+="      $(FZF_DEFAULT_OPTS='--border --margin=2' doctor | grep -i fzf_default | head -2 || true)"$'\n' ;;
+esac
+case "$(FZF_DEFAULT_OPTS='--color=fg:blue --cycle' doctor)" in
+  *"none of it changes fzf's geometry"*) report "a harmless \$FZF_DEFAULT_OPTS is not nagged about" pass ;;
+  *) report "a harmless \$FZF_DEFAULT_OPTS is not nagged about" fail ;;
+esac
+
+# A hide pattern that matches nothing looks exactly like one that works.
+setopt hide 'nosuch-session-xyz'
+case "$(doctor)" in
+  *"matches no session right now"*) report "a hide pattern that matches nothing is reported" pass ;;
+  *) report "a hide pattern that matches nothing is reported" fail ;;
+esac
+# ...and the pattern it reports must be the pattern, not whatever the cwd
+# happened to contain.  This is how the pathname-expansion bug in the hide loops
+# was noticed: the report named two FILES.
+mkdir -p "$TMPD/globtrap"
+: > "$TMPD/globtrap/nosuch-session-aaa"
+: > "$TMPD/globtrap/nosuch-session-bbb"
+setopt hide 'nosuch-session-*'
+globbed=$(cd "$TMPD/globtrap" && doctor)
+if printf '%s\n' "$globbed" | grep -q "pattern 'nosuch-session-\*'"; then
+  report "the reported pattern is the pattern, not a filename from the cwd" pass
+else
+  report "the reported pattern is the pattern, not a filename from the cwd" fail
+  ERRORS+="      $(printf '%s\n' "$globbed" | grep -i 'hide pattern' | head -2 || true)"$'\n'
+fi
+
+# A pattern that matches a session which is NOT the current one.
+tmux -L "$SOCK" new-session -d -s hideme -x 120 -y 40 2>/dev/null || true
+setopt hide 'hideme'
+case "$(doctor)" in
+  *"pattern 'hideme' matches a session"*) report "...and one that matches is confirmed" pass ;;
+  *) report "...and one that matches is confirmed" fail
+     ERRORS+="      $(doctor | grep -i 'hide pattern' | head -2 || true)"$'\n' ;;
+esac
+
+# ...and the case the real filter treats specially: the CURRENT session is never
+# hidden, so a pattern whose only match is the session you are in does nothing.
+# Saying "matches a session" there is a true sentence about a filter that is not
+# running — and the harness session being called `doc` is what made the earlier
+# version of this assertion lock in the wrong answer.
+setopt hide 'doc'
+case "$(doctor)" in
+  *"matches only the session you are in"*)
+    report "a pattern matching only the current session is called out" pass ;;
+  *) report "a pattern matching only the current session is called out" fail
+     ERRORS+="      $(doctor | grep -i 'hide pattern' | head -2 || true)"$'\n' ;;
+esac
+unsetopt hide
+[ "$(doctor_rc)" = 0 ] && report "neither hide case fails the run" pass \
+                       || report "neither hide case fails the run" fail
+
+# A binary older than its sources renders last build's layout, silently.
+# The check only fires for a binary belonging to the checkout being run, so the
+# fixture is a whole miniature checkout rather than a stray copy: a binary
+# installed elsewhere has no relationship to these sources, and a fresh clone
+# (which stamps every source with the checkout time) would otherwise report any
+# previously-built binary stale for ever.
+if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then
+  mkdir -p "$TMPD/fakerepo/scripts" "$TMPD/fakerepo/rust/src" "$TMPD/fakerepo/rust/target/release"
+  cp "$SCRIPT" "$TMPD/fakerepo/scripts/interdimux.sh"
+  cp "$SCRIPT_DIR/rust/target/release/imux" "$TMPD/fakerepo/rust/target/release/imux"
+  : > "$TMPD/fakerepo/rust/Cargo.toml"
+  : > "$TMPD/fakerepo/rust/src/main.rs"
+  fake() { bash "$TMPD/fakerepo/scripts/interdimux.sh" --doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g'; return 0; }
+
+  touch -d '1990-01-01' "$TMPD/fakerepo/rust/target/release/imux" 2>/dev/null \
+    || touch -t 199001010000 "$TMPD/fakerepo/rust/target/release/imux"
+  case "$(fake)" in
+    *"older than its sources"*) report "a stale rust binary is reported" pass ;;
+    *) report "a stale rust binary is reported" fail
+       ERRORS+="      $(fake | grep -i 'rust helper' | head -2 || true)"$'\n' ;;
+  esac
+  # ...naming the sources, and only files — `find` returns its start directory
+  # too, which used to eat one of the three slots.
+  case "$(fake)" in
+    *"newer: rust/src/main.rs"*) report "...and it names a source that is newer" pass ;;
+    *) report "...and it names a source that is newer" fail ;;
+  esac
+  if fake | grep -qE 'newer: rust/src$'; then
+    report "...without listing the directory itself" fail
+  else
+    report "...without listing the directory itself" pass
+  fi
+
+  touch "$TMPD/fakerepo/rust/target/release/imux"
+  case "$(fake)" in
+    *"older than its sources"*) report "a fresh one is not" fail ;;
+    *) report "a fresh one is not" pass ;;
+  esac
+
+  # A binary from somewhere else is not this checkout's business.
+  cp "$SCRIPT_DIR/rust/target/release/imux" "$TMPD/elsewhere"
+  touch -d '1990-01-01' "$TMPD/elsewhere" 2>/dev/null || touch -t 199001010000 "$TMPD/elsewhere"
+  case "$(INTERDIMUX_BIN="$TMPD/elsewhere" doctor)" in
+    *"older than its sources"*) report "a binary installed elsewhere is not called stale" fail ;;
+    *) report "a binary installed elsewhere is not called stale" pass ;;
+  esac
+else
+  echo "  (skipped the stale-binary check: no release binary built)"
+fi
+
+# The dashboard has two forms and they look different; --doctor says which one
+# this client is about to get.  THIS harness attaches no client, so only the
+# give-up arm is reachable here — which is the arm worth pinning here, because a
+# check that guessed instead of admitting it could not tell would be worse than
+# no check.  The two real arms are asserted in tests/test_dashboard.sh, which has
+# clients of known height.
+case "$(doctor)" in
+  *"no client attached here"*)
+    report "with no client attached, --doctor says so rather than guessing" pass ;;
+  *) report "with no client attached, --doctor says so rather than guessing" fail
+     ERRORS+="      $(doctor | grep -i 'dashboard\|client' | head -2 || true)"$'\n' ;;
+esac
+
+# --- the pending-jobs note ------------------------------------------------------
+# Driven with a stub `atq` rather than by scheduling anything: the note is about
+# the COUNT and its singular/plural, and queueing real jobs in a test is how you
+# end up with real jobs firing after the test is over.
+if command -v at >/dev/null 2>&1; then
+  mkdir -p "$TMPD/atq"
+  printf '#!/bin/sh\ni=0\nwhile [ "$i" -lt "${STUB_JOBS:-0}" ]; do echo "$i\tSat Jan 1 00:00:00 2000 x user"; i=$((i+1)); done\n' \
+    > "$TMPD/atq/atq"
+  chmod +x "$TMPD/atq/atq"
+  jobs_line() { PATH="$TMPD/atq:$PATH" STUB_JOBS="$1" doctor | grep -i 'scheduled' | head -1; }
+  case "$(jobs_line 1)" in
+    *"1 command is scheduled"*) report "one pending job is counted in the singular" pass ;;
+    *) report "one pending job is counted in the singular (got: $(jobs_line 1))" fail ;;
+  esac
+  case "$(jobs_line 3)" in
+    *"3 commands are scheduled"*) report "three are counted in the plural" pass ;;
+    *) report "three are counted in the plural (got: $(jobs_line 3))" fail ;;
+  esac
+  case "$(jobs_line 0)" in
+    *"command"*"scheduled"*) report "an empty queue says nothing about jobs" fail ;;
+    *) report "an empty queue says nothing about jobs" pass ;;
+  esac
+else
+  echo "  (skipped the pending-jobs note: 'at' is not installed)"
+fi
+
+# --- the popup viewer ---------------------------------------------------------
+# The dashboard's Health entry runs --doctor-view, which pages the report through
+# fzf.  Its contract is narrow: it must not alter the report, and it must not
+# leak the non-zero status --doctor uses to mean "found a problem".
+# The handler itself, by its dispatch line.  `grep -c doctor-view >= 2` passed
+# with the entire block deleted, because the two `cmd=` lines in --launch already
+# make two.  (What the viewer actually DOES is asserted in test_dashboard.sh,
+# which drives prefix+g then h on a real client.)
+if grep -q '^if \[ "\${1:-}" = "--doctor-view" \]; then$' "$SCRIPT"; then
+  report "--doctor-view has a handler" pass
+else
+  report "--doctor-view has a handler" fail
+fi
+if grep -q "ctrl-r:reload(bash '\$SQ_SCRIPT' --doctor)" "$SCRIPT"; then
+  report "...with a recheck binding" pass
+else
+  report "...with a recheck binding" fail
+fi
+if grep -q "doctor) cmd=\"bash '\$sp' --doctor-view\"" "$SCRIPT"; then
+  report "--launch doctor opens the viewer in a popup" pass
+else
+  report "--launch doctor opens the viewer in a popup" fail
 fi
 
 echo
