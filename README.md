@@ -49,15 +49,28 @@ A portal gun for your tmux sessions.
 
 ## Dependencies
 
-- `tmux` >= 3.2 — popups; >= 3.3 adds popup titles, >= 3.4 the native
-  dashboard menu, >= 3.6 live border accents
-- `fzf` >= 0.40 — newer versions unlock extra polish automatically
-  (0.52 full-line highlight, 0.58 match-scope cycling, 0.61 ghost text,
-  0.63 the footer hint bar, 0.66 the scope highlight, 0.67 the frozen
-  identity column, 0.74 raw filter mode)
+- **`tmux` >= 3.6 — a hard requirement, not a recommendation.** Every row is
+  delimited with a raw US byte (`\x1f`) inside a `tmux -F` format, and tmux
+  3.5a and older rewrite that byte as the four characters `\037`. The whole row
+  then parses as one field, the session name comes out empty, and the picker is
+  simply blank. Measured: 3.4 → 0 rows, 3.5a → 0 rows, 3.6 → works. Note that
+  Ubuntu 24.04 ships 3.4 and Debian 13 ships 3.5a, so on those you want tmux
+  from source or a backport.
+- **`fzf` >= 0.74.** Older versions still open a working picker — every feature
+  is version-gated and degrades on its own (0.52 full-line highlight, 0.58
+  match-scope cycling, 0.61 ghost text, 0.63 the footer hint bar, 0.66 the scope
+  highlight, 0.67 the frozen identity column, 0.74 raw filter mode) — but 0.74
+  is the only version the test suite exercises, so anything older is untested
+  rather than unsupported.
 - `bash` >= 4.0
+- A UTF-8 locale. The tree glyphs are multibyte and every column width is
+  counted in cells; under `LC_ALL=C` the columns misalign. `--doctor` says so.
 - `fd` or `find` (for directory picker)
+- `at` (optional — the Schedule and Jobs entries; needs its job-runner enabled)
 - `zoxide` (optional — feeds the recent tier and find-or-create)
+
+CI builds tmux 3.7b and installs fzf 0.74 rather than using the distro packages,
+for exactly these reasons — see [docs/CI.md](docs/CI.md).
 
 ## Installation
 

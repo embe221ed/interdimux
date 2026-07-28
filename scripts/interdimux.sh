@@ -551,19 +551,21 @@ POPUP_TITLE_STYLE='#[bold]'
 #
 # Below 0.63 every --footer here is a --header, and nothing else changes.
 
-# Hint builder: accent key + dim label pairs.  Sets REPLY (styled) and REPLY_W
-# (its width in cells) so the navigator can size and build every bar with no
-# subshell at all — they are handed to fzf as env vars for the focus bind.
+# Hint builder: accent key + dim label pairs.  Sets REPLY.
+#
+# It no longer tracks a width.  It used to also set REPLY_W, for a hint_tiers
+# that built every rung by calling back into here; that version was replaced by
+# one which styles each hint once and cuts fragments out of the widest line, and
+# computes its own widths as it goes.  Nothing has read REPLY_W since.
 hint_r() {
-  local out="" k l w=0
+  local out="" k l
   while [ $# -ge 2 ]; do
     k="$1" l="$2"
     shift 2
     out+="${ACCENT_ESC}${k}"$'\033[0m\033[2m '"${l}"$'\033[0m'
-    w=$(( w + ${#k} + 1 + ${#l} ))
-    if [ $# -ge 2 ]; then out+="  "; w=$(( w + 2 )); fi
+    [ $# -ge 2 ] && out+="  "
   done
-  REPLY="$out" REPLY_W="$w"
+  REPLY="$out"
 }
 hint() { hint_r "$@"; printf '%s' "$REPLY"; }
 
@@ -647,7 +649,7 @@ hint_tiers() {
   # the same seven strings eight times over, five times per open, on the path
   # that runs before fzf can draw its first frame.
   local -a hp=() frag=() w=()
-  local i n=0 live=0 lo loi packed="" line lw first
+  local i n=0 live=0 loi packed="" line lw first
   while [ $# -ge 3 ]; do
     frag+=("${ACCENT_ESC}${1}"$'\033[0m\033[2m '"${2}"$'\033[0m')
     w+=($(( ${#1} + 1 + ${#2} )))
@@ -3563,7 +3565,7 @@ input_dialog() {
   # EOF is accepted below as "take what we have", which is right for one prompt
   # and non-terminating for a loop.
   _input_eof=0
-  local c c2 c3 c4 vis pad len
+  local c c2 c3 vis pad len
   while true; do
     len=${#buf}
     (( pos < scroll )) && scroll=$pos
@@ -3589,7 +3591,7 @@ input_dialog() {
             H) pos=0 ;;
             F) pos=$len ;;
             [0-9])
-              IFS= read -rsN1 -t 0.05 -u "$ifd" c4          # swallow the trailing '~'
+              IFS= read -rsN1 -t 0.05 -u "$ifd" _           # swallow the trailing '~'
               case "$c3" in
                 1|7) pos=0 ;;
                 4|8) pos=$len ;;

@@ -104,7 +104,15 @@ ck "TMUX_PANE is the PRESSING client's pane"        "$(get TMUX_PANE)" "$EXPECT_
 # screen saying where you are.  Free here -- it comes from a tmux format
 # expanded in-server at keypress.
 ck "TITLE names the current session"                "$(get INTERDIMUX_TITLE)" " interdimux · main "
-ck "TMUX_VNUM baked numerically"                    "$(get INTERDIMUX_TMUX_VNUM)" "307"
+# Derived from the running tmux by the same arithmetic the script uses, not
+# pinned: hardcoded to 307 this asserted "the developer's tmux" and failed on
+# every other one (306 on 3.6), which is a version check masquerading as a
+# forwarding check.  What is under test is that the number is BAKED IN, numeric.
+tmux_vnum() {
+  local v; v=$("$T" -V 2>/dev/null)
+  [[ "$v" =~ ([0-9]+)\.([0-9]+) ]] && printf '%s' "$(( BASH_REMATCH[1] * 100 + BASH_REMATCH[2] ))"
+}
+ck "TMUX_VNUM baked numerically"                    "$(get INTERDIMUX_TMUX_VNUM)" "$(tmux_vnum)"
 
 ck "every option in OPT_MAP is forwarded" \
    "$(grep -c '^INTERDIMUX_' "$OUT")" \

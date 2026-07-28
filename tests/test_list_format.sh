@@ -53,10 +53,19 @@ report() {
 # Dir rows (IDEAS #14) come from the developer's own recent-dirs/zoxide, which
 # would make this suite depend on the machine it runs on.  This file tests the
 # tmux TREE format; tests/test_one_list.sh owns the D: rows.
+#
+# TMUX_PANE is passed EXPLICITLY.  `run-shell -t` does not export it — verified
+# against tmux 3.4 (apt), 3.5a (apt), 3.6 (source), 3.7b (source) and 3.7b
+# (Debian package); only a locally patched build does.  Without it the script
+# falls back to an untargeted `#S`, which resolves to the most recently ATTACHED
+# session rather than the one named here, and the MRU assertion below reads
+# `alpha charlie bravo`.  The real key bindings already do this — they bake
+# `TMUX_PANE=#{pane_id}` into the binding for exactly the same reason.
 run_list() {
-  local extra_env="INTERDIMUX_SHOW_DIRS=off ${1:-}"
+  local extra_env="INTERDIMUX_SHOW_DIRS=off ${1:-}" pane
+  pane=$(tmux_cmd list-panes -t "=charlie:0" -F '#{pane_id}' 2>/dev/null | head -1)
   tmux_cmd run-shell -t "=charlie:0" \
-    "$extra_env bash '$SCRIPT' --list > '$OUT_FILE'" 2>/dev/null || true
+    "TMUX_PANE=$pane $extra_env bash '$SCRIPT' --list > '$OUT_FILE'" 2>/dev/null || true
   sed $'s/\x1b\\[[0-9;]*m//g' "$OUT_FILE"
 }
 

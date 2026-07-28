@@ -5,27 +5,141 @@ on:
     branches: [main]
   pull_request:
 
+# The versions this project targets.  Both floors are load-bearing rather than
+# preferences, and both were measured — see docs/CI.md:
+#
+#   tmux 3.6  the row protocol delimits fields with a raw US byte inside a `-F`
+#             format.  tmux <= 3.5a rewrites that byte as the four characters
+#             `\037`, so every row parses as ONE field, the session name comes
+#             out empty, and `--list` emits nothing at all.  Measured: 3.4 -> 0
+#             rows, 3.5a -> 0 rows, 3.6 -> 3 rows.  ubuntu-latest ships 3.4, so
+#             unless tmux is built here the test job is testing an empty picker.
+#   fzf 0.74  the floor the suite pins itself to (INTERDIMUX_FZF_MINOR=74).
+#             ubuntu-latest's apt fzf is 0.44, which silently turns the picker
+#             suites into skips rather than failures.
+env:
+  TMUX_VERSION: "3.7b"
+  FZF_VERSION: "0.74.0"
+  # The tree glyphs are multibyte and the column maths counts CELLS.  Runners do
+  # not reliably set a locale, and without a UTF-8 one widths are measured in
+  # bytes.
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
 jobs:
   shellcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Lint
-        run: shellcheck -S warning scripts/interdimux.sh interdimux.tmux tests/*.sh
+      # Two invocations on purpose, with the SHIPPED code held to the stricter
+      # bar.  A single call needs the union of both exclusion lists, and that
+      # union hid two genuinely dead variables in the script behind the test
+      # harnesses' deliberate SC2034s.
+      #
+      # scripts/ excludes only what is deliberate there:
+      #   SC2191  `--"$HINT_BAR"="$REPLY"` as an array element; the `=` is literal
+      #   SC2206  the RS split in gather_targets, unquoted on purpose under `set -f`
+      - name: Lint the plugin
+        run: |
+          shellcheck -S warning -e SC2191,SC2206 \
+            scripts/interdimux.sh interdimux.tmux
+      # tests/ additionally excludes the harness idioms:
+      #   SC2155  `export TMUX="$(tmux …)"` — the masked exit status is not wanted
+      #   SC2034  loop counters and flags read by an eval'd snippet
+      #   SC2164  `cd` in run_all.sh, guarded by its caller
+      #   SC2010  `ls | grep` over a tmux socket directory
+      #   SC2154  a variable defined by the `eval` on the line above
+      - name: Lint the tests
+        run: |
+          shellcheck -S warning -e SC2155,SC2034,SC2164,SC2010,SC2154 \
+            tests/*.sh
 
   tests:
     runs-on: ubuntu-latest
+    # The suites drive real tmux servers and wait on real panes.  They take ~3
+    # minutes; a cap keeps a hung one from burning the job's six-hour default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux fzf fd-find
-      - name: Check fzf version
-        run: fzf --version
-      - name: Run tests
         run: |
-          for t in tests/test_*.sh; do
-            echo "=== $t"
-            bash "$t"
-          done
+          sudo apt-get update
+          sudo apt-get install -y \
+            fd-find at gawk locales \
+            build-essential libevent-dev libncurses-dev bison pkg-config
+          # A SECOND locale, whose collation differs from C's.  The parity suite
+          # guards a real bug with it — the MRU sort used to order tied
+          # timestamps by collation, so the two renderers disagreed on any
+          # machine that was not in the C locale.  That guard probes for such a
+          # locale and skips when there is none, and the runner image ships only
+          # C and C.UTF-8: without this the regression test for a bug that
+          # shipped quietly does not run at all.
+          sudo locale-gen en_US.UTF-8
+          # gawk, not the default mawk: several assertions measure a rendered row
+          # in CELLS with awk's length(), and mawk counts BYTES — a five-glyph
+          # rule measures 15 there.
+          sudo update-alternatives --set awk /usr/bin/gawk
+
+      - name: Cache tmux ${{ env.TMUX_VERSION }}
+        id: tmux-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tmux-prefix
+          key: tmux-${{ env.TMUX_VERSION }}-${{ runner.os }}
+
+      - name: Build tmux ${{ env.TMUX_VERSION }}
+        if: steps.tmux-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz" \
+            -o /tmp/tmux.tar.gz
+          tar -xzf /tmp/tmux.tar.gz -C /tmp
+          cd "/tmp/tmux-${TMUX_VERSION}"
+          ./configure --prefix="$HOME/tmux-prefix"
+          make -j"$(nproc)"
+          make install
+
+      - name: Install fzf ${{ env.FZF_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/junegunn/fzf/releases/download/v${FZF_VERSION}/fzf-${FZF_VERSION}-linux_amd64.tar.gz" \
+            -o /tmp/fzf.tar.gz
+          sudo tar -xzf /tmp/fzf.tar.gz -C /usr/local/bin
+
+      - name: Put the built tmux first on PATH
+        run: echo "$HOME/tmux-prefix/bin" >> "$GITHUB_PATH"
+
+      - name: Start the at job-runner
+        # Without it the schedule suites do not fail — they SKIP, and a skip
+        # reporting "0 passed, 0 failed" is indistinguishable from coverage.
+        run: sudo systemctl start atd || sudo service atd start
+
+      - name: Versions under test
+        run: |
+          tmux -V
+          fzf --version
+          awk --version | head -1
+          cargo --version
+          locale charmap
+
+      - name: Build the Rust core
+        # Without it every suite runs against the bash fallback and
+        # test_rust_parity.sh — the one that guarantees the two renderers agree —
+        # skips itself entirely.
+        run: cargo build --release --manifest-path rust/Cargo.toml
+
+      - name: Rust tests
+        run: cargo test --release --manifest-path rust/Cargo.toml
+
+      # run_all.sh, not a bare loop: it runs every suite even after one fails,
+      # totals the assertions, and reports a suite that DIED without a Results
+      # line as a failure rather than as silence.  A `for … bash "$t"` under
+      # `bash -e` stops at the first failing suite and says nothing about the
+      # other twenty.
+      # IMUX_SKIP_RUST: run_all.sh runs `cargo test` itself when cargo is on
+      # PATH, and it already ran as its own step above — where a failure is
+      # attributed to Rust rather than buried in a shell-suite total.
+      - name: Shell tests
+        run: IMUX_SKIP_RUST=1 bash tests/run_all.sh

@@ -80,7 +80,14 @@ export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
 # Helpers
 # ---------------------------------------------------------------------------
 
-queue_ids() { atq -q i 2>/dev/null | awk '{print $1}' | sort -n; }
+# `sort`, NOT `sort -n`: these ids are only ever fed to `comm`, which collates
+# lexicographically and does not care what the numbers mean.  Sorted numerically,
+# the moment the queue holds both a single- and a double-digit id comm decides the
+# input is unsorted, prints a diagnostic, emits the wrong set — and the `| head -1`
+# below then closes the pipe under it, so `pipefail` turns the SIGPIPE into an
+# abort and the whole suite dies without a Results line.  Reproduced: ids 2 9 10
+# kill it, ids 2 9 do not, which is why it survived every local run.
+queue_ids() { atq -q i 2>/dev/null | awk '{print $1}' | sort; }
 
 # Fixture bytes: one argument per answer, each newline-terminated.  Assembled
 # by concatenation rather than with `printf %b` because \x takes "one or two"
