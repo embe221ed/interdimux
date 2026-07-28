@@ -3133,7 +3133,18 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
   # $_mflag is "-M" only where at accepts it (GNU); empty on BSD/macOS, so it
   # word-splits away and never reaches at as a bogus argument.
   _mflag=$(at_mail_flag)
-  _out=$(cd / && sched_job_body "$SCHED_PANE" "$SCHED_SOCK" "$SCHED_SRVPID" "$SCHED_LABEL" "$_keys" \
+  # 2>/dev/null on the WRITER, and it is load-bearing.  at parses its time from
+  # argv and exits before ever reading stdin, so a bad spec closes this pipe
+  # under the body.  Where SIGPIPE is at its default the writer dies silently;
+  # where SIGPIPE is IGNORED (a systemd unit -- IgnoreSIGPIPE defaults to true --
+  # or a GitHub Actions step) it does not die, and bash prints "printf: write
+  # error: Broken pipe" once per failed write: measured 49,917 lines.  Those go
+  # to OUR stderr, not into $_out, and they arrive while the pipeline is still
+  # running -- ahead of the `printf '%s\n' "$_out" >&2` below.  The caller picks
+  # the first non-"interdimux:" line as the message to show, so without this the
+  # schedule dialog reports a truncated path instead of at's "syntax error.
+  # Last token seen: ...".  The body is pure printf; it has no other stderr.
+  _out=$(cd / && sched_job_body "$SCHED_PANE" "$SCHED_SOCK" "$SCHED_SRVPID" "$SCHED_LABEL" "$_keys" 2>/dev/null \
          | at $_mflag -q "$SCHED_QUEUE" $_spec 2>&1)
   if [ $? -ne 0 ]; then
     printf '%s\n' "$_out" >&2

@@ -54,16 +54,36 @@ mkdir -p "$XDG_DATA_HOME/interdimux" "$TMPD/d1" "$TMPD/d2"
 printf '%s\n%s\n' "$TMPD/d1" "$TMPD/d2" > "$XDG_DATA_HOME/interdimux/recent_dirs"
 
 # A project tree big enough that the scan is still running when the reader stops.
-# Size, not just streaming, decides whether SIGPIPE happens at all: a producer
-# whose entire output fits the 64 KB pipe buffer finishes writing before the
-# reader exits and never sees it.  Building it up front makes both the mechanism
-# check and the end-to-end accept deterministic instead of timing-dependent.
+# DURATION is what matters, not volume -- an earlier version of this comment
+# claimed the tree existed to overflow the 64 KB pipe buffer, and that was
+# measured false: --dirs-list emits 36,070 bytes here (47,330 at its widest,
+# since DIRS_PATH_W clamps at 64), and a 2-row 178-byte fixture still yields
+# 141.  What makes SIGPIPE deterministic is that the scan takes ~0.9 s and
+# printf-writes one unbuffered row at a time, so the producer is always still
+# writing when the reader goes away.  The tree also keeps the end-to-end
+# accept-during-scan check below honest.
 mkdir -p "$TMPD/big"
 for i in $(seq 1 400); do mkdir -p "$TMPD/big/proj$i/sub"; done
 export INTERDIMUX_PROJECT_DIRS="$TMPD/big"
 
+# Restore SIGPIPE's default disposition for the probe below.  A parent that
+# ignores SIGPIPE passes SIG_IGN across execve, and bash CANNOT undo that --
+# `trap - PIPE` is a no-op for a signal ignored at shell entry (measured: it
+# yields PIPESTATUS 1, not 141).  Both systemd (IgnoreSIGPIPE defaults to true)
+# and GitHub Actions run us that way, and there the producer cannot die of
+# SIGPIPE at all, so the assertion would be testing the harness rather than the
+# script.  Nothing to reset when SIGPIPE is already default, so this is a no-op
+# in a normal shell.
+if env --default-signal=PIPE true 2>/dev/null; then
+  DFLPIPE=(env --default-signal=PIPE)          # coreutils >= 8.30
+elif command -v perl >/dev/null 2>&1; then
+  DFLPIPE=(perl -e '$SIG{PIPE}="DEFAULT"; exec @ARGV')   # macOS / BSD env
+else
+  DFLPIPE=()
+fi
+
 # --- the mechanism: the producer really does die on a short read -----------------
-st=$(bash -c "bash '$SCRIPT' --dirs-list 2>/dev/null | head -1 >/dev/null; echo \"\${PIPESTATUS[0]}\"")
+st=$(${DFLPIPE[@]+"${DFLPIPE[@]}"} bash -c "bash '$SCRIPT' --dirs-list 2>/dev/null | head -1 >/dev/null; echo \"\${PIPESTATUS[0]}\"")
 if [ "$st" = 141 ]; then
   report "--dirs-list dies with SIGPIPE when the reader stops early (rc $st)" pass
 else

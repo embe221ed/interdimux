@@ -14,6 +14,24 @@ test that assumed the developer's tmux, one in a test whose `sort -n` fed a
 `comm` that collates lexicographically — and with those, **522 passed, 0
 failed**.
 
+Then the first green-looking run on the *real* runner came back **441 passed, 2
+failed**, which no container reproduced. Both failures had one cause, §10.
+
+### Reading the totals
+
+Three different numbers are correct at once, so it is worth pinning down:
+
+| where | shell | rust | printed |
+|---|---|---|---|
+| `tests/run_all.sh` locally | 443 | +80 | **523** |
+| the workflow's "Shell tests" step | 443 | — | **443** |
+| that step before §10 was fixed | 441 + 2 failed | — | **441** |
+
+`run_all.sh` runs `cargo test` itself and folds those 80 into its own total; CI
+passes `IMUX_SKIP_RUST=1` because Rust already ran as its own step. So a CI total
+80 lower than a local one is the *expected* reading, not a coverage gap — every
+one of the 443 shell assertions runs in both places.
+
 ## 1. tmux 3.4 makes the picker empty — this is the big one
 
 Rows are `IDENT \t CTX \t CMD \t SPEC`, but the *tmux* side of the pipe uses a
@@ -142,6 +160,66 @@ tests/                       -e SC2155,SC2034,SC2164,SC2010,SC2154
 One invocation needs the union of those lists, and that union is exactly what
 hid the dead variables behind the harnesses' deliberate SC2034s. Split, the
 plugin is linted with SC2034 and SC2155 **on**.
+
+## 10. GitHub runs `run:` steps with SIGPIPE ignored
+
+The one failure mode no container reproduced, because no container has it.
+GitHub starts a `run:` step with SIGPIPE set to `SIG_IGN`, and an ignored
+disposition survives `execve` — so every process the suite spawns inherits it.
+Bash cannot undo it: a signal ignored at shell entry is a *hard* ignore that
+`trap` cannot reach.
+
+```
+trap - PIPE               -> PIPESTATUS=1      # bash cannot reset it
+perl $SIG{PIPE}=DEFAULT   -> PIPESTATUS=141
+env --default-signal=PIPE -> PIPESTATUS=141
+```
+
+Reproduce it anywhere: `( trap '' PIPE; bash tests/run_all.sh )`. In the runner
+replica that yields **441 passed, 2 failed** — the real runner's numbers, to the
+assertion.
+
+It broke two things.
+
+**`test_pipefail.sh` asserts that a producer dies of SIGPIPE**, and nothing can
+die of a signal that is ignored, so `PIPESTATUS[0]` is 0 rather than 141. The
+64 KB pipe-buffer theory in that test's own comment was wrong and had sent the
+investigation the wrong way: `--dirs-list` emits 36,070 bytes against that
+fixture (47,330 at its widest — `DIRS_PATH_W` clamps at 64), a 189 KB fixture
+still returns 0 when SIGPIPE is ignored, and a 178-byte one still returns 141
+when it is not. Size never controlled the outcome in either direction; duration
+and unbuffered per-row `printf` do. The probe now runs under
+`env --default-signal=PIPE` (with a `perl` fallback for BSD `env`), so it tests
+the mechanism it names on any host.
+
+**`--send-at` printed 49,917 lines of `printf: write error: Broken pipe`.** This
+one was a real defect, and only this environment could surface it. `at` parses
+its time from argv and exits *before* reading stdin, so a bad spec closes the
+pipe under `sched_job_body`. With SIGPIPE at its default the writer dies
+silently; with SIGPIPE ignored it does not die, and bash reports every failed
+write. Those go to the script's own stderr — the `2>&1` on that line binds to
+`at` — and they arrive *while the pipeline is still running*, ahead of the
+`printf '%s\n' "$_out" >&2` that emits at's real message afterwards. The caller
+shows the first non-`interdimux:` line, so the schedule dialog read
+
+```
+✗ /home/runner/work/interdimux/interdimux/scripts/interdimux.sh: line…
+```
+
+instead of `✗ syntax error. Last token seen: n`. Fixed by silencing the writer,
+which is pure `printf` and has no other stderr.
+
+**How much this can bite a user: less than it looks, but not zero.** tmux resets
+SIGPIPE to its default for panes *and* for `run-shell` children (measured:
+`SigIgn 0x300000`, `PIPESTATUS=141`) even though the server itself ignores it —
+so no in-tmux path reaches this. It needs the CLI driven from a SIGPIPE-ignoring
+parent: a CI step, or `--send-at` called from a systemd unit, where
+`IgnoreSIGPIPE` defaults to true.
+
+**Do not "fix" a future SIGPIPE failure by wrapping the whole suite** in
+`env --default-signal=PIPE`. It works, and it would have hidden the second bug
+above. CI is the only place this project ever runs with SIGPIPE ignored, and
+that is coverage worth keeping — `ci.yml` says so at the "Shell tests" step.
 
 ## What the developer's tmux does that no released tmux does
 

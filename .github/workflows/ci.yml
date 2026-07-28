@@ -140,6 +140,20 @@ jobs:
       # other twenty.
       # IMUX_SKIP_RUST: run_all.sh runs `cargo test` itself when cargo is on
       # PATH, and it already ran as its own step above — where a failure is
-      # attributed to Rust rather than buried in a shell-suite total.
+      # attributed to Rust rather than buried in a shell-suite total.  It also
+      # means this step's total EXCLUDES the 80 Rust tests, so it reads 443
+      # where a local `tests/run_all.sh` reads 523.  Same coverage, one total.
+      #
+      # DO NOT "fix" a SIGPIPE failure here by wrapping this in
+      # `env --default-signal=PIPE` or `perl -e '$SIG{PIPE}="DEFAULT"; exec @ARGV'`.
+      # GitHub starts `run:` steps with SIGPIPE set to SIG_IGN, and SIG_IGN
+      # survives execve, so every process the suite spawns inherits it — bash
+      # cannot undo it, `trap - PIPE` is a no-op for a signal ignored at entry.
+      # That is the ONLY place this project ever runs with SIGPIPE ignored, and
+      # it is worth keeping: it is what caught the schedule dialog printing
+      # 49,917 lines of "printf: write error: Broken pipe" over at's real
+      # diagnostic (fixed in interdimux.sh, at the `sched_job_body` writer).
+      # tests/test_pipefail.sh restores the default disposition for the one
+      # assertion that genuinely needs it, and only for that assertion.
       - name: Shell tests
         run: IMUX_SKIP_RUST=1 bash tests/run_all.sh
