@@ -193,6 +193,13 @@ editor window of the *proj* session) and the command column. Paths, git
 badges, and metadata are visible but not matched — press `Ctrl-]` to
 cycle the scope when you *do* want to search by path.
 
+When two rows match a query *equally well*, the list's own order decides. So an
+existing session is picked ahead of a directory that is only being offered as a
+new one — typing `circle` with a `circle/sui-cctp` session open goes there, not
+into a fresh session made from a `Circle` directory — and a session is picked
+ahead of its own windows. This is a tiebreak, not a rule that sessions always
+win: a directory whose name is genuinely the better match is still picked first.
+
 ### Numbered jumps (opt-in)
 
 ```tmux

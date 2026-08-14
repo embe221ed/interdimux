@@ -2235,11 +2235,15 @@ IMUX_SECTIONS
     # extra rows.  Entirely inside field 1 — see rust/src/render.rs for why it
     # cannot be split across the tab into field 2.
     #
-    # The SPACE before the run is load-bearing, not cosmetic: --tiebreak=chunk
-    # scores by the whitespace chunk a match lands in, so gluing the rule to the
-    # name makes that chunk 50-odd cells instead of 4.  Measured — querying
-    # "proj" dropped the `proj` session row from rank 1 to rank 11, below every
-    # window row.
+    # The SPACE before the run used to be load-bearing for RANKING as well as
+    # for reading: --tiebreak=chunk scored by the whitespace chunk a match landed
+    # in, so gluing the rule to the name made that chunk 50-odd cells instead of
+    # 4 and dropped the exact-name `proj` session row from rank 1 to rank 11,
+    # below its own windows.  The navigator's tiebreak is `index` now (see the
+    # fzf_opts block), and re-measuring says the chunk length no longer decides
+    # anything: glued or not, the session row still ranks first.  What is left is
+    # the rendering reason — the name and the rule have to read as two things
+    # rather than as one long word — which the golden corpus pins.
     #
     # ASCII only, and only here: bash measures with ${#var}, which counts
     # CHARACTERS, so a wide glyph makes FLD_LEN too small and the run too long —
@@ -5296,13 +5300,38 @@ while true; do
   # of phase and rows are sized for a preview that is not shown.
   [ -n "$PREVIEW_STATE_FILE" ] && printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null
 
+  # Ties go to the LIST'S OWN ORDER, and nothing else does.  gather_targets
+  # already emits the sessions in @interdimux-order (MRU by default), each with
+  # its windows and panes under it, and the directory suggestions last — and on
+  # a tie that order is the answer.  It is the order --jump N counts in too.
+  #
+  # This is not the default and it is not `chunk`, which is what it used to be.
+  # Two rows tie a great deal more often than it looks: fzf scores the MATCH, not
+  # the row, so a session and a directory whose names both sit one space into
+  # field 1 (` ▸ name` and ` + name`) score identically for every query that
+  # reaches both, and the tiebreak is then the entire decision.  `chunk` decides
+  # it by the length of the whitespace chunk the match landed in, i.e. by whose
+  # name is SHORTER — so an existing session `circle/sui-cctp` lost, every time,
+  # to a `Circle` directory that was only being offered as a new session, and
+  # Enter created a second session beside the one being aimed at.  (Reported from
+  # real use; tests/test_pick_order.sh drives it.)  The same key also demoted a
+  # session row below its OWN window rows, since a window row carries the session
+  # name truncated to the prefix budget and its chunk is therefore the shorter
+  # one — measured, `anno` ranked W:annotations-worker:0 above
+  # S:annotations-worker, and with `index` the session row leads again.
+  #
+  # `index` does NOT mean sessions always win.  Score still comes first, so a
+  # directory suggestion that is genuinely the better match — an exact `notes`
+  # against a session that only matches it as a scattered subsequence — is still
+  # picked first, which is what keeps the one-list model worth having.
+  #
   # shellcheck disable=SC2054  # commas are part of a single fzf argument
   fzf_opts=(
     "${FZF_THEME[@]}"
     --delimiter=$'\t'
     --with-nth=1..3
     --nth=1,3
-    --tiebreak=chunk,begin,index
+    --tiebreak=index
     --bind='change:first'
     --bind="ctrl-r:reload($LIST_CMD)"
   )

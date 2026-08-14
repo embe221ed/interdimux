@@ -246,7 +246,9 @@ if printf '%s\n' "$rule_out" | grep $'\tS:alpha$' | grep -q '▸ alpha ──'; 
   report "the rule is separated from the name by a space" pass
 else
   report "the rule is separated from the name by a space" fail
-  ERRORS+="      --tiebreak=chunk demotes the session row if they are glued"$'\n'
+  ERRORS+="      glued, the name and the rule read as one long word"$'\n'
+  ERRORS+="      (this also demoted the row under the old --tiebreak=chunk; the"$'\n'
+  ERRORS+="       navigator uses index now, so what is left is the rendering)"$'\n'
 fi
 
 if printf '%s\n' "$rule_out" | grep $'\tS:alpha$' | awk -F'\t' '$2 ~ /─/ {exit 1}'; then

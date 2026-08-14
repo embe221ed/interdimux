@@ -508,6 +508,19 @@ and `--tiebreak=chunk` then scores the exact-name session row *below* every one
 of its own window rows — measured, `proj` fell from rank 1 to rank 11. One space
 fixes it completely. Nothing about the rendering hints at this.
 
+> **Superseded.** One space patched the symptom; the key was the cause. `chunk`
+> breaks a tie by whose matched chunk is *shorter*, which is a proxy for "whose
+> name is shorter" — so it demoted a session row under any shorter row that
+> matched, and the space only bought back the cases where the session's own rule
+> was the long thing. It surfaced again from real use, this time against the
+> directory suggestions: an existing `circle/sui-cctp` lost to a `Circle` offered
+> as a new session, and Enter created a second session next to the one being
+> aimed at. The navigator's tiebreak is `--tiebreak=index` now — keep the list's
+> own order, which is already MRU sessions → their windows and panes →
+> suggestions last. Re-measured: with `index`, gluing the rule no longer changes
+> any ranking, so the space here is a rendering choice again.
+> See `tests/test_pick_order.sh`.
+
 ### One thing the rule had to learn
 
 It only draws while there is a command column to line up with. The whole idea is
