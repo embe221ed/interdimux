@@ -4,7 +4,9 @@
 //! children (the command the user typed) — the one in the pane tty's
 //! FOREGROUND process group, see `Resolver::pick_child`.  Never walk deeper —
 //! grandchildren are the command's own subprocesses (LSPs, formatters) and
-//! showing those misleads.
+//! showing those misleads — except through a nested interactive shell that is
+//! busy running something (`bash`, then a command in it), see
+//! `Resolver::shell_command`.
 //!
 //! Three backends, each fork-free per pane where possible:
 //!   * `/proc` (Linux): one lazy read per pane, no fork, cost scales with panes.
@@ -34,8 +36,9 @@ use std::fs;
 
 use crate::macproc;
 
-/// Does this look like a login/interactive shell?  Mirrors SHELLS_PATTERN:
-/// `^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$`
+/// Does this look like a login/interactive shell?  Mirrors bash SHELL_NAMES:
+/// sh bash zsh fish dash ash ksh tcsh csh or login, each with or without a
+/// login shell's leading '-', by basename.
 pub fn is_shell(cmd: &str) -> bool {
     let base = cmd.rsplit('/').next().unwrap_or(cmd);
     let s = base.strip_prefix('-').unwrap_or(base);
@@ -47,6 +50,21 @@ pub fn is_shell(cmd: &str) -> bool {
         None => false,
     }
 }
+
+/// An idle shell's argv: a shell and nothing but its options — `-zsh`,
+/// `/bin/bash`, `bash --norc -i` — not a shell running something (`bash
+/// build.sh`, `sh -c …`).  format_command dims such a row, and full_command
+/// looks through such a shell while something else is the foreground job.
+/// Mirrors bash, where it is a SHELL_NAMES test and `only_options`.
+pub fn is_idle_shell(cmd: &str) -> bool {
+    let mut words = cmd.split(' ');
+    is_shell(words.next().unwrap_or(""))
+        && words.filter(|w| !w.is_empty()).all(|w| w.starts_with('-'))
+}
+
+/// How many nested interactive shells `full_command` looks through.  Mirrors
+/// bash NESTED_SHELL_MAX.
+const NESTED_SHELL_MAX: usize = 4;
 
 /// Render argv the way `ps args=` does, so both backends produce identical rows.
 /// Used only by the /proc backend — the ps backend gets already-sanitized bytes.
@@ -336,6 +354,41 @@ impl Resolver {
         Some(first)
     }
 
+    /// What the shell `pid`, whose argv is `own`, is running: `pick_child`'s
+    /// pick, or `own` when it has no child.
+    ///
+    /// When that pick is itself an interactive shell (`bash`, `zsh -f`: a shell
+    /// and nothing but options, `is_idle_shell`) and is NOT the tty's
+    /// foreground group, the user is running something inside it: look through
+    /// it the same way, so the row names that command, as tmux's
+    /// #{pane_current_command} does.  Without this the busy nested shell's own
+    /// argv was shown, and format_command drew it as an idle shell (review
+    /// #24).  A nested shell that IS the foreground group sits at its own
+    /// prompt: it is the answer.  Only such shells are looked through, at most
+    /// NESTED_SHELL_MAX deep — never a command's subprocesses, nor a shell
+    /// running a script.  Mirrors bash `full_command`.
+    fn shell_command(&mut self, mut pid: u32, own: String) -> String {
+        let mut args = own;
+        let mut depth = 0;
+        loop {
+            let child = match self.pick_child(pid) {
+                Some(c) => c,
+                None => return args,
+            };
+            let cargs = self.args_of(child);
+            if depth == NESTED_SHELL_MAX || !is_idle_shell(&cargs) {
+                return cargs;
+            }
+            match self.group_ids(child) {
+                Some((pg, fg)) if fg > 0 && pg != fg => {}
+                _ => return cargs,
+            }
+            args = cargs;
+            pid = child;
+            depth += 1;
+        }
+    }
+
     /// The command to display for a pane.  `short` is tmux's
     /// #{pane_current_command}, used only as the fallback.  This tail is shared
     /// by both backends and mirrors bash `resolve_command`: tab->space, trim,
@@ -350,14 +403,7 @@ impl Resolver {
         }
         let own = self.args_of(pid);
         let argv0 = own.split(' ').next().unwrap_or("");
-        let resolved = if is_shell(argv0) {
-            match self.pick_child(pid) {
-                Some(child) => self.args_of(child),
-                None => own.clone(),
-            }
-        } else {
-            own.clone()
-        };
+        let resolved = if is_shell(argv0) { self.shell_command(pid, own) } else { own };
         let r = resolved.replace('\t', " ");
         let r = r.trim();
         if r.is_empty() {
@@ -601,6 +647,109 @@ mod tests {
                 (300, 100, 300, tpgid, "second"),
             ]);
             assert_eq!(r.full_command(100, "bash"), "first", "tpgid {}", tpgid);
+        }
+    }
+
+    // --- a nested interactive shell (review #24) -----------------------------
+
+    #[test]
+    fn a_busy_nested_shell_is_looked_through_to_its_foreground_job() {
+        // `bash`, then `sleep 640` inside it: the tty's foreground group is the
+        // sleep's, not the nested shell's, so the nested shell is busy.
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 300, "bash --norc --noprofile -i"),
+            (200, 100, 200, 300, "bash --norc --noprofile"),
+            (300, 200, 300, 300, "sleep 640"),
+        ]);
+        assert_eq!(r.full_command(100, "sleep"), "sleep 640");
+    }
+
+    #[test]
+    fn a_nested_shell_at_its_own_prompt_is_the_answer() {
+        // it IS the foreground group, at its own prompt with only a background
+        // job: it is shown (and the formatter dims it)
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 200, "bash"),
+            (200, 100, 200, 200, "zsh -f"),
+            (300, 200, 300, 200, "sleep 99"), // a background job of the nested shell
+        ]);
+        assert_eq!(r.full_command(100, "zsh"), "zsh -f");
+    }
+
+    #[test]
+    fn nested_shells_are_looked_through_level_by_level() {
+        // -bash -> bash -> zsh -> the foreground job, with an older background
+        // job in the innermost shell: each level picks its own child by the
+        // same foreground rule
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 400, "-bash"),
+            (200, 100, 200, 400, "bash"),
+            (300, 200, 300, 400, "zsh -f"),
+            (350, 300, 350, 400, "sleep 1"),
+            (400, 300, 400, 400, "vim notes.md"),
+        ]);
+        assert_eq!(r.full_command(100, "vim"), "vim notes.md");
+    }
+
+    #[test]
+    fn nested_shells_are_looked_through_at_most_nested_shell_max_deep() {
+        // a chain of n busy nested shells above `sleep 7`
+        let chain = |n: u32| {
+            let mut rows = vec![(100u32, 1u32, 100i64, 999i64, "bash".to_string())];
+            for i in 1..=n {
+                let pid = 100 + i;
+                rows.push((pid, pid - 1, i64::from(pid), 999, format!("bash -i{}", i)));
+            }
+            rows.push((999, 100 + n, 999, 999, "sleep 7".to_string()));
+            rows
+        };
+        let max = NESTED_SHELL_MAX as u32;
+        let rows = chain(max);
+        let refs: Vec<_> = rows.iter().map(|(a, b, c, d, e)| (*a, *b, *c, *d, e.as_str())).collect();
+        assert_eq!(ps_resolver_groups(&refs).full_command(100, "sleep"), "sleep 7");
+        let rows = chain(max + 1);
+        let refs: Vec<_> = rows.iter().map(|(a, b, c, d, e)| (*a, *b, *c, *d, e.as_str())).collect();
+        assert_eq!(ps_resolver_groups(&refs).full_command(100, "sleep"),
+                   format!("bash -i{}", max + 1));
+    }
+
+    #[test]
+    fn a_shell_running_a_script_is_never_looked_through() {
+        // `bash build.sh` is the command; make is its subprocess
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 200, "bash"),
+            (200, 100, 200, 200, "bash build.sh"),
+            (300, 200, 300, 200, "make -j8"),
+        ]);
+        assert_eq!(r.full_command(100, "bash"), "bash build.sh");
+        // ... even when its child owns the foreground
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 300, "bash"),
+            (200, 100, 200, 300, "sh -c make"),
+            (300, 200, 300, 300, "make"),
+        ]);
+        assert_eq!(r.full_command(100, "make"), "sh -c make");
+    }
+
+    #[test]
+    fn a_nested_shell_with_no_known_foreground_is_the_answer() {
+        for tpgid in [0, -1] {
+            let mut r = ps_resolver_groups(&[
+                (100, 1, 100, tpgid, "bash"),
+                (200, 100, 200, tpgid, "bash"),
+                (300, 200, 300, tpgid, "sleep 5"),
+            ]);
+            assert_eq!(r.full_command(100, "bash"), "bash", "tpgid {}", tpgid);
+        }
+    }
+
+    #[test]
+    fn idle_shell_is_a_shell_and_only_options() {
+        for s in ["bash", "-zsh", "/bin/bash", "bash --norc -i", "zsh  -f", "sh -", "-login"] {
+            assert!(is_idle_shell(s), "{:?}", s);
+        }
+        for s in ["bash build.sh", "sh -c make", "zsh -c x", "vim", "sleep -1", "", "bash -x a"] {
+            assert!(!is_idle_shell(s), "{:?}", s);
         }
     }
 

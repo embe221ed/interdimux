@@ -372,8 +372,9 @@ still exists, so one stalled mount cannot hold up the list.
 - SSH connections show `user@host` highlighted in blue
 - Editors show the filename highlighted in green
 - The command is the one in the pane's foreground — a job you backgrounded does
-  not hide it — and it is named, not pathed: `python3 tool.py`, not
-  `/usr/bin/python3 /home/me/bin/tool.py`
+  not hide it, nor does a shell you started inside the pane's own (`bash`, then
+  `make` in it, reads `make`) — and it is named, not pathed: `python3 tool.py`,
+  not `/usr/bin/python3 /home/me/bin/tool.py`
 - An idle shell is just its name (`zsh`, not `-zsh`) in the tree colour, so
   the rows where something is running are the ones that stand out
 - Panes only shown for multi-pane windows

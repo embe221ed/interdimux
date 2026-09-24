@@ -2052,25 +2052,62 @@ read_cmdline() {
   return 0
 }
 
-# Known shells — used to decide whether to descend one level
-SHELLS_PATTERN='^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$'
+# The shells, by argv0 basename, each also with a login shell's leading '-'.
+# A name is tested as
+#
+#   [[ "$SHELL_NAMES" == *" ${name#-} "* ]]
+#
+# -- a glob over this string.  Not a `[[ =~ ]]`: bash compiles a regex afresh on
+# every test, and the bash renderer asks this of every row it draws (review
+# #28).  Not a function either: in bash the call costs more than the test.  A
+# name holds no blank, being argv0 cut at the first space.  rust/src/proc.rs
+# is_shell is the same list.
+SHELL_NAMES=' sh bash zsh fish dash ash ksh tcsh csh login '
 
-# /proc/<pid>/stat after its comm field: state ppid pgrp session tty_nr tpgid.
-STAT_IDS_RE='^[^ ]+ [^ ]+ (-?[0-9]+) [^ ]+ [^ ]+ (-?[0-9]+)'
+# Is every word of $1 an option?  $1 is what follows argv0: empty, or starting
+# with a blank.  The words are never split out -- unquoted they would glob --
+# so a word that is not an option is a blank followed by anything but a blank
+# or '-'.
+#
+# A shell and nothing but its options is an idle shell's argv: `-zsh`,
+# `/bin/bash`, `bash --norc -i`, not `bash build.sh` or `sh -c …`.
+# format_command dims such a row, and full_command looks through such a shell
+# while something else is the foreground job.  rust/src/proc.rs is_idle_shell
+# is the same rule.
+only_options() {
+  [[ "$1" != *[$' \t\n'][!$' \t\n'-]* ]]
+}
 
 # Process group and the controlling tty's foreground process group of a pid:
-# REPLY="<pgrp> <tpgid>", either half empty when unknown.  The comm field is
-# parenthesised and may itself hold spaces, ')' and even a newline, so the file
-# is read whole and the fields are counted from its LAST ") ".
+# REPLY="<pgrp> <tpgid>", either half empty when unknown.
+#
+# /proc/<pid>/stat is `pid (comm) state ppid pgrp session tty_nr tpgid ...`,
+# read straight into words.  comm may itself hold blanks, ')' and even a
+# newline, so it ends at the LAST word with a ')' in it: every field after comm
+# is a number or a state letter.  comm is at most 15 bytes (TASK_COMM_LEN), so
+# at most 7 blanks, and that word is one of f[1]..f[8].  The usual comm (no
+# blank, so f[1] is all of it) is one test.
+#
+# No regex and no whole-line pattern strip.  `${line##*) }` over the ~300-byte
+# line is quadratic in its length, and with the regex after it cost ~0.3 ms a
+# call, for every shell with two or more children the bash renderer draws
+# (review #29).
 proc_group_ids() {
   REPLY=""
-  local pid="$1" line=""
+  local pid="$1" f=() i last=0
   [ -n "$pid" ] || return 0
   if [ "$PROC_CMDLINE_OK" = 1 ]; then
-    { read -r -d '' line < "/proc/$pid/stat"; } 2>/dev/null || :
-    line="${line##*) }"
-    [[ "$line" =~ $STAT_IDS_RE ]] || return 0
-    REPLY="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+    { IFS=$' \t\n' read -r -d '' -a f < "/proc/$pid/stat"; } 2>/dev/null || :
+    if [[ "${f[1]-}" == *')' && "${f[*]:2:7}" != *')'* ]]; then
+      last=1
+    else
+      for (( i = 1; i <= 8 && i < ${#f[@]}; i++ )); do
+        case "${f[i]}" in *')'*) last=$i ;; esac
+      done
+      [ "$last" -gt 0 ] || return 0
+    fi
+    [ -n "${f[last+6]-}" ] || return 0      # a vanished or short record: unknown
+    REPLY="${f[last+3]} ${f[last+6]}"
   else
     REPLY="${PS_PGID[$pid]:-} ${PS_TPGID[$pid]:-}"
   fi
@@ -2114,12 +2151,23 @@ pick_child() {
 # deeper children are subprocesses of that command (LSPs, formatters,
 # watchers, …) and showing those is misleading.
 #
+# One exception: a child that is itself an interactive shell (`bash`, `zsh -f`:
+# a shell and nothing but options, see only_options) and is NOT the tty's
+# foreground group is running something -- the user typed `bash`, then a
+# command in it.  Look through it the same way, so the row names that command,
+# as tmux's #{pane_current_command} does.  Without this the busy nested shell's
+# own argv was shown, and format_command drew it as an idle shell (review #24).
+# A nested shell that IS the foreground group sits at its own prompt: it is
+# the answer.  Only such shells are looked through, at most NESTED_SHELL_MAX
+# deep -- never a command's subprocesses, nor a shell running a script.
+#
 # The shell test MUST come from the pane process's own argv.  tmux's
 # #{pane_current_command} names the pane tty's FOREGROUND process group, which
 # is the running command, not the shell — so gating on it inverts the test
 # exactly when a command is running and every busy pane renders as "-zsh".
+NESTED_SHELL_MAX=4
 full_command() {
-  local pid="$1" args children child
+  local pid="$1" args children child fg depth=0 c0
 
   if [ "$PROC_CMDLINE_OK" = 1 ]; then
     read_cmdline "$pid"; args="$REPLY"
@@ -2130,29 +2178,41 @@ full_command() {
   local cmd_name="${args%% *}"
   cmd_name="${cmd_name##*/}"
 
-  # If the pane process is a shell, look one level down
-  if [[ "$cmd_name" =~ $SHELLS_PATTERN ]]; then
-    if [ "$PROC_CMDLINE_OK" = 1 ]; then
-      children=""
-      # The children file has NO trailing newline, so `read` assigns the value
-      # and THEN reports EOF.  A `|| children=""` fallback here would wipe what
-      # it just read and silently disable child resolution for every pane.
-      { read -r children < "/proc/$pid/task/$pid/children"; } 2>/dev/null || :
-    else
-      children="${PS_CHILDREN[$pid]:-}"
-    fi
-    if [ -n "$children" ]; then
+  # If the pane process is a shell, look one level down -- and on through
+  # nested interactive shells that are busy
+  if [[ "$SHELL_NAMES" == *" ${cmd_name#-} "* ]]; then
+    while :; do
+      if [ "$PROC_CMDLINE_OK" = 1 ]; then
+        children=""
+        # The children file has NO trailing newline, so `read` assigns the
+        # value and THEN reports EOF.  A `|| children=""` fallback here would
+        # wipe what it just read and silently disable child resolution for
+        # every pane.
+        { read -r children < "/proc/$pid/task/$pid/children"; } 2>/dev/null || :
+      else
+        children="${PS_CHILDREN[$pid]:-}"
+      fi
+      [ -n "$children" ] || break
       pick_child "$pid" "$children"; child="$REPLY"
       if [ "$PROC_CMDLINE_OK" = 1 ]; then
         read_cmdline "$child"
       else
         REPLY="${PS_ARGS[$child]:-}"
       fi
-      return 0
-    fi
+      # The pick is the answer unless it is an interactive shell -- the name
+      # first: it is rarely a shell at all.
+      c0="${REPLY%% *}"; c0="${c0##*/}"
+      [[ "$SHELL_NAMES" == *" ${c0#-} "* ]] && [ "$depth" -lt "$NESTED_SHELL_MAX" ] \
+        && only_options "${REPLY#"${REPLY%% *}"}" || return 0
+      # A nested interactive shell: busy unless it is the foreground group.
+      args="$REPLY"
+      proc_group_ids "$child"; fg="${REPLY#* }"
+      case "$fg" in ''|0|-*|"${REPLY%% *}") REPLY="$args"; return 0 ;; esac
+      pid="$child"; depth=$(( depth + 1 ))
+    done
   fi
 
-  # Not a shell (or shell has no children) — use as-is
+  # Not a shell, or a shell with no children — use as-is
   REPLY="$args"
   return 0
 }
@@ -2256,24 +2316,26 @@ get_git_branch() {
 # Smart command formatting (SSH host, editor context)
 # ---------------------------------------------------------------------------
 
-EDITORS_PATTERN='^(n?vim|vi|nano|emacs|code|hx|helix|micro|kate|gedit|subl)$'
-
-# SSH flags that consume the next argument (so we skip both flag and value)
-SSH_FLAGS_WITH_VALUE='^-(b|c|D|E|e|F|I|i|J|L|l|m|O|o|p|Q|R|S|W|w)$'
-
-# Editor flags that consume the next argument
-EDITOR_FLAGS_WITH_VALUE='^-[uUsSpc]$|^--cmd$|^--listen$'
-
-# Interpreters whose first argument, when it is a path, is the script they run.
-# Shells count too (SHELLS_PATTERN is checked alongside).
-INTERPRETERS_PATTERN='^(python[0-9.]*|lua[0-9.]*|node|nodejs|ruby|perl|php)$'
-
+# Every classification below is a `case` glob, never a `[[ =~ ]]`: bash
+# compiles a regex afresh on every test, about 20-25 us each, and the bash
+# renderer formats every window row and every pane row (review #28).  The Rust
+# core's format.rs holds the same tables.
+#
+#   editors                       vim nvim vi nano emacs code hx helix micro
+#                                 kate gedit subl
+#   ssh flags taking a value      -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p
+#                                 -Q -R -S -W -w
+#   editor flags taking a value   -u -U -s -S -p -c --cmd --listen
+#   interpreters (whose first     python and lua, each with an optional
+#   argument, when it is a path,  version of digits and dots; node nodejs ruby
+#   is the script they run)       perl php; and the shells (SHELL_NAMES)
 format_command() {
   local cmd_str="$1"
   REPLY=""                       # reset: callers read REPLY after a bare call
   [ -z "$cmd_str" ] && return
   local cmd_name="${cmd_str%% *}"
   local cmd_base="${cmd_name##*/}"
+  local rest="${cmd_str#"$cmd_name"}"
 
   # Disable globbing for word-splitting of arguments
   local old_set="$-"
@@ -2292,9 +2354,8 @@ format_command() {
           continue
         fi
         case "$word" in
-          -*)
-            [[ "$word" =~ $SSH_FLAGS_WITH_VALUE ]] && skip_next=1
-            ;;
+          -[bcDEeFIiJLlmOopQRSWw]) skip_next=1 ;;
+          -*) ;;
           *)  host="$word" ;;
         esac
       done
@@ -2307,7 +2368,9 @@ format_command() {
   esac
 
   # Editors: highlight the file being edited
-  if [[ "$cmd_base" =~ $EDITORS_PATTERN ]]; then
+  local is_ed=0
+  case "$cmd_base" in vim|nvim|vi|nano|emacs|code|hx|helix|micro|kate|gedit|subl) is_ed=1 ;; esac
+  if [ "$is_ed" = 1 ]; then
     local file="" skip_next=""
     local args="${cmd_str#* }"
     [ "$args" = "$cmd_str" ] && args=""
@@ -2318,9 +2381,8 @@ format_command() {
         continue
       fi
       case "$word" in
-        -*)
-          [[ "$word" =~ $EDITOR_FLAGS_WITH_VALUE ]] && skip_next=1
-          ;;
+        -[uUsSpc]|--cmd|--listen) skip_next=1 ;;
+        -*) ;;
         +*) ;;  # vim +line / +/pattern
         *)  file="$word" ;;
       esac
@@ -2333,27 +2395,20 @@ format_command() {
     fi
   fi
 
+  [[ "$old_set" != *f* ]] && set +f
+
+  # Asked once, answered for both rules below.
+  local is_sh=0
+  [[ "$SHELL_NAMES" == *" ${cmd_base#-} "* ]] && is_sh=1
+
   # An idle shell — the shell and nothing but its options: `-zsh`, `/bin/bash`,
   # `bash --norc -i`.  Its bare name, in the tree colour, so the rows doing real
   # work are the ones in the accent (IDEAS #10).  A shell running something
   # (`bash build.sh`, `sh -c …`) is real work and falls through.
-  if [[ "$cmd_base" =~ $SHELLS_PATTERN ]]; then
-    local args="${cmd_str#* }" word idle=1
-    [ "$args" = "$cmd_str" ] && args=""
-    for word in $args; do
-      case "$word" in
-        -*) ;;
-        *)  idle=0; break ;;
-      esac
-    done
-    if [ "$idle" = 1 ]; then
-      [[ "$old_set" != *f* ]] && set +f
-      printf -v REPLY '%s%s%s' "$DIM_TREE" "${cmd_base#-}" "$RST"
-      return
-    fi
+  if [ "$is_sh" = 1 ] && only_options "$rest"; then
+    printf -v REPLY '%s%s%s' "$DIM_TREE" "${cmd_base#-}" "$RST"
+    return
   fi
-
-  [[ "$old_set" != *f* ]] && set +f
 
   # Everything else, with argv0 by its basename: `/usr/bin/python3 -c …` spent
   # nine of the column's cells on `/usr/bin/`.  An argv0 that ends in '/' has
@@ -2361,8 +2416,15 @@ format_command() {
   # path shows the script's basename too — a `#!/usr/bin/python3` script reads
   # `python3 tool.py`, not `/usr/bin/python3 /home/…/bin/tool.py`.  Only the
   # word straight after argv0 is considered, never an option.
-  local rest="${cmd_str#"$cmd_name"}"
-  if [[ "$cmd_base" =~ $INTERPRETERS_PATTERN ]] || [[ "$cmd_base" =~ $SHELLS_PATTERN ]]; then
+  local is_int="$is_sh"
+  case "$cmd_base" in
+    # a version is digits and dots only: python3.12 is one, pythonw is not.
+    # The digits are listed, not ranged: a range follows the locale's collation.
+    python*) [[ "${cmd_base#python}" == *[!0123456789.]* ]] || is_int=1 ;;
+    lua*)    [[ "${cmd_base#lua}" == *[!0123456789.]* ]] || is_int=1 ;;
+    node|nodejs|ruby|perl|php) is_int=1 ;;
+  esac
+  if [ "$is_int" = 1 ]; then
     local r1="${rest# }" w1
     w1="${r1%% *}"
     if [[ "$w1" != -* && "$w1" == */* ]] && [ -n "${w1##*/}" ]; then

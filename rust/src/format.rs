@@ -4,7 +4,7 @@
 //! flag-skipping tables and its "last positional wins" behaviour.
 
 use crate::palette::{Palette, RST};
-use crate::proc::is_shell;
+use crate::proc::{is_idle_shell, is_shell};
 
 /// ssh/mosh flags that consume the following argument.
 fn ssh_flag_takes_value(w: &str) -> bool {
@@ -29,8 +29,9 @@ fn is_editor(base: &str) -> bool {
 }
 
 /// Interpreters whose first argument, when it is a path, is the script they
-/// run.  Mirrors bash INTERPRETERS_PATTERN
-/// `^(python[0-9.]*|lua[0-9.]*|node|nodejs|ruby|perl|php)$`, plus the shells.
+/// run: python and lua, each with an optional version of ASCII digits and
+/// dots, node nodejs ruby perl php, and the shells.  Mirrors the `case` in bash
+/// `format_command`.
 fn is_interpreter(base: &str) -> bool {
     let versioned = |stem: &str| {
         base.strip_prefix(stem)
@@ -106,7 +107,7 @@ pub fn format_command(cmd: &str, p: &Palette) -> (String, String) {
     // `/bin/bash`, `bash --norc -i`.  Its bare name, in the tree colour, so the
     // rows doing real work are the ones in the accent (IDEAS #10).  A shell
     // running something (`bash build.sh`, `sh -c …`) is real work.
-    if is_shell(base) && args.iter().all(|w| w.starts_with('-')) {
+    if is_idle_shell(cmd) {
         let name = base.strip_prefix('-').unwrap_or(base);
         return (format!("{}{}{}", p.dim_tree, name, RST), name.to_string());
     }

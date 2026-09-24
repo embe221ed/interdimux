@@ -1,0 +1,53 @@
+cmds170000000040attached
+
+cmds0w01python3.12 /x/tool.py/home/u22000000
+cmds1w10pythonw /x/tool.py/home/u22001000
+cmds2w20python-config /x/y/home/u22002000
+cmds3w30python3.1a /x/y.py/home/u22003000
+cmds4w40python /x/p.py/home/u12004000
+cmds5w50lua5.4 /x/a.lua/home/u12005000
+cmds6w60luajit /x/a.lua/home/u12006000
+cmds7w70lua /x/a.lua/home/u12007000
+cmds8w80/usr/bin/node /x/s.js/home/u12008000
+cmds9w90nodejs /x/s.js/home/u12009000
+cmds10w100ruby /x/r.rb/home/u12010000
+cmds11w110perl /x/p.pl/home/u12011000
+cmds12w120php /x/p.php/home/u12012000
+cmds13w130python3 -u /x/t.py/home/u12013000
+cmds14w140bash /x/b.sh/home/u12014000
+cmds15w150-zsh/home/u12015000
+cmds16w160/bin/bash --norc -i/home/u12016000
+cmds17w170sh -c make/home/u12017000
+cmds18w180--bash/home/u12018000
+cmds19w190bash -x a/home/u12019000
+cmds20w200-login/home/u12020000
+cmds21w210tcsh -f/home/u12021000
+cmds22w220wish /x/w.tcl/home/u12022000
+cmds23w230ssh -p 22 me@box/home/u12023000
+cmds24w240ssh box -w 1/home/u12024000
+cmds25w250ssh box -x/home/u12025000
+cmds26w260mosh -o x box/home/u12026000
+cmds27w270ssh -J j -i k h/home/u12027000
+cmds28w280vim f.txt --cmd x/home/u12028000
+cmds29w290nvim f.txt -S s.vim/home/u12029000
+cmds30w300vi +3 /etc/hosts/home/u12030000
+cmds31w310nvim -O a.rs b.rs/home/u12031000
+cmds32w320emacs -nw /a/b.el/home/u12032000
+cmds33w330hx/home/u12033000
+cmds34w340/usr/bin/nvim/home/u12034000
+cmds35w350micro /x/m.go/home/u12035000
+cmds36w360vim --listen /s f.md/home/u12036000
+cmds37w370code ./home/u12037000
+cmds38w380kate a -c/home/u12038000
+cmds39w390subl /q/r/home/u12039000
+
+cmds001python3.12 /x/tool.py/home/u20002
+cmds010subl /q/r/home/u30002
+cmds101pythonw /x/tool.py/home/u20012
+cmds110kate a -c/home/u30012
+cmds201python-config /x/y/home/u20022
+cmds210code ./home/u30022
+cmds301python3.1a /x/y.py/home/u20032
+cmds310vim --listen /s f.md/home/u30032
+
+cmds00
