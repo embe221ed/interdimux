@@ -43,6 +43,9 @@ struct Session {
     name: String,
     windows: String,
     attached: bool,
+    /// #{session_path}: where the session was started.  A `cd` inside it never
+    /// changes this, which is what makes it the session's directory identity.
+    path: String,
 }
 struct Window {
     session: String,
@@ -141,12 +144,14 @@ fn gather() {
     // the same rules -- see the comments there.
 
     // The session NAME is the first field (bash's _sfmt), so a cut line keeps
-    // its identity; everything after it may be missing.
+    // its identity; everything after it may be missing.  #{session_path} is
+    // last and taken whole -- at most five fields -- so a US inside it stays in
+    // the path, exactly as bash's `read` hands the remainder to its last name.
     let mut sessions: Vec<Session> = sessions_raw
         .lines()
         .filter(|l| !l.is_empty())
         .filter_map(|l| {
-            let f: Vec<&str> = l.split(US).collect();
+            let f: Vec<&str> = l.splitn(5, US).collect();
             let name = f[0].to_string();
             if name.is_empty() {
                 return None;
@@ -156,6 +161,7 @@ fn gather() {
                 name,
                 windows: f.get(2).unwrap_or(&"").to_string(),
                 attached: !f.get(3).unwrap_or(&"").is_empty(),
+                path: f.get(4).unwrap_or(&"").to_string(),
             })
         })
         .collect();
@@ -288,6 +294,11 @@ fn gather() {
     };
 
     for s in &sessions {
+        // A directory that already has a session is not offered as a D: row:
+        // its start directory, and (below) its active window's cwd.
+        if !s.path.is_empty() {
+            session_dirs.insert(s.path.clone());
+        }
         let is_cur = s.name == current_session;
         let (ident, sdisp_full) = render::session_ident(&s.name, is_cur, &w, &p, session_rule);
         let age = age_of(s.last, now);

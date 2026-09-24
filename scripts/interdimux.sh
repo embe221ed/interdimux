@@ -1023,28 +1023,51 @@ collect_dir() {
   fi
 }
 
-# Directory of a session's active pane — used to detect whether an
-# existing session with a given name belongs to a directory.
-session_dir() {
-  tmux list-panes -t "=$1" -F '#{pane_current_path}' -f '#{pane_active}' 2>/dev/null | head -1
+# Does session $1 belong to directory $2?
+#
+# A session's identity is where it was STARTED: #{session_path}, what
+# `new-session -c` recorded, which a `cd` inside the session never changes.  The
+# active pane's cwd is the second chance: AT the directory (the old test), or
+# BELOW it for a session started on the same branch of the tree -- above it
+# (`tmux new -s api` from ~, then `cd ~/work/api/src`) or inside it.  Only ever
+# asked about a session whose NAME already matches the directory; the branch
+# condition keeps a same-named session from an unrelated directory, whose pane
+# merely wandered in, from being mistaken for this one.
+#
+# It used to be the active pane's cwd alone, compared for equality, so a plain
+# `cd src` inside the project -- or a second window opened in /tmp -- made the
+# project's own session "a different directory": Enter on the project created
+# `<parent>-<name>`, a second session for the same directory.  SESSION_DIRS
+# (the navigator's directory rows) and DIR_SESSION (the ctrl-o badge) key on
+# the same #{session_path} for the same reason.
+session_at_dir() {
+  local out spath cwd
+  out=$(tmux display-message -p -t "=$1:" "#{session_path}${US}#{pane_current_path}" 2>/dev/null) || return 1
+  spath="${out%%"$US"*}" cwd="${out#*"$US"}"
+  [ "$spath" = "$2" ] || [ "$cwd" = "$2" ] && return 0
+  case "$cwd" in "$2"/*) ;; *) return 1 ;; esac
+  [ "$spath" = / ] && return 0
+  case "$2" in "$spath"/*) return 0 ;; esac
+  case "$spath" in "$2"/*) return 0 ;; esac
+  return 1
 }
 
 # Derive a session name for a directory.  When a same-named session
-# exists for a *different* directory, disambiguate with the parent dir
-# name (then numeric suffixes) instead of silently reusing it.
+# exists for a *different* directory (session_at_dir), disambiguate with the
+# parent dir name (then numeric suffixes) instead of silently reusing it.
 resolve_session_name() {
   local dir_path="$1"
   local session_name base_name parent_name n
   session_name=$(basename "$dir_path" | tr '.:' '-')
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
-    if [ "$(session_dir "$session_name")" != "$dir_path" ]; then
+    if ! session_at_dir "$session_name" "$dir_path"; then
       base_name="$session_name"
       parent_name=$(basename "$(dirname "$dir_path")" | tr '.:' '-')
       session_name="${parent_name}-${base_name}"
       n=2
       while tmux has-session -t "=$session_name" 2>/dev/null; do
-        [ "$(session_dir "$session_name")" = "$dir_path" ] && break
+        session_at_dir "$session_name" "$dir_path" && break
         session_name="${base_name}-${n}"
         n=$((n + 1))
       done
@@ -1921,8 +1944,9 @@ build_ctx_field() {
 #
 # Sources are only the cheap ones — the recent list and zoxide (~3-5 ms
 # combined).  Filesystem scanning stays behind ctrl-o, where the user has asked
-# for it.  SESSION_DIRS holds the cwd of each session's active window, so a
-# directory that already has a session is not offered again.
+# for it.  SESSION_DIRS holds each session's start directory (#{session_path})
+# and the cwd of its active window, so a directory that already has a session
+# is not offered again -- not even after a `cd` inside that session.
 emit_dir_rows() {
   [ "$SHOW_DIRS" = "on" ] || return 0
   [[ "$DIRS_LIMIT" =~ ^[0-9]+$ ]] || return 0
@@ -1982,7 +2006,15 @@ gather_targets() {
   # the session vanished along with every window and pane under it (shifting
   # --jump N onto the wrong session).
   local _sfmt _wfmt _pfmt _curfmt
-  _sfmt="#{session_name}${US}#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_windows}${US}#{?session_attached,attached,}"
+  #
+  # #{session_path} goes LAST, so a US inside it stays inside it (both renderers
+  # split the line into at most five fields).  A newline or RS in it is
+  # rewritten to '?' by tmux itself: the first would split the line and hand the
+  # fragment after it the session-name position, the second would break the
+  # section framing.  Such a path could never equal a directory row's path
+  # anyway -- the recent list and zoxide are line-based.
+  local _nl=$'\n' _rs=$'\x1e'
+  _sfmt="#{session_name}${US}#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_windows}${US}#{?session_attached,attached,}${US}#{s/[${_nl}${_rs}]/?/:session_path}"
   _wfmt="#{session_name}${US}#{window_index}${US}#{window_name}${US}#{window_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_panes}${US}#{pane_pid}${US}#{window_zoomed_flag}#{window_bell_flag}#{window_activity_flag}"
   _pfmt="#{session_name}${US}#{window_index}${US}#{pane_index}${US}#{pane_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{pane_pid}${US}#{window_panes}"
   _curfmt="#S${US}#I${US}#P"
@@ -2220,8 +2252,8 @@ IMUX_SECTIONS
     sessions_raw="${sessions_raw%$'\n'}"
   fi
 
-  # cwd of each session's active window — emit_dir_rows uses it to skip
-  # directories that already have a session.
+  # Each session's start directory and its active window's cwd -- emit_dir_rows
+  # uses them to skip directories that already have a session.
   declare -A SESSION_DIRS=()
 
   # Build lookup: windows grouped by session name
@@ -2282,13 +2314,14 @@ IMUX_SECTIONS
   measure_widths
   compute_widths
 
-  local sla sname swins sattach marker meta age sdisp rule_n rule_run rule_ok
+  local sla sname swins sattach spath marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
   local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
 
-  while IFS="$US" read -r sname sla swins sattach; do
+  while IFS="$US" read -r sname sla swins sattach spath; do
     [ -z "$sname" ] && continue
+    [ -n "$spath" ] && SESSION_DIRS["$spath"]=1
     marker=" "
     [ "$sname" = "$current_session" ] && marker="${MARKER_COLOR}*${RST}"
 
@@ -2653,15 +2686,20 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # directory you already had open looked like it had done nothing.  Naming the
   # session is the useful half: it tells you where you are about to land.
   #
-  # One tmux invocation, keyed on each session's ACTIVE window, the same basis
-  # the navigator's directory rows use.  This is the ctrl-o picker, not the hot
-  # path, so ~5 ms of round-trip is affordable here.
+  # Keyed on each session's START directory (#{session_path}) and on its active
+  # window's cwd -- the same basis as the navigator's directory rows and as
+  # resolve_session_name, so the badge names the session Enter lands in.  The
+  # start directory wins a tie: a `cd` inside a session must not move the badge
+  # (it used to, and the project's own row lost its badge the moment you cd'd).
+  # One tmux invocation for both lists (sessions first, so they win); this is
+  # the ctrl-o picker, not the hot path, so ~5 ms of round-trip is affordable.
   declare -A DIR_SESSION=()
-  while IFS="$US" read -r _ds_name _ds_path; do
+  while IFS="$US" read -r _ds_kind _ds_name _ds_path; do
+    case "$_ds_kind" in s|w) ;; *) continue ;; esac   # a newline-split fragment
     [ -n "$_ds_path" ] || continue
     [[ -v "DIR_SESSION[$_ds_path]" ]] || DIR_SESSION["$_ds_path"]="$_ds_name"
-  done < <(tmux list-windows -a -F \
-             "#{?window_active,#{session_name}${US}#{pane_current_path},}" 2>/dev/null)
+  done < <(tmux list-sessions -F "s${US}#{session_name}${US}#{session_path}" \; \
+             list-windows -a -F "#{?window_active,w${US}#{session_name}${US}#{pane_current_path},}" 2>/dev/null)
 
   # Path column width derived from the popup (list pane is ~60% with the
   # 40% preview open)
