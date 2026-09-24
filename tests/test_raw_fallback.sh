@@ -19,6 +19,10 @@
 #                and bring the row hints back with the matches -- in bash, in
 #                zsh, and (through the sh -c wrapper, kept for shells that may
 #                not speak POSIX, like fish) in a shell it does not recognise.
+#   the reload - ...and after a reload that leaves the cursor's row number
+#                alone but slides a different KIND of row under it (a ^x that
+#                takes a window down to one pane), where focus does not fire:
+#                the bar must follow the row, not keep the killed one's hints.
 #
 # Oracle for the cost: every process is counted where it starts, by a `bash`
 # and an `sh` on PATH that log their argv and fzf's environment and then exec
@@ -285,6 +289,57 @@ for ws in "${SHELLS[@]}"; do
   esac
   tmux -L "$OUTER" kill-server 2>/dev/null || true
 done
+
+# --- the bar after a reload that slides a new row type under the cursor ----------
+# fzf fires `focus` only when the cursor's row NUMBER changes, and a reload
+# keeps the number.  Kill the first of delta's two panes: the window is left
+# with one pane, both pane rows go, and the row that slides under the unmoved
+# cursor is gamma -- a session.  focus stays silent, so only the `result` bind
+# can rewrite the bar, and it used to do that only around zero matches: the
+# session row kept the dead pane's hints (^z zoom, ^s swap, ^t send).
+tmux -L "$SOCK" new-session -d -s delta -x 120 -y 24 -c "$TMPD/cwd" 'sleep 3600'
+tmux -L "$SOCK" split-window -t '=delta:0' -c "$TMPD/cwd" 'sleep 3602'
+if launch 'bash -c'; then
+  settle > /dev/null
+  # Down one row at a time, each step waiting for the cursor to leave the row
+  # it was on (every row reads differently).
+  for _i in $(seq 1 30); do
+    r0=$(cur_row)
+    [[ "$r0" == *'├╴ delta 0.0'* ]] && break
+    keys Down
+    for _j in $(seq 1 40); do [ "$(cur_row)" != "$r0" ] && break; sleep 0.05; done
+  done
+  if [[ "$(cur_row)" != *'├╴ delta 0.0'* ]]; then
+    report "the cursor reaches delta's first pane row (fixture)" fail
+    ERRORS+="    cursor on: $(cur_row)"$'\n'
+  else
+    s=$(settle)
+    if ! printf '%s' "$s" | grep -qF '^z zoom'; then
+      report "a pane row shows the pane hints (fixture)" fail
+    else
+      keys C-x
+      for _i in $(seq 1 100); do screen | grep -qF "Kill pane" && break; sleep 0.1; done
+      keys y
+      for _i in $(seq 1 100); do
+        tmux -L "$SOCK" list-panes -t '=delta:0' 2>/dev/null | wc -l | grep -qx 1 \
+          && ! screen | grep -qF 'delta 0.1' && break
+        sleep 0.1
+      done
+      s=$(settle)
+      row=$(cur_row)
+      if [[ "$row" == *'▸ gamma'* ]] && printf '%s' "$s" | grep -qF '^d detach' \
+         && ! printf '%s' "$s" | grep -qF '^z zoom'; then
+        report "a kill that slides a session row under the cursor shows the session hints" pass
+      else
+        report "a kill that slides a session row under the cursor shows the session hints" fail
+        ERRORS+="    cursor: $row"$'\n'"    bar: $(printf '%s\n' "$s" | grep -E 'enter' | head -1 | sed 's/^ *//')"$'\n'
+      fi
+    fi
+  fi
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
+else
+  report "the navigator opens for the kill case" fail
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

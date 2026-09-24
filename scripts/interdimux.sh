@@ -7923,9 +7923,20 @@ while true; do
           # in through the environment, so neither its quotes nor its {-1}
           # pass through the guard's own quoting (fzf expands the {-1} when it
           # runs the printed action).
+          #
+          # And after a RELOAD, a result with the same query as the last one.
+          # focus fires only when the cursor's row NUMBER changes, and a reload
+          # keeps the number while the row under it may be a different kind:
+          # kill the last pane but one of a window and both pane rows go, so a
+          # session row slides under the cursor -- which kept the pane's hints
+          # (^z zoom ^s swap ^t send).  A swap can do it with the row count
+          # unchanged, so the test is "not a keystroke", not "fewer rows".
+          # Reloads are the user's own actions (^r, ^/, a resize, each ^x ^e
+          # ^z ^s ^d ^t) plus the snapshots of the first load, never typing,
+          # so the per-keystroke saving above stands.
           export INTERDIMUX_BAR_ACTION="bg-cancel+bg-transform-$HINT_BAR($_footer_for)"
           _best_guard+=' o=; [ -z "$b" ] || o=best;'
-          _best_guard+=' if [ "$FZF_MATCH_COUNT" = 0 ] || [ "$m" = 0 ]; then o="$o+$INTERDIMUX_BAR_ACTION"; fi;'
+          _best_guard+=' if [ "$FZF_MATCH_COUNT" = 0 ] || [ "$m" = 0 ] || [ "$p" = "$k" ]; then o="$o+$INTERDIMUX_BAR_ACTION"; fi;'
           _best_guard+=' o=${o#+}; [ -z "$o" ] || printf "%s\n" "$o"'
           # The guard is POSIX, and wrapping it in `sh -c` inside the user's
           # shell cost a second shell per keystroke (measured: 5.3 ms under
