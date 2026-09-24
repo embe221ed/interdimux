@@ -4,7 +4,9 @@
 //! on the host before the first row can emit (~100 ms on a busy Mac).  Here we
 //! ask the kernel directly, per pane:
 //!   * argv          -> sysctl(KERN_PROCARGS2, pid)
-//!   * first child   -> proc_listpids(PROC_PPID_ONLY, pid)
+//!   * children      -> proc_listpids(PROC_PPID_ONLY, pid)
+//!   * pgid / tpgid  -> proc_pidinfo(PROC_PIDTBSDINFO) — which child is the
+//!                      pane tty's foreground job (proc.rs `pick_child`)
 //! so cost scales with pane count, not host load — the same win `/proc` gives
 //! Linux.
 //!
@@ -17,7 +19,7 @@
 //!     from macOS `ps` on this host: tab -> \011, newline -> \012, every other
 //!     control byte and 0x7f -> caret notation, printable/valid-UTF-8 bytes
 //!     verbatim.
-//!   * the first child is the lowest-pid child.  `ps -eo` orders processes by
+//!   * children are listed lowest-pid first.  `ps -eo` orders processes by
 //!     (controlling tty, pid), so lowest-pid == ps's first child for every
 //!     ordinary multi-child shell (jobs, pipelines, foreground+background — all
 //!     share the pane tty and stay pid-ascending).  It differs ONLY when a
@@ -67,6 +69,37 @@ mod imp {
     const KERN_ARGMAX: c_int = 8;
     const KERN_PROCARGS2: c_int = 49;
     const PROC_PPID_ONLY: u32 = 6;
+    const PROC_PIDTBSDINFO: c_int = 3;
+    const MAXCOMLEN: usize = 16;
+
+    /// <sys/proc_info.h> `struct proc_bsdinfo` (136 bytes).  Only the group ids
+    /// are read; the rest is layout.
+    #[repr(C)]
+    #[allow(dead_code)]
+    struct ProcBsdInfo {
+        pbi_flags: u32,
+        pbi_status: u32,
+        pbi_xstatus: u32,
+        pbi_pid: u32,
+        pbi_ppid: u32,
+        pbi_uid: u32,
+        pbi_gid: u32,
+        pbi_ruid: u32,
+        pbi_rgid: u32,
+        pbi_svuid: u32,
+        pbi_svgid: u32,
+        rfu_1: u32,
+        pbi_comm: [u8; MAXCOMLEN],
+        pbi_name: [u8; 2 * MAXCOMLEN],
+        pbi_nfiles: u32,
+        pbi_pgid: u32,
+        pbi_pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        pbi_nice: i32,
+        pbi_start_tvsec: u64,
+        pbi_start_tvusec: u64,
+    }
 
     extern "C" {
         fn sysctl(
@@ -79,6 +112,13 @@ mod imp {
         ) -> c_int;
         // libproc, part of libSystem — no extra link directive needed.
         fn proc_listpids(typ: u32, typeinfo: u32, buffer: *mut c_void, buffersize: c_int) -> c_int;
+        fn proc_pidinfo(
+            pid: c_int,
+            flavor: c_int,
+            arg: u64,
+            buffer: *mut c_void,
+            buffersize: c_int,
+        ) -> c_int;
     }
 
     /// Buffer size for a KERN_PROCARGS2 read — the kernel's argument-area max.
@@ -163,11 +203,11 @@ mod imp {
         Some(super::ps_vis(&joined))
     }
 
-    /// The lowest-pid direct child of `pid`, or None.  Two syscalls: size, fetch.
-    pub fn first_child(pid: u32) -> Option<u32> {
+    /// The direct children of `pid`, lowest pid first.  Two syscalls: size, fetch.
+    pub fn children(pid: u32) -> Vec<u32> {
         let need = unsafe { proc_listpids(PROC_PPID_ONLY, pid, ptr::null_mut(), 0) };
         if need <= 0 {
-            return None;
+            return Vec::new();
         }
         // slack in case a child spawns between the sizing call and the fetch
         let cap = need as usize / std::mem::size_of::<c_int>() + 8;
@@ -181,11 +221,34 @@ mod imp {
             )
         };
         if got <= 0 {
-            return None;
+            return Vec::new();
         }
         let n = got as usize / std::mem::size_of::<c_int>();
         pids.truncate(n.min(pids.len()));
-        pids.into_iter().filter(|&p| p > 0).map(|p| p as u32).min()
+        let mut kids: Vec<u32> = pids.into_iter().filter(|&p| p > 0).map(|p| p as u32).collect();
+        kids.sort_unstable();
+        kids.dedup();
+        kids
+    }
+
+    /// (process group, controlling tty's foreground process group) of `pid` —
+    /// the same two numbers `ps -o pgid=,tpgid=` prints.  None when the process
+    /// is gone or unreadable.
+    pub fn group_ids(pid: u32) -> Option<(i64, i64)> {
+        if pid == 0 {
+            return None;
+        }
+        let mut info = std::mem::MaybeUninit::<ProcBsdInfo>::zeroed();
+        let size = std::mem::size_of::<ProcBsdInfo>() as c_int;
+        let got = unsafe {
+            proc_pidinfo(pid as c_int, PROC_PIDTBSDINFO, 0, info.as_mut_ptr() as *mut c_void, size)
+        };
+        if got != size {
+            return None;
+        }
+        // SAFETY: zero-initialised, and the kernel filled all `size` bytes.
+        let info = unsafe { info.assume_init() };
+        Some((i64::from(info.pbi_pgid), i64::from(info.e_tpgid)))
     }
 
     /// libproc is usable if we can read our own argv.  Cheap self-test, run once.
@@ -206,7 +269,10 @@ mod imp {
     pub fn pid_argv(_pid: u32, _buf: &mut Vec<u8>) -> Option<String> {
         None
     }
-    pub fn first_child(_pid: u32) -> Option<u32> {
+    pub fn children(_pid: u32) -> Vec<u32> {
+        Vec::new()
+    }
+    pub fn group_ids(_pid: u32) -> Option<(i64, i64)> {
         None
     }
     pub fn available() -> bool {
@@ -214,7 +280,7 @@ mod imp {
     }
 }
 
-pub use imp::{argmax, available, first_child, pid_argv};
+pub use imp::{argmax, available, children, group_ids, pid_argv};
 
 #[cfg(test)]
 mod tests {

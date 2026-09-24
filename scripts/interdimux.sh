@@ -1340,14 +1340,21 @@ fi
 
 declare -A PS_CHILDREN=()
 declare -A PS_ARGS=()
+declare -A PS_PGID=()
+declare -A PS_TPGID=()
 
 build_process_table() {
   [ "$PROC_CMDLINE_OK" = 1 ] && return 0   # /proc backend needs no table
-  local pid ppid args
-  while read -r pid ppid args; do
+  local pid ppid pgid tpgid args
+  # pgid/tpgid ride along for pick_child: which child is the FOREGROUND job.
+  # Every ps this runs on (procps, macOS, the BSDs) has both keywords, and args
+  # stays last so it keeps its embedded spaces.
+  while read -r pid ppid pgid tpgid args; do
     PS_ARGS[$pid]="$args"
+    PS_PGID[$pid]="$pgid"
+    PS_TPGID[$pid]="$tpgid"
     PS_CHILDREN[$ppid]+="$pid "
-  done < <(ps -eo pid=,ppid=,args= 2>/dev/null)
+  done < <(ps -eo pid=,ppid=,pgid=,tpgid=,args= 2>/dev/null)
   return 0
 }
 
@@ -1398,11 +1405,64 @@ read_cmdline() {
 # Known shells — used to decide whether to descend one level
 SHELLS_PATTERN='^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$'
 
+# /proc/<pid>/stat after its comm field: state ppid pgrp session tty_nr tpgid.
+STAT_IDS_RE='^[^ ]+ [^ ]+ (-?[0-9]+) [^ ]+ [^ ]+ (-?[0-9]+)'
+
+# Process group and the controlling tty's foreground process group of a pid:
+# REPLY="<pgrp> <tpgid>", either half empty when unknown.  The comm field is
+# parenthesised and may itself hold spaces, ')' and even a newline, so the file
+# is read whole and the fields are counted from its LAST ") ".
+proc_group_ids() {
+  REPLY=""
+  local pid="$1" line=""
+  [ -n "$pid" ] || return 0
+  if [ "$PROC_CMDLINE_OK" = 1 ]; then
+    { read -r -d '' line < "/proc/$pid/stat"; } 2>/dev/null || :
+    line="${line##*) }"
+    [[ "$line" =~ $STAT_IDS_RE ]] || return 0
+    REPLY="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+  else
+    REPLY="${PS_PGID[$pid]:-} ${PS_TPGID[$pid]:-}"
+  fi
+  return 0
+}
+
+# Which of a shell's direct children is the command to show.  REPLY = a pid.
+#
+# The one in the pane tty's FOREGROUND process group — the job the shell is
+# waiting on, the same process tmux's own #{pane_current_command} names.  Not
+# simply the first child: that is the OLDEST one, so a job backgrounded earlier
+# (or stopped with ^Z, or a shell plugin's helper) shadowed whatever ran in the
+# foreground after it.  In order:
+#   * the job leader itself, when it is one of the shell's children;
+#   * else the first child in that group — a pipeline whose leader already
+#     exited (`cat f | less`) keeps the dead leader's pid as its group id;
+#   * else the first child: the shell is itself in the foreground (at its
+#     prompt, jobs only in the background), or the foreground belongs to
+#     something that is not the shell's direct child.  Never walk deeper.
+# One child needs no lookup at all: every rule above picks it.
+pick_child() {
+  local pid="$1" children="$2" first c fg
+  first="${children%% *}"
+  REPLY="$first"
+  [[ "${children#"$first"}" == *[0-9]* ]] || return 0
+  proc_group_ids "$pid"; fg="${REPLY#* }"
+  REPLY="$first"
+  case "$fg" in ''|0|-*|"$pid") return 0 ;; esac
+  case " $children " in *" $fg "*) REPLY="$fg"; return 0 ;; esac
+  for c in $children; do
+    proc_group_ids "$c"
+    [ "${REPLY%% *}" = "$fg" ] && { REPLY="$c"; return 0; }
+  done
+  REPLY="$first"
+  return 0
+}
+
 # Get the user's actual command from a pane pid.
-# Strategy: if the pane process is a shell, show its direct child (the
-# command the user typed).  Do NOT walk further — deeper children are
-# subprocesses of that command (LSPs, formatters, watchers, …) and
-# showing those is misleading.
+# Strategy: if the pane process is a shell, show one of its direct children
+# (the command the user typed — pick_child says which).  Do NOT walk further —
+# deeper children are subprocesses of that command (LSPs, formatters,
+# watchers, …) and showing those is misleading.
 #
 # The shell test MUST come from the pane process's own argv.  tmux's
 # #{pane_current_command} names the pane tty's FOREGROUND process group, which
@@ -1432,7 +1492,7 @@ full_command() {
       children="${PS_CHILDREN[$pid]:-}"
     fi
     if [ -n "$children" ]; then
-      child="${children%% *}"
+      pick_child "$pid" "$children"; child="$REPLY"
       if [ "$PROC_CMDLINE_OK" = 1 ]; then
         read_cmdline "$child"
       else
@@ -1528,6 +1588,10 @@ SSH_FLAGS_WITH_VALUE='^-(b|c|D|E|e|F|I|i|J|L|l|m|O|o|p|Q|R|S|W|w)$'
 # Editor flags that consume the next argument
 EDITOR_FLAGS_WITH_VALUE='^-[uUsSpc]$|^--cmd$|^--listen$'
 
+# Interpreters whose first argument, when it is a path, is the script they run.
+# Shells count too (SHELLS_PATTERN is checked alongside).
+INTERPRETERS_PATTERN='^(python[0-9.]*|lua[0-9.]*|node|nodejs|ruby|perl|php)$'
+
 format_command() {
   local cmd_str="$1"
   REPLY=""                       # reset: callers read REPLY after a bare call
@@ -1593,8 +1657,43 @@ format_command() {
     fi
   fi
 
+  # An idle shell — the shell and nothing but its options: `-zsh`, `/bin/bash`,
+  # `bash --norc -i`.  Its bare name, in the tree colour, so the rows doing real
+  # work are the ones in the accent (IDEAS #10).  A shell running something
+  # (`bash build.sh`, `sh -c …`) is real work and falls through.
+  if [[ "$cmd_base" =~ $SHELLS_PATTERN ]]; then
+    local args="${cmd_str#* }" word idle=1
+    [ "$args" = "$cmd_str" ] && args=""
+    for word in $args; do
+      case "$word" in
+        -*) ;;
+        *)  idle=0; break ;;
+      esac
+    done
+    if [ "$idle" = 1 ]; then
+      [[ "$old_set" != *f* ]] && set +f
+      printf -v REPLY '%s%s%s' "$DIM_TREE" "${cmd_base#-}" "$RST"
+      return
+    fi
+  fi
+
   [[ "$old_set" != *f* ]] && set +f
-  printf -v REPLY '%s%s%s' "$DIM_CMD" "$cmd_str" "$RST"
+
+  # Everything else, with argv0 by its basename: `/usr/bin/python3 -c …` spent
+  # nine of the column's cells on `/usr/bin/`.  An argv0 that ends in '/' has
+  # no basename and keeps the whole word.  An interpreter running a script by
+  # path shows the script's basename too — a `#!/usr/bin/python3` script reads
+  # `python3 tool.py`, not `/usr/bin/python3 /home/…/bin/tool.py`.  Only the
+  # word straight after argv0 is considered, never an option.
+  local rest="${cmd_str#"$cmd_name"}"
+  if [[ "$cmd_base" =~ $INTERPRETERS_PATTERN ]] || [[ "$cmd_base" =~ $SHELLS_PATTERN ]]; then
+    local r1="${rest# }" w1
+    w1="${r1%% *}"
+    if [[ "$w1" != -* && "$w1" == */* ]] && [ -n "${w1##*/}" ]; then
+      rest=" ${w1##*/}${r1#"$w1"}"
+    fi
+  fi
+  printf -v REPLY '%s%s%s%s' "$DIM_CMD" "${cmd_base:-$cmd_name}" "$rest" "$RST"
 }
 
 # ---------------------------------------------------------------------------

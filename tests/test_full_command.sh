@@ -13,6 +13,13 @@
 #   backgrounded     `sleep X &` keeps the shell in the foreground -- this is
 #                    the case that HIDES the inversion, so it is not sufficient
 #                    on its own.
+#   bg, then fg      the shell's FIRST child is its OLDEST: a job backgrounded
+#                    earlier shadowed the command running in the foreground
+#                    after it, on every renderer and backend (review BUG-07).
+#                    The foreground job is the tty's foreground process group.
+#   exited leader    `true | sleep` keeps the dead `true`'s pid as the
+#                    pipeline's group id, so the foreground group names no live
+#                    child; the command is the child still IN that group.
 #   control chars    ps replaced NUL/newline with a space and every other
 #                    non-printable with '?'.  Reading /proc raw loses that, and
 #                    a newline in argv splits the row, detaching its SPEC field.
@@ -63,6 +70,12 @@ tmux_cmd new-window -d -t '=t:' -n bg   -c "$SCRIPT_DIR" 'bash --norc --noprofil
 tmux_cmd send-keys -t '=t:bg' 'sleep 601 &' Enter                   # backgrounded
 tmux_cmd new-window -d -t '=t:' -n idle -c "$SCRIPT_DIR" 'bash --norc --noprofile -i'  # plain shell
 tmux_cmd new-window -d -t '=t:' -n direct -c "$SCRIPT_DIR" 'sleep 602'   # no shell
+# One line each, so the fork order is fixed: the background job is the shell's
+# first (oldest) child, the foreground command its second.
+tmux_cmd new-window -d -t '=t:' -n bgfg -c "$SCRIPT_DIR" 'bash --norc --noprofile -i'
+tmux_cmd send-keys -t '=t:bgfg' 'sleep 603 & sleep 604' Enter
+tmux_cmd new-window -d -t '=t:' -n pipe -c "$SCRIPT_DIR" 'bash --norc --noprofile -i'
+tmux_cmd send-keys -t '=t:pipe' 'sleep 605 & true | sleep 606' Enter
 
 if [ -n "$SLEEPER" ]; then
   # argv carrying a newline and a \x1f -- the two bytes that would corrupt a row
@@ -105,6 +118,28 @@ wait_settled() {
 }
 wait_settled || echo "  (warning: panes did not settle; assertions may be flaky)" >&2
 
+# The bg-then-fg panes are settled when the KERNEL says so, not when the output
+# under test does: both jobs are the shell's children, and in `pipe` the exited
+# `true` has been reaped (a forked-but-not-yet-exec'd or defunct third child
+# would still be listed).  ps, not /proc, so this also holds off Linux.
+children_of() {  # window name -> argv of each direct child of its shell
+  local ppid
+  ppid=$(tmux -L "$SOCK" display-message -p -t "=t:$1" '#{pane_pid}')
+  ps -eo ppid=,args= | awk -v p="$ppid" '$1 == p { $1 = ""; sub(/^ /, ""); print }'
+}
+jobs_settled() {
+  local i b p
+  for i in $(seq 1 200); do
+    b=$(children_of bgfg | sort | tr '\n' ,)
+    p=$(children_of pipe | sort | tr '\n' ,)
+    [ "$b" = "sleep 603,sleep 604," ] && [ "$p" = "sleep 605,sleep 606," ] && return 0
+    sleep 0.1
+  done
+  echo "  (warning: bg+fg jobs did not settle: bgfg=[$b] pipe=[$p])" >&2
+  return 1
+}
+jobs_settled || :
+
 out=$(bash "$SCRIPT" --list 2>/dev/null)
 plain=$(printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g')
 
@@ -142,6 +177,37 @@ case "$got" in
   *"sleep 602"*) report "pane with no shell shows its own command" pass ;;
   *) report "pane with no shell shows its own command (got '$got')" fail ;;
 esac
+
+# --- the foreground job, not the oldest child (BUG-07) ------------------------
+# Every renderer x backend pair: they all shared the first-child rule, so they
+# all agreed on the wrong answer and no parity check could notice.
+cmd_in() {  # list output, window name -> that window's COMMAND column
+  local idx
+  idx=$(tmux -L "$SOCK" list-windows -t '=t:' -F '#{window_index} #{window_name}' \
+        | awk -v n="$2" '$2 == n {print $1; exit}')
+  printf '%s\n' "$1" | sed 's/\x1b\[[0-9;]*m//g' \
+    | awk -F'\t' -v spec="W:t:$idx" '$4 == spec {print $3; exit}'
+}
+for cfg in "default renderer, default backend:" \
+           "default renderer, ps backend:INTERDIMUX_FORCE_PS=1" \
+           "bash renderer, default backend:INTERDIMUX_USE_RUST=off" \
+           "bash renderer, ps backend:INTERDIMUX_USE_RUST=off INTERDIMUX_FORCE_PS=1"; do
+  label="${cfg%%:*}"
+  # shellcheck disable=SC2086
+  cfg_out=$(env ${cfg#*:} bash "$SCRIPT" --list 2>/dev/null)
+  got=$(cmd_in "$cfg_out" bgfg)
+  [ "$got" = "sleep 604" ] \
+    && report "$label: the foreground command beats an older background job" pass \
+    || report "$label: the foreground command beats an older background job (got '$got')" fail
+  got=$(cmd_in "$cfg_out" pipe)
+  [ "$got" = "sleep 606" ] \
+    && report "$label: a pipeline whose leader exited still resolves to it" pass \
+    || report "$label: a pipeline whose leader exited still resolves to it (got '$got')" fail
+  got=$(cmd_in "$cfg_out" bg)
+  [ "$got" = "sleep 601" ] \
+    && report "$label: a shell at its prompt still shows its background job" pass \
+    || report "$label: a shell at its prompt still shows its background job (got '$got')" fail
+done
 
 # --- the row contract --------------------------------------------------------
 bad=$(printf '%s\n' "$out" | awk -F'\t' 'NF != 4 { print }')
