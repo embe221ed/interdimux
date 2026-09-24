@@ -120,9 +120,27 @@ if [ -x "$BIN" ]; then
 else
   echo "  (rust binary not built: only the bash renderer is exercised)"
 fi
+# Both passes are PINNED.  tests/run_all.sh's bash leg (IMUX_RENDERER=bash)
+# exports INTERDIMUX_USE_RUST=off, and a "rust" pass that inherited it rendered
+# with bash: section 5's parity sweep then compared bash with bash and could
+# not fail.  The rust pass also runs the core through a stand-in that logs each
+# run's exit status, so section 5 can check the core really drew those rows --
+# a render that fell back to bash (a refused or failed binary) would pass the
+# comparison just as emptily.
+CORE_RUNS="$TMPD/core-runs"
+if [ -x "$BIN" ]; then
+  cat > "$TMPD/imux" <<'SH'
+#!/bin/sh
+"$IMUX_REAL" "$@"; rc=$?
+echo "$rc" >> "$IMUX_RUNS"
+exit "$rc"
+SH
+  chmod +x "$TMPD/imux"
+fi
 list() { # $1 = renderer, $2 = FZF_COLUMNS, rest = extra env
   local r="$1" c="$2"; shift 2
-  if [ "$r" = bash ]; then set -- INTERDIMUX_USE_RUST=off "$@"; fi
+  if [ "$r" = bash ]; then set -- INTERDIMUX_USE_RUST=off "$@"
+  else set -- INTERDIMUX_USE_RUST=on INTERDIMUX_BIN="$TMPD/imux" IMUX_REAL="$BIN" IMUX_RUNS="$CORE_RUNS" "$@"; fi
   env "$@" FZF_COLUMNS="$c" bash "$SCRIPT" --list 2>/dev/null
 }
 # field 2 (the context column) of the row whose spec is $2, colour stripped
@@ -238,11 +256,14 @@ done
 # this is exactly the part of the row that moved.
 if [ -x "$BIN" ]; then
   bad=""
+  rust_renders=0
+  : > "$CORE_RUNS"
   for g in on off; do
     for pv in off on; do
       for w in 40 52 60 72 80 96 120 200; do
         b1=$(list bash "$w" INTERDIMUX_SHOW_GIT_BRANCH=$g INTERDIMUX_SHOW_PREVIEW=$pv)
         rr=$(list rust "$w" INTERDIMUX_SHOW_GIT_BRANCH=$g INTERDIMUX_SHOW_PREVIEW=$pv)
+        rust_renders=$((rust_renders + 1))
         b2=$(list bash "$w" INTERDIMUX_SHOW_GIT_BRANCH=$g INTERDIMUX_SHOW_PREVIEW=$pv)
         if [ "$b1" != "$b2" ]; then
           bad+=" [control: bash vs bash differs at $w git=$g preview=$pv]"
@@ -258,6 +279,14 @@ if [ -x "$BIN" ]; then
       done
     done
   done
+  # The comparison means something only if the core drew one side of it: one
+  # successful run of it per rust render, and the bash passes none.
+  ran_ok=$(grep -cx 0 "$CORE_RUNS" || true); ran_all=$(wc -l < "$CORE_RUNS")
+  if [ "$ran_ok" -eq "$rust_renders" ] && [ "$ran_all" -eq "$rust_renders" ]; then
+    report "the parity sweep's rust side is the core ($ran_ok of $rust_renders renders ran it, exit 0)" pass
+  else
+    report "the parity sweep's rust side is the core ($ran_ok of $rust_renders renders ran it and succeeded, $ran_all runs in all)" fail
+  fi
   if [ -z "$bad" ]; then
     report "rust and bash render byte-identical rows at every width (git on/off, preview on/off)" pass
   else
