@@ -18,24 +18,44 @@ fn recent_limit() -> usize {
         .unwrap_or(10)
 }
 
+/// One directory per line, as the recent file and `zoxide query --list` both
+/// write them.  A line that is not valid UTF-8 is SKIPPED, never decoded
+/// lossily: the lossy string names a directory that does not exist (U+FFFD in
+/// place of the byte), and even the raw bytes could not be offered, because fzf
+/// hands a selection back with every invalid byte replaced by U+FFFD -- so a row
+/// for such a directory can never be opened, from either renderer.  bash's
+/// load_recent_dirs skips the same lines (is_utf8).
+///
+/// Split on '\n' alone, like bash's `read -r`: `str::lines()` would also strip a
+/// trailing '\r', which bash keeps.
+fn utf8_lines(bytes: &[u8]) -> impl Iterator<Item = &str> {
+    bytes.split(|b| *b == b'\n').filter_map(|l| std::str::from_utf8(l).ok())
+}
+
+/// Is `d` worth offering?  An existing directory -- except on a filesystem whose
+/// stat can block (mounts.rs), which is offered unchecked: one stalled mount in
+/// the recent list used to hold the whole first paint for its timeout.
+fn offerable(d: &str) -> bool {
+    crate::mounts::is_remote(d) || Path::new(d).is_dir()
+}
+
 /// The recent list first, then zoxide's frecency, deduped, existing dirs only.
 pub fn candidates() -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut out = Vec::new();
     let limit = recent_limit();
 
-    // Read BYTES and decode lossily per line.  read_to_string() errors on the
-    // first invalid UTF-8 byte and the `if let Ok` swallowed it, so ONE
-    // non-UTF-8 directory name silently deleted the entire recent list — and
-    // interdimux writes this file itself, so visiting such a directory once
-    // killed the feature permanently.
+    // Read BYTES, not a String.  read_to_string() errors on the first invalid
+    // UTF-8 byte and the `if let Ok` swallowed it, so ONE non-UTF-8 directory
+    // name silently deleted the entire recent list — and interdimux writes this
+    // file itself, so visiting such a directory once killed the feature
+    // permanently.  Now only that one line is skipped (see utf8_lines).
     if let Ok(bytes) = fs::read(recent_file()) {
-        let content = String::from_utf8_lossy(&bytes).into_owned();
-        for d in content.lines() {
+        for d in utf8_lines(&bytes) {
             if out.len() >= limit {
                 break;
             }
-            if d.is_empty() || seen.contains(d) || !Path::new(d).is_dir() {
+            if d.is_empty() || seen.contains(d) || !offerable(d) {
                 continue;
             }
             seen.insert(d.to_string());
@@ -45,13 +65,25 @@ pub fn candidates() -> Vec<String> {
 
     let use_zoxide = std::env::var("INTERDIMUX_USE_ZOXIDE").map(|v| v == "on").unwrap_or(true);
     if use_zoxide {
-        if let Ok(o) = std::process::Command::new("zoxide").args(["query", "--list"]).output() {
+        // `--all`: without it zoxide stats EVERY entry in its database to hide
+        // the missing ones, so one entry on a stalled mount hangs zoxide itself.
+        // The existence check is ours now (offerable), and a zoxide too old to
+        // know the flag gets the plain query.
+        let query = |all: bool| {
+            let mut c = std::process::Command::new("zoxide");
+            c.args(["query", "--list"]);
+            if all {
+                c.arg("--all");
+            }
+            c.stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success())
+        };
+        if let Some(o) = query(true).or_else(|| query(false)) {
             let mut n = 0;
-            for d in String::from_utf8_lossy(&o.stdout).lines() {
+            for d in utf8_lines(&o.stdout) {
                 if n >= limit {
                     break;
                 }
-                if d.is_empty() || seen.contains(d) || !Path::new(d).is_dir() {
+                if d.is_empty() || seen.contains(d) || !offerable(d) {
                     continue;
                 }
                 seen.insert(d.to_string());
@@ -63,8 +95,12 @@ pub fn candidates() -> Vec<String> {
     out
 }
 
-/// First matching marker wins — the same order bash checks in.
+/// First matching marker wins — the same order bash checks in.  Nothing is
+/// probed on a filesystem whose stat can block (mounts.rs).
 pub fn project_type(dir: &str) -> Option<&'static str> {
+    if crate::mounts::is_remote(dir) {
+        return None;
+    }
     const FILES: &[(&str, &str)] = &[
         ("Cargo.toml", "Rust"),
         ("go.mod", "Go"),
@@ -118,6 +154,16 @@ mod tests {
         fs::create_dir_all(d.join(".git")).unwrap();
         assert_eq!(project_type(d.to_str().unwrap()), Some("Git"));
         fs::remove_dir_all(&d).ok();
+    }
+
+    /// A non-UTF-8 line is skipped whole -- never offered under a lossy name
+    /// that no directory has -- while its neighbours, a valid non-ASCII name
+    /// among them, survive.  '\r' is kept, as bash's `read -r` keeps it.
+    #[test]
+    fn a_non_utf8_line_is_skipped_not_mangled() {
+        let got: Vec<&str> = utf8_lines(b"/a\n/non\xffutf8\n/caf\xc3\xa9\n/cr\r\n").collect();
+        assert_eq!(got, vec!["/a", "/caf\u{e9}", "/cr\r", ""]);
+        assert!(!got.iter().any(|l| l.contains('\u{fffd}')), "a lossy name leaked: {:?}", got);
     }
 
     #[test]

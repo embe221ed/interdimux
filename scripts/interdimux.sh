@@ -952,10 +952,101 @@ fi
 PROJECT_MARKERS=(.git Makefile package.json Cargo.toml go.mod pyproject.toml CMakeLists.txt .hg .svn build.gradle pom.xml mix.exs flake.nix)
 
 # Additional user-defined markers (colon-separated)
+#
+# A marker that names the directory ITSELF is dropped, because is_project_root
+# tests `[ -e "$dir/$m" ]`, and for an empty marker that is `[ -e "$dir/" ]`:
+# true for every directory there is.  `read -a` keeps the empty field a doubled
+# or leading ':' produces ('Move.toml::deno.json', ':Gemfile' -- only a TRAILING
+# ':' is dropped), so one typo turned every scanned directory into a ◆ project.
+# '.', '..', '/' and './' are the same mistake spelled differently.  A marker
+# with a real name in it -- '.github/workflows' -- is kept.
 if [ -n "$EXTRA_MARKERS" ]; then
   IFS=':' read -ra _extra_markers <<< "$EXTRA_MARKERS"
-  PROJECT_MARKERS+=("${_extra_markers[@]}")
+  for _m in "${_extra_markers[@]}"; do
+    IFS='/' read -ra _m_parts <<< "$_m"
+    _m_named=0
+    for _p in "${_m_parts[@]}"; do
+      case "$_p" in ''|.|..) ;; *) _m_named=1 ;; esac
+    done
+    [ "$_m_named" = 1 ] && PROJECT_MARKERS+=("$_m")
+  done
+  unset _m _p _m_parts _m_named
 fi
+
+# ---------------------------------------------------------------------------
+# Filesystems whose stat() can block: never probed before the first paint
+# ---------------------------------------------------------------------------
+#
+# Every row can cost probes before anything paints: the git badge walks
+# `<dir>/.git` up to `/`, a directory row's type badge is up to 11 marker tests,
+# and a recent/zoxide directory is checked for existence.  On a stalled
+# NFS/CIFS/sshfs mount, or an automount point that has to (re)mount, each one
+# blocks for the mount's timeout -- measured with a FUSE filesystem whose
+# lookups stall for 1 s, ONE such directory in the recent list made --list take
+# 11 s.  So a path on such a filesystem is not probed at all: no git badge, no
+# type badge, and a recent/zoxide entry is offered without an existence check.
+#
+# Classified from /proc/self/mountinfo (INTERDIMUX_MOUNTINFO overrides it, for
+# tests), read on first use; without it (macOS, BSD) nothing is skipped.  `/` and
+# the filesystem $HOME is on are never skipped: the picker touches both anyway
+# (bash, the recent list), and an NFS home keeps its badges.  The same table as
+# rust/src/mounts.rs -- keep them in step.
+_MOUNTS_READ=0
+declare -A _MOUNT_BLOCKS=()   # mount point -> 1 (can block) | 0; the LAST mount at a point wins
+
+_mounts_read() {
+  _MOUNTS_READ=1
+  local f="${INTERDIMUX_MOUNTINFO:-/proc/self/mountinfo}" line fstype point any=0 b
+  [ -r "$f" ] || return 0
+  while IFS= read -r line; do
+    fstype="${line#* - }"; fstype="${fstype%% *}"
+    case "$fstype" in
+      nfs|nfs4|cifs|smb3|smbfs|ncpfs|afs|ceph|coda|lustre|gpfs|9p|orangefs|beegfs|autofs|fuse) b=1 ;;
+      # FUSE backed by local storage keeps its badges; fuseblk is a local disk
+      fuse.gocryptfs|fuse.encfs|fuse.cryfs|fuse.securefs|fuse.bindfs|fuse.mergerfs|fuse.unionfs|fuse.unionfs-fuse|fuse.fuse-overlayfs) b=0 ;;
+      fuse.*) b=1 ;;
+      *) b=0 ;;
+    esac
+    # A local mount only matters once it can shadow, or sit inside, a blocking
+    # one -- which, in mount order, is after the first of those.
+    [ "$b" = 0 ] && [ "$any" = 0 ] && continue
+    any=1
+    point="${line#* * * * }"; point="${point%% *}"   # field 5
+    printf -v point '%b' "$point"                      # mountinfo escapes ' ' as \040
+    _MOUNT_BLOCKS["$point"]=$b
+  done < "$f"
+  [ "$any" = 1 ] || return 0
+  # never skip what the picker touches anyway (see above)
+  local p
+  for p in / "$HOME"; do
+    [ -n "$p" ] || continue
+    _mount_of "$p" && _MOUNT_BLOCKS["$_MOUNT_AT"]=0
+  done
+  # nothing left that blocks: empty the table, so the check is free
+  for b in "${_MOUNT_BLOCKS[@]}"; do [ "$b" = 1 ] && return 0; done
+  _MOUNT_BLOCKS=()
+}
+
+# _MOUNT_AT = the recorded mount point $1 is on (the longest one covering it).
+# Not REPLY: the callers are REPLY-returning functions (get_git_branch,
+# detect_project_type) that must not have theirs overwritten by the check.
+_MOUNT_AT=""
+_mount_of() {
+  local p="$1"
+  while :; do
+    [[ -v "_MOUNT_BLOCKS[$p]" ]] && { _MOUNT_AT="$p"; return 0; }
+    [ "$p" = / ] && return 1
+    p="${p%/*}"; [ -n "$p" ] || p=/
+  done
+}
+
+# Is $1 on a filesystem whose stat can block?
+is_remote_path() {
+  [ "$_MOUNTS_READ" = 1 ] || _mounts_read
+  [ "${#_MOUNT_BLOCKS[@]}" -gt 0 ] || return 1
+  case "$1" in /*) ;; *) return 1 ;; esac
+  _mount_of "$1" && [ "${_MOUNT_BLOCKS[$_MOUNT_AT]}" = 1 ]
+}
 
 is_project_root() {
   local dir="$1"
@@ -970,6 +1061,7 @@ is_project_root() {
 detect_project_type() {
   local dir="$1"
   REPLY=""
+  is_remote_path "$dir" && return 0   # never probed (see is_remote_path)
   [ -f "$dir/Cargo.toml" ]      && { REPLY="Rust";    return; }
   [ -f "$dir/go.mod" ]          && { REPLY="Go";      return; }
   [ -f "$dir/package.json" ]    && { REPLY="Node.js"; return; }
@@ -986,12 +1078,31 @@ detect_project_type() {
 
 RECENT_DIRS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/interdimux/recent_dirs"
 
+# Is $1 valid UTF-8?  Byte-wise, so the answer does not depend on the locale:
+# the regex runs under LC_ALL=C, where a bracket range is a range of BYTES.  The
+# same definition Rust's str::from_utf8 uses (no overlongs, no surrogates,
+# nothing past U+10FFFF).  Pure ASCII -- nearly every path -- never reaches it.
+_UTF8_SEQ=$'^([\x01-\x7f]|[\xc2-\xdf][\x80-\xbf]|\xe0[\xa0-\xbf][\x80-\xbf]|[\xe1-\xec\xee\xef][\x80-\xbf][\x80-\xbf]|\xed[\x80-\x9f][\x80-\xbf]|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]|[\xf1-\xf3][\x80-\xbf][\x80-\xbf][\x80-\xbf]|\xf4[\x80-\x8f][\x80-\xbf][\x80-\xbf])*$'
+is_utf8() {
+  case "$1" in *[![:ascii:]]*) ;; *) return 0 ;; esac
+  local LC_ALL=C
+  [[ "$1" =~ $_UTF8_SEQ ]]
+}
+
+# A directory whose name is not valid UTF-8 is skipped (is_utf8), in both
+# renderers.  Listing it is worse than useless: fzf hands a selection back with
+# every invalid byte replaced by U+FFFD, so the row names a directory that does
+# not exist and can never be opened.  The Rust core skips the same lines.
+#
+# One on a filesystem whose stat can block is offered WITHOUT the existence
+# check (is_remote_path) -- connect_dir reports it if it is gone.
 load_recent_dirs() {
   local d count=0
   local -A _recent_seen=()
   if [ -f "$RECENT_DIRS_FILE" ]; then
     while IFS= read -r d; do
-      [ -d "$d" ] || continue
+      is_utf8 "$d" || continue
+      is_remote_path "$d" || [ -d "$d" ] || continue
       [[ -v "_recent_seen[$d]" ]] && continue
       _recent_seen["$d"]=1
       echo "$d"
@@ -1004,13 +1115,18 @@ load_recent_dirs() {
   if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
     local zcount=0
     while IFS= read -r d; do
-      [ -d "$d" ] || continue
+      is_utf8 "$d" || continue
+      is_remote_path "$d" || [ -d "$d" ] || continue
       [[ -v "_recent_seen[$d]" ]] && continue
       _recent_seen["$d"]=1
       echo "$d"
       zcount=$((zcount + 1))
       [ "$zcount" -ge "$RECENT_LIMIT" ] && break
-    done < <(zoxide query --list 2>/dev/null || true)
+    # --all: without it zoxide stats EVERY entry in its database to hide the
+    # missing ones, so one entry on a stalled mount hangs zoxide itself.  The
+    # existence check is the loop's own now; a zoxide too old for the flag gets
+    # the plain query.
+    done < <(zoxide query --list --all 2>/dev/null || zoxide query --list 2>/dev/null || true)
   fi
 }
 
@@ -1035,7 +1151,7 @@ record_recent_dir() {
   if [ -f "$RECENT_DIRS_FILE" ]; then
     while IFS= read -r d; do
       [ "$d" = "$dir" ] && continue
-      [ -d "$d" ] || continue
+      is_remote_path "$d" || [ -d "$d" ] || continue   # a stalled mount must not delay the switch
       echo "$d" >> "$tmp"
       count=$((count + 1))
       [ "$count" -ge 50 ] && break
@@ -1127,28 +1243,51 @@ collect_dir() {
   fi
 }
 
-# Directory of a session's active pane — used to detect whether an
-# existing session with a given name belongs to a directory.
-session_dir() {
-  tmux list-panes -t "=$1" -F '#{pane_current_path}' -f '#{pane_active}' 2>/dev/null | head -1
+# Does session $1 belong to directory $2?
+#
+# A session's identity is where it was STARTED: #{session_path}, what
+# `new-session -c` recorded, which a `cd` inside the session never changes.  The
+# active pane's cwd is the second chance: AT the directory (the old test), or
+# BELOW it for a session started on the same branch of the tree -- above it
+# (`tmux new -s api` from ~, then `cd ~/work/api/src`) or inside it.  Only ever
+# asked about a session whose NAME already matches the directory; the branch
+# condition keeps a same-named session from an unrelated directory, whose pane
+# merely wandered in, from being mistaken for this one.
+#
+# It used to be the active pane's cwd alone, compared for equality, so a plain
+# `cd src` inside the project -- or a second window opened in /tmp -- made the
+# project's own session "a different directory": Enter on the project created
+# `<parent>-<name>`, a second session for the same directory.  SESSION_DIRS
+# (the navigator's directory rows) and DIR_SESSION (the ctrl-o badge) key on
+# the same #{session_path} for the same reason.
+session_at_dir() {
+  local out spath cwd
+  out=$(tmux display-message -p -t "=$1:" "#{session_path}${US}#{pane_current_path}" 2>/dev/null) || return 1
+  spath="${out%%"$US"*}" cwd="${out#*"$US"}"
+  [ "$spath" = "$2" ] || [ "$cwd" = "$2" ] && return 0
+  case "$cwd" in "$2"/*) ;; *) return 1 ;; esac
+  [ "$spath" = / ] && return 0
+  case "$2" in "$spath"/*) return 0 ;; esac
+  case "$spath" in "$2"/*) return 0 ;; esac
+  return 1
 }
 
 # Derive a session name for a directory.  When a same-named session
-# exists for a *different* directory, disambiguate with the parent dir
-# name (then numeric suffixes) instead of silently reusing it.
+# exists for a *different* directory (session_at_dir), disambiguate with the
+# parent dir name (then numeric suffixes) instead of silently reusing it.
 resolve_session_name() {
   local dir_path="$1"
   local session_name base_name parent_name n
   session_name=$(basename "$dir_path" | tr '.:' '-')
 
   if tmux has-session -t "=$session_name" 2>/dev/null; then
-    if [ "$(session_dir "$session_name")" != "$dir_path" ]; then
+    if ! session_at_dir "$session_name" "$dir_path"; then
       base_name="$session_name"
       parent_name=$(basename "$(dirname "$dir_path")" | tr '.:' '-')
       session_name="${parent_name}-${base_name}"
       n=2
       while tmux has-session -t "=$session_name" 2>/dev/null; do
-        [ "$(session_dir "$session_name")" = "$dir_path" ] && break
+        session_at_dir "$session_name" "$dir_path" && break
         session_name="${base_name}-${n}"
         n=$((n + 1))
       done
@@ -1696,6 +1835,9 @@ get_git_branch() {
 
   local d="$dir"
   while [ "$d" != "/" ] && [ -n "$d" ]; do
+    # Never probe a filesystem whose stat can block (is_remote_path): the walk
+    # stops there, badge-less, rather than stall the first paint.
+    is_remote_path "$d" && break
     local head_file=""
     if [ -d "$d/.git" ]; then
       head_file="$d/.git/HEAD"
@@ -1709,6 +1851,7 @@ get_git_branch() {
         /*) ;;
         *)  gitdir="$d/$gitdir" ;;
       esac
+      is_remote_path "$gitdir" && break   # a worktree whose repository is on one
       [ -f "$gitdir/HEAD" ] && head_file="$gitdir/HEAD"
     fi
 
@@ -2011,7 +2154,7 @@ MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0 HAS_BRANCH=0
 measure_widths() {
   MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0 HAS_BRANCH=0
   local _sla sname _sw _sa _sn widx wname _wa _wc wpath _wp _wpid wflags _pi _pa _pc ppath _pr il dp nf
-  while IFS="$US" read -r _sla sname _sw _sa; do
+  while IFS="$US" read -r sname _sla _sw _sa; do
     [ -z "$sname" ] && continue
     (( ${#sname} > MAX_SESS )) && MAX_SESS=${#sname}
   done <<< "$sessions_raw"
@@ -2286,8 +2429,9 @@ build_ctx_field() {
 #
 # Sources are only the cheap ones — the recent list and zoxide (~3-5 ms
 # combined).  Filesystem scanning stays behind ctrl-o, where the user has asked
-# for it.  SESSION_DIRS holds the cwd of each session's active window, so a
-# directory that already has a session is not offered again.
+# for it.  SESSION_DIRS holds each session's start directory (#{session_path})
+# and the cwd of its active window, so a directory that already has a session
+# is not offered again -- not even after a `cd` inside that session.
 emit_dir_rows() {
   [ "$SHOW_DIRS" = "on" ] || return 0
   [[ "$DIRS_LIMIT" =~ ^[0-9]+$ ]] || return 0
@@ -2337,8 +2481,25 @@ gather_targets() {
   # resolves commands itself now — from /proc on Linux, from its own ps snapshot
   # everywhere else — so when the binary is present bash never forks ps at all.
 
+  # tmux gives each line of a list-* a 100 ms wall-clock budget and, when the
+  # server is descheduled for that long in the middle of one, returns the line
+  # CUT at the next '#{' (format.c, FORMAT_TIME_LIMIT) -- `s^_0^_zsh^_1^_zsh^_`,
+  # with no error.  Rare (it takes a starved server), transient (the next reload
+  # is whole), and both renderers keep such a line rather than drop the row; see
+  # the window and pane grouping below.  For the SESSION line that means the name
+  # has to come FIRST: behind the timestamp, a cut line had no name at all, and
+  # the session vanished along with every window and pane under it (shifting
+  # --jump N onto the wrong session).
   local _sfmt _wfmt _pfmt _curfmt
-  _sfmt="#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}${US}#{session_windows}${US}#{?session_attached,attached,}"
+  #
+  # #{session_path} goes LAST, so a US inside it stays inside it (both renderers
+  # split the line into at most five fields).  A newline or RS in it is
+  # rewritten to '?' by tmux itself: the first would split the line and hand the
+  # fragment after it the session-name position, the second would break the
+  # section framing.  Such a path could never equal a directory row's path
+  # anyway -- the recent list and zoxide are line-based.
+  local _nl=$'\n' _rs=$'\x1e'
+  _sfmt="#{session_name}${US}#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_windows}${US}#{?session_attached,attached,}${US}#{s/[${_nl}${_rs}]/?/:session_path}"
   _wfmt="#{session_name}${US}#{window_index}${US}#{window_name}${US}#{window_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_panes}${US}#{pane_pid}${US}#{window_zoomed_flag}#{window_bell_flag}#{window_activity_flag}"
   _pfmt="#{session_name}${US}#{window_index}${US}#{pane_index}${US}#{pane_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{pane_pid}${US}#{window_panes}"
   _curfmt="#S${US}#I${US}#P"
@@ -2423,7 +2584,7 @@ gather_targets() {
     local _hp _hname _hkeep _hout=""
     while IFS= read -r _hline; do
       [ -n "$_hline" ] || continue
-      _hname="${_hline#*"$US"}"; _hname="${_hname%%"$US"*}"
+      _hname="${_hline%%"$US"*}"
       _hkeep=1
       if [ "$_hname" != "$current_session" ]; then
         for _hp in $HIDE_PATTERNS; do
@@ -2435,7 +2596,7 @@ gather_targets() {
     done <<< "$sessions_raw"
     sessions_raw="${_hout%$'\n'}"
 
-    # windows and panes carry the session name in field 1
+    # windows and panes carry the session name in field 1 too
     _hout=""
     while IFS= read -r _hline; do
       [ -n "$_hline" ] || continue
@@ -2541,10 +2702,6 @@ IMUX_SECTIONS
   # elsewhere it is the one ps fork, paid only when there is no working binary.
   [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
 
-  # Size the columns to the content we just fetched (fork-free).
-  measure_widths
-  compute_widths
-
   # MRU ordering: most recently attended sessions first (last-attached,
   # falling back to activity for never-attached sessions); the current
   # session moves to the END so the top row is the previous session —
@@ -2559,7 +2716,7 @@ IMUX_SECTIONS
     # ties; bash re-ordered them by locale, and the two renderers listed sessions
     # differently for the same server.
     #
-    # (`-k1,1nr` itself is only incidentally locale-safe: `sort -n` DOES read the
+    # (`-k2,2nr` itself is only incidentally locale-safe: `sort -n` DOES read the
     # locale's thousands separator, so `1,785` sorts differently under en_US than
     # under C.  It cannot bite here because the key is bare epoch digits — but it
     # would the moment that field grew a separator or a fraction.)
@@ -2569,11 +2726,14 @@ IMUX_SECTIONS
     # Under C.UTF-8 they do not, which is why 20 of 30 parity cases failed on a
     # normal desktop and every one of them passed here.  -s disables the
     # last-resort comparison outright, so the order is stable AND locale-free.
-    sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k1,1nr)
+    #
+    # The key is field 2 since the name moved to the front (see _sfmt).  A line
+    # tmux cut before its timestamp has an empty key, which sorts as 0 -- last,
+    # for this one paint -- exactly as the Rust core's unwrap_or(0) does.
+    sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr)
     while IFS= read -r line; do
       [ -z "$line" ] && continue
-      sn_check="${line#*"$US"}"
-      sn_check="${sn_check%%"$US"*}"
+      sn_check="${line%%"$US"*}"
       if [ "$sn_check" = "$current_session" ]; then
         current_line="$line"
       else
@@ -2584,39 +2744,76 @@ IMUX_SECTIONS
     sessions_raw="${sessions_raw%$'\n'}"
   fi
 
-  # cwd of each session's active window — emit_dir_rows uses it to skip
-  # directories that already have a session.
+  # Each session's start directory and its active window's cwd -- emit_dir_rows
+  # uses them to skip directories that already have a session.
   declare -A SESSION_DIRS=()
 
   # Build lookup: windows grouped by session name
+  #
+  # A line tmux cut short (see _sfmt) still names its window, so it is KEPT --
+  # dropping it lost the window and every pane under it -- but only while what
+  # is left is plausibly a window: session, a numeric index, and window_active
+  # as 0 or 1.  That is what tells a cut line from the other short line there
+  # is, the second half of a line split by a newline in a pane's cwd
+  # (`<path tail>^_<panes>^_<pid>^_<flags>`), whose 4th field is the 3-digit
+  # flags.  Filtered HERE rather than in the render loop, which needs the final
+  # count up front to draw the last branch as └─.  The same rules as
+  # rust/src/main.rs; a full line (flags present) is not second-guessed.
   declare -A windows_by_session=()
-  while IFS= read -r line; do
-    local sn="${line%%"$US"*}"
-    if [[ -v "windows_by_session[$sn]" ]]; then
-      windows_by_session["$sn"]+=$'\n'"$line"
+  local _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9 _kept=""
+  while IFS="$US" read -r _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9; do
+    [ -n "$_w1" ] || continue
+    if [ -z "$_w9" ]; then
+      case "$_w2" in ''|*[!0-9]*) continue ;; esac
+      case "$_w4" in 0|1) ;; *) continue ;; esac
+    fi
+    line="$_w1$US$_w2$US$_w3$US$_w4$US$_w5$US$_w6$US$_w7$US$_w8$US$_w9"
+    _kept+="$line"$'\n'
+    if [[ -v "windows_by_session[$_w1]" ]]; then
+      windows_by_session["$_w1"]+=$'\n'"$line"
     else
-      windows_by_session["$sn"]="$line"
+      windows_by_session["$_w1"]="$line"
     fi
   done <<< "$all_windows_raw"
+  all_windows_raw="${_kept%$'\n'}"   # what measure_widths sizes: only what renders
 
-  # Build lookup: panes grouped by "session\x1fwindow_index"
+  # Build lookup: panes grouped by "session\x1fwindow_index".  A cut pane line
+  # is kept on the same terms as a window line: numeric window AND pane index,
+  # pane_active 0 or 1 (a newline in a cwd leaves `<tail>^_<pid>^_<panes>`).
   declare -A panes_by_window=()
-  while IFS="$US" read -r sn widx rest; do
-    local key="${sn}${US}${widx}"
+  local sn _p3 _p4 _p5 _p6 _p7 _p8
+  _kept=""
+  while IFS="$US" read -r sn widx _p3 _p4 _p5 _p6 _p7 _p8; do
+    [ -n "$sn" ] || continue
+    if [ -z "$_p8" ]; then
+      case "$widx" in ''|*[!0-9]*) continue ;; esac
+      case "$_p3" in ''|*[!0-9]*) continue ;; esac
+      case "$_p4" in 0|1) ;; *) continue ;; esac
+    fi
+    local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8"
+    _kept+="$key$US$rest"$'\n'
     if [[ -v "panes_by_window[$key]" ]]; then
       panes_by_window["$key"]+=$'\n'"$rest"
     else
       panes_by_window["$key"]="$rest"
     fi
   done <<< "$all_panes_raw"
+  all_panes_raw="${_kept%$'\n'}"
 
-  local sla sname swins sattach marker meta age sdisp rule_n rule_run rule_ok
+  # Size the columns to the content we just fetched (fork-free) -- AFTER the
+  # grouping above, so a line it refused cannot widen a column, exactly as the
+  # Rust core measures only the rows it parsed.
+  measure_widths
+  compute_widths
+
+  local sla sname swins sattach spath marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
   local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
 
-  while IFS="$US" read -r sla sname swins sattach; do
+  while IFS="$US" read -r sname sla swins sattach spath; do
     [ -z "$sname" ] && continue
+    [ -n "$spath" ] && SESSION_DIRS["$spath"]=1
     marker=" "
     [ "$sname" = "$current_session" ] && marker="${MARKER_COLOR}*${RST}"
 
@@ -2691,6 +2888,14 @@ IMUX_SECTIONS
 
     wi=0
     while IFS="$US" read -r _sn widx wname _wact wcmd wpath wpanes wpid wflags; do
+      # A line tmux cut short (no flags -- see the grouping above) lost its
+      # pane count and pid.  The pid is NEVER read from such a line: it is the
+      # one field that reaches /proc, and a newline-split fragment can put any
+      # number there.  One pane and no pid, for this one paint.
+      if [ -z "$wflags" ]; then
+        wpanes=1 wpid=0
+      fi
+      case "$wpanes" in ''|*[!0-9]*) wpanes=1 ;; esac
       wi=$((wi + 1))
       branch_glyph='├─'
       cont='│'
@@ -2736,6 +2941,7 @@ IMUX_SECTIONS
         pi=0
 
         while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2; do
+          [ -n "$_wp2" ] || ppid=0   # cut short: never read its pid (see above)
           pi=$((pi + 1))
           pglyph='├╴'
           [ "$pi" -eq "$pane_count" ] && pglyph='└╴'
@@ -2836,6 +3042,8 @@ if [ "${1:-}" = "--preview" ]; then
       tmux list-windows -t "=$SPEC_SESSION" \
         -F "#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}" 2>/dev/null | \
       while IFS="$US" read -r wid wcmd wpath wact wpanes; do
+        # a line tmux cut short (see gather_targets) has no pane count
+        case "$wpanes" in ''|*[!0-9]*) wpanes=1 ;; esac
         marker=" "
         [ "$wact" = "1" ] && marker="${MARKER_COLOR}*${RST}"
         wpath="${wpath/#$HOME/\~}"
@@ -2970,15 +3178,20 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # directory you already had open looked like it had done nothing.  Naming the
   # session is the useful half: it tells you where you are about to land.
   #
-  # One tmux invocation, keyed on each session's ACTIVE window, the same basis
-  # the navigator's directory rows use.  This is the ctrl-o picker, not the hot
-  # path, so ~5 ms of round-trip is affordable here.
+  # Keyed on each session's START directory (#{session_path}) and on its active
+  # window's cwd -- the same basis as the navigator's directory rows and as
+  # resolve_session_name, so the badge names the session Enter lands in.  The
+  # start directory wins a tie: a `cd` inside a session must not move the badge
+  # (it used to, and the project's own row lost its badge the moment you cd'd).
+  # One tmux invocation for both lists (sessions first, so they win); this is
+  # the ctrl-o picker, not the hot path, so ~5 ms of round-trip is affordable.
   declare -A DIR_SESSION=()
-  while IFS="$US" read -r _ds_name _ds_path; do
+  while IFS="$US" read -r _ds_kind _ds_name _ds_path; do
+    case "$_ds_kind" in s|w) ;; *) continue ;; esac   # a newline-split fragment
     [ -n "$_ds_path" ] || continue
     [[ -v "DIR_SESSION[$_ds_path]" ]] || DIR_SESSION["$_ds_path"]="$_ds_name"
-  done < <(tmux list-windows -a -F \
-             "#{?window_active,#{session_name}${US}#{pane_current_path},}" 2>/dev/null)
+  done < <(tmux list-sessions -F "s${US}#{session_name}${US}#{session_path}" \; \
+             list-windows -a -F "#{?window_active,w${US}#{session_name}${US}#{pane_current_path},}" 2>/dev/null)
 
   # Path column width derived from the popup (list pane is ~60% with the
   # 40% preview open)
@@ -4213,9 +4426,11 @@ if [ "${1:-}" = "--action" ]; then
             # detach-on-destroy), ejecting the user from tmux even when
             # other sessions exist — hop them to the next MRU session
             # first so the stay-open kill workflow survives.
-            fallback=$(tmux list-sessions -F "#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}" 2>/dev/null \
-              | sort -s -t "$US" -k1,1nr | cut -d "$US" -f2- \
-              | grep -vxF -- "$SPEC_SESSION" | head -1)
+            # Name FIRST, as in gather_targets' _sfmt: a line tmux cuts at its
+            # per-line time budget keeps the name, and an empty one is skipped.
+            fallback=$(tmux list-sessions -F "#{session_name}${US}#{?session_last_attached,#{session_last_attached},#{session_activity}}" 2>/dev/null \
+              | sort -s -t "$US" -k2,2nr | cut -d "$US" -f1 \
+              | grep -vxF -e "$SPEC_SESSION" -e '' | head -1)
             if [ -n "$fallback" ]; then
               while IFS= read -r c; do
                 [ -n "$c" ] && tmux switch-client -c "$c" -t "=${fallback}:" 2>/dev/null

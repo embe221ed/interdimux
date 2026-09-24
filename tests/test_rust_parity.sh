@@ -73,7 +73,10 @@ export XDG_DATA_HOME="$TMPD/data"
 mkdir -p "$XDG_DATA_HOME/interdimux"
 mkdir -p "$TMPD/rustproj" && printf '[package]\n' > "$TMPD/rustproj/Cargo.toml"
 mkdir -p "$TMPD/gitproj/.git" && printf 'ref: refs/heads/parity-branch\n' > "$TMPD/gitproj/.git/HEAD"
-printf '%s\n%s\n' "$TMPD/rustproj" "$TMPD/gitproj" > "$XDG_DATA_HOME/interdimux/recent_dirs"
+# a directory whose name is not UTF-8: neither renderer may offer it (fzf would
+# hand the selection back with U+FFFD in place of the byte, naming nothing)
+mkdir -p "$TMPD/nonutf8-"$'\377'
+printf '%s\n%s\n%s\n' "$TMPD/rustproj" "$TMPD/nonutf8-"$'\377' "$TMPD/gitproj" > "$XDG_DATA_HOME/interdimux/recent_dirs"
 sleep 4
 
 rows=$(INTERDIMUX_USE_RUST=off bash "$SCRIPT" --list 2>/dev/null | wc -l)
@@ -176,8 +179,13 @@ done
 # 31 assertions instead of 36, exit 0, with the `-s` also removed).  This one
 # assertion cannot be skipped, and it covers BOTH sort sites — the kill-fallback
 # MRU hop is not reachable from any case below.
-unstable=$(grep -n "sort .*-k1,1nr" "$SCRIPT" | grep -v 'sort -s' || true)
-if [ -z "$unstable" ]; then
+# (Any numeric-reverse key, not `-k1,1nr` literally: the timestamp became field
+# 2 when the session name moved to the front, and a pattern pinned to the old
+# key would have matched nothing -- and passed -- from then on.  So the count
+# of sort sites is asserted too.)
+unstable=$(grep -nE "sort .*-k[0-9]+,[0-9]+nr" "$SCRIPT" | grep -v 'sort -s' || true)
+mru_sorts=$(grep -cE "sort .*-k[0-9]+,[0-9]+nr" "$SCRIPT" || true)
+if [ -z "$unstable" ] && [ "$mru_sorts" -ge 2 ]; then
   report "every MRU sort is stable (-s), including the kill-fallback hop" pass
 else
   report "every MRU sort is stable (-s), including the kill-fallback hop" fail

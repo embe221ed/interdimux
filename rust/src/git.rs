@@ -33,22 +33,32 @@ impl GitCache {
     fn lookup(dir: &str) -> String {
         let mut d = PathBuf::from(dir);
         loop {
+            // Never probe a filesystem whose stat can block (mounts.rs): the
+            // walk stops there, badge-less, rather than stall the first paint.
+            if d.to_str().map_or(false, crate::mounts::is_remote) {
+                return String::new();
+            }
             let dot = d.join(".git");
             let head = if dot.is_dir() {
                 Some(dot.join("HEAD"))
             } else if dot.is_file() {
                 // "gitdir: <path>", possibly relative to d
-                fs::read_to_string(&dot).ok().and_then(|s| {
+                let gd = fs::read_to_string(&dot).ok().and_then(|s| {
                     let line = s.lines().next()?.trim().to_string();
                     let p = line.strip_prefix("gitdir: ")?;
-                    let gd = if p.starts_with('/') {
-                        PathBuf::from(p)
-                    } else {
-                        d.join(p)
-                    };
-                    let h = gd.join("HEAD");
-                    if h.is_file() { Some(h) } else { None }
-                })
+                    Some(if p.starts_with('/') { PathBuf::from(p) } else { d.join(p) })
+                });
+                match gd {
+                    // a worktree whose repository is on such a mount: stop here
+                    Some(gd) if gd.to_str().map_or(false, crate::mounts::is_remote) => {
+                        return String::new();
+                    }
+                    Some(gd) => {
+                        let h = gd.join("HEAD");
+                        if h.is_file() { Some(h) } else { None }
+                    }
+                    None => None,
+                }
             } else {
                 None
             };
