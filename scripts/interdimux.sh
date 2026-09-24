@@ -46,7 +46,11 @@ SQ_SCRIPT_FMT="${SQ_SCRIPT//'#'/##}"
 #
 # Only an explicit path or the in-repo build is accepted; no bare PATH lookup,
 # because "imux" is a short name that could plausibly be something else.  Set
-# INTERDIMUX_BIN (or @interdimux-binary) to use a binary installed elsewhere.
+# INTERDIMUX_BIN to use a binary installed elsewhere — for the popups, in the tmux
+# server's environment (`tmux set-environment -g INTERDIMUX_BIN …`), which is the
+# one they start from.  Deliberately NOT a tmux option: anything that can set an
+# option could then choose the program every picker runs, and reading one here
+# would cost a tmux round-trip on every cold invocation.
 # INTERDIMUX_USE_RUST=off forces the bash renderer, which is how the parity
 # tests compare the two.
 IMUX_BIN=""
@@ -2173,7 +2177,14 @@ IMUX_SECTIONS
     # A failed or empty render must fall through to the bash renderer, never be
     # mistaken for "there is nothing to show".  Capturing costs ~2ms (the binary
     # renders the whole list in about that) and buys a safe failure mode.
-    if [ -n "$_imux_out" ]; then
+    #
+    # So must one that is not a row list at all.  INTERDIMUX_BIN accepts any
+    # executable, and whatever a wrong one printed on exit 0 — `/bin/echo` prints
+    # "gather" — used to become the entire picker.  The first row has to end in a
+    # tab-separated S:/W:/P:/D: spec, the shape every row of both renderers has:
+    # no fork, and nothing the real binary has to learn.
+    _imux_row1="${_imux_out%%$'\n'*}"
+    if [[ "$_imux_row1" == *$'\t'* && "${_imux_row1##*$'\t'}" == [SWPD]:* ]]; then
       printf '%s\n' "$_imux_out"
       return 0
     fi
@@ -4706,8 +4717,17 @@ if [ "${1:-}" = "--doctor" ]; then
 
   _repo="${SCRIPT_PATH%/scripts/*}"
   if [ -n "${IMUX_BIN:-}" ] && [ -x "$IMUX_BIN" ]; then
-    if _v=$("$IMUX_BIN" --version 2>/dev/null) && [ -n "$_v" ]; then
-      _ok "$_v at $IMUX_BIN"
+    # Ask it what it is.  The helper is picked by an -x test, which any
+    # executable passes, and this used to give a green tick to whatever printed
+    # anything at all — `/bin/ls` got "✓ ls (GNU coreutils) 9.4".  The real one
+    # answers "imux <version>".  </dev/null: something that reads stdin instead
+    # must not hang the report.
+    if _v=$("$IMUX_BIN" --version 2>/dev/null </dev/null) && [ -n "$_v" ]; then
+      case "$_v" in
+        'imux '*) _ok "$_v at $IMUX_BIN" ;;
+        *) _bad "$IMUX_BIN is not the interdimux helper — its --version says: ${_v%%$'\n'*}"
+           _note "the list notices, and falls back to the slow bash renderer; point INTERDIMUX_BIN at an imux build" ;;
+      esac
     else
       _bad "rust helper at $IMUX_BIN is present but does not run"
       _note "rebuild with: (cd '$_repo/rust' && cargo build --release)"
@@ -4717,6 +4737,13 @@ if [ "${1:-}" = "--doctor" ]; then
   else
     _warn "rust helper not found — falling back to the minimal bash renderer"
     _note "build it with: (cd '$_repo/rust' && cargo build --release)"
+  fi
+  # An INTERDIMUX_BIN that is not executable is skipped in favour of the in-repo
+  # build, silently — the line above then names a different binary than the one
+  # asked for, with nothing to say why.
+  if [ -n "${INTERDIMUX_BIN:-}" ] && [ "${INTERDIMUX_USE_RUST:-on}" != off ] \
+     && [ "${IMUX_BIN:-}" != "$INTERDIMUX_BIN" ]; then
+    _warn "INTERDIMUX_BIN=$INTERDIMUX_BIN is not an executable file, so it is ignored"
   fi
 
   # The MRU order is stable only because the sort is: without `-s`, GNU sort
@@ -4962,7 +4989,10 @@ if [ "${1:-}" = "--doctor" ]; then
   _sec options
   # Names the code understands but that are not in OPT_MAP: they are read
   # directly rather than forwarded to the popup.
-  _known=("${OPT_NAMES[@]}" key dashboard-key binary project-dirs jump-keys)
+  # (No `binary`: the helper's path is read from $INTERDIMUX_BIN only, and an
+  # option by that name was once accepted here and green-ticked while nothing
+  # read it.  Unknown now, so setting it says so.)
+  _known=("${OPT_NAMES[@]}" key dashboard-key project-dirs jump-keys)
 
   _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 
@@ -5063,8 +5093,6 @@ if [ "${1:-}" = "--doctor" ]; then
       jump-keys)
         # space-separated tmux key specs; the count is what maps to #1, #2, …
         case "$v" in *[!A-Za-z0-9\ ^\-]*) printf 'expected space-separated tmux keys, e.g. "M-1 M-2 M-3"' ;; esac ;;
-      binary)
-        [ -x "$v" ] || printf 'not an executable file' ;;
     esac
   }
 
@@ -5096,6 +5124,8 @@ if [ "${1:-}" = "--doctor" ]; then
       else
         _bad "unknown option @interdimux-$_name"
       fi
+      [ "$_name" = binary ] \
+        && _note "the helper's path comes from \$INTERDIMUX_BIN only — for the popups: tmux set-environment -g INTERDIMUX_BIN <path>"
       continue
     fi
     _why=$(_check_value "$_name" "$_raw")

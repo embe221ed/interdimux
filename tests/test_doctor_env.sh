@@ -250,6 +250,26 @@ for good in '#E78A4E' '-1' 'default' '255'; do
 done
 unsetopt color-border
 
+# --- the helper binary ------------------------------------------------------------------
+# @interdimux-binary was accepted and green-ticked while nothing read it.
+setopt binary /bin/true
+out=$(doctor)
+has "@interdimux-binary is reported as unknown" "$out" "✗ unknown option @interdimux-binary"
+has "...and points at the variable that does work" "$out" "INTERDIMUX_BIN"
+unsetopt binary
+# Any executable passes the -x test; only imux answers `--version` with "imux".
+printf '#!/bin/sh\necho "hello from not-imux"\n' > "$TMPD/hello"; chmod +x "$TMPD/hello"
+has "a binary that is not imux is a problem" "$(INTERDIMUX_BIN="$TMPD/hello" doctor)" \
+  "✗ $TMPD/hello is not the interdimux helper"
+if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then
+  has "...and the real one is still a tick" \
+    "$(INTERDIMUX_BIN="$SCRIPT_DIR/rust/target/release/imux" doctor)" "✓ imux "
+else
+  echo "  (skipped the real-helper case: no release binary built)"
+fi
+has "an INTERDIMUX_BIN that is not executable is said to be ignored" \
+  "$(INTERDIMUX_BIN="$TMPD/no-such-imux" doctor)" "⚠ INTERDIMUX_BIN=$TMPD/no-such-imux is not an executable file"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

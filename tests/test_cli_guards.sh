@@ -7,6 +7,8 @@
 #   * An argument no mode takes is refused with exit 2.  It used to fall into the
 #     navigator: from a terminal that opened the picker, from a script it failed
 #     there, appended a bogus entry to errors.log and turned --doctor red.
+#   * A helper binary whose output is not a row list is not allowed to BE the
+#     picker; the list falls back to the bash renderer.
 #
 # The navigator is detected with a stand-in fzf that only logs that it started:
 # with the fzf version pinned, nothing else in the script runs fzf, so its log is
@@ -101,6 +103,38 @@ check "--help works outside tmux with an empty PATH" \
 OUT=$(env -u TMUX PATH=/nonexistent "$BASH" "$SCRIPT" --version 2>&1) && RC=0 || RC=$?
 check "--version prints 'interdimux X.Y.Z' there too (got: $OUT)" \
   '[ "$RC" = 0 ] && [[ "$OUT" =~ ^interdimux\ [0-9]+\.[0-9]+\.[0-9]+$ ]]'
+
+# --- a helper binary that is not imux ---------------------------------------------------
+# INTERDIMUX_BIN accepts any executable, and whatever one printed on exit 0 used
+# to become the entire list.  Now it must be a row list or the bash renderer
+# takes over — so the list must be the bash renderer's rows: the same targets,
+# in the same order (the spec column, which no clock or width moves), and none
+# of the impostor's output.
+specs() { printf '%s\n' "$1" | awk -F'\t' '{ print $NF }'; }
+printf '#!/bin/sh\necho "hello from not-imux"\n' > "$TMPD/hello"; chmod +x "$TMPD/hello"
+want=$(INTERDIMUX_USE_RUST=off INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null || true)
+for pair in "$TMPD/hello:hello from not-imux" "/bin/echo:gather"; do
+  bin="${pair%%:*}" junk="${pair#*:}"
+  [ -x "$bin" ] || continue
+  got=$(INTERDIMUX_BIN="$bin" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null || true)
+  check "INTERDIMUX_BIN=$bin: the list is the bash renderer's rows" \
+    '[ -n "$want" ] && [ "$(specs "$got")" = "$(specs "$want")" ]'
+  check "...and not a line of what it printed ('$junk')" \
+    '! printf "%s\n" "$got" | grep -qxF "$junk"'
+done
+# ...while a row list DOES pass straight through — a wrapper around the real
+# helper that appends one row no renderer could produce, so its presence proves
+# the helper's own output was used.
+if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then
+  printf '#!/bin/sh\n"%s" "$@"\nprintf "zz\\tmarker\\t\\tS:zz-only-from-the-helper\\n"\n' \
+    "$SCRIPT_DIR/rust/target/release/imux" > "$TMPD/wrapped"
+  chmod +x "$TMPD/wrapped"
+  got=$(INTERDIMUX_BIN="$TMPD/wrapped" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null || true)
+  check "the real helper's rows still pass straight through" \
+    'case "$got" in *S:zz-only-from-the-helper*) true ;; *) false ;; esac'
+else
+  echo "  (skipped the pass-through case: no release binary built)"
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
