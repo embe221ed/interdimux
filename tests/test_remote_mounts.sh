@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+#
+# A path on a filesystem whose stat() can block is never probed before the
+# first paint.
+#
+# Every row can cost filesystem probes before anything is drawn: the git badge
+# walks <dir>/.git up to /, a directory row's type badge is up to 11 marker
+# tests, a recent/zoxide directory is checked for existence -- and bash captures
+# the renderer's whole output, so nothing paints until the last one returns.  On
+# a stalled NFS/CIFS/sshfs mount each probe blocks for the mount's timeout
+# (measured with a FUSE filesystem whose lookups stall 1 s: one such directory
+# in the recent list took --list from 0.1 s to 11 s, a pane in it to 2 s).
+#
+# A hung mount cannot be built here without root, so the mount table is the
+# seam: INTERDIMUX_MOUNTINFO points both renderers at a copy of
+# /proc/self/mountinfo with a few lines appended that declare fixture
+# directories to be NFS / gocryptfs mounts.  The directories are real and local,
+# so the oracle is what a probe WOULD have found: each carries a Cargo.toml and
+# a .git/HEAD, so a badge on a "remote" row means it was probed, and a row for
+# a directory that does not exist means it was not stat()ed.  The same fixture
+# without the seam is the control.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+BIN="$SCRIPT_DIR/rust/target/release/imux"
+SOCK="interdimux-remote-test-$$"
+TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-remote.XXXXXX")" && pwd -P)"
+PASS=0
+FAIL=0
+ERRORS=""
+
+cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$TMPD"; }
+trap cleanup EXIT
+
+report() {
+  local name="$1" result="$2"
+  if [ "$result" = "pass" ]; then
+    PASS=$((PASS + 1)); printf '  \033[32m✓\033[0m %s\n' "$name"
+  else
+    FAIL=$((FAIL + 1)); ERRORS+="  FAIL: $name"$'\n'; printf '  \033[31m✗\033[0m %s\n' "$name"
+  fi
+}
+
+wait_for() { # $1 = description, $2.. = a command that must succeed
+  local desc="$1"; shift
+  local i
+  for i in $(seq 1 150); do
+    "$@" >/dev/null 2>&1 && return 0
+    sleep 0.1
+  done
+  echo "  (timed out waiting for: $desc)" >&2
+  return 1
+}
+
+echo "interdimux remote-mount tests"
+echo
+
+if [ ! -r /proc/self/mountinfo ]; then
+  echo "  (skipped: no /proc/self/mountinfo on this system -- nothing is classified there)"
+  echo
+  echo "Results: 0 passed, 0 failed"
+  exit 0
+fi
+
+# a project: a Cargo.toml and a git branch named after it
+mkproj() { mkdir -p "$1/.git"; : > "$1/Cargo.toml"; printf 'ref: refs/heads/%s\n' "$2" > "$1/.git/HEAD"; }
+mkproj "$TMPD/nas/proj"     nasbranch
+mkproj "$TMPD/nas/work"     naswork
+mkproj "$TMPD/local/proj"   localbranch
+mkproj "$TMPD/local/work"   localwork
+mkproj "$TMPD/vault/proj"   vaultbranch
+mkproj "$TMPD/home/proj"    homebranch
+mkproj "$TMPD/local/zdir"   zoxidebranch
+mkdir -p "$TMPD/data/interdimux" "$TMPD/bin"
+printf '%s\n' "$TMPD/nas/proj" "$TMPD/nas/gone" "$TMPD/local/proj" "$TMPD/vault/proj" "$TMPD/home/proj" \
+  > "$TMPD/data/interdimux/recent_dirs"
+
+MI="$TMPD/mountinfo"
+{
+  cat /proc/self/mountinfo
+  echo "900 1 0:900 / $TMPD/nas rw,relatime shared:900 - nfs4 srv:/nas rw"
+  echo "901 1 0:901 / $TMPD/vault rw,nosuid shared:901 - fuse.gocryptfs $TMPD/.vault rw"
+  echo "902 1 0:902 / $TMPD/home rw,relatime shared:902 - nfs4 srv:/home rw"
+} > "$MI"
+
+tmux -f /dev/null -L "$SOCK" new-session -d -s bench -x 200 -y 50 -c "$TMPD/home" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s naspane -x 200 -y 50 -c "$TMPD/nas/work" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s locpane -x 200 -y 50 -c "$TMPD/local/work" 'sleep 99999'
+export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
+export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=bench:0' -F '#{pane_id}' | head -1)"
+export HOME="$TMPD/home" XDG_DATA_HOME="$TMPD/data"
+export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
+export INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_GIT_BRANCH=on
+export INTERDIMUX_DIRS_LIMIT=20 INTERDIMUX_PROJECT_DIRS="$TMPD/nowhere"
+# wide enough that the git-badge column is on (it is off at 80 columns)
+export FZF_COLUMNS=200 INTERDIMUX_NOW="$(date +%s)"
+wait_for "the panes' cwds" sh -c "tmux -L '$SOCK' list-panes -a -F '#{pane_current_path}' | grep -qx '$TMPD/nas/work'"
+
+renderers="off"
+[ -x "$BIN" ] && renderers="on off"
+
+# The --list row whose spec is $2, ANSI stripped; $1 = on|off.  LIST_ENV holds
+# the extra environment (the seam, or nothing).
+row() { env $LIST_ENV INTERDIMUX_USE_RUST="$1" bash "$SCRIPT" --list 2>/dev/null \
+          | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' -v s="$2" '$4 == s { print; exit }'; }
+
+# $1 = a row: does it carry the git badge ‹$2› AND the Rust type badge?
+badged() {
+  case "$1" in *"‹$2›"*) ;; *) return 1 ;; esac
+  case "$1" in *Rust*) return 0 ;; esac
+  return 1
+}
+
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+
+  LIST_ENV=""   # control: the real mount table, where all of $TMPD is local
+  got=$(row "$r" "D:$TMPD/nas/proj")
+  badged "$got" nasbranch && report "$label control: a local dir row carries its git and type badges" pass \
+                          || report "$label control: a local dir row carries its git and type badges (got: $got)" fail
+  got=$(row "$r" "D:$TMPD/nas/gone")
+  [ -z "$got" ] && report "$label control: a recent dir that does not exist is not offered" pass \
+                || report "$label control: a recent dir that does not exist is not offered (got: $got)" fail
+
+  LIST_ENV="INTERDIMUX_MOUNTINFO=$MI"
+  got=$(row "$r" "D:$TMPD/nas/proj")
+  if [ -n "$got" ] && ! printf '%s' "$got" | grep -q -e '‹' -e 'Rust'; then
+    report "$label: a dir row on an NFS mount is drawn without probing it (no badges)" pass
+  else
+    report "$label: a dir row on an NFS mount is drawn without probing it (no badges) (got: $got)" fail
+  fi
+  got=$(row "$r" "D:$TMPD/nas/gone")
+  [ -n "$got" ] && report "$label: a recent dir on an NFS mount is offered without an existence check" pass \
+                || report "$label: a recent dir on an NFS mount is offered without an existence check" fail
+  got=$(row "$r" "W:naspane:0")
+  if [ -n "$got" ] && ! printf '%s' "$got" | grep -q '‹'; then
+    report "$label: a pane on an NFS mount gets no git walk" pass
+  else
+    report "$label: a pane on an NFS mount gets no git walk (got: $got)" fail
+  fi
+  got=$(row "$r" "W:locpane:0")
+  case "$got" in *"‹localwork›"*) report "$label: a pane on a local disk still gets its git badge" pass ;;
+                 *) report "$label: a pane on a local disk still gets its git badge (got: $got)" fail ;; esac
+  got=$(row "$r" "D:$TMPD/local/proj")
+  badged "$got" localbranch && report "$label: a local dir row keeps its badges" pass \
+                            || report "$label: a local dir row keeps its badges (got: $got)" fail
+  got=$(row "$r" "D:$TMPD/vault/proj")
+  badged "$got" vaultbranch && report "$label: a local-backed FUSE fs (gocryptfs) keeps its badges" pass \
+                            || report "$label: a local-backed FUSE fs (gocryptfs) keeps its badges (got: $got)" fail
+  got=$(row "$r" "D:$TMPD/home/proj")
+  badged "$got" homebranch && report "$label: the filesystem \$HOME is on keeps its badges, NFS or not" pass \
+                           || report "$label: the filesystem \$HOME is on keeps its badges, NFS or not (got: $got)" fail
+done
+
+# Both renderers classify alike: the whole list is byte-identical.
+if [ -x "$BIN" ]; then
+  a=$(INTERDIMUX_MOUNTINFO="$MI" INTERDIMUX_USE_RUST=on  bash "$SCRIPT" --list 2>/dev/null)
+  b=$(INTERDIMUX_MOUNTINFO="$MI" INTERDIMUX_USE_RUST=off bash "$SCRIPT" --list 2>/dev/null)
+  [ -n "$a" ] && [ "$a" = "$b" ] && report "both renderers draw the same list under the mount table" pass \
+                                 || report "both renderers draw the same list under the mount table" fail
+fi
+
+# The ctrl-o picker: the same rows, through load_recent_dirs / detect_project_type.
+dl=$(INTERDIMUX_MOUNTINFO="$MI" bash "$SCRIPT" --dirs-list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+nas=$(printf '%s\n' "$dl" | awk -F'\t' -v d="$TMPD/nas/proj" '$3 == d')
+loc=$(printf '%s\n' "$dl" | awk -F'\t' -v d="$TMPD/local/proj" '$3 == d')
+if [ -n "$nas" ] && [ "$(printf '%s' "$nas" | cut -f2)" = "" ] && [ "$(printf '%s' "$loc" | cut -f2)" = "Rust" ]; then
+  report "--dirs-list: no type probe on the NFS row, the local one is typed" pass
+else
+  report "--dirs-list: no type probe on the NFS row, the local one is typed (nas: $nas / local: $loc)" fail
+fi
+
+# zoxide stats every entry of its database unless told --all; a zoxide that
+# does not know the flag still gets asked the plain way.
+printf '#!/bin/sh\necho "$*" >> "%s/zargs"\nprintf "%%s\\n" "%s/local/zdir"\n' "$TMPD" "$TMPD" > "$TMPD/bin/zoxide"
+chmod +x "$TMPD/bin/zoxide"
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  rm -f "$TMPD/zargs"
+  PATH="$TMPD/bin:$PATH" INTERDIMUX_USE_ZOXIDE=on INTERDIMUX_USE_RUST="$r" bash "$SCRIPT" --list >/dev/null 2>&1
+  case "$(cat "$TMPD/zargs" 2>/dev/null)" in
+    *"--list --all"*) report "$label: zoxide is queried with --all (it stats nothing)" pass ;;
+    *) report "$label: zoxide is queried with --all (got: $(cat "$TMPD/zargs" 2>/dev/null))" fail ;;
+  esac
+done
+printf '#!/bin/sh\ncase "$*" in *--all*) exit 2 ;; esac\nprintf "%%s\\n" "%s/local/zdir"\n' "$TMPD" > "$TMPD/bin/zoxide"
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  got=$(PATH="$TMPD/bin:$PATH" INTERDIMUX_USE_ZOXIDE=on INTERDIMUX_USE_RUST="$r" bash "$SCRIPT" --list 2>/dev/null | cut -f4)
+  case "$got" in *"D:$TMPD/local/zdir"*) report "$label: a zoxide without --all still contributes its dirs" pass ;;
+                 *) report "$label: a zoxide without --all still contributes its dirs" fail ;; esac
+done
+
+echo
+echo "Results: $PASS passed, $FAIL failed"
+if [ "$FAIL" -gt 0 ]; then
+  echo
+  printf '%s' "$ERRORS"
+  exit 1
+fi

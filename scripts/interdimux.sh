@@ -836,6 +836,81 @@ if [ -n "$EXTRA_MARKERS" ]; then
   unset _m _p _m_parts _m_named
 fi
 
+# ---------------------------------------------------------------------------
+# Filesystems whose stat() can block: never probed before the first paint
+# ---------------------------------------------------------------------------
+#
+# Every row can cost probes before anything paints: the git badge walks
+# `<dir>/.git` up to `/`, a directory row's type badge is up to 11 marker tests,
+# and a recent/zoxide directory is checked for existence.  On a stalled
+# NFS/CIFS/sshfs mount, or an automount point that has to (re)mount, each one
+# blocks for the mount's timeout -- measured with a FUSE filesystem whose
+# lookups stall for 1 s, ONE such directory in the recent list made --list take
+# 11 s.  So a path on such a filesystem is not probed at all: no git badge, no
+# type badge, and a recent/zoxide entry is offered without an existence check.
+#
+# Classified from /proc/self/mountinfo (INTERDIMUX_MOUNTINFO overrides it, for
+# tests), read on first use; without it (macOS, BSD) nothing is skipped.  `/` and
+# the filesystem $HOME is on are never skipped: the picker touches both anyway
+# (bash, the recent list), and an NFS home keeps its badges.  The same table as
+# rust/src/mounts.rs -- keep them in step.
+_MOUNTS_READ=0
+declare -A _MOUNT_BLOCKS=()   # mount point -> 1 (can block) | 0; the LAST mount at a point wins
+
+_mounts_read() {
+  _MOUNTS_READ=1
+  local f="${INTERDIMUX_MOUNTINFO:-/proc/self/mountinfo}" line fstype point any=0 b
+  [ -r "$f" ] || return 0
+  while IFS= read -r line; do
+    fstype="${line#* - }"; fstype="${fstype%% *}"
+    case "$fstype" in
+      nfs|nfs4|cifs|smb3|smbfs|ncpfs|afs|ceph|coda|lustre|gpfs|9p|orangefs|beegfs|autofs|fuse) b=1 ;;
+      # FUSE backed by local storage keeps its badges; fuseblk is a local disk
+      fuse.gocryptfs|fuse.encfs|fuse.cryfs|fuse.securefs|fuse.bindfs|fuse.mergerfs|fuse.unionfs|fuse.unionfs-fuse|fuse.fuse-overlayfs) b=0 ;;
+      fuse.*) b=1 ;;
+      *) b=0 ;;
+    esac
+    # A local mount only matters once it can shadow, or sit inside, a blocking
+    # one -- which, in mount order, is after the first of those.
+    [ "$b" = 0 ] && [ "$any" = 0 ] && continue
+    any=1
+    point="${line#* * * * }"; point="${point%% *}"   # field 5
+    printf -v point '%b' "$point"                      # mountinfo escapes ' ' as \040
+    _MOUNT_BLOCKS["$point"]=$b
+  done < "$f"
+  [ "$any" = 1 ] || return 0
+  # never skip what the picker touches anyway (see above)
+  local p
+  for p in / "$HOME"; do
+    [ -n "$p" ] || continue
+    _mount_of "$p" && _MOUNT_BLOCKS["$_MOUNT_AT"]=0
+  done
+  # nothing left that blocks: empty the table, so the check is free
+  for b in "${_MOUNT_BLOCKS[@]}"; do [ "$b" = 1 ] && return 0; done
+  _MOUNT_BLOCKS=()
+}
+
+# _MOUNT_AT = the recorded mount point $1 is on (the longest one covering it).
+# Not REPLY: the callers are REPLY-returning functions (get_git_branch,
+# detect_project_type) that must not have theirs overwritten by the check.
+_MOUNT_AT=""
+_mount_of() {
+  local p="$1"
+  while :; do
+    [[ -v "_MOUNT_BLOCKS[$p]" ]] && { _MOUNT_AT="$p"; return 0; }
+    [ "$p" = / ] && return 1
+    p="${p%/*}"; [ -n "$p" ] || p=/
+  done
+}
+
+# Is $1 on a filesystem whose stat can block?
+is_remote_path() {
+  [ "$_MOUNTS_READ" = 1 ] || _mounts_read
+  [ "${#_MOUNT_BLOCKS[@]}" -gt 0 ] || return 1
+  case "$1" in /*) ;; *) return 1 ;; esac
+  _mount_of "$1" && [ "${_MOUNT_BLOCKS[$_MOUNT_AT]}" = 1 ]
+}
+
 is_project_root() {
   local dir="$1"
   for m in "${PROJECT_MARKERS[@]}"; do
@@ -849,6 +924,7 @@ is_project_root() {
 detect_project_type() {
   local dir="$1"
   REPLY=""
+  is_remote_path "$dir" && return 0   # never probed (see is_remote_path)
   [ -f "$dir/Cargo.toml" ]      && { REPLY="Rust";    return; }
   [ -f "$dir/go.mod" ]          && { REPLY="Go";      return; }
   [ -f "$dir/package.json" ]    && { REPLY="Node.js"; return; }
@@ -880,13 +956,16 @@ is_utf8() {
 # renderers.  Listing it is worse than useless: fzf hands a selection back with
 # every invalid byte replaced by U+FFFD, so the row names a directory that does
 # not exist and can never be opened.  The Rust core skips the same lines.
+#
+# One on a filesystem whose stat can block is offered WITHOUT the existence
+# check (is_remote_path) -- connect_dir reports it if it is gone.
 load_recent_dirs() {
   local d count=0
   local -A _recent_seen=()
   if [ -f "$RECENT_DIRS_FILE" ]; then
     while IFS= read -r d; do
       is_utf8 "$d" || continue
-      [ -d "$d" ] || continue
+      is_remote_path "$d" || [ -d "$d" ] || continue
       [[ -v "_recent_seen[$d]" ]] && continue
       _recent_seen["$d"]=1
       echo "$d"
@@ -900,13 +979,17 @@ load_recent_dirs() {
     local zcount=0
     while IFS= read -r d; do
       is_utf8 "$d" || continue
-      [ -d "$d" ] || continue
+      is_remote_path "$d" || [ -d "$d" ] || continue
       [[ -v "_recent_seen[$d]" ]] && continue
       _recent_seen["$d"]=1
       echo "$d"
       zcount=$((zcount + 1))
       [ "$zcount" -ge "$RECENT_LIMIT" ] && break
-    done < <(zoxide query --list 2>/dev/null || true)
+    # --all: without it zoxide stats EVERY entry in its database to hide the
+    # missing ones, so one entry on a stalled mount hangs zoxide itself.  The
+    # existence check is the loop's own now; a zoxide too old for the flag gets
+    # the plain query.
+    done < <(zoxide query --list --all 2>/dev/null || zoxide query --list 2>/dev/null || true)
   fi
 }
 
@@ -931,7 +1014,7 @@ record_recent_dir() {
   if [ -f "$RECENT_DIRS_FILE" ]; then
     while IFS= read -r d; do
       [ "$d" = "$dir" ] && continue
-      [ -d "$d" ] || continue
+      is_remote_path "$d" || [ -d "$d" ] || continue   # a stalled mount must not delay the switch
       echo "$d" >> "$tmp"
       count=$((count + 1))
       [ "$count" -ge 50 ] && break
@@ -1454,6 +1537,9 @@ get_git_branch() {
 
   local d="$dir"
   while [ "$d" != "/" ] && [ -n "$d" ]; do
+    # Never probe a filesystem whose stat can block (is_remote_path): the walk
+    # stops there, badge-less, rather than stall the first paint.
+    is_remote_path "$d" && break
     local head_file=""
     if [ -d "$d/.git" ]; then
       head_file="$d/.git/HEAD"
@@ -1467,6 +1553,7 @@ get_git_branch() {
         /*) ;;
         *)  gitdir="$d/$gitdir" ;;
       esac
+      is_remote_path "$gitdir" && break   # a worktree whose repository is on one
       [ -f "$gitdir/HEAD" ] && head_file="$gitdir/HEAD"
     fi
 

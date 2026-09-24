@@ -32,6 +32,13 @@ fn utf8_lines(bytes: &[u8]) -> impl Iterator<Item = &str> {
     bytes.split(|b| *b == b'\n').filter_map(|l| std::str::from_utf8(l).ok())
 }
 
+/// Is `d` worth offering?  An existing directory -- except on a filesystem whose
+/// stat can block (mounts.rs), which is offered unchecked: one stalled mount in
+/// the recent list used to hold the whole first paint for its timeout.
+fn offerable(d: &str) -> bool {
+    crate::mounts::is_remote(d) || Path::new(d).is_dir()
+}
+
 /// The recent list first, then zoxide's frecency, deduped, existing dirs only.
 pub fn candidates() -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = Default::default();
@@ -48,7 +55,7 @@ pub fn candidates() -> Vec<String> {
             if out.len() >= limit {
                 break;
             }
-            if d.is_empty() || seen.contains(d) || !Path::new(d).is_dir() {
+            if d.is_empty() || seen.contains(d) || !offerable(d) {
                 continue;
             }
             seen.insert(d.to_string());
@@ -58,13 +65,25 @@ pub fn candidates() -> Vec<String> {
 
     let use_zoxide = std::env::var("INTERDIMUX_USE_ZOXIDE").map(|v| v == "on").unwrap_or(true);
     if use_zoxide {
-        if let Ok(o) = std::process::Command::new("zoxide").args(["query", "--list"]).output() {
+        // `--all`: without it zoxide stats EVERY entry in its database to hide
+        // the missing ones, so one entry on a stalled mount hangs zoxide itself.
+        // The existence check is ours now (offerable), and a zoxide too old to
+        // know the flag gets the plain query.
+        let query = |all: bool| {
+            let mut c = std::process::Command::new("zoxide");
+            c.args(["query", "--list"]);
+            if all {
+                c.arg("--all");
+            }
+            c.stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success())
+        };
+        if let Some(o) = query(true).or_else(|| query(false)) {
             let mut n = 0;
             for d in utf8_lines(&o.stdout) {
                 if n >= limit {
                     break;
                 }
-                if d.is_empty() || seen.contains(d) || !Path::new(d).is_dir() {
+                if d.is_empty() || seen.contains(d) || !offerable(d) {
                     continue;
                 }
                 seen.insert(d.to_string());
@@ -76,8 +95,12 @@ pub fn candidates() -> Vec<String> {
     out
 }
 
-/// First matching marker wins — the same order bash checks in.
+/// First matching marker wins — the same order bash checks in.  Nothing is
+/// probed on a filesystem whose stat can block (mounts.rs).
 pub fn project_type(dir: &str) -> Option<&'static str> {
+    if crate::mounts::is_remote(dir) {
+        return None;
+    }
     const FILES: &[(&str, &str)] = &[
         ("Cargo.toml", "Rust"),
         ("go.mod", "Go"),
