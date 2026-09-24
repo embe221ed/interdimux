@@ -19,18 +19,28 @@ failed**, which no container reproduced. Both failures had one cause, §10.
 
 ### Reading the totals
 
-Three different numbers are correct at once, so it is worth pinning down:
+Several different numbers are correct at once, so it is worth pinning down.
+The first three rows are the history this document records; the rest are
+current, measured after §11 on the development box — where
+`tests/test_old_fzf.sh` skips, since it has no `INTERDIMUX_OLD_FZF_DIR`.  CI
+fetches those fzf releases, so both of its legs read higher by that suite's
+count:
 
 | where | shell | rust | printed |
 |---|---|---|---|
-| `tests/run_all.sh` locally | 443 | +80 | **523** |
-| the workflow's "Shell tests" step | 443 | — | **443** |
+| `tests/run_all.sh` locally, then | 443 | +80 | **523** |
+| the workflow's "Shell tests" step, then | 443 | — | **443** |
 | that step before §10 was fixed | 441 + 2 failed | — | **441** |
+| `tests/run_all.sh` locally, now | 941 | +115 | **1056** |
+| "Shell tests", `rust` leg | 941 | — | **941** |
+| "Shell tests", `bash` leg (`IMUX_RENDERER=bash`) | 873 | — | **873** |
 
-`run_all.sh` runs `cargo test` itself and folds those 80 into its own total; CI
+`run_all.sh` runs `cargo test` itself and folds those 115 into its own total; CI
 passes `IMUX_SKIP_RUST=1` because Rust already ran as its own step. So a CI total
-80 lower than a local one is the *expected* reading, not a coverage gap — every
-one of the 443 shell assertions runs in both places.
+115 lower than a local one is the *expected* reading, not a coverage gap — every
+one of the 941 shell assertions runs in both places.  The `bash` leg reads
+68 lower again: `test_rust_parity.sh`, which compares the two renderers
+itself, is skipped there (§11).
 
 ## 1. tmux 3.4 makes the picker empty — this is the big one
 
@@ -117,6 +127,8 @@ byte for byte" — skips itself. The runner has Rust preinstalled; nothing was
 using it.
 
 **Fix:** `cargo build --release` and `cargo test --release`.
+
+That fix had a cost nobody noticed, which is §11.
 
 ## 7. The test step stopped at the first failure
 
@@ -228,6 +240,48 @@ parent: a CI step, or `--send-at` called from a systemd unit, where
 `env --default-signal=PIPE`. It works, and it would have hidden the second bug
 above. CI is the only place this project ever runs with SIGPIPE ignored, and
 that is coverage worth keeping — `ci.yml` says so at the "Shell tests" step.
+
+## 11. Building the core hid the renderer most installs run
+
+§6 built `rust/target/release/imux` so the parity suite would run.  But the
+script prefers a built binary everywhere, so from then on every suite that did
+not pin a renderer ran the Rust core — and the bash renderer, which is what
+every install WITHOUT cargo runs (the README's TPM route never builds
+`rust/`), was exercised only in the handful of places a suite forced it with
+`INTERDIMUX_USE_RUST=off`.
+
+**Fix:** the `tests` job is a matrix over `renderer: [rust, bash]`.  The `bash`
+leg runs `IMUX_RENDERER=bash tests/run_all.sh`, which exports
+`INTERDIMUX_USE_RUST=off`; the private tmux servers the suites start inherit it
+into their global environment, so every pane, popup and `run-shell` inside them
+renders with bash too.  It skips `test_rust_parity.sh` (it compares both
+renderers itself) and the Rust tests (renderer-independent), but still builds
+the binary: the suites that compare renderers, and `--doctor`'s helper checks,
+pin it on.  The job's check names are now "tests (rust renderer)" and "tests
+(bash renderer)" — anything that required the old "tests" check needs the new
+names.
+
+A canary copy of the script that logged every Rust render, run through the
+whole suite under `IMUX_RENDERER=bash`, confirmed the leg does what it says:
+the only Rust renders left were the cases that pin it on to compare.  The first
+bash-leg run failed 15 assertions in six suites:
+
+* **one real defect.** In raw mode, ^r, ^/ and a resize threw the cursor to the
+  first row: a bug already fixed, but, it turned out, only for the core.  Every
+  navigator reload was a plain `reload`, which shows rows as they stream in;
+  the core's rows arrive in one write, bash's row by row, and fzf keeps the
+  cursor by row NUMBER.  Fixed with `reload-sync`.
+* **suites that assumed the core**: two that `unset` the variable after their
+  own renderer loop (silently flipping the rest of the suite back to Rust),
+  `--doctor`'s suites reading its "rust helper disabled" warning as a problem,
+  `INTERDIMUX_BIN` cases that never ran the helper at all, and a count of the
+  popup's `INTERDIMUX_*` variables that counted the override.
+* the two `‹main›` scope-highlight failures every non-`main` checkout had.
+
+`tests/test_corpus_parity.sh` closes the other half of the gap without a
+server: `INTERDIMUX_DUMP_IN=<file>` feeds a recorded dump to the bash renderer
+at the same fetch site tmux would, so every `rust/tests/corpus/*.dump` is
+rendered by both, and the bash output must equal the blessed golden.
 
 ## What the developer's tmux does that no released tmux does
 
