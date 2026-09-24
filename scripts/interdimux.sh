@@ -6,6 +6,26 @@
 # and switches to the selected target.  Supports kill, rename, and
 # new-session-from-directory actions via fzf keybindings.
 
+# bash >= 4.3, checked before anything can need it.  Every option read goes
+# through a nameref (`local -n`), and namerefs, `[[ -v arr[k] ]]` and the rules
+# this file writes its array expansions to are all 4.3; macOS's own /bin/bash is
+# 3.2.  Unchecked, 3.2 died at the first `declare -A` and 4.2 at the first
+# `local -n`, each naming a builtin rather than the problem -- and behind a key
+# binding or in a popup nobody saw even that.  So it is said here: on stderr,
+# and from inside tmux on the status line, which outlives a popup.
+#
+# POSIX sh, and BASH_VERSION rather than BASH_VERSINFO, because this has to run
+# in whatever shell the file is handed to.  bash reads a script one command at a
+# time, so a bash that fails this never parses the rest of the file.
+case "${BASH_VERSION:-}" in
+  4.[3-9]*|4.[1-9][0-9]*|[5-9].*|[1-9][0-9]*.*) ;;
+  *)
+    _imux_old="interdimux: bash >= 4.3 is required (found ${BASH_VERSION:+bash }${BASH_VERSION:-a shell that is not bash})"
+    echo "$_imux_old" >&2
+    [ -n "${TMUX:-}" ] && tmux display-message "$_imux_old" >/dev/null 2>&1
+    exit 1 ;;
+esac
+
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -980,7 +1000,7 @@ if [ -n "$EXTRA_MARKERS" ]; then
   for _m in "${_extra_markers[@]}"; do
     IFS='/' read -ra _m_parts <<< "$_m"
     _m_named=0
-    for _p in "${_m_parts[@]}"; do
+    for _p in ${_m_parts[@]+"${_m_parts[@]}"}; do
       case "$_p" in ''|.|..) ;; *) _m_named=1 ;; esac
     done
     [ "$_m_named" = 1 ] && PROJECT_MARKERS+=("$_m")
@@ -3481,7 +3501,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
             [ -d "$sp" ] || continue
             mapfile -t _matches < <(match_dirs "$sp" "$query" $((SCAN_DEPTH * 2)) "$finder" | sort)
             _scanned_root=""
-            for d in "${_matches[@]}"; do
+            for d in ${_matches[@]+"${_matches[@]}"}; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               collect_dir "$d"
               # A match inside an already-scanned match is covered
