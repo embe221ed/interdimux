@@ -5486,12 +5486,6 @@ while true; do
       fzf_opts+=(
         --prompt='❯ '
         --print-query
-        --bind="ctrl-x:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
-        --bind="ctrl-e:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
-        --bind="ctrl-z:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
-        --bind="ctrl-s:${_wait}execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
-        --bind="ctrl-d:${_wait}execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
-        --bind="ctrl-t:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
         --bind="ctrl-o:execute(bash '$SCRIPT_PATH' --dirs || echo resume > '$RESUME_FILE')+abort"
         # Column widths are computed against the space actually available, so
         # toggling the preview or resizing the popup invalidates them: without
@@ -5676,6 +5670,40 @@ while true; do
           fzf_opts+=(--bind="zero:transform-$HINT_BAR($_footer_for)")
         fi
       fi
+
+      # The row actions.  In raw mode a query that matches NOTHING still leaves
+      # every row on screen, dimmed, with the cursor on one of them -- and fzf
+      # runs an execute against it: ^x offered to kill a session the query had
+      # excluded, ^e to rename it, and ^z zoomed it with no dialog at all.
+      # (Without raw the list is empty there, and fzf skips an execute whose
+      # template names a field when there is no current item.)  Enter already
+      # dispatches on FZF_MATCH_COUNT; these do the same, inside fzf, so the
+      # dialog never takes over the terminal.  At zero matches the bar says why
+      # nothing happened; the next keystroke puts the announcement back.
+      #
+      # The action text is ECHOED by the transform and then parsed by fzf, so
+      # its placeholder is written \{-1}: fzf expands a bare {-1} in the
+      # transform's own command -- quoted for a shell, but those quotes would be
+      # consumed by the echo -- where the escaped form reaches the emitted
+      # execute intact and is expanded, and quoted, when that runs.  No single
+      # quotes (hence SQ_SCRIPT in double quotes) and no commas.  The test is a
+      # plain string compare so it parses in any shell a user's --with-shell
+      # may name, fish included; raw mode means fzf >= 0.74, which always
+      # exports the count.
+      _action_bind() { # key action exec-kind nomatch-label [trailing actions]
+        if [ "$_raw_on" = 1 ]; then
+          hint_r '∅' "nothing matches · no row to $4"
+          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY' || echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload(bash \"$SQ_SCRIPT\" --list)${5:-}'")
+        else
+          fzf_opts+=(--bind="$1:${_wait}$3($ACTION_CMD $2 {-1})+reload($LIST_CMD)${5:-}")
+        fi
+      }
+      _action_bind ctrl-x kill   execute        kill
+      _action_bind ctrl-e rename execute        rename
+      _action_bind ctrl-z zoom   execute-silent zoom +refresh-preview
+      _action_bind ctrl-s swap   execute        swap
+      _action_bind ctrl-d detach execute        detach
+      _action_bind ctrl-t send   execute        'send keys to'
       ;;
   esac
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # The zero-match state: a query that matches nothing.  Enter creates a session
-# there (find-or-create), so in every mode the navigator can run in:
+# there (find-or-create), so two things have to hold, in every mode the
+# navigator can run in:
 #
 #   the bar says so   - "create <query> in <dir>", not a row's hints.  It used
 #                       to, only with raw mode on: with raw off, or on any fzf
@@ -10,6 +11,11 @@
 #                       the generic "enter switch …" ladder (on fzf >= 0.63 its
 #                       bg-cancel also killed the announcement outright).  So
 #                       the bar promised a switch while Enter created a session.
+#   the row keys don't act
+#                     - in raw mode the rows stay on screen, dimmed, with the
+#                       cursor on one of them, and fzf ran ^x/^e/^z against it:
+#                       a kill dialog for a session the query had excluded, and
+#                       ^z zoomed one with no dialog at all.
 #
 # The modes are real fzf code paths, picked with INTERDIMUX_FZF_MINOR on the
 # installed fzf (>= 0.74 accepts every tier's flags): the bg- inline path, the
@@ -191,6 +197,94 @@ for m in "${MODES[@]}"; do
   fi
   tmux -L "$OUTER" kill-server 2>/dev/null || true
 done
+
+# --- raw mode: the row keys do nothing at zero matches ---------------------------
+# The discriminator is positive, so it needs no "wait and see nothing happened":
+# the guarded key writes its own bar text, and a dialog would have replaced it.
+if launch "export INTERDIMUX_RAW=on"; then
+  keys 'qqqj'
+  wait_query 'qqqj' ' 0/' || true
+  settle > /dev/null
+  cur=$(screen | grep -m1 '▌' || true)
+
+  keys C-x
+  if wait_text 'no row to kill'; then
+    report "raw, zero matches: ^x says there is nothing to kill" pass
+  else
+    report "raw, zero matches: ^x says there is nothing to kill" fail
+  fi
+  if screen | grep -q 'Kill '; then
+    report "raw, zero matches: ^x opens no kill dialog" fail
+    ERRORS+="    cursor was on: $(printf '%s' "$cur" | sed 's/  */ /g')"$'\n'
+    keys Escape
+  else
+    report "raw, zero matches: ^x opens no kill dialog" pass
+  fi
+
+  keys C-e
+  if wait_text 'no row to rename' && ! screen | grep -q 'Rename '; then
+    report "raw, zero matches: ^e opens no rename dialog" pass
+  else
+    report "raw, zero matches: ^e opens no rename dialog" fail
+    screen | grep -q 'Rename ' && keys Escape
+  fi
+
+  # ^z has no dialog at all, so it is the one that used to act silently: put
+  # the cursor on one of beta's (dimmed) pane rows and check tmux itself.
+  for _i in $(seq 1 20); do
+    screen | grep -m1 '▌' | grep -q '╴ beta 0\.' && break
+    keys Down
+    sleep 0.1
+  done
+  z0=$(tmux -L "$SOCK" display-message -p -t '=beta:0' '#{window_zoomed_flag}')
+  keys C-z
+  if wait_text 'no row to zoom'; then
+    z1=$(tmux -L "$SOCK" display-message -p -t '=beta:0' '#{window_zoomed_flag}')
+    if [ "$z0" = 0 ] && [ "$z1" = 0 ]; then
+      report "raw, zero matches: ^z on a dimmed pane row zooms nothing" pass
+    else
+      report "raw, zero matches: ^z on a dimmed pane row zooms nothing ($z0 -> $z1)" fail
+    fi
+  else
+    report "raw, zero matches: ^z on a dimmed pane row zooms nothing (no guard text)" fail
+  fi
+  if tmux -L "$SOCK" has-session -t '=alpha' 2>/dev/null \
+     && tmux -L "$SOCK" has-session -t '=beta' 2>/dev/null \
+     && tmux -L "$SOCK" has-session -t '=gamma' 2>/dev/null; then
+    report "raw, zero matches: every session is still there" pass
+  else
+    report "raw, zero matches: every session is still there" fail
+  fi
+
+  # The control: with a match under the cursor the same keys still act.  Clear
+  # the query, stand on a pane row of beta, and zoom it for real.
+  keys C-u
+  wait_query '' ' [1-9][0-9]*/' || true
+  for _i in $(seq 1 20); do
+    screen | grep -m1 '▌' | grep -q '╴ beta 0\.' && break
+    keys Down
+    sleep 0.1
+  done
+  keys C-z
+  zoomed=""
+  for _i in $(seq 1 50); do
+    zoomed=$(tmux -L "$SOCK" display-message -p -t '=beta:0' '#{window_zoomed_flag}')
+    [ "$zoomed" = 1 ] && break
+    sleep 0.1
+  done
+  [ "$zoomed" = 1 ] && report "raw, with a match: ^z still zooms the row under the cursor" pass \
+                    || report "raw, with a match: ^z still zooms the row under the cursor" fail
+  keys C-x
+  if wait_text "Kill "; then
+    report "raw, with a match: ^x still opens its dialog" pass
+    keys n
+  else
+    report "raw, with a match: ^x still opens its dialog" fail
+  fi
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
+else
+  report "the navigator opens in raw mode" fail
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
