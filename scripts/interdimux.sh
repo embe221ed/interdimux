@@ -1289,57 +1289,151 @@ collect_dir() {
   fi
 }
 
-# Does session $1 belong to directory $2?
+# Which session is a directory's -- the ONE answer, shared by everything that
+# names or opens a directory's session: resolve_session_name (so connect_dir,
+# ctrl-o's Enter and a D: row's Enter), --session-name-for, the find-or-create
+# header, and the ctrl-o picker's "→ session" badge.  They used to ask three
+# different questions:
 #
-# A session's identity is where it was STARTED: #{session_path}, what
-# `new-session -c` recorded, which a `cd` inside the session never changes.  The
-# active pane's cwd is the second chance: AT the directory (the old test), or
-# BELOW it for a session started on the same branch of the tree -- above it
-# (`tmux new -s api` from ~, then `cd ~/work/api/src`) or inside it.  Only ever
-# asked about a session whose NAME already matches the directory; the branch
-# condition keeps a same-named session from an unrelated directory, whose pane
-# merely wandered in, from being mistaken for this one.
+#   * the badge keyed on #{session_path} whatever the session was called, while
+#     Enter only ever looked at the session NAMED after the directory.  So `tmux
+#     new -s foo` in ~/repo was badged "→ foo", and Enter created a second
+#     session, `repo`, for the same directory.
+#   * the name lookups went through `has-session -t "=NAME"` and "=NAME:", which
+#     tmux reads as a session ID when NAME starts with '$'.  A directory called
+#     "$work" never saw the existing "$work" session as taken, and connect_dir
+#     (which matches names exactly) then switched into that session -- another
+#     project's -- without a word.
+#
+# Now every one of them reads the same table through dir_session, which does
+# its own exact string matching, and never asks tmux to parse a name.
+
+# The table: each session's ID, name, start directory (#{session_path}, what
+# `new-session -c` recorded; a `cd` never changes it) and its active pane's cwd,
+# from ONE list-sessions.  SESS_AT maps a start directory to the session started
+# there -- the one named after that directory when several were, else the first
+# in tmux's (name) order -- and SESS_BYNAME a name to its row.
+#
+# A path holding a US or a newline would break the line apart; tmux blanks it
+# instead (#{m/r:}), and a blank path matches no directory.  tmux escapes control
+# characters in names, so neither can occur in one.
+SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=()
+declare -A SESS_AT=() SESS_BYNAME=()
+load_session_table() {
+  local id name spath cwd i=0 nl=$'\n' j
+  SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=() SESS_AT=() SESS_BYNAME=()
+  while IFS="$US" read -r id name spath cwd; do
+    [ -n "$id" ] && [ -n "$name" ] || continue
+    SESS_ID[i]="$id" SESS_NAME[i]="$name" SESS_SPATH[i]="$spath" SESS_CWD[i]="$cwd"
+    SESS_BYNAME["$name"]=$i
+    if [ -n "$spath" ]; then
+      j="${SESS_AT[$spath]-}"
+      if [ -z "$j" ]; then
+        SESS_AT["$spath"]=$i
+      else
+        dir_base_name "$spath"
+        [ "${SESS_NAME[j]}" != "$REPLY" ] && [ "$name" = "$REPLY" ] && SESS_AT["$spath"]=$i
+      fi
+    fi
+    i=$((i + 1))
+  done <<< "$(tmux list-sessions -F "#{session_id}${US}#{session_name}${US}#{?#{m/r:[${US}${nl}],#{session_path}},,#{session_path}}${US}#{?#{m/r:[${US}${nl}],#{pane_current_path}},,#{pane_current_path}}" 2>/dev/null)"
+  return 0
+}
+
+# The session name a directory gets by default, in REPLY: its last component,
+# with '.' and ':' (which tmux targets split at) made '-'.  In-process, because
+# the ctrl-o picker asks this for every row; it is what `basename | tr '.:' '-'`
+# printed, trailing slashes and trailing newlines dropped the same way.
+dir_base_name() {
+  local p="$1" nl=$'\n'
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  [ "$p" = / ] || p="${p##*/}"
+  while [ "${p%"$nl"}" != "$p" ]; do p="${p%"$nl"}"; done
+  REPLY="${p//[.:]/-}"
+}
+
+# The directory above $1, in REPLY -- dirname(1) for the paths used here.
+path_parent() {
+  local p="$1"
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  case "$p" in
+    */*) p="${p%/*}"
+         while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+         [ -n "$p" ] || p=/ ;;
+    *) p=. ;;
+  esac
+  REPLY="$p"
+}
+
+# Does the session in table row $1 belong to directory $2, although it was not
+# started there?  Only ever asked about a session whose NAME is the one the
+# directory would get.
+#
+# The active pane's cwd is the second chance: AT the directory, or BELOW it for
+# a session started on the same branch of the tree -- above it (`tmux new -s
+# api` from ~, then `cd ~/work/api/src`) or inside it.  The branch condition
+# keeps a same-named session from an unrelated directory, whose pane merely
+# wandered in, from being mistaken for this one.
 #
 # It used to be the active pane's cwd alone, compared for equality, so a plain
 # `cd src` inside the project -- or a second window opened in /tmp -- made the
 # project's own session "a different directory": Enter on the project created
 # `<parent>-<name>`, a second session for the same directory.  SESSION_DIRS
-# (the navigator's directory rows) and DIR_SESSION (the ctrl-o badge) key on
-# the same #{session_path} for the same reason.
-session_at_dir() {
-  local out spath cwd
-  out=$(tmux display-message -p -t "=$1:" "#{session_path}${US}#{pane_current_path}" 2>/dev/null) || return 1
-  spath="${out%%"$US"*}" cwd="${out#*"$US"}"
+# (the navigator's directory rows) keys on the same #{session_path} for the same
+# reason.
+sess_row_at_dir() {
+  local spath="${SESS_SPATH[$1]}" cwd="${SESS_CWD[$1]}"
+  [ -n "$2" ] || return 1
   [ "$spath" = "$2" ] || [ "$cwd" = "$2" ] && return 0
   case "$cwd" in "$2"/*) ;; *) return 1 ;; esac
+  [ -n "$spath" ] || return 1       # blanked: unknown, so no branch to be on
   [ "$spath" = / ] && return 0
   case "$2" in "$spath"/*) return 0 ;; esac
   case "$spath" in "$2"/*) return 0 ;; esac
   return 1
 }
 
-# Derive a session name for a directory.  When a same-named session
-# exists for a *different* directory (session_at_dir), disambiguate with the
-# parent dir name (then numeric suffixes) instead of silently reusing it.
-resolve_session_name() {
-  local dir_path="$1"
-  local session_name base_name parent_name n
-  session_name=$(basename "$dir_path" | tr '.:' '-')
-
-  if tmux has-session -t "=$session_name" 2>/dev/null; then
-    if ! session_at_dir "$session_name" "$dir_path"; then
-      base_name="$session_name"
-      parent_name=$(basename "$(dirname "$dir_path")" | tr '.:' '-')
-      session_name="${parent_name}-${base_name}"
-      n=2
-      while tmux has-session -t "=$session_name" 2>/dev/null; do
-        session_at_dir "$session_name" "$dir_path" && break
-        session_name="${base_name}-${n}"
-        n=$((n + 1))
-      done
-    fi
+# dir_session DIR -- over the table load_session_table filled.  REPLY is the
+# name of DIR's session; DIR_SID its ID when it exists already (Enter switches
+# to it), empty when Enter would create it.
+#
+#   1. a session STARTED in DIR, whatever its name (the one named after DIR
+#      when several were): a session's identity is where it began.
+#   2. else the session named after DIR, if its pane is at or below DIR on the
+#      same branch (sess_row_at_dir).
+#   3. a same-named session from somewhere else is not reused: `<parent>-<name>`,
+#      then `<name>-2`, `-3`... -- the first that is free or is DIR's.
+dir_session() {
+  local dir="$1" name base i n
+  REPLY="" DIR_SID=""
+  [ -n "$dir" ] || return 0
+  i="${SESS_AT[$dir]-}"
+  if [ -n "$i" ]; then
+    REPLY="${SESS_NAME[i]}" DIR_SID="${SESS_ID[i]}"
+    return 0
   fi
-  printf '%s' "$session_name"
+  dir_base_name "$dir"; name="$REPLY"
+  [ -n "$name" ] || return 0
+  i="${SESS_BYNAME[$name]-}"
+  if [ -n "$i" ] && ! sess_row_at_dir "$i" "$dir"; then
+    base="$name"
+    path_parent "$dir"; dir_base_name "$REPLY"
+    name="$REPLY-$base" n=2
+    while i="${SESS_BYNAME[$name]-}"; [ -n "$i" ]; do
+      sess_row_at_dir "$i" "$dir" && break
+      name="$base-$n" n=$((n + 1))
+    done
+  fi
+  REPLY="$name"
+  [ -z "$i" ] || DIR_SID="${SESS_ID[i]}"
+  return 0
+}
+
+# Derive a session name for a directory (see dir_session), on stdout.
+resolve_session_name() {
+  load_session_table
+  dir_session "$1"
+  printf '%s' "$REPLY"
 }
 
 # ---------------------------------------------------------------------------
@@ -1540,6 +1634,35 @@ hydrate_session() {
   return 0
 }
 
+# $1 escaped, in REPLY, for a tmux argument that is FORMAT-EXPANDED and then
+# kept as it comes out: new-session's -s and -c, rename-session and
+# rename-window's new name.  Without it "proj#Sync" is stored as
+# "proj<current session>ync".
+#
+# '##' is tmux's escape for '#' -- except in front of '['.  The expander copies
+# a run of '#' that ends in '[' through untouched, whatever its length, because
+# it may be a style for whatever draws the string later ("#[fg=red]").  So
+# doubling EVERY '#' was an escape that changed the name it escaped: a directory
+# "p#[q" became a session "p##[q" whose shell started in $HOME (no such -c
+# directory), and the next Enter looked for "p#[q", found nothing, and failed on
+# a duplicate.  The rule here -- double a run of '#' unless a '[' follows it --
+# stores exactly what was typed, checked against tmux's stored names and paths
+# for a few hundred random strings of '#', '[', ']', '{', '}', ',' and letters.
+#
+# Not for display-message: its text is expanded AND then drawn, and the drawing
+# step reads "##[" as a literal "#[" -- there plain doubling is the escape
+# (imux_msg).
+esc_fmt() {
+  local s="$1" out="" pre run
+  while [[ $s == *'#'* ]]; do
+    pre="${s%%'#'*}"; s="${s:${#pre}}"
+    run="${s%%[!#]*}"; s="${s:${#run}}"
+    out+="$pre$run"
+    [[ $s == '['* ]] || out+="$run"
+  done
+  REPLY="$out$s"
+}
+
 # connect_dir DIR [SESSION_NAME]
 #
 # The single "open a directory as a session" path: switch to the session for
@@ -1559,8 +1682,8 @@ hydrate_session() {
 #     "proj<current session>ync" whose shell started in $HOME (the expanded -c
 #     did not exist), and the switch-client that followed looked for the name as
 #     typed, found nothing, and silently left the user where they were -- with a
-#     junk session behind them and "duplicate session" on the next Enter.  '##'
-#     is tmux's escape; only the two expanded arguments get it.
+#     junk session behind them and "duplicate session" on the next Enter.
+#     Only the two expanded arguments are escaped, and by esc_fmt.
 #   * the lookup goes through session_id_of, the one exact-name match: "=$1"
 #     means session ID 1 to tmux whatever the '=' says, and "=c:d" cannot name
 #     anything at all.
@@ -1568,14 +1691,16 @@ hydrate_session() {
 # The ID also goes to hydrate_session in place of the name: it builds "=$ID:",
 # and tmux resolves a '$' session part as an ID before any name.
 connect_dir() {
-  local dir="$1" name="${2:-}" sid
+  local dir="$1" name="${2:-}" sid ename edir
   [ -n "$name" ] || name=$(resolve_session_name "$dir")
   [ -n "$name" ] || return 1
 
   session_id_of "$name"; sid="$REPLY"
   if [ -z "$sid" ]; then
+    esc_fmt "$name"; ename="$REPLY"
+    esc_fmt "$dir"; edir="$REPLY"
     sid=$(tmux new-session -d -P -F '#{session_id}' \
-            -s "${name//'#'/##}" -c "${dir//'#'/##}" 2>/dev/null) || return 1
+            -s "$ename" -c "$edir" 2>/dev/null) || return 1
     [ -n "$sid" ] || return 1
     hydrate_session "$sid" "$dir"
   fi
@@ -1653,7 +1778,15 @@ fi
 
 # A status-line message on the pressing client.  display-message FORMAT-EXPANDS
 # its text, so '#' is doubled: a session called "a#Sb" is reported as exactly
-# that, not with the current session's name spliced into it.
+# that, not with the current session's name spliced into it.  Every '#', even
+# before a '[' (unlike esc_fmt): the expander keeps "##[" as it is, and the
+# status line then draws it as a literal "#[" -- where a bare "#[b'" would be
+# swallowed as a style.
+#
+# Every "interdimux: ..." status line goes through here.  A bare display-message
+# lets tmux pick the client, and from a popup or run-shell it picks the one with
+# the latest keypress -- another terminal on the same session, once a key was
+# typed there while this one's picker or menu was open.
 imux_msg() {
   local m="interdimux: $1"
   tmux display-message ${TMUX_C[@]+"${TMUX_C[@]}"} "${m//'#'/##}" 2>/dev/null || :
@@ -3443,20 +3576,15 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # directory you already had open looked like it had done nothing.  Naming the
   # session is the useful half: it tells you where you are about to land.
   #
-  # Keyed on each session's START directory (#{session_path}) and on its active
-  # window's cwd -- the same basis as the navigator's directory rows and as
-  # resolve_session_name, so the badge names the session Enter lands in.  The
-  # start directory wins a tie: a `cd` inside a session must not move the badge
-  # (it used to, and the project's own row lost its badge the moment you cd'd).
-  # One tmux invocation for both lists (sessions first, so they win); this is
-  # the ctrl-o picker, not the hot path, so ~5 ms of round-trip is affordable.
-  declare -A DIR_SESSION=()
-  while IFS="$US" read -r _ds_kind _ds_name _ds_path; do
-    case "$_ds_kind" in s|w) ;; *) continue ;; esac   # a newline-split fragment
-    [ -n "$_ds_path" ] || continue
-    [[ -v "DIR_SESSION[$_ds_path]" ]] || DIR_SESSION["$_ds_path"]="$_ds_name"
-  done < <(tmux list-sessions -F "s${US}#{session_name}${US}#{session_path}" \; \
-             list-windows -a -F "#{?window_active,w${US}#{session_name}${US}#{pane_current_path},}" 2>/dev/null)
+  # So the badge is dir_session's answer, from the same table and the same code
+  # Enter goes through (resolve_session_name): a row is badged exactly when Enter
+  # would switch, and with the session it would switch to.  It used to be a map
+  # of its own, keyed on each session's start directory AND on its active
+  # window's cwd, whatever the session was called -- so ~/repo said "→ foo" for
+  # a `tmux new -s foo` started there (or one merely passing through), and Enter
+  # created a second session, `repo`.  One list-sessions for the whole list;
+  # the per-row lookup is in-process.
+  load_session_table
 
   # Path column width derived from the popup (list pane is ~60% with the
   # 40% preview open)
@@ -3479,10 +3607,11 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
     # Already open?  Say so, and say WHERE -- the badge column is outside fzf's
     # match scope, so the session name is display-only and cannot skew results.
-    if [[ -v "DIR_SESSION[$dir]" ]]; then
+    dir_session "$dir"
+    if [ -n "$DIR_SID" ]; then
       printf '  %s▸%s  %s\t%s→%s %s%s%s\t%s\n' \
         "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" \
-        "$DIM" "$RST" "$ACCENT_ESC" "${DIR_SESSION[$dir]}" "$RST" "$dir"
+        "$DIM" "$RST" "$ACCENT_ESC" "$REPLY" "$RST" "$dir"
       return
     fi
 
@@ -4089,7 +4218,7 @@ fi
 if [ "${1:-}" = "--create-from-query" ]; then
   set +e
   create_from_query "${2:-}" || {
-    tmux display-message "interdimux: could not create a session from '${2:-}'" 2>/dev/null
+    imux_msg "could not create a session from '${2:-}'"
     exit 1
   }
   exit 0
@@ -4879,13 +5008,14 @@ if [ "${1:-}" = "--action" ]; then
         #
         # The new name is FORMAT-EXPANDED by tmux, the target is not: "proj#Sx"
         # was stored as "proj<this session>x" while the dialog said "renamed to
-        # proj#Sx".  '##' is the escape, and the status line reads the name back
-        # from tmux (by ID, which a rename does not change) rather than echoing
-        # what was typed.
+        # proj#Sx".  esc_fmt is the escape, and the status line reads the name
+        # back from tmux (by ID, which a rename does not change) rather than
+        # echoing what was typed.
         _err=""
+        esc_fmt "$new_name"
         case "$SPEC_TYPE" in
-          S) _err=$(tmux rename-session -t "$target" -- "${new_name//'#'/##}" 2>&1) ;;
-          W) _err=$(tmux rename-window  -t "$target" -- "${new_name//'#'/##}" 2>&1) ;;
+          S) _err=$(tmux rename-session -t "$target" -- "$REPLY" 2>&1) ;;
+          W) _err=$(tmux rename-window  -t "$target" -- "$REPLY" 2>&1) ;;
         esac
         if [ $? -eq 0 ]; then
           case "$SPEC_TYPE" in
@@ -6806,9 +6936,7 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNT
 elif ! RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX" 2>/dev/null) \
   && ! { mkdir -p "$SCHED_LOGDIR" 2>/dev/null \
          && RESUME_FILE=$(mktemp "$SCHED_LOGDIR/resume.XXXXXX" 2>/dev/null); }; then
-  # '#' doubled: display-message format-expands its text.
-  _nt="${TMPDIR:-/tmp}"
-  tmux display-message "interdimux: cannot create a scratch file in ${_nt//'#'/##} or ${SCHED_LOGDIR//'#'/##} (see --doctor)" 2>/dev/null || :
+  imux_msg "cannot create a scratch file in ${TMPDIR:-/tmp} or $SCHED_LOGDIR (see --doctor)"
   exit 1
 fi
 PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
@@ -6850,11 +6978,11 @@ _report_stderr() {
   local first
   { read -r first < "$ERR_FILE"; } 2>/dev/null || :
   [ -n "$first" ] || return 0
-  # `#` would be format-expanded by display-message; a long line would be
-  # truncated by the status line anyway, so cut it where it stays readable
-  first="${first//\#/##}"
+  # A long line would be truncated by the status line anyway, so cut it where
+  # it stays readable.  imux_msg escapes the '#'s -- after the cut, which
+  # therefore cannot split a "##" pair and leave a lone '#' to start a format.
   [ "${#first}" -gt 160 ] && first="${first:0:157}…"
-  tmux display-message "interdimux: $first" 2>/dev/null || :
+  imux_msg "$first"
   if mkdir -p "$SCHED_LOGDIR" 2>/dev/null; then
     {
       printf '== %s navigator stderr\n' "$(date '+%Y-%m-%d %H:%M:%S')"

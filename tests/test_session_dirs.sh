@@ -11,6 +11,10 @@
 # second session for the same directory.  The session's start directory,
 # #{session_path}, is what does not move; all four places consult it now.
 #
+# And the badge, the name and Enter must agree on WHICH session: one started in
+# the directory under another name, one merely passing through it, and names
+# that tmux's own targets misread ("$work" is not a session ID).
+#
 # The oracles are the user-visible outcomes: which D: rows --list prints, the
 # badge --dirs-list prints, the name --session-name-for resolves, and how many
 # sessions exist after --connect-dir.
@@ -168,6 +172,96 @@ case "$got" in
   *"→ proj"*) report "the badge names the session started there, not one passing through" pass ;;
   *) report "the badge names the session started there, not one passing through (got: '$got')" fail ;;
 esac
+
+# --- a session not named after its directory -----------------------------------
+# `tmux new -s foo` in work/repo, and foo's active window is now elsewhere.  It
+# was started there, so it IS work/repo's session -- and the badge, the name,
+# the find-or-create header and Enter must all say so together.  The badge used
+# to say "→ foo" while Enter looked only for a session NAMED `repo`, and created
+# one: a second session for the same directory.
+mkdir -p "$H/work/repo" "$H/work/wander"
+tmux -L "$SOCK" new-session -d -s foo -x 200 -y 50 -c "$H/work/repo"
+tmux -L "$SOCK" new-window -t '=foo:' -c "$TMPD/elsewhere"
+wait_for "foo's active pane to sit elsewhere" cwd_is foo "$TMPD/elsewhere"
+got=$(INTERDIMUX_PROJECT_DIRS="$H/work" badge_of "$H/work/repo")
+case "$got" in
+  *"→ foo"*) report "a session started in a dir under another name: the badge names it" pass ;;
+  *) report "a session started in a dir under another name: the badge names it (got: '$got')" fail ;;
+esac
+got=$(bash "$SCRIPT" --session-name-for "$H/work/repo")
+[ "$got" = foo ] && report "...and its name resolves to that session" pass \
+                 || report "...and its name resolves to that session (got: $got)" fail
+got=$(bash "$SCRIPT" --describe-create "$H/work/repo" 2>/dev/null | sed $'s/\x1b\\[[0-9;]*m//g')
+case "$got" in
+  "switch to foo "*) report "...and the find-or-create header offers to switch to it" pass ;;
+  *) report "...and the find-or-create header offers to switch to it (got: $got)" fail ;;
+esac
+before=$(tmux -L "$SOCK" list-sessions | wc -l)
+bash "$SCRIPT" --connect-dir "$H/work/repo" >/dev/null 2>&1 || true
+after=$(tmux -L "$SOCK" list-sessions | wc -l)
+[ "$before" = "$after" ] && report "...and Enter on it creates no second session" pass \
+                         || report "...and Enter on it creates no second session ($before -> $after: $(tmux -L "$SOCK" list-sessions -F '#S' | tr '\n' ' '))" fail
+
+# ...while a session merely PASSING THROUGH a directory is not its session:
+# `passer` was started in ~ and only its active window sits in work/wander.
+# Enter creates `wander`, so no badge may promise `passer` (it used to).
+tmux -L "$SOCK" new-session -d -s passer -x 200 -y 50 -c "$H"
+tmux -L "$SOCK" new-window -t '=passer:' -c "$H/work/wander"
+wait_for "passer's pane to sit in work/wander" cwd_is passer "$H/work/wander"
+got=$(INTERDIMUX_PROJECT_DIRS="$H/work" badge_of "$H/work/wander")
+case "$got" in
+  *"→"*) report "a session passing through a dir is not badged as its session (got: '$got')" fail ;;
+  *) report "a session passing through a dir is not badged as its session" pass ;;
+esac
+bash "$SCRIPT" --connect-dir "$H/work/wander" >/dev/null 2>&1 || true
+got=$(tmux -L "$SOCK" list-sessions -F '#{session_name}|#{session_path}' | grep -cxF "wander|$H/work/wander" || true)
+[ "$got" = 1 ] && report "...and Enter on it creates the session 'wander' there" pass \
+               || report "...and Enter on it creates the session 'wander' there" fail
+got=$(INTERDIMUX_PROJECT_DIRS="$H/work" badge_of "$H/work/wander")
+case "$got" in
+  *"→ wander"*) report "...which the badge then names" pass ;;
+  *) report "...which the badge then names (got: '$got')" fail ;;
+esac
+
+# --- a directory whose name starts with '$' ---------------------------------------
+# tmux reads "=$work" as a session ID, not a name, so a lookup through tmux's
+# own targets never saw the session "$work" as taken: the name for y/$work came
+# back as "$work", and Enter switched into x/$work's session -- another
+# project's -- without a word.
+mkdir -p "$H/x/\$work" "$H/y/\$work" "$H/n/\$1"
+bash "$SCRIPT" --connect-dir "$H/x/\$work" >/dev/null 2>&1 || true
+if [ "$(tmux -L "$SOCK" list-sessions -F '#{session_name}|#{session_path}' | grep -cxF "\$work|$H/x/\$work" || true)" = 1 ]; then
+  report "control: x/\$work opens as the session '\$work'" pass
+else
+  report "control: x/\$work opens as the session '\$work'" fail
+fi
+got=$(bash "$SCRIPT" --session-name-for "$H/y/\$work")
+[ "$got" = 'y-$work' ] && report "y/\$work, with '\$work' taken by x/\$work, is named 'y-\$work'" pass \
+                      || report "y/\$work, with '\$work' taken by x/\$work, is named 'y-\$work' (got: $got)" fail
+before=$(tmux -L "$SOCK" list-sessions | wc -l)
+rc=0; bash "$SCRIPT" --connect-dir "$H/y/\$work" >/dev/null 2>&1 || rc=$?
+after=$(tmux -L "$SOCK" list-sessions | wc -l)
+if [ "$rc" = 0 ] && [ "$after" = $((before + 1)) ] \
+   && tmux -L "$SOCK" list-sessions -F '#{session_name}|#{session_path}' | grep -qxF "y-\$work|$H/y/\$work"; then
+  report "...and Enter on it opens its own session, not x/\$work's" pass
+else
+  report "...and Enter on it opens its own session, not x/\$work's (rc=$rc, $before -> $after)" fail
+fi
+before=$(tmux -L "$SOCK" list-sessions | wc -l)
+bash "$SCRIPT" --connect-dir "$H/x/\$work" >/dev/null 2>&1 || true
+after=$(tmux -L "$SOCK" list-sessions | wc -l)
+[ "$before" = "$after" ] && report "...while Enter on x/\$work still reuses '\$work'" pass \
+                         || report "...while Enter on x/\$work still reuses '\$work' ($before -> $after)" fail
+# The reverse: session ID $1 exists, but no session is NAMED "$1" -- so n/$1
+# collides with nothing and keeps its own name.
+if [ -n "$(tmux -L "$SOCK" display-message -p -t '$1' '#{session_name}' 2>/dev/null)" ] \
+   && ! tmux -L "$SOCK" list-sessions -F '#{session_name}' | grep -qxF '$1'; then
+  got=$(bash "$SCRIPT" --session-name-for "$H/n/\$1")
+  [ "$got" = '$1' ] && report "a dir named '\$1' is not renamed for session ID 1" pass \
+                   || report "a dir named '\$1' is not renamed for session ID 1 (got: $got)" fail
+else
+  report "setup: session ID \$1 exists and no session is named '\$1'" fail
+fi
 
 # --- a start directory with a newline in it -------------------------------------
 # #{session_path} rides on the session line, so a newline in it would split that

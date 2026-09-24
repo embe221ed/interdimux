@@ -144,16 +144,17 @@ else
   report "an action outside a popup does not hang" pass
 fi
 
-# tmux parses a leading '-' as a flag unless -- separates it.
-_dash_ok=1
-# (the new name is '#'-escaped, since tmux format-expands it -- see
-# tests/test_targets.sh, which also renames to '-dash' through the dialog)
-grep -qF -- "rename-session -t \"\$target\" -- \"\${new_name//'#'/##}\"" "$SCRIPT" || _dash_ok=0
-grep -qF -- "rename-window  -t \"\$target\" -- \"\${new_name//'#'/##}\"" "$SCRIPT" || _dash_ok=0
-# (send's leading dash is checked by what the pane receives, in
-# tests/test_send_literal.sh -- send goes through send_line now)
-[ "$_dash_ok" = 1 ] && report "user text is passed after -- so a leading dash is not a flag" pass \
-                    || report "user text is passed after -- so a leading dash is not a flag" fail
+# tmux parses a leading '-' as a flag unless -- separates it.  Checked by what
+# tmux stored, not by the command's spelling in the script (that grep broke on
+# every change to how the name is escaped).  The window rename is checked the
+# same way in tests/test_targets.sh; send's leading dash by what the pane
+# receives, in tests/test_send_literal.sh -- send goes through send_line now.
+tmux -L "$SOCK" new-session -d -s dashsrc -x 100 -y 30
+for _i in $(seq 1 50); do tmux -L "$SOCK" has-session -t '=dashsrc' 2>/dev/null && break; sleep 0.1; done
+run_rename_on 'dashsrc' '-dash-s' >/dev/null
+tmux -L "$SOCK" list-sessions -F '#{session_name}' | grep -qxF -- '-dash-s' \
+  && report "user text is passed after -- so a leading dash is not a flag" pass \
+  || report "user text is passed after -- so a leading dash is not a flag" fail
 
 # A ':' in a session name makes the session permanently unreachable from the
 # picker: tmux splits a target at the FIRST ':', so spec_target's "=name:idx"
