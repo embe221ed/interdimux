@@ -198,15 +198,26 @@ fn gather() {
         .collect();
 
     // ---- measure + compute widths -----------------------------------------
+    // Branches are looked up here, before the widths, because whether any row
+    // HAS one decides whether the badge is worth path cells.  The cache makes
+    // the emit loop's lookups free, so this is the same I/O as before.
+    let mut git = GitCache::new();
     let mut mx = Maxima::default();
     for s in &sessions {
         mx.observe_session(&s.name);
     }
     for w in &windows {
         mx.observe_window(&w.idx, &w.name, &w.path, &home);
+        mx.observe_flags(w.zoomed, w.bell, w.activity);
+        if show_git {
+            mx.observe_branch(&git.branch(&w.path));
+        }
     }
     for pn in &panes {
         mx.observe_pane(&pn.path, &home);
+        if show_git {
+            mx.observe_branch(&git.branch(&pn.path));
+        }
     }
     let w = widths::compute(mx, cols, preview_on);
 
@@ -231,7 +242,6 @@ fn gather() {
     }
 
     // ---- emit --------------------------------------------------------------
-    let mut git = GitCache::new();
     let mut res = Resolver::new();
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());

@@ -11,6 +11,9 @@ const PFX_CEIL: usize = 16;
 const WIN_FLOOR: usize = 8;
 const WIN_CEIL: usize = 40;
 const PATH_FLOOR: usize = 12;
+/// How far the path may shrink to keep the git badge on screen.  Below this the
+/// badge goes instead, and the path gets the room back.
+const PATH_KEEP: usize = 24;
 const PATH_CEIL: usize = 44;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,10 +23,20 @@ pub struct Widths {
     pub badge: usize,
     pub pfx: usize,
     pub win: usize,
+    /// The Z/!/# slot: a leading space plus one cell per flag, sized to the
+    /// most flags any window carries, and 0 when no window has one.  It is its
+    /// own column, NOT part of the badge, so a squeeze that drops the branch can
+    /// never take the flags with it, and the flags sit at the same x on every row.
+    pub flags: usize,
     /// Total width a session header row's identity field is padded to when the
     /// group rule is drawn.  Chosen so the session meta lands in the same column
     /// as the command field on child rows: ident + TAB + ctx.
     pub rule: usize,
+}
+
+/// Width of the context column: "│ " + path + flag slot + (" " + badge).
+fn ctx_width(path: usize, flags: usize, badge: usize) -> usize {
+    path + 2 + flags + if badge > 0 { badge + 1 } else { 0 }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -31,6 +44,12 @@ pub struct Maxima {
     pub sess: usize,
     pub win: usize,
     pub path: usize,
+    /// Most of Z / ! / # set on any one window (0..=3).
+    pub flags: usize,
+    /// Whether any window or pane row has a git branch to show.  Without one the
+    /// badge column would be blank on every tree row, so it is not worth a
+    /// single cell of path.
+    pub branch: bool,
 }
 
 impl Maxima {
@@ -45,6 +64,13 @@ impl Maxima {
     pub fn observe_pane(&mut self, path: &str, home: &str) {
         self.path = self.path.max(width(&tildify(path, home)));
     }
+    pub fn observe_flags(&mut self, zoomed: bool, bell: bool, activity: bool) {
+        let n = usize::from(zoomed) + usize::from(bell) + usize::from(activity);
+        self.flags = self.flags.max(n);
+    }
+    pub fn observe_branch(&mut self, branch: &str) {
+        self.branch |= !branch.is_empty();
+    }
 }
 
 /// `avail` is the popup width already halved when the preview is open.
@@ -58,6 +84,7 @@ pub fn compute(m: Maxima, cols: usize, preview_on: bool) -> Widths {
     let mut pfx = m.sess.clamp(PFX_FLOOR, PFX_CEIL);
     let mut win = m.win.clamp(WIN_FLOOR, WIN_CEIL);
     let mut path = m.path.clamp(PATH_FLOOR, PATH_CEIL);
+    let flags = if m.flags > 0 { 1 + m.flags.min(3) } else { 0 };
     let mut badge = if avail >= 72 {
         16
     } else if avail >= 52 {
@@ -69,43 +96,67 @@ pub fn compute(m: Maxima, cols: usize, preview_on: bool) -> Widths {
     };
     let mut ident = IDENT_OV + pfx + win;
 
-    // Squeeze to fit.  The dim session prefix is redundant so it shrinks first;
-    // then the git badge, snapped straight to 0 (never left at 1..3, which would
-    // make the badge slice degenerate); then the path; the window name last.
-    let mut guard = 0;
-    loop {
-        let ctx = if badge > 0 { path + 3 + badge } else { path + 2 };
-        if ident + ctx + 2 + CMD_MIN <= avail {
-            break;
-        }
-        guard += 1;
-        if guard > 400 {
-            break;
-        }
-        if pfx > PFX_FLOOR {
-            pfx -= 1;
-            ident -= 1;
-        } else if badge > 0 {
-            badge = 0;
-        } else if path > PATH_FLOOR {
-            path -= 1;
-        } else if win > WIN_FLOOR {
-            win -= 1;
-            ident -= 1;
+    // How many cells the row is over the popup, 0 when it fits.
+    let over = |ident: usize, path: usize, badge: usize| {
+        (ident + ctx_width(path, flags, badge) + 2 + CMD_MIN).saturating_sub(avail)
+    };
+
+    // Squeeze to fit.  The order is the point: what you TYPE outlasts what you
+    // only READ.  fzf matches the identity column as displayed, so a session
+    // prefix cut to "my-pr…" makes `my-project shell` match nothing; the path
+    // and the branch are display-only.  So:
+    //
+    //   1. the path gives up cells down to PATH_KEEP to keep the git badge —
+    //      all or nothing: if that is not enough, the badge goes (snapped
+    //      straight to 0, never to a degenerate 1..3) and the path keeps its
+    //      cells.  Only while some row actually HAS a branch; a badge column
+    //      that would be blank on every tree row is simply the first to go.
+    //   2. the path, down to PATH_FLOOR
+    //   3. the session prefix, down to PFX_FLOOR
+    //   4. the window name, down to WIN_FLOOR
+    //
+    // The Z/!/# flags are never squeezed: they are their own slot, at most 4
+    // cells, and they are the part of the context column you act on.  Any
+    // deficit left after the floors lands on the flowing command column, which
+    // fzf clips anyway.
+    let o = over(ident, path, badge);
+    if badge > 0 && o > 0 {
+        let keep = if m.branch { PATH_KEEP } else { path };
+        if path.saturating_sub(keep) >= o {
+            path -= o;
         } else {
-            break;
+            badge = 0;
         }
     }
-    let ctx = if badge > 0 { path + 3 + badge } else { path + 2 };
+    let give = over(ident, path, badge).min(path.saturating_sub(PATH_FLOOR));
+    path -= give;
+    let give = over(ident, path, badge).min(pfx.saturating_sub(PFX_FLOOR));
+    pfx -= give;
+    ident -= give;
+    let give = over(ident, path, badge).min(win.saturating_sub(WIN_FLOOR));
+    win -= give;
+    ident -= give;
+
     // The rule is a wide-terminal affordance: it works by moving the session
     // meta into the command column, so it is only right while that column still
-    // exists.  Once the squeeze has run out of room — it left the loop at the
-    // floors rather than because everything fit — the meta would be clipped at
+    // exists.  Once the squeeze has run out of room — it stopped at the floors
+    // rather than because everything fit — the meta would be clipped at
     // exactly the point the command already is, so the rule switches itself off
     // and session rows go back to the plain layout.  Measured: below ~49 popup
     // columns "2 win ● 2h" became "2 win…".
-    let rule = if ident + ctx + 2 + CMD_MIN <= avail { ident + 1 + ctx } else { 0 };
-    Widths { ident, path, badge, pfx, win, rule }
+    let rule = if over(ident, path, badge) == 0 {
+        ident + 1 + ctx_width(path, flags, badge)
+    } else {
+        0
+    };
+    Widths { ident, path, badge, pfx, win, flags, rule }
+}
+
+impl Widths {
+    /// Width of the context column every child row pads to.
+    pub fn ctx(&self) -> usize {
+        ctx_width(self.path, self.flags, self.badge)
+    }
 }
 
 #[cfg(test)]
@@ -113,7 +164,17 @@ mod tests {
     use super::*;
 
     fn m(sess: usize, win: usize, path: usize) -> Maxima {
-        Maxima { sess, win, path }
+        Maxima { sess, win, path, ..Default::default() }
+    }
+    /// The same, with a git branch on some row (so the badge is worth keeping).
+    fn mb(sess: usize, win: usize, path: usize) -> Maxima {
+        Maxima { branch: true, ..m(sess, win, path) }
+    }
+    fn avail(cols: usize, preview: bool) -> usize {
+        (if preview { cols / 2 } else { cols }).saturating_sub(WIDTH_GUTTER)
+    }
+    fn row(w: &Widths) -> usize {
+        w.ident + w.ctx() + 2 + CMD_MIN
     }
 
     #[test]
@@ -142,18 +203,121 @@ mod tests {
         assert_eq!(w.path, PATH_FLOOR);
     }
 
+    // The squeeze order used to be prefix FIRST, then the badge, then the path.
+    // Both halves of that were wrong: the prefix is what fzf matches (so
+    // `my-project shell` found nothing once it read "my-pr…"), and two cells of
+    // path cost the whole branch badge and the Z/!/# flags with it.
+
+    /// Review BUG-24: a 96-column popup, one 39-cell path in the tree.  The path
+    /// has 15 cells above PATH_KEEP to give, and 4 are enough.
     #[test]
-    fn the_prefix_shrinks_before_anything_else() {
-        let wide = compute(m(16, 20, 40), 200, false);
-        let tight = compute(m(16, 20, 40), 110, false);
-        assert!(tight.pfx < wide.pfx, "prefix should shrink first");
-        assert_eq!(tight.win, wide.win, "window name is protected");
+    fn the_path_gives_way_before_the_git_badge() {
+        let w = compute(mb(6, 8, 39), 96, false);
+        assert_eq!(w.badge, 16, "the badge was dropped: {:?}", w);
+        assert_eq!(w.path, 35, "the path should give exactly the 4 cells needed: {:?}", w);
+        assert_eq!(row(&w), avail(96, false), "not one cell wasted");
+    }
+
+    /// ...but only down to PATH_KEEP.  Past that the badge goes, and the path
+    /// gets back everything it gave for it.
+    #[test]
+    fn the_badge_goes_when_keeping_it_would_starve_the_path() {
+        for cols in 0..=300 {
+            for preview in [false, true] {
+                let mx = mb(10, 12, 44);
+                let w = compute(mx, cols, preview);
+                if w.badge > 0 {
+                    assert!(w.path >= PATH_KEEP, "cols={} kept the badge at path {}", cols, w.path);
+                } else if w.path < PATH_CEIL {
+                    // the badge is gone and the path was trimmed: it must be
+                    // trimmed only as far as the row needs, or it is at its floor
+                    assert!(
+                        row(&w) == avail(cols, preview) || w.path == PATH_FLOOR,
+                        "cols={} preview={} wasted cells: {:?}", cols, preview, w
+                    );
+                }
+            }
+        }
+    }
+
+    /// Review BUG-02: the prefix is matched as displayed, so it outlasts the
+    /// display-only columns.  At an 80-column popup a 10-character name used to
+    /// be cut to "my-pr…"; at 60 it now survives whole as well.
+    #[test]
+    fn the_matchable_prefix_outlasts_the_path_and_the_badge() {
+        for cols in [60, 80, 100] {
+            let w = compute(mb(10, 8, 44), cols, false);
+            assert_eq!(w.pfx, 10, "cols={} cut the session prefix: {:?}", cols, w);
+        }
+    }
+
+    /// The whole ladder, as invariants over every width: each rung is spent only
+    /// once the rungs before it are exhausted.
+    #[test]
+    fn each_rung_is_spent_only_after_the_ones_before_it() {
+        for (sess, win, path) in [(16, 20, 44), (10, 8, 39), (40, 60, 90), (6, 8, 12)] {
+            for branch in [false, true] {
+                for cols in 0..=300 {
+                    for preview in [false, true] {
+                        let mx = Maxima { branch, ..m(sess, win, path) };
+                        let w = compute(mx, cols, preview);
+                        let full_pfx = sess.clamp(PFX_FLOOR, PFX_CEIL);
+                        let full_win = win.clamp(WIN_FLOOR, WIN_CEIL);
+                        let ctx = format!("{:?} cols={} preview={} -> {:?}", mx, cols, preview, w);
+                        if w.pfx < full_pfx {
+                            assert_eq!(w.path, PATH_FLOOR, "prefix cut before the path: {}", ctx);
+                            assert_eq!(w.badge, 0, "prefix cut while the badge stayed: {}", ctx);
+                        }
+                        if w.win < full_win {
+                            assert_eq!(w.pfx, PFX_FLOOR, "window cut before the prefix: {}", ctx);
+                        }
+                        if w.pfx < full_pfx || w.win < full_win {
+                            // an identity cut is only ever as deep as needed
+                            assert!(
+                                row(&w) == avail(cols, preview)
+                                    || (w.pfx == PFX_FLOOR && w.win == WIN_FLOOR),
+                                "identity cut deeper than needed: {}", ctx
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// With no branch on any row the badge column would be blank on every tree
+    /// row: it must not cost a single cell of path.
+    #[test]
+    fn a_badge_with_nothing_to_show_costs_no_path() {
+        let w = compute(m(6, 8, 39), 96, false);
+        assert_eq!(w.badge, 0);
+        assert_eq!(w.path, 39);
+        // ...while at a width where it fits outright it stays, as it always did
+        // (directory rows can still fill it)
+        assert_eq!(compute(m(6, 8, 39), 200, false).badge, 16);
+    }
+
+    /// The Z/!/# flags have their own slot, so no squeeze can take them.
+    #[test]
+    fn the_flag_slot_survives_every_squeeze() {
+        for (n, want) in [(0usize, 0usize), (1, 2), (2, 3), (3, 4), (9, 4)] {
+            for cols in 0..=300 {
+                for preview in [false, true] {
+                    let mx = Maxima { flags: n, ..mb(16, 30, 44) };
+                    let w = compute(mx, cols, preview);
+                    assert_eq!(w.flags, want, "{} flags at cols={} preview={}", n, cols, preview);
+                }
+            }
+        }
+        // and the slot is part of the context column the rows pad to
+        let w = compute(Maxima { flags: 1, ..mb(6, 8, 20) }, 200, false);
+        assert_eq!(w.ctx(), w.path + 2 + 2 + w.badge + 1);
     }
 
     #[test]
     fn the_badge_snaps_to_zero_never_to_a_degenerate_width() {
         for cols in 40..=200 {
-            let w = compute(m(16, 30, 44), cols, false);
+            let w = compute(mb(16, 30, 44), cols, false);
             assert!(
                 w.badge == 0 || w.badge >= 10,
                 "cols={} produced a degenerate badge width {}",
@@ -174,7 +338,7 @@ mod tests {
     fn it_always_terminates_and_never_underflows() {
         for cols in 0..=300 {
             for preview in [false, true] {
-                let w = compute(m(40, 60, 90), cols, preview);
+                let w = compute(Maxima { flags: 3, ..mb(40, 60, 90) }, cols, preview);
                 assert!(w.pfx >= PFX_FLOOR);
                 assert!(w.win >= WIN_FLOOR);
                 assert!(w.path >= PATH_FLOOR);
@@ -192,5 +356,13 @@ mod tests {
         mx.observe_window("12", "editor", "/home/u/x", "/home/u");
         assert_eq!(mx.win, 2 + 1 + 6);
         assert_eq!(mx.path, "~/x".len());
+        mx.observe_flags(true, false, true);
+        mx.observe_flags(false, true, false);
+        assert_eq!(mx.flags, 2);
+        mx.observe_branch("");
+        assert!(!mx.branch);
+        mx.observe_branch("main");
+        mx.observe_branch("");
+        assert!(mx.branch);
     }
 }

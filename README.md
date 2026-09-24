@@ -195,6 +195,13 @@ editor window of the *proj* session) and the command column. Paths, git
 badges, and metadata are visible but not matched — press `Ctrl-]` to
 cycle the scope when you *do* want to search by path.
 
+The session name on a window row is matched as it is *displayed*. A name
+longer than 16 characters is shortened with `…`, and so is any name on a
+popup too narrow for the rest of the row — the path and the branch badge
+give way first, so that takes a genuinely narrow popup. Then type what you
+see (`my-pr shell`). When a query matches nothing, the bar says what `Enter`
+would create before you press it.
+
 When two rows match a query *equally well*, the list's own order decides. So an
 existing session is picked ahead of a directory that is only being offered as a
 new one — typing `circle` with a `circle/sui-cctp` session open goes there, not
@@ -265,7 +272,7 @@ The preview shows project type, git branch/status/last commit, a README excerpt,
 
 ```
   ▸ my-project ─────────────────────────────────────────── 3 win ● 2h
-* ├─ my-project 0:editor   │ ~/code/proj    ‹feature-x›    nvim main.c
+* ├─ my-project 0:editor   │ ~/code/proj  Z ‹feature-x›    nvim main.c
   ├─ my-project 1:shell    │ ~/code/proj    ‹feature-x›    zsh
   └─ my-project 2:remote   │ ~/code/proj                   ssh user@host
     ├╴ my-project 2.0      │ ~/code/proj                   tail -f app.log
@@ -286,12 +293,17 @@ The preview shows project type, git branch/status/last commit, a README excerpt,
   identifiable while filtering and compound queries work
 - `*` marks the current target
 - `‹branch›` git branch badge (purple) for directories inside a git repo
-- `Z` / `!` / `#` flags mark zoomed, bell, and activity windows
+- `Z` / `!` / `#` flags mark zoomed, bell, and activity windows, in a column
+  of their own right after the path: a narrow popup can drop the branch badge,
+  never the flags
 - SSH connections show `user@host` highlighted in blue
 - Editors show the filename highlighted in green
 - Panes only shown for multi-pane windows
-- Column widths adapt to the content and the popup width — the redundant
-  session prefix shrinks first, window names are protected last
+- Column widths adapt to the content and the popup width. When a row does not
+  fit, what you only read gives way before what you type: the path shrinks
+  (to 24 cells) to keep the branch badge, then the badge goes, then the path
+  shrinks to 12 cells, and only then the session prefix and, last, the window
+  name
 
 ## Checking your setup
 

@@ -11,7 +11,12 @@ use crate::palette::{Palette, BOLD, DIM, RST};
 use crate::text::{pad_to, tildify, trim_path, truncate, width};
 use crate::widths::Widths;
 
-/// The path + git badge + flag glyphs column.
+/// The context column: path, then the Z/!/# flag slot, then the git badge.
+///
+/// The flags are a column of their own (`w.flags` cells, sized to the most flags
+/// any window carries).  They used to trail the branch inside the badge, so
+/// their x moved with the branch's length, the branch budget moved with the
+/// flag count, and the squeeze that dropped the badge dropped them too.
 pub fn ctx_field(
     path: &str,
     zoomed: bool,
@@ -35,43 +40,50 @@ pub fn ctx_field(
     out = pad_to(&out, len, w.path + 2);
     len = len.max(w.path + 2);
 
+    if w.flags > 0 {
+        // Packed ("Z!#"), in a fixed order, so each flag reads as a column.
+        // The slot is sized from the windows' own flags, so it always fits.
+        let mut fl = String::new();
+        let mut n = 0usize;
+        if zoomed {
+            fl.push_str(&format!("{}Z{}", p.bold_amber, RST));
+            n += 1;
+        }
+        if bell {
+            fl.push_str(&format!("{}!{}", p.bold_red, RST));
+            n += 1;
+        }
+        if activity {
+            fl.push_str(&format!("{}#{}", p.dim_ssh, RST));
+            n += 1;
+        }
+        if n > 0 {
+            out.push(' ');
+            out.push_str(&fl);
+            len += 1 + n;
+        }
+        out = pad_to(&out, len, w.path + 2 + w.flags);
+        len = len.max(w.path + 2 + w.flags);
+    }
+
     if w.badge > 0 {
-        let mut badge = String::new();
-        let mut blen = 0usize;
-        // Reserve room for the flag glyphs FIRST: each of Z / ! / # costs 2
-        // cells, and pad_to can only pad, never trim — so a long branch plus a
-        // flag used to overflow the field and shift the command column for that
-        // one row.
-        let nflags = usize::from(zoomed) + usize::from(bell) + usize::from(activity);
-        let branch_budget = w.badge.saturating_sub(2 + 2 * nflags);
         if show_git {
             // .git/HEAD is a file anyone can write: a TAB in the ref name
             // produced a FIVE-field row, breaking the contract fzf's
             // --delimiter/--with-nth/--nth all depend on.
             let mut b = sanitize(&git.branch(path)).replace('\t', " ");
             if !b.is_empty() {
-                if width(&b) > branch_budget {
-                    b = truncate(&b, branch_budget);
+                // " ‹" + branch + "›" in badge + 1 cells: the budget is the same
+                // on every row, whatever flags the row carries.
+                let budget = w.badge.saturating_sub(2);
+                if width(&b) > budget {
+                    b = truncate(&b, budget);
                 }
-                badge.push_str(&format!(" {}‹{}›{}", p.dim_git, b, RST));
-                blen += width(&b) + 3;
+                out.push_str(&format!(" {}‹{}›{}", p.dim_git, b, RST));
+                len += width(&b) + 3;
             }
         }
-        if zoomed {
-            badge.push_str(&format!(" {}Z{}", p.bold_amber, RST));
-            blen += 2;
-        }
-        if bell {
-            badge.push_str(&format!(" {}!{}", p.bold_red, RST));
-            blen += 2;
-        }
-        if activity {
-            badge.push_str(&format!(" {}#{}", p.dim_ssh, RST));
-            blen += 2;
-        }
-        out.push_str(&badge);
-        len += blen;
-        out = pad_to(&out, len, w.path + 3 + w.badge);
+        out = pad_to(&out, len, w.ctx());
     }
     out
 }
@@ -240,8 +252,13 @@ mod tests {
     use crate::widths::{compute, Maxima};
 
     fn setup() -> (Widths, Palette) {
-        let w = compute(Maxima { sess: 10, win: 16, path: 24 }, 200, false);
+        let w = compute(Maxima { sess: 10, win: 16, path: 24, ..Default::default() }, 200, false);
         (w, Palette::from_env())
+    }
+    /// A tree where some window carries all three flags.
+    fn setup_flags() -> (Widths, Palette) {
+        let mx = Maxima { sess: 10, win: 16, path: 24, flags: 3, branch: true };
+        (compute(mx, 200, false), Palette::from_env())
     }
 
     fn visible(s: &str) -> String {
@@ -344,17 +361,75 @@ mod tests {
         let (w, p) = setup();
         let mut g = GitCache::new();
         let c = ctx_field("/tmp", false, false, false, &w, &p, "/home/u", &mut g, false);
+        assert_eq!(w.flags, 0, "no window has a flag, so there is no slot");
         assert_eq!(width(&visible(&c)), w.path + 3 + w.badge);
+        assert_eq!(width(&visible(&c)), w.ctx());
     }
 
     #[test]
     fn ctx_field_flag_glyphs_keep_the_width() {
-        let (w, p) = setup();
+        let (w, p) = setup_flags();
         let mut g = GitCache::new();
-        let c = ctx_field("/tmp", true, true, true, &w, &p, "/home/u", &mut g, false);
-        assert_eq!(width(&visible(&c)), w.path + 3 + w.badge);
-        let v = visible(&c);
-        assert!(v.contains('Z') && v.contains('!') && v.contains('#'));
+        for flags in [(true, true, true), (true, false, false), (false, false, true), (false, false, false)] {
+            let c = ctx_field("/tmp", flags.0, flags.1, flags.2, &w, &p, "/home/u", &mut g, false);
+            assert_eq!(width(&visible(&c)), w.ctx(), "flags {:?}", flags);
+        }
+        let v = visible(&ctx_field("/tmp", true, true, true, &w, &p, "/home/u", &mut g, false));
+        assert!(v.contains("Z!#"), "{:?}", v);
+    }
+
+    fn git_repo(branch: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "imux-render-test-{}-{}",
+            std::process::id(),
+            branch.replace('/', "_")
+        ));
+        std::fs::create_dir_all(d.join(".git")).unwrap();
+        std::fs::write(d.join(".git/HEAD"), format!("ref: refs/heads/{}\n", branch)).unwrap();
+        d
+    }
+
+    /// The flags sit at one x on every row, whatever the branch, and a long
+    /// branch is cut to the same budget whatever the flags (UI-EXPLORATION §8).
+    #[test]
+    fn flags_are_a_fixed_column_and_the_branch_budget_ignores_them() {
+        let (w, p) = setup_flags();
+        let mut g = GitCache::new();
+        let short = git_repo("main");
+        let long = git_repo("feature/a-very-long-branch-name");
+        let rows = [
+            ctx_field(short.to_str().unwrap(), true, false, false, &w, &p, "/home/u", &mut g, true),
+            ctx_field(long.to_str().unwrap(), false, true, false, &w, &p, "/home/u", &mut g, true),
+            ctx_field(long.to_str().unwrap(), true, true, true, &w, &p, "/home/u", &mut g, true),
+            ctx_field(long.to_str().unwrap(), false, false, false, &w, &p, "/home/u", &mut g, true),
+        ];
+        let vis: Vec<String> = rows.iter().map(|r| visible(r)).collect();
+        let col = |v: &str, c: char| v.chars().position(|x| x == c);
+        let slot = w.path + 3; // "│ " + path + the slot's leading space
+        assert_eq!(col(&vis[0], 'Z'), Some(slot), "{:?}", vis[0]);
+        assert_eq!(col(&vis[1], '!'), Some(slot), "{:?}", vis[1]);
+        assert_eq!(col(&vis[2], 'Z'), Some(slot), "{:?}", vis[2]);
+        let branch = |v: &str| v[v.find('‹').unwrap()..].chars().take_while(|c| *c != ' ').collect::<String>();
+        assert_eq!(branch(&vis[1]), branch(&vis[2]), "the flag count changed the branch budget");
+        assert_eq!(branch(&vis[1]), branch(&vis[3]), "the flag count changed the branch budget");
+        for (i, v) in vis.iter().enumerate() {
+            assert_eq!(width(v), w.ctx(), "row {} overflowed: {:?}", i, v);
+        }
+        let _ = std::fs::remove_dir_all(short);
+        let _ = std::fs::remove_dir_all(long);
+    }
+
+    /// The squeeze may drop the badge; it must never drop the flags with it.
+    #[test]
+    fn the_flags_survive_when_the_badge_is_squeezed_out() {
+        let mx = Maxima { sess: 16, win: 20, path: 44, flags: 1, branch: true };
+        let w = compute(mx, 60, false);
+        assert_eq!(w.badge, 0, "precondition: this width has no room for the badge");
+        let p = Palette::from_env();
+        let mut g = GitCache::new();
+        let v = visible(&ctx_field("/tmp", true, false, false, &w, &p, "/home/u", &mut g, false));
+        assert!(v.contains('Z'), "the zoom flag went with the badge: {:?}", v);
+        assert_eq!(width(&v), w.ctx());
     }
 
     #[test]
