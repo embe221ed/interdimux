@@ -678,13 +678,18 @@ hint_cols() {
 # scope` survives longest because it is the least discoverable thing in the tool
 # and, being last in the line, was the first casualty of plain truncation.
 # Array ORDER is what the eye sees and is unchanged from the pre-tier bar.
+#
+# `^r reload` is on every row type because the Gone dialog and the "is gone"
+# status message both tell you to press it; S/W/P used to leave it out, so the
+# advice named a key the bar never showed.  It sits where the D and X sets put
+# it, and at priority 1 it goes second, right after `enter`, when space is short.
 hint_set() {
   local -a scope=()
   fzf_ge 58 && scope=('^]' scope 9)
   case "${1:-}" in
-    S) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^d detach 3  ^o new 4  ^/ preview 2) ;;
-    W) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^s swap 3     ^o new 4  ^/ preview 2) ;;
-    P) HINT_SET=(enter switch 1  ^x kill 7  ^z zoom 5    ^s swap 4     ^t send 3 ^/ preview 2) ;;
+    S) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^d detach 3  ^o new 4  ^r reload 1  ^/ preview 2) ;;
+    W) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^s swap 3     ^o new 4  ^r reload 1  ^/ preview 2) ;;
+    P) HINT_SET=(enter switch 1  ^x kill 7  ^z zoom 5    ^s swap 4     ^t send 3 ^r reload 1  ^/ preview 2) ;;
     D) HINT_SET=(enter open 3    ^o new 4   ^r reload 1  ^/ preview 2) ;;
     *) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^o new 4      ^r reload 3 ^/ preview 2)
        scope=() ;;

@@ -15,6 +15,8 @@
 #                its --height/--border/--margin/--padding/--style moved fzf's
 #                window without moving FZF_COLUMNS; and its colours blended into
 #                the plugin's palette.
+#   the bar    - the Gone dialog says "press ^r to reload", so the bar on the
+#                rows that can be gone has to advertise it.
 #
 # Every oracle is tmux's own screen (capture-pane, with -e for colour) or the
 # real fzf's exit status -- never the script's own expression.
@@ -427,6 +429,33 @@ for m in 40 57 58 66 74; do
 done
 [ "$ok" = 1 ] && report "every fzf version gets the palette led by the base scheme" pass \
               || { report "every fzf version gets the palette led by the base scheme" fail; ERRORS+="    $why"$'\n'; }
+
+# =============================================================================
+# 6. The hint bar names ^r on every row type
+# =============================================================================
+# The Gone dialog and the "is gone" status message both say "press ^r to
+# reload".  Checked at a width where nothing has to be dropped.
+for spec in 'S:themeproj' 'W:themeproj:0' 'P:themeproj:0:1'; do
+  bar=$(FZF_COLUMNS=200 INTERDIMUX_OPTS_PRIMED=1 bash "$SCRIPT" --footer-for "$spec" 2>/dev/null | plain) || bar=""
+  case "$bar" in
+    *"^r reload"*) report "the ${spec%%:*} row's bar advertises ^r reload" pass ;;
+    *)             report "the ${spec%%:*} row's bar advertises ^r reload (got: '$bar')" fail ;;
+  esac
+done
+
+# ...and on a screen: whatever row the cursor starts on, the bar says ^r.
+launch 120 20
+if wait_for 'themeproj' && wait_for 'kill'; then
+  scr=$(screen)
+  case "$scr" in
+    *"^r reload"*) report "the navigator's hint bar advertises ^r reload" pass ;;
+    *)             bar=$(grep -m1 'kill' <<< "$scr" || true)
+                   report "the navigator's hint bar advertises ^r reload (bar: '${bar:0:100}')" fail ;;
+  esac
+else
+  report "the navigator draws its hint bar" fail; why_dead
+fi
+tmux -L "$OUTER" kill-server 2>/dev/null || true
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
