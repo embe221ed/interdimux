@@ -50,9 +50,12 @@ echo "interdimux --jump tests"
 echo
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s aaa -x 120 -y 30
+# (No sleep between them.  One stood here "for distinct session_activity", but
+# that timestamp has one-second resolution, so 0.3 s never made the order any
+# less of a tie; and it does not need to be one: the MRU sort is stable, and
+# every assertion below compares --jump against the order --list prints.)
 for n in bbb ccc ddd; do
   tmux -L "$SOCK" new-session -d -s "$n" -x 120 -y 30
-  sleep 0.3   # distinct session_activity, so the MRU order is not a tie
 done
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=aaa:' -F '#{pane_id}' | head -1)"

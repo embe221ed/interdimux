@@ -235,13 +235,16 @@ render() { # $1 = rows, $2 = fzf minor to pretend to be; prints the screen
          INTERDIMUX_FZF_MINOR=${2:-74} INTERDIMUX_TMUX_VNUM=307 \
          INTERDIMUX_SHOW_DIRS=off FZF_DEFAULT_OPTS= \
          bash '$SCRIPT'; sleep 30"
-  local i
+  # Until the two things asserted on are both drawn -- the bar and a session
+  # row -- rather than the prompt plus a fixed 0.6 s: rows stream in after the
+  # prompt, and on a loaded box that was not always long enough.
+  local i s=""
   for i in $(seq 1 150); do
-    tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | grep -q '❯' && break
-    sleep 0.15
+    s=$(tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | plain) || s=""
+    [[ "$s" == *kill* && "$s" == *'▸ hint'* ]] && break
+    sleep 0.1
   done
-  sleep 0.6
-  tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | plain
+  printf '%s\n' "$s"
 }
 
 screen=$(render 16)

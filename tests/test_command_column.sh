@@ -144,7 +144,12 @@ expect() {  # label, got, want
   fi
 }
 
-if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then first="rust renderer"; else first="default renderer (no binary built)"; fi
+# The first pass is whatever the environment selects: the Rust core when it is
+# built, unless INTERDIMUX_USE_RUST=off is inherited (tests/run_all.sh under
+# IMUX_RENDERER=bash), where both passes are the bash renderer.
+if [ "${INTERDIMUX_USE_RUST:-on}" = off ]; then first="inherited bash renderer"
+elif [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then first="rust renderer"
+else first="default renderer (no binary built)"; fi
 for cfg in "$first:" "bash renderer:INTERDIMUX_USE_RUST=off"; do
   label="${cfg%%:*}"
   # shellcheck disable=SC2086

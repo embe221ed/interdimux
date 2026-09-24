@@ -47,7 +47,29 @@ OUTER="${SOCK}-outer"
 trap '"$T" -L "$SOCK" kill-server 2>/dev/null || true; "$T" -L "$OUTER" kill-server 2>/dev/null || true; rm -rf "$TMPD"' EXIT
 "$T" -f /dev/null -L "$OUTER" new-session -d -s drv -x 130 -y 45 \
   "TMUX= $T -L $SOCK attach -t main"
-sleep 3
+
+# Condition polls, never a fixed sleep: each wait below is for the thing the
+# next step depends on, bounded (docs/IDEAS.md, lesson 2).
+wait_until() { # $1 = tries, 0.1 s apart; the rest = a command that must succeed
+  local n="$1" i; shift
+  for (( i = 0; i < n; i++ )); do "$@" && return 0; sleep 0.1; done
+  return 1
+}
+client_attached() { [ -n "$("$T" -L "$SOCK" list-clients -F '#{client_name}' 2>/dev/null)" ]; }
+key_table_is()    { [ "$("$T" -L "$SOCK" list-clients -F '#{client_key_table}' 2>/dev/null | head -1)" = "$1" ]; }
+# the probe's dump is written by one `sort`, and TMUX_PANE sorts last
+dumped()          { grep -q '^TMUX_PANE=' "$1" 2>/dev/null; }
+# A real prefix+f: C-b, and only once the client is IN the prefix table, f.
+# Then wait for the probe's dump, and close its popup -- a popup still open
+# would swallow the next press.
+press_prefix_f() { # $1 = the dump file the probe writes
+  "$T" -L "$OUTER" send-keys -t '=drv:' C-b
+  wait_until 50 key_table_is prefix || echo "  (the prefix key never registered)" >&2
+  "$T" -L "$OUTER" send-keys -t '=drv:' f
+  wait_until 150 dumped "$1" || echo "  (no dump from the popup within 15 s)" >&2
+  "$T" -L "$SOCK" display-popup -C -c "$("$T" -L "$SOCK" list-clients -F '#{client_name}' | head -1)" 2>/dev/null || true
+}
+wait_until 100 client_attached || { echo "the nested client never attached"; exit 1; }
 
 NASTY='a"b\c$HOME;d#{pane_id}e}f --no-mouse'
 "$T" -L "$SOCK" set -g @interdimux-fzf-opts "$NASTY"
@@ -62,16 +84,13 @@ bash "$TMPD/probe.sh" --bind-keys || { echo "--bind-keys failed"; exit 1; }
 
 # make window 2 active, so #{pane_id} must resolve to ITS pane, not window 1's
 "$T" -L "$SOCK" select-window -t '=main:second'
-sleep 1
+wait_until 50 sh -c "[ \"\$('$T' -L '$SOCK' display-message -p -t '=main:' '#{window_name}')\" = second ]"
 EXPECT_PANE=$("$T" -L "$SOCK" display-message -p '#{pane_id}')
 # the one client attached to the server under test is the one that presses keys
 EXPECT_CLIENT=$("$T" -L "$SOCK" list-clients -F '#{client_name}' | head -1)
 
 # type prefix+f into the OUTER pane -> the inner client sees a real key press
-"$T" -L "$OUTER" send-keys -t '=drv:' C-b
-sleep 0.6
-"$T" -L "$OUTER" send-keys -t '=drv:' f
-sleep 3.5
+press_prefix_f "$OUT"
 
 PASS=0
 FAIL=0
@@ -120,8 +139,11 @@ tmux_vnum() {
 }
 ck "TMUX_VNUM baked numerically"                    "$(get INTERDIMUX_TMUX_VNUM)" "$(tmux_vnum)"
 
+# (INTERDIMUX_USE_RUST is not counted: the binding never forwards it, but
+# tests/run_all.sh's IMUX_RENDERER=bash exports it, the server under test
+# inherits it into its global environment, and every popup gets it from there.)
 ck "every option in OPT_MAP is forwarded" \
-   "$(grep -c '^INTERDIMUX_' "$OUT")" \
+   "$(grep '^INTERDIMUX_' "$OUT" | grep -vc '^INTERDIMUX_USE_RUST=')" \
    "$(( $(grep -c '"' <<< "$(sed -n '/^OPT_MAP=(/,/^)/p' "$REPO/scripts/interdimux.sh" | grep -o '"[a-z-]*:[A-Z_]*"')" ) + 5 ))"
 
 # --- an install path containing '#' ---------------------------------------------
@@ -178,10 +200,7 @@ done
 "$T" -L "$SOCK" rename-session -t main 'ma"in#xy'
 bash "$HASHD/probe.sh" --bind-keys
 rm -f "$OUT2"
-"$T" -L "$OUTER" send-keys -t '=drv:' C-b
-sleep 0.6
-"$T" -L "$OUTER" send-keys -t '=drv:' f
-sleep 3.5
+press_prefix_f "$OUT2"
 _got_title=$(sed -n 's/^INTERDIMUX_TITLE=//p' "$OUT2" 2>/dev/null)
 if [ "$_got_title" = ' interdimux · ma"in#xy ' ]; then
   PASS=$((PASS + 1)); printf '  \033[32m\xe2\x9c\x93\033[0m %s\n' "a session name with a quote and a '#' survives into the title"
@@ -191,11 +210,11 @@ else
 fi
 "$T" -L "$SOCK" rename-session -t 'ma"in#xy' main
 
-# ...and end to end: a real key press must actually reach the popup.
-"$T" -L "$OUTER" send-keys -t '=drv:' C-b
-sleep 0.6
-"$T" -L "$OUTER" send-keys -t '=drv:' f
-sleep 3.5
+# ...and end to end: a real key press must actually reach the popup.  The dump
+# from the press above is removed first -- it was still there, so this passed
+# whether or not the popup ran.
+rm -f "$OUT2"
+press_prefix_f "$OUT2"
 if [ -s "$OUT2" ]; then
   PASS=$((PASS + 1)); printf '  \033[32m\xe2\x9c\x93\033[0m %s\n' "prefix+f actually opens the popup from a '#' path"
 else

@@ -15,7 +15,7 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 | # | Idea | Effort | Notes |
 |---|------|--------|-------|
 | 1 | ✅ **Done** — **Announce find-or-create in the zero-match state** — bind fzf's `zero:` event to a header like *"enter → create session 'api' in ~/code/api (zoxide)"* with the resolved name/dir. The feature is invisible today and typos create junk sessions silently. | S | fzf ≥ 0.40 |
-| 2 | ✅ **Done** — **Cursor stability across reloads** — `--id-nth=-1` **without `--track`**; the SPEC field is a stable identity. Today every execute+reload can silently move the cursor to a different target (dangerous in kill mode). ⚠️ **Do NOT add `--track`:** it arms `trackBlocked`, which *discards* every keystroke except abort while a reload is in flight (`fzf src/terminal.go:6821-6827`) — worst exactly when the popup has just opened (measured keystroke loss vs 0/20 lost with `--id-nth` alone). `--id-nth` on its own never blocks and still restores identity across `reload-sync`. Pair with `enter:wait+accept` (fzf ≥ 0.74) so Enter during an in-flight reload can't accept an already-killed row. ⚠️ **Correction, measured on 0.74.3:** without tracking on, `--id-nth` does *not* move the cursor with its item across a reload (either kind) — fzf keeps the row NUMBER, exactly as with no flag (rows `a b c d`, cursor on `c`, reloaded as `a x y b c d` → cursor on `y`). The cursor stays put after ^r, ^/ and a resize only because those do not change the list; after a kill it is on whatever slid in. | S | fzf ≥ 0.71 |
+| 2 | ✅ **Done** — **Cursor stability across reloads** — `--id-nth=-1` **without `--track`**; the SPEC field is a stable identity. Today every execute+reload can silently move the cursor to a different target (dangerous in kill mode). ⚠️ **Do NOT add `--track`:** it arms `trackBlocked`, which *discards* every keystroke except abort while a reload is in flight (`fzf src/terminal.go:6821-6827`) — worst exactly when the popup has just opened (measured keystroke loss vs 0/20 lost with `--id-nth` alone). `--id-nth` on its own never blocks and still restores identity across `reload-sync`. Pair with `enter:wait+accept` (fzf ≥ 0.74) so Enter during an in-flight reload can't accept an already-killed row. ⚠️ **Correction, measured on 0.74.3:** without tracking on, `--id-nth` does *not* move the cursor with its item across a reload (either kind) — fzf keeps the row NUMBER, exactly as with no flag (rows `a b c d`, cursor on `c`, reloaded as `a x y b c d` → cursor on `y`). The cursor stays put after ^r, ^/ and a resize only because those do not change the list — and because every navigator reload is a `reload-sync`: a plain `reload` shows the list as it streams in, the bash renderer streams row by row, and the cursor landed on row 1 of the half-drawn list (found by CI's bash-renderer leg). After a kill it is on whatever slid in. | S | fzf ≥ 0.71 |
 | 3 | **Standalone `--last` toggle** — bindable (e.g. `prefix+L`) zero-UI switch to the previous session; recomputes MRU so it survives the last session being killed (tmux's built-in `switch-client -l` doesn't). | S | — |
 | 4 | ✅ **Done** — **Footer hint bar** — key hints moved to `--footer`, so the top of the list stops twitching on every cursor move. Two things the entry did not know: the footer's DEFAULT border costs a SECOND row (use `--footer-border=none` and the move is free), and the footer is drawn inside the *list* column, so a right-hand preview halves it while `FZF_COLUMNS` does not move — branch on `FZF_PREVIEW_COLUMNS` being set. Shipped tiered rather than truncated, since the untiered bar overflowed at any width under ~95. | S | fzf ≥ 0.63 |
 | 5 | **Responsive preview layout** — `--preview-window='right,50%,…,<90(up,40%,…)'` so narrow popups stack the preview below instead of starving both panes. | S | — |
@@ -110,14 +110,45 @@ Two recurring lessons, both of which cost real time here:
    and failed in a batch; every one was a `sleep` that should have been a
    poll for the condition the test actually depended on.
 
-   `tests/test_hydration.sh` is the one that still has them — seven, at 1.5 s to
-   2.5 s, and one of its own comments records that an eighth had to be converted
-   because "under load `clear` had" not landed in time. It fails roughly one run
-   in four when the box is busy (measured: green three times alone, red once in a
-   batch while four other agents were running suites) and green every time on its
-   own. That is not flakiness in the product; it is the assertion being about the
-   machine's spare capacity. Converting those seven to condition-polls is the
-   remaining work on this lesson.
+   Every such sleep is gone now.  There were far more than this lesson used to
+   admit — about 65 s of single-shot waits across bind_keys (16 s, more than
+   hydration's 13), hydration, schedule, raw_mode, rust_parity, gather_batch,
+   list_format, session_names, send_keys, rendered_ui and hint_bar — and each
+   became a bounded poll for what the next step reads.  Three shapes recur:
+
+   * **Wait for the thing, not for "long enough".** A dump file carrying its
+     last line, `#{client_key_table}` reading `prefix` before the second key,
+     a pane's `#{pane_current_path}` (tmux lists a pane before /proc has its
+     cwd), a query shown in the prompt and then a cursor row that reads the
+     same twice (test_pick_order.sh's `query()`).
+   * **A negative assertion needs a sentinel.** "Nothing was sent" cannot be
+     polled for; "wait 2 s and look" is the same guess as before.  Keys reach a
+     pane in order, so type a sentinel of your own and wait for ITS output:
+     anything sent earlier is on screen above it by then.
+   * **A quiet pane has no condition to wait for, so remove the race.** A
+     window name follows its pane's output a timer tick behind; panes that
+     print nothing may never be renamed at all.  The parity and batching
+     benches freeze names (`automatic-rename off`) instead of waiting.
+
+   One sub-lesson from the conversion itself: under `set -o pipefail`,
+   `producer | grep -q` inside a poll can report "not found" for a line that is
+   there — grep's early exit SIGPIPEs a producer still writing.  The rendered-UI
+   gating checks flaked exactly that way once the argv they grep grew.  Capture
+   first, then match.
+
+   What is genuinely left is physical, not a guess:
+
+   * `tests/test_list_format.sh`'s `sleep 1` in `visit()`:
+     `#{session_last_attached}` has one-second resolution, and the MRU
+     assertion needs two different timestamps.  That is the clock, not the box.
+   * Delays that are part of a FIXTURE, not a wait: the zoxide stand-in in
+     test_cursor_reload.sh answers 1.5 s late on purpose (rows that arrive
+     after a typed query), test_squeeze.sh's panes ring their bell after a
+     beat, test_pipefail.sh's producer sleeps so it is still writing when the
+     pipe closes, and the `; sleep N` after a dialog keeps its finished pane
+     open to be captured.
+   * Hydration's shell start is the product's own wait (`wait_pane_ready`,
+     before the startup command is typed); the suite no longer adds one.
 
 3. **The suite is not safe to run concurrently with itself.** `at`'s queue is
    machine-global, so two copies of `test_schedule_ui.sh` see each other's jobs:

@@ -163,7 +163,9 @@ want=$(INTERDIMUX_USE_RUST=off INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>
 for pair in "$TMPD/hello:hello from not-imux" "/bin/echo:gather"; do
   bin="${pair%%:*}" junk="${pair#*:}"
   [ -x "$bin" ] || continue
-  got=$(INTERDIMUX_BIN="$bin" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null || true)
+  # INTERDIMUX_USE_RUST=on: under IMUX_RENDERER=bash the inherited "off" would
+  # skip the helper altogether, and these cases would pass without running it.
+  got=$(INTERDIMUX_USE_RUST=on INTERDIMUX_BIN="$bin" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null || true)
   check "INTERDIMUX_BIN=$bin: the list is the bash renderer's rows" \
     '[ -n "$want" ] && [ "$(specs "$got")" = "$(specs "$want")" ]'
   check "...and not a line of what it printed ('$junk')" \
@@ -176,7 +178,7 @@ if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then
   printf '#!/bin/sh\n"%s" "$@"\nprintf "zz\\tmarker\\t\\tS:zz-only-from-the-helper\\n"\n' \
     "$SCRIPT_DIR/rust/target/release/imux" > "$TMPD/wrapped"
   chmod +x "$TMPD/wrapped"
-  got=$(INTERDIMUX_BIN="$TMPD/wrapped" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null || true)
+  got=$(INTERDIMUX_USE_RUST=on INTERDIMUX_BIN="$TMPD/wrapped" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 2>/dev/null || true)
   check "the real helper's rows still pass straight through" \
     'case "$got" in *S:zz-only-from-the-helper*) true ;; *) false ;; esac'
 else

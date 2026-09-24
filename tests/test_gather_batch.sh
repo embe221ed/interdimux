@@ -38,17 +38,37 @@ tmux_cmd() { tmux -f /dev/null -L "$SOCK" "$@"; }
 echo "interdimux gather-batching tests"
 echo
 
-tmux_cmd new-session -d -s b1 -x 200 -y 50 -c "$SCRIPT_DIR"
-tmux_cmd new-window  -d -t '=b1:' -n two -c "$SCRIPT_DIR"
-tmux_cmd split-window -d -t '=b1:two' -c "$SCRIPT_DIR"
-tmux_cmd new-session -d -s b2 -x 200 -y 50 -c "$SCRIPT_DIR"
+# Every pane runs a process that never prints and never changes, and window
+# names are frozen, so two renders a moment apart can only differ by the thing
+# under test.  (They used to start the user's login shell, and a `sleep 2`
+# stood in for "it has finished starting".)
+PC='exec sleep 900'
+tmux_cmd new-session -d -s b1 -x 200 -y 50 -c "$SCRIPT_DIR" "$PC"
+tmux_cmd set -g automatic-rename off
+tmux_cmd new-window  -d -t '=b1:' -n two -c "$SCRIPT_DIR" "$PC"
+tmux_cmd split-window -d -t '=b1:two' -c "$SCRIPT_DIR" "$PC"
+tmux_cmd new-session -d -s b2 -x 200 -y 50 -c "$SCRIPT_DIR" "$PC"
+
+# Settled: every pane has its cwd and has exec'd its command.
+settled() {
+  local l
+  while IFS= read -r l; do
+    [ "$l" = "cwd sleep" ] || return 1
+  done < <(tmux -L "$SOCK" list-panes -a -F '#{?pane_current_path,cwd,nocwd} #{pane_current_command}' 2>/dev/null)
+}
+wait_settled() {
+  local i
+  for i in $(seq 1 100); do settled && return 0; sleep 0.1; done
+  echo "  (the panes never settled)" >&2
+  return 1
+}
 
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=b1:0' -F '#{pane_id}' | head -1)"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307
 export INTERDIMUX_SHOW_FULL_COMMAND=off INTERDIMUX_SHOW_GIT_BRANCH=off
 export INTERDIMUX_ORDER=mru INTERDIMUX_USE_ZOXIDE=off
-sleep 2
+wait_settled || true
 
 # Pin the clock for both runs.  The age column is derived from it, so without
 # this the two renders disagree whenever a second boundary falls between them —
@@ -90,8 +110,8 @@ fi
 # --- the RS-in-a-field guard -------------------------------------------------
 rsdir="$WORKDIR/$(printf 'dir\036rs')"
 mkdir -p "$rsdir"
-tmux_cmd new-window -d -t '=b1:' -n rsw -c "$rsdir"
-sleep 2
+tmux_cmd new-window -d -t '=b1:' -n rsw -c "$rsdir" "$PC"
+wait_settled || true
 
 rs_batched=$(bash "$SCRIPT" --list 2>/dev/null)
 rs_separate=$(INTERDIMUX_NO_BATCH=1 bash "$SCRIPT" --list 2>/dev/null)

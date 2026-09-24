@@ -58,9 +58,15 @@ echo
 # makes a row overflow, which is what --freeze-left is for.
 LONGCMD='buildtool --config set-rtp+=share/x --stage lua-require-cfg plugins/lsp/servers/zebra.lua'
 
-tmux -f /dev/null -L "$SOCK" new-session -d -s proj -x 200 -y 50 -c "$SCRIPT_DIR" \
+# The windows sit in a repository of their OWN, on a branch of their own, so the
+# git badge the scope case looks for is there in any checkout: it used to be
+# the checkout's badge (`‹main›`), which a worktree on another branch, or a
+# path long enough to squeeze the badge out, did not have.
+REPO="$TMPD/repo"
+mkdir -p "$REPO/.git" && printf 'ref: refs/heads/scope-probe\n' > "$REPO/.git/HEAD"
+tmux -f /dev/null -L "$SOCK" new-session -d -s proj -x 200 -y 50 -c "$REPO" \
   "bash --norc --noprofile -c 'exec -a \"$LONGCMD\" sleep 900'"
-tmux -L "$SOCK" new-window -d -t '=proj:' -n editor -c "$SCRIPT_DIR" 'sleep 900'
+tmux -L "$SOCK" new-window -d -t '=proj:' -n editor -c "$REPO" 'sleep 900'
 tmux -L "$SOCK" new-session -d -s other -x 200 -y 50 -c "$HOME" 'sleep 900'
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=proj:editor' -F '#{pane_id}' | head -1)"
@@ -89,8 +95,11 @@ capture() { # $1 = fzf minor, $2 = FZF_COLUMNS, rest = script args
     timeout 30 bash "$SCRIPT" "$@" >/dev/null 2>&1 || true
 }
 argv() { sed -n 's/^ARGV\t//p' "$IMUX_ARGV_LOG"; }
-has()  { argv | grep -qx -- "$1"; }
-hasp() { argv | grep -q -- "$1"; }
+# Not `argv | grep -q`: under `set -o pipefail` grep -q's early exit can SIGPIPE
+# the sed still writing a long argv, and the pipeline then reports "not found"
+# for a token that is there.  It did, intermittently, once the argv grew.
+has()  { grep -qx -- "$1" <<< "$(argv)"; }
+hasp() { grep -q -- "$1" <<< "$(argv)"; }
 
 # --- gating: every capability token stays behind its fzf version --------------
 # Each of these is fatal on an fzf that does not know it, so "it degrades
@@ -143,8 +152,8 @@ for c in 8 4; do
   for args in "" "--jobs" "--dashboard"; do
     # shellcheck disable=SC2086
     capture 74 "$c" $args
-    argv | grep -qx -- '--footer=' && { ok=0; ERRORS+="     empty --footer= at $c cols ${args:-(navigator)}"$'\n'; }
-    argv | grep -qx -- '--header=' && { ok=0; ERRORS+="     empty --header= at $c cols ${args:-(navigator)}"$'\n'; }
+    has '--footer=' && { ok=0; ERRORS+="     empty --footer= at $c cols ${args:-(navigator)}"$'\n'; }
+    has '--header=' && { ok=0; ERRORS+="     empty --header= at $c cols ${args:-(navigator)}"$'\n'; }
   done
 done
 [ "$ok" = 1 ] && report "a bar that does not fit is omitted, not passed empty" pass \
@@ -189,9 +198,10 @@ launch() { # $1 = cols, $2 = rows, rest = extra `export` lines for the launcher
     tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | grep -q '❯' && break
     sleep 0.15
   done
-  sleep 0.8
 }
-keys() { tmux -L "$OUTER" send-keys -t '=drv:' "$@"; sleep 1.0; }
+# No sleep after a key: each case below polls for the screen the key produces
+# (wait_for / settle), which a fixed second only ever approximated.
+keys() { tmux -L "$OUTER" send-keys -t '=drv:' "$@"; }
 # Rows stream in, so waiting for the prompt is not waiting for the list.  Poll
 # for the thing about to be asserted on rather than sleeping a fixed time — a
 # loaded box otherwise reports "the picker is broken" when it was merely slow.
@@ -206,11 +216,21 @@ wait_for() { # $1 = pattern
 screen()  { tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | plain; }
 screen_e() { tmux -L "$OUTER" capture-pane -t '=drv:' -p -e 2>/dev/null; }
 row_e() { screen_e | grep -a "$1" | head -1 || true; }
+# Until "$@" (a command over the screen) succeeds, bounded at 10 s.
+until_screen() {
+  local i
+  for i in $(seq 1 100); do "$@" && return 0; sleep 0.1; done
+  return 1
+}
+cursor_has() { local s; s=$(screen); s=$(grep -m1 '▌' <<< "$s" || true); [[ "$s" == *"$1"* ]]; }
+prompt_is()  { local s; s=$(screen); [[ "${s%%$'\n'*}" == "$1"* ]]; }
+bar()        { local s; s=$(screen); grep -m1 'kill' <<< "$s" || true; }
 
 # 02 — a hscrolling long command must not take the row's identity with it.
 launch 100 14
 wait_for 'buildtool' || true
 keys zebra
+until_screen cursor_has zebra || true
 cur=$(screen | grep '▌' | head -1) || true
 case "$cur" in
   *zebra*) report "the matched token is on screen" pass ;;
@@ -229,10 +249,16 @@ tmux -L "$OUTER" kill-server 2>/dev/null || true
 # changes at all.
 for state in on off; do
   launch 100 14 "INTERDIMUX_SCOPE_HIGHLIGHT=$state"
-  wait_for '‹main›' || true
-  before=$(row_e '‹main›')
+  wait_for '‹scope-probe›' || true
+  before=$(row_e '‹scope-probe›')
   keys C-] C-]
-  after=$(row_e '‹main›')
+  # the prompt names the scope once fzf has applied it; with the highlight on,
+  # the row it restyles is redrawn in that same pass, but poll for it anyway
+  until_screen prompt_is path || true
+  if [ "$state" = on ]; then
+    until_screen eval '[ "$(row_e "‹scope-probe›")" != "$before" ]' || true
+  fi
+  after=$(row_e '‹scope-probe›')
   prompt=$(screen | head -1 || true)
   if [ -z "$before" ] || [ -z "$after" ]; then
     report "scope-highlight=$state: a window row was captured" fail
@@ -269,6 +295,10 @@ for path in inline fallback; do
   wait_for 'kill' || true
   wide=$(screen | grep 'kill' | head -1) || true
   keys C-_
+  # ^/ is done once the bar has been RE-FITTED: fzf first clips the old one to
+  # the narrower list (`^…`), and the transform's shorter bar lands after.  A
+  # bar that is never re-fitted is the failure the assertion below reports.
+  until_screen eval 'b=$(bar); [ -n "$b" ] && [ "$b" != "$wide" ] && [[ "$b" != *…* && "$b" != *··* ]]' || true
   narrow=$(screen | grep 'kill' | head -1) || true
   if [ -z "$wide" ] || [ -z "$narrow" ]; then
     report "$path path: the hint bar was captured" fail

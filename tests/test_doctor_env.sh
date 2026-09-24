@@ -14,6 +14,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+# --doctor reports on the INSTALL, and a renderer forced from outside is not
+# part of one: under tests/run_all.sh's IMUX_RENDERER=bash the inherited
+# INTERDIMUX_USE_RUST=off would make every report warn "rust helper disabled"
+# and hide the helper checks below.  A case that wants a renderer pins it.
+unset INTERDIMUX_USE_RUST
 SOCK="interdimux-doctor-env-test-$$"
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-doctor-env.XXXXXX")"
 PASS=0

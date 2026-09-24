@@ -1970,31 +1970,50 @@ get_git_branch() {
     return
   fi
 
-  local d="$dir"
-  while [ "$d" != "/" ] && [ -n "$d" ]; do
+  # Up to and INCLUDING "/", as git's own discovery walks (and rust/src/git.rs):
+  # a repository at the root is a repository.  $b is the directory with its
+  # trailing slash dropped, so the root's marker is "/.git", not "//.git".
+  local d="$dir" b
+  while [ -n "$d" ]; do
     # Never probe a filesystem whose stat can block (is_remote_path): the walk
     # stops there, badge-less, rather than stall the first paint.
     is_remote_path "$d" && break
+    b="${d%/}"
     local head_file=""
-    if [ -d "$d/.git" ]; then
-      head_file="$d/.git/HEAD"
-    elif [ -f "$d/.git" ]; then
-      # Worktrees/submodules: .git is a file containing "gitdir: <path>"
-      local gitdir_line
-      read -r gitdir_line < "$d/.git" 2>/dev/null || { d="${d%/*}"; continue; }
-      local gitdir="${gitdir_line#gitdir: }"
-      # Resolve relative paths
-      case "$gitdir" in
-        /*) ;;
-        *)  gitdir="$d/$gitdir" ;;
-      esac
-      is_remote_path "$gitdir" && break   # a worktree whose repository is on one
-      [ -f "$gitdir/HEAD" ] && head_file="$gitdir/HEAD"
+    # A .git DIRECTORY counts only with a HEAD in it, as git's own discovery
+    # has it: an empty one (a half-made clone, a stray `mkdir .git` inside a
+    # repo) is skipped and the walk goes on to the enclosing repository.
+    if [ -d "$b/.git" ]; then
+      [ -f "$b/.git/HEAD" ] && head_file="$b/.git/HEAD"
+    elif [ -f "$b/.git" ]; then
+      # Worktrees/submodules: .git is a file containing "gitdir: <path>".
+      # `read` reports EOF on a last line with no newline AFTER assigning it --
+      # the trap live_preview_state documents -- so the status is ignored and
+      # the VALUE decides.  `|| continue` here threw away a newline-less
+      # gitdir file that the Rust core (and git) read.  A CRLF file keeps its
+      # CR through `read`; git and the Rust core strip it.
+      local gitdir_line=""
+      { read -r gitdir_line < "$b/.git"; } 2>/dev/null || :
+      gitdir_line="${gitdir_line%$'\r'}"
+      if [ -n "$gitdir_line" ]; then
+        local gitdir="${gitdir_line#gitdir: }"
+        # Resolve relative paths
+        case "$gitdir" in
+          /*) ;;
+          *)  gitdir="$b/$gitdir" ;;
+        esac
+        is_remote_path "$gitdir" && break   # a worktree whose repository is on one
+        [ -f "$gitdir/HEAD" ] && head_file="$gitdir/HEAD"
+      fi
     fi
 
-    if [ -n "$head_file" ] && [ -f "$head_file" ]; then
-      local head_content
-      read -r head_content < "$head_file" 2>/dev/null || break
+    if [ -n "$head_file" ]; then
+      # The same EOF trap: a HEAD written without a trailing newline (by a
+      # tool, or by hand) is a valid HEAD to git, and `read || break` dropped it.
+      local head_content=""
+      { read -r head_content < "$head_file"; } 2>/dev/null || :
+      head_content="${head_content%$'\r'}"
+      [ -n "$head_content" ] || break
       local branch=""
       case "$head_content" in
         "ref: refs/heads/"*) branch="${head_content#ref: refs/heads/}" ;;
@@ -2004,7 +2023,10 @@ get_git_branch() {
       REPLY="$branch"
       return
     fi
-    d="${d%/*}"
+    [ "$d" = "/" ] && break
+    case "$b" in */*) ;; *) break ;; esac   # relative: nothing above it to walk to
+    d="${b%/*}"
+    [ -n "$d" ] || d="/"
   done
 
   GIT_BRANCH_CACHE["$_cache_key"]=""
@@ -2531,7 +2553,14 @@ build_ctx_field() {
   local disp gbranch fl fn
   fld_reset
   disp="${path/#$HOME/\~}"
-  disp="${disp//$'\t'/ }"   # tabs are the field delimiter
+  # Sanitised, not just de-tabbed: a cwd is arbitrary bytes.  An ESC reached
+  # the popup as a live escape sequence, and ${#disp} counted the bytes the
+  # terminal then swallowed, so the padding came out short and the command
+  # column shifted; a CR redrew the row over itself.  The Rust core's rules
+  # (render.rs ctx_field -> proc::sanitize): newline to a space, every other
+  # control byte -- TAB, the field delimiter, included -- to '?'.  Guarded, so
+  # a clean path costs one pattern test.
+  sanitize_args "$disp"; disp="$REPLY"
   trim_path "$disp" "$PATH_W"; disp="$REPLY"
   fld_add "${SEP} " 2
   fld_add "${DIM_PATH}${disp}${RST}" "${#disp}"
@@ -2547,6 +2576,10 @@ build_ctx_field() {
   fi
   if [ "$BADGE_W" -gt 0 ]; then
     get_git_branch "$path"; gbranch="$REPLY"
+    # .git/HEAD is a file anyone can write: a TAB in the ref name made a
+    # FIVE-field row, breaking the contract --delimiter/--with-nth/--nth all
+    # rest on.  Same rules as the path above.
+    sanitize_args "$gbranch"; gbranch="$REPLY"
     if [ -n "$gbranch" ]; then
       # " ‹" + branch + "›" in BADGE_W + 1 cells: the same budget on every
       # row, whatever flags the row carries.
@@ -2651,7 +2684,33 @@ gather_targets() {
   # it cannot swallow the bulk data.
   local _batched=0 _all RS=$'\x1e'
   local -a _parts=()
-  if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+  if [ -n "${INTERDIMUX_DUMP_IN:-}" ]; then
+    # Test seam: the four sections from a FILE instead of from tmux, framed
+    # exactly as the batched query below returns them -- which is also the
+    # framing `imux gather` reads on stdin.  It is what lets the golden corpus
+    # (rust/tests/corpus/*.dump) reach THIS renderer, the one every install
+    # without cargo runs, with no server and no timing:
+    # tests/test_corpus_parity.sh.  Same family as INTERDIMUX_NO_BATCH and
+    # INTERDIMUX_NOW.
+    #
+    # A dump IS the batch, so it serves both fetch paths and neither one
+    # queries tmux: a seam that fell through to a live server whenever the
+    # file was unreadable or mis-framed would render some other list and pass.
+    # So a bad dump renders nothing, loudly -- the Rust core exits 3 on the
+    # same framing.  The trailing RS keeps an EMPTY last section a section:
+    # word splitting drops a trailing empty field, and the corpus has an
+    # empty server.
+    if ! { _all=$(<"$INTERDIMUX_DUMP_IN"); } 2>/dev/null; then
+      printf 'interdimux: INTERDIMUX_DUMP_IN: cannot read %s\n' "$INTERDIMUX_DUMP_IN" >&2
+      return 1
+    fi
+    set -f; IFS="$RS"; _parts=($_all$RS); set +f; unset IFS
+    if [ "${#_parts[@]}" -ne 4 ]; then
+      printf 'interdimux: INTERDIMUX_DUMP_IN: expected 4 sections, got %d\n' "${#_parts[@]}" >&2
+      return 1
+    fi
+    _batched=1
+  elif [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
     _all=$(tmux \
       list-sessions -F "$_sfmt" \; \
       display-message -p "$RS" \; \
@@ -2900,6 +2959,15 @@ IMUX_SECTIONS
   local _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9 _kept=""
   while IFS="$US" read -r _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9; do
     [ -n "$_w1" ] || continue
+    # MORE than nine fields: a US inside pane_current_path (a directory may be
+    # named anything but '/' and NUL).  `read` hands the surplus to its last
+    # name, so every field after the path was the one to its left -- the pane
+    # count read "part2", the flags "1<US>000", and the PID the pane count, so
+    # the row showed PID 1's command (`init`) with a bell it did not have and
+    # stderr got "integer expression expected".  There is no telling which US
+    # is the path's, so the row is dropped, as the Rust core drops it
+    # (main.rs, `f.len() > 9`); its session header still renders.
+    case "$_w9" in *"$US"*) continue ;; esac
     if [ -z "$_w9" ]; then
       case "$_w2" in ''|*[!0-9]*) continue ;; esac
       case "$_w4" in 0|1) ;; *) continue ;; esac
@@ -2922,6 +2990,7 @@ IMUX_SECTIONS
   _kept=""
   while IFS="$US" read -r sn widx _p3 _p4 _p5 _p6 _p7 _p8; do
     [ -n "$sn" ] || continue
+    case "$_p8" in *"$US"*) continue ;; esac   # a US in its cwd: see above
     if [ -z "$_p8" ]; then
       case "$widx" in ''|*[!0-9]*) continue ;; esac
       case "$_p3" in ''|*[!0-9]*) continue ;; esac
@@ -2946,7 +3015,7 @@ IMUX_SECTIONS
   local sla sname swins sattach spath marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
-  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
+  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax
 
   while IFS="$US" read -r sname sla swins sattach spath; do
     [ -z "$sname" ] && continue
@@ -3091,14 +3160,40 @@ IMUX_SECTIONS
           # (dim) session prefix, never the pane id itself.
           pdisp="$sdisp"
           pover=$(( 9 + ${#pdisp} + ${#widx} + ${#pidx} - IDENT_W ))
-          if [ "$pover" -gt 0 ] && [ "${#pdisp}" -gt $(( pover + 1 )) ]; then
-            pdisp="${pdisp:0:${#pdisp}-pover-1}…"
+          if [ "$pover" -gt 0 ]; then
+            if [ "${#pdisp}" -gt $(( pover + 1 )) ]; then
+              pdisp="${pdisp:0:${#pdisp}-pover-1}…"
+            else
+              # Too short to absorb the overflow (a short session name, wide
+              # indexes): drop it.  Left in, the row ran past every other one,
+              # since fld_pad can only pad.  rust/src/render.rs pane_ident.
+              pdisp=""
+            fi
           fi
-          pprefix="${pdisp} ${widx}."
+          if [ -n "$pdisp" ]; then pprefix="${pdisp} ${widx}."; else pprefix="${widx}."; fi
+          # Still over with the prefix gone: the bare indexes can outrun the
+          # column's floor too (a window index near INT_MAX and a pane index near
+          # 65535, in a narrow popup).  A shortened id beats a shifted column --
+          # the SPEC still carries both indexes exactly.  Same ladder as the Rust
+          # core; ASCII digits, so characters are cells here.
+          pid_disp="$pidx"
+          if (( 7 + ${#pprefix} + ${#pid_disp} > IDENT_W )); then
+            pmax=$(( IDENT_W - 7 - ${#pprefix} )); (( pmax < 0 )) && pmax=0
+            if (( ${#pid_disp} > pmax )); then
+              if (( pmax == 0 )); then pid_disp=""; else pid_disp="${pid_disp:0:pmax-1}…"; fi
+            fi
+            if (( 7 + ${#pprefix} + ${#pid_disp} > IDENT_W )); then
+              pmax=$(( IDENT_W - 7 )); (( pmax < 0 )) && pmax=0
+              if (( ${#pprefix} > pmax )); then
+                if (( pmax == 0 )); then pprefix=""; else pprefix="${pprefix:0:pmax-1}…"; fi
+              fi
+              pid_disp=""
+            fi
+          fi
           fld_reset
           fld_add "$pmarker" 1
           fld_add " ${DIM_TREE}${cont} ${pglyph}${RST} " 6
-          fld_add "${DIM}${pprefix}${RST}${pidx}" $(( ${#pprefix} + ${#pidx} ))
+          fld_add "${DIM}${pprefix}${RST}${pid_disp}" $(( ${#pprefix} + ${#pid_disp} ))
           fld_pad "$IDENT_W"
           ident="$FLD"
 
@@ -6726,7 +6821,16 @@ while true; do
     --nth=1,3
     --tiebreak=index
     --bind='change:first'
-    --bind="ctrl-r:reload($LIST_CMD)"
+    # reload-SYNC, here and on every navigator reload (^/, resize, each
+    # action's execute+reload): the old list stays up until the new one is
+    # complete, then swaps in whole.  A plain `reload` clears the list and
+    # shows rows as they stream in, and the bash renderer (every install
+    # without the Rust core) prints row by row: the cursor, which fzf keeps by
+    # row NUMBER, landed on row 1 of a half-drawn list and stayed there, so in
+    # raw mode ^r, ^/ and a resize threw it to the top after all -- the Rust
+    # core's output arrives in one write, which is why only it was fixed.
+    # (fzf >= 0.36; the floor is 0.40.)
+    --bind="ctrl-r:reload-sync($LIST_CMD)"
   )
 
 
@@ -6786,7 +6890,7 @@ while true; do
       fzf_opts+=(
         --prompt='kill ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     rename)
@@ -6794,7 +6898,7 @@ while true; do
       fzf_opts+=(
         --prompt='rename ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD rename {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     zoom)
@@ -6802,7 +6906,7 @@ while true; do
       fzf_opts+=(
         --prompt='zoom ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
+        --bind="enter:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload-sync($LIST_CMD)+refresh-preview"
       )
       ;;
     swap)
@@ -6810,7 +6914,7 @@ while true; do
       fzf_opts+=(
         --prompt='swap ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD swap {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     detach)
@@ -6818,7 +6922,7 @@ while true; do
       fzf_opts+=(
         --prompt='detach ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD detach {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     send)
@@ -6826,7 +6930,7 @@ while true; do
       fzf_opts+=(
         --prompt='send ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD send {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     schedule)
@@ -6834,7 +6938,7 @@ while true; do
       fzf_opts+=(
         --prompt='schedule ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD schedule {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD schedule {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     *)
@@ -6872,14 +6976,14 @@ while true; do
         # the reload the rows stay sized for the old geometry (IDEAS #26).
         # A reload used to cost ~195ms, which is why this was deferred; it is
         # ~25ms now.
-        --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload($LIST_CMD)$_refit"
+        --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload-sync($LIST_CMD)$_refit"
       )
       # The `resize` event arrived in fzf 0.46 (its CHANGELOG), and fzf REFUSES
       # TO START on an event it does not know ("unsupported key: resize"), so
       # ungated this one bind closed the popup the instant it opened on
       # 0.40-0.45 -- Ubuntu 24.04 ships 0.44.1.  Below 0.46 a resized popup
       # keeps its old column widths until ^r, which is the whole loss.
-      fzf_ge 46 && fzf_opts+=(--bind="resize:reload($LIST_CMD)$_refit")
+      fzf_ge 46 && fzf_opts+=(--bind="resize:reload-sync($LIST_CMD)$_refit")
       # An empty bar means nothing fits at this width.  Passing --footer='' still
       # costs a row (measured — the section is drawn, blank), so omit the flag
       # entirely; a transform that emits nothing later removes the section again
@@ -7123,9 +7227,9 @@ while true; do
       _action_bind() { # key action exec-kind nomatch-label [trailing actions]
         if [ "$_raw_on" = 1 ]; then
           hint_r '∅' "nothing matches · no row to $4"
-          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY' || echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload(bash \"$SQ_SCRIPT\" --list)${5:-}'")
+          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY' || echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload-sync(bash \"$SQ_SCRIPT\" --list)${5:-}'")
         else
-          fzf_opts+=(--bind="$1:${_wait}$3($ACTION_CMD $2 {-1})+reload($LIST_CMD)${5:-}")
+          fzf_opts+=(--bind="$1:${_wait}$3($ACTION_CMD $2 {-1})+reload-sync($LIST_CMD)${5:-}")
         fi
       }
       _action_bind ctrl-x kill   execute        kill

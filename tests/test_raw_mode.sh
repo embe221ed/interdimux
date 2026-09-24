@@ -47,7 +47,6 @@ fi
 tmux -f /dev/null -L "$SOCK" new-session -d -s aaa       -x 120 -y 30 -c "$SCRIPT_DIR"
 tmux -L "$SOCK" new-session -d -s bbb       -x 120 -y 30 -c /tmp
 tmux -L "$SOCK" new-session -d -s zzztarget -x 120 -y 30 -c /tmp
-sleep 1
 
 sockpath=$(tmux -L "$SOCK" display-message -p '#{socket_path}')
 anchor=$(tmux -L "$SOCK" list-panes -t '=aaa:' -F '#{pane_id}' | head -1)
@@ -68,7 +67,33 @@ open_navigator() { # $1 = extra env
 }
 screen()      { tmux -L "$SOCK" capture-pane -t '=drv:' -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'; }
 cursor_row()  { screen | grep -m1 '▌' | sed 's/^ *//'; }
-close_nav()   { tmux -L "$SOCK" send-keys -t '=drv:' Escape 2>/dev/null || true; sleep 0.5; }
+# Escape closes the navigator, and with it the drv session (its only pane
+# exits): wait for that, not a fixed half second.
+close_nav()   {
+  tmux -L "$SOCK" send-keys -t '=drv:' Escape 2>/dev/null || true
+  local i
+  for i in $(seq 1 50); do tmux -L "$SOCK" has-session -t '=drv' 2>/dev/null || return 0; sleep 0.1; done
+}
+# Type a query and return the cursor row once fzf has finished with it -- the
+# settle detection of tests/test_pick_order.sh's query(): the prompt shows the
+# query, then the cursor row reads the same on two consecutive looks.  The
+# assertions are about where the cursor LANDED, so "the keys were typed" is not
+# enough, and a fixed 2.5 s was a guess at "fzf is done".
+type_query() { # $1 = query
+  local i s cur="" prev=""
+  tmux -L "$SOCK" send-keys -t '=drv:' "$1"
+  for i in $(seq 1 100); do
+    s=$(screen) || s=""
+    [[ "${s%%$'\n'*}" == *"❯ $1"* ]] && break
+    sleep 0.1
+  done
+  for i in $(seq 1 100); do
+    cur=$(cursor_row) || cur=""
+    [ -n "$cur" ] && [ "$cur" = "$prev" ] && break
+    prev="$cur"
+    sleep 0.1
+  done
+}
 
 # --- the critical one ----------------------------------------------------------
 if open_navigator ""; then
@@ -79,8 +104,7 @@ else
 fi
 
 before=$(cursor_row)
-tmux -L "$SOCK" send-keys -t '=drv:' 'zzztarget'
-sleep 2.5
+type_query zzztarget
 after=$(cursor_row)
 
 case "$after" in
@@ -108,8 +132,7 @@ close_nav
 
 # --- raw off must still behave -------------------------------------------------
 if open_navigator "INTERDIMUX_RAW=off"; then
-  tmux -L "$SOCK" send-keys -t '=drv:' 'zzztarget'
-  sleep 2.5
+  type_query zzztarget
   after=$(cursor_row)
   case "$after" in
     *zzztarget*) report "with raw off, filtering still selects the match" pass ;;

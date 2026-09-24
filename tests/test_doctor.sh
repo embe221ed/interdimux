@@ -15,6 +15,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+# --doctor reports on the INSTALL, and a renderer forced from outside is not
+# part of one: under tests/run_all.sh's IMUX_RENDERER=bash the inherited
+# INTERDIMUX_USE_RUST=off would make every report warn "rust helper disabled"
+# and hide the helper checks below.  A case that wants a renderer pins it.
+unset INTERDIMUX_USE_RUST
 SOCK="interdimux-doctor-test-$$"
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-doctor.XXXXXX")"
 PASS=0
@@ -285,8 +290,12 @@ printf '%s\n%s\n' "$TMPD/d1" "$TMPD/d2" > "$XDG_DATA_HOME/interdimux/recent_dirs
 # BOTH renderers: the Rust core reads the limits from the environment itself, so
 # the bash guard is what keeps the two agreeing.  Testing only the Rust path
 # would miss the `[ -ge ]` failure entirely -- that lives in the bash fallback.
+# The loop pins each renderer in turn and then puts back what it INHERITED:
+# `unset` here flipped the rest of this suite to the Rust core under
+# IMUX_RENDERER=bash (tests/run_all.sh), silently.
+_use_rust_was="${INTERDIMUX_USE_RUST-<unset>}"
 for renderer in rust bash; do
-  [ "$renderer" = bash ] && export INTERDIMUX_USE_RUST=off || unset INTERDIMUX_USE_RUST
+  [ "$renderer" = bash ] && export INTERDIMUX_USE_RUST=off || export INTERDIMUX_USE_RUST=on
   for pair in "recent-limit:lots" "dirs-limit:many" "scan-depth:deep" "order:sideways"; do
     o="${pair%%:*}"; v="${pair#*:}"
     setopt "$o" "$v"
@@ -313,7 +322,8 @@ for renderer in rust bash; do
     unsetopt "$o"
   done
 done
-unset INTERDIMUX_USE_RUST
+if [ "$_use_rust_was" = '<unset>' ]; then unset INTERDIMUX_USE_RUST
+else export INTERDIMUX_USE_RUST="$_use_rust_was"; fi
 
 # --- the same, for the dirs picker path --------------------------------------------
 # scan-depth is only read here.  It is the quiet one: bash arithmetic reads a

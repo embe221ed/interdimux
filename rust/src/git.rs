@@ -40,7 +40,13 @@ impl GitCache {
             }
             let dot = d.join(".git");
             let head = if dot.is_dir() {
-                Some(dot.join("HEAD"))
+                // Only with a HEAD in it, as git's own discovery has it: an
+                // empty .git (a half-made clone, a stray `mkdir .git` inside a
+                // repository) is skipped and the walk goes on to the enclosing
+                // repository.  Taking it as the answer ended the walk with no
+                // badge at all, where the bash renderer found the parent's.
+                let h = dot.join("HEAD");
+                if h.is_file() { Some(h) } else { None }
             } else if dot.is_file() {
                 // "gitdir: <path>", possibly relative to d
                 let gd = fs::read_to_string(&dot).ok().and_then(|s| {
@@ -140,6 +146,38 @@ mod tests {
         fs::write(wt.join(".git"), format!("gitdir: {}\n", real.display())).unwrap();
         let mut g = GitCache::new();
         assert_eq!(g.branch(wt.to_str().unwrap()), "wt");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// An empty .git inside a repository is not a repository: the walk goes
+    /// on to the enclosing one, as git's discovery and the bash reader do.
+    #[test]
+    fn an_empty_dot_git_is_skipped_for_the_enclosing_repo() {
+        let d = tmpdir("emptydotgit");
+        fs::create_dir_all(d.join(".git")).unwrap();
+        fs::write(d.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let inner = d.join("inner");
+        fs::create_dir_all(inner.join(".git")).unwrap();
+        let mut g = GitCache::new();
+        assert_eq!(g.branch(inner.to_str().unwrap()), "main");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// Git writes HEAD with a trailing newline, but a HEAD or gitdir file
+    /// written without one (by a tool, by hand) is still valid to git.
+    #[test]
+    fn head_and_gitdir_files_without_a_trailing_newline_are_read() {
+        let d = tmpdir("nonl");
+        fs::create_dir_all(d.join("a/.git")).unwrap();
+        fs::write(d.join("a/.git/HEAD"), "ref: refs/heads/no-newline").unwrap();
+        let real = d.join("realgit");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("HEAD"), "ref: refs/heads/wt\r\n").unwrap();
+        fs::create_dir_all(d.join("wt")).unwrap();
+        fs::write(d.join("wt/.git"), format!("gitdir: {}", real.display())).unwrap();
+        let mut g = GitCache::new();
+        assert_eq!(g.branch(d.join("a").to_str().unwrap()), "no-newline");
+        assert_eq!(g.branch(d.join("wt").to_str().unwrap()), "wt", "CRLF HEAD, newline-less gitdir");
         fs::remove_dir_all(&d).ok();
     }
 
