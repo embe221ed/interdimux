@@ -7198,6 +7198,16 @@ while true; do
       #   * when a reload left the cursor on a row that no longer matches -- a
       #     kill slid a dimmed one under it -- the one reload after which the
       #     match set, not the row number, is what the user was on.
+      #     FZF_RAW=0 also means "past the end", though: a kill that removes
+      #     the LAST rows leaves the cursor one beyond the shorter list (fzf
+      #     clamps it only when it next draws), and read as a dimmed row that
+      #     sent it to row 1 -- kill your bottom pane, and the next ^x offered
+      #     the first session.  fzf exports FZF_CURRENT_ITEM only when the
+      #     cursor is ON a row (0.73+; raw needs 0.74), which tells the two
+      #     apart.  Past the end with no query every row matches, so fzf's own
+      #     clamp lands on the new last row, as it does with raw off; with a
+      #     query that row may be dimmed, so `best` still fires.  An inherited
+      #     FZF_CURRENT_ITEM (interdimux run from an fzf child) is dropped below.
       # Synchronous by necessity: a cursor move that lands late would undo the
       # user's own.  Degrades to the old unconditional `best` if the file cannot
       # be made.  No commas, no single quotes, no parentheses and no `${x}` that
@@ -7205,12 +7215,14 @@ while true; do
       # the fallback path inside `sh -c '...'` too.
       _res_pre=""
       if [ "$_raw_on" = 1 ]; then
+        unset FZF_CURRENT_ITEM
         _best_guard='f=$INTERDIMUX_QUERY_STATE; k="$FZF_NTH $FZF_QUERY"; t=${FZF_TOTAL_COUNT:-0}; b=;'
         _best_guard+=' { read -r n; IFS= read -r p; } 2>/dev/null < "$f";'
         _best_guard+=' [ "$n" -ge 0 ] 2>/dev/null || n=0;'
         _best_guard+=' [ "$p" = "$k" ] || b=1;'
         _best_guard+=' if [ "$t" -gt "$n" ]; then n=$t; [ -z "$FZF_QUERY" ] || b=1; fi;'
-        _best_guard+=' [ "${FZF_RAW:-1}" = 0 ] && [ "${FZF_MATCH_COUNT:-0}" -gt 0 ] && b=1;'
+        _best_guard+=' [ "${FZF_RAW:-1}" = 0 ] && [ "${FZF_MATCH_COUNT:-0}" -gt 0 ]'
+        _best_guard+=' && { [ -n "$FZF_CURRENT_ITEM" ] || [ -n "$FZF_QUERY" ]; } && b=1;'
         _best_guard+=' { printf "%s\n%s" "$n" "$k" > "$f"; } 2>/dev/null;'
         _best_guard+=' [ -z "$b" ] || echo best'
         if ! : > "$QUERY_STATE_FILE" 2>/dev/null; then

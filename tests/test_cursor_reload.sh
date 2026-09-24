@@ -11,8 +11,10 @@
 #
 # What must hold: a reload with the query unchanged leaves the cursor where it
 # was, with or without a query; a query change still lands on the best match;
-# and a reload that leaves the cursor on a row the query does not match (a kill
-# slid a dimmed one under it) moves it back onto a match.
+# a reload that leaves the cursor on a row the query does not match (a kill
+# slid a dimmed one under it) moves it back onto a match; and a reload that
+# drops the bottom rows, leaving the cursor past the end, lands it on the new
+# last row as raw off does -- or, under a query, on a match.
 #
 # Each reload is made observable by adding a session to the inner server first:
 # `result` actions run before fzf draws the new list, so once the new row is on
@@ -270,6 +272,97 @@ if launch "export PATH=$TMPD/shim:\$PATH INTERDIMUX_USE_RUST=off INTERDIMUX_USE_
   fi
 else
   report "typed ahead: the navigator opens with the bash renderer" fail
+fi
+
+# --- a kill at the BOTTOM of the list ------------------------------------------------
+# FZF_RAW=0 means "the cursor is on a dimmed row" -- and also "the cursor is past
+# the end": a reload that drops the LAST rows leaves it one beyond the shorter
+# list until fzf next draws.  Read as a dimmed row, that sent it to row 1 (with
+# an empty query `best` is the top), so killing your bottom pane made the next
+# ^x offer the first session.  With raw off fzf clamps it to the new last row,
+# and raw on must do the same -- except under a query, where that row may be a
+# dimmed one and the cursor still belongs on a match.
+#
+# The rows are removed from outside and ^r reloads: the same shortened
+# reload-sync a confirmed ^x ends in, without racing the dialog, which drains
+# typeahead after it draws (a `y` sent the moment it appears can be swallowed).
+# Two sessions at the bottom (index order: zzpane < zzzk): zzpane has two
+# panes, so its last row is a pane row; zzzk is the only session besides
+# cuckoo with a `k` in it.
+cur_row() { { screen | grep -m1 '▌' || true; } | sed 's/  */ /g'; }
+# One Down at a time, each waited for until the row changes: a Down sent before
+# the previous one was drawn would carry the cursor past the target, and with
+# --cycle on round to the top.
+move_to_row() { # $1 = fixed string the current row must contain
+  local i j prev
+  for i in $(seq 1 40); do
+    prev=$(cur_row)
+    [[ "$prev" == *"$1"* ]] && return 0
+    keys Down
+    for j in $(seq 1 50); do [ "$(cur_row)" != "$prev" ] && break; sleep 0.05; done
+  done
+  return 1
+}
+wait_row() { # $1 = fixed string: poll until the current row contains it
+  local i
+  for i in $(seq 1 50); do
+    [[ "$(cur_row)" == *"$1"* ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+tmux -L "$SOCK" new-session -d -s zzpane -x 120 -y 30 -c "$TMPD/cwd" 'sleep 3600'
+tmux -L "$SOCK" split-window -d -t '=zzpane:0' -c "$TMPD/cwd" 'sleep 3601'
+tmux -L "$SOCK" new-session -d -s zzzk -x 120 -y 30 -c "$TMPD/cwd" 'sleep 3600'
+# FZF_CURRENT_ITEM is what tells "past the end" apart, and fzf passes its own
+# environment through: one left over from an fzf that launched this (a picker's
+# execute, say) would read as "on a row" every time.  So it is set here.
+if launch "export FZF_CURRENT_ITEM='left over from a parent fzf'"; then
+  # Under a query first: `k` matches cuckoo and zzzk only, so removing zzzk
+  # leaves zzpane's (dimmed) pane row as the new last row.
+  keys k
+  wait_row cuckoo || true   # the query's own `best`, before any Down
+  if move_to_row '└─ zzzk 0:'; then
+    tmux -L "$SOCK" kill-session -t '=zzzk'
+    keys C-r
+    wait_text "zzzk" absent || true
+    got=$(cur_row)
+    case "$got" in
+      *cuckoo*) report "under a query, dropping the bottom rows puts the cursor on a match, not a dimmed row" pass ;;
+      *) report "under a query, dropping the bottom rows puts the cursor on a match, not a dimmed row" fail
+         ERRORS+="    cursor on: $got"$'\n' ;;
+    esac
+  else
+    report "the cursor reaches zzzk's window row under the query k" fail
+  fi
+
+  # Then with an empty query: the bottom row is zzpane's second pane.
+  keys C-u
+  wait_row '▸ alpha' || true
+  if move_to_row '└╴ zzpane 0.1'; then
+    tmux -L "$SOCK" kill-pane -t '=zzpane:0.1'
+    keys C-r
+    wait_text "zzpane 0.1" absent || true
+    got=$(cur_row)
+    case "$got" in
+      *'└─ zzpane 0:'*) report "dropping the bottom pane leaves the cursor on the new last row" pass ;;
+      *) report "dropping the bottom pane leaves the cursor on the new last row" fail
+         ERRORS+="    cursor on: $got"$'\n' ;;
+    esac
+    # The dialog is the oracle that matters: it names fzf's current item.
+    keys C-x
+    if wait_text "Kill window 'zzpane:0'"; then
+      report "...so the next ^x offers that row, not the first session" pass
+    else
+      report "...so the next ^x offers that row, not the first session" fail
+      ERRORS+="    dialog: $(screen | grep -o "Kill [a-z]* '[^']*'" | head -1)"$'\n'
+    fi
+    keys n
+  else
+    report "the cursor reaches zzpane's second pane row" fail
+  fi
+else
+  report "the navigator opens for the bottom-kill cases" fail
 fi
 
 echo
