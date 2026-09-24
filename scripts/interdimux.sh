@@ -1573,6 +1573,26 @@ format_command() {
     fi
   fi
 
+  # An idle shell — the shell and nothing but its options: `-zsh`, `/bin/bash`,
+  # `bash --norc -i`.  Its bare name, in the tree colour, so the rows doing real
+  # work are the ones in the accent (IDEAS #10).  A shell running something
+  # (`bash build.sh`, `sh -c …`) is real work and falls through.
+  if [[ "$cmd_base" =~ $SHELLS_PATTERN ]]; then
+    local args="${cmd_str#* }" word idle=1
+    [ "$args" = "$cmd_str" ] && args=""
+    for word in $args; do
+      case "$word" in
+        -*) ;;
+        *)  idle=0; break ;;
+      esac
+    done
+    if [ "$idle" = 1 ]; then
+      [[ "$old_set" != *f* ]] && set +f
+      printf -v REPLY '%s%s%s' "$DIM_TREE" "${cmd_base#-}" "$RST"
+      return
+    fi
+  fi
+
   [[ "$old_set" != *f* ]] && set +f
 
   # Everything else, with argv0 by its basename: `/usr/bin/python3 -c …` spent

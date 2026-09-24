@@ -1,7 +1,7 @@
 //! Smart command formatting: highlight the ssh host, or the file an editor has
-//! open; show argv0 (and an interpreter's script) by its basename.  A faithful
-//! port of bash `format_command`, including its flag-skipping tables and its
-//! "last positional wins" behaviour.
+//! open; dim an idle shell; show argv0 (and an interpreter's script) by its
+//! basename.  A faithful port of bash `format_command`, including its
+//! flag-skipping tables and its "last positional wins" behaviour.
 
 use crate::palette::{Palette, RST};
 use crate::proc::is_shell;
@@ -102,6 +102,15 @@ pub fn format_command(cmd: &str, p: &Palette) -> (String, String) {
         }
     }
 
+    // An idle shell — the shell and nothing but its options: `-zsh`,
+    // `/bin/bash`, `bash --norc -i`.  Its bare name, in the tree colour, so the
+    // rows doing real work are the ones in the accent (IDEAS #10).  A shell
+    // running something (`bash build.sh`, `sh -c …`) is real work.
+    if is_shell(base) && args.iter().all(|w| w.starts_with('-')) {
+        let name = base.strip_prefix('-').unwrap_or(base);
+        return (format!("{}{}{}", p.dim_tree, name, RST), name.to_string());
+    }
+
     // Everything else, with argv0 by its basename: `/usr/bin/python3 -c …`
     // spent nine of the column's cells on `/usr/bin/`.  An argv0 ending in '/'
     // has no basename and keeps the whole word.  An interpreter running a
@@ -164,10 +173,42 @@ mod tests {
     #[test]
     fn a_bare_command_passes_through() {
         assert_eq!(plain("cargo watch -x run"), "cargo watch -x run");
-        assert_eq!(plain("-zsh"), "-zsh");
         assert_eq!(plain(""), "");
         // spacing after argv0 is the command's own, and kept
         assert_eq!(plain("a  b"), "a  b");
+    }
+
+    // --- idle shells (IDEAS #10) ---------------------------------------------
+
+    #[test]
+    fn an_idle_shell_is_its_bare_name_in_the_tree_colour() {
+        let p = pal();
+        for (cmd, name) in [
+            ("-zsh", "zsh"),
+            ("zsh", "zsh"),
+            ("/bin/bash", "bash"),
+            ("-/bin/bash", "bash"),
+            ("bash --norc --noprofile -i", "bash"),
+            ("-login", "login"),
+        ] {
+            let (rendered, text) = format_command(cmd, &p);
+            assert_eq!(text, name, "{:?}", cmd);
+            assert_eq!(rendered, format!("{}{}{}", p.dim_tree, name, RST), "{:?}", cmd);
+            assert!(!rendered.contains(p.dim_cmd.as_str()), "{:?} kept the accent", cmd);
+        }
+    }
+
+    #[test]
+    fn a_shell_doing_work_keeps_the_accent() {
+        let p = pal();
+        for cmd in ["bash build.sh", "sh -c make", "zsh -c exit"] {
+            let (rendered, text) = format_command(cmd, &p);
+            assert!(rendered.starts_with(p.dim_cmd.as_str()), "{:?}: {:?}", cmd, rendered);
+            assert_eq!(text, cmd);
+        }
+        // the tree colour and the accent must really differ for the test above
+        // to mean anything
+        assert_ne!(p.dim_tree, p.dim_cmd);
     }
 
     // --- argv0 and scripts by their basename -------------------------------

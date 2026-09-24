@@ -9,6 +9,10 @@
 #                    `/usr/bin/`; argv0 is shown by its basename.  A script run
 #                    through its shebang reads `sh tool.sh`, not
 #                    `/bin/sh /tmp/…/tool.sh` (review UX-02).
+#   idle shells      a shell with nothing but options (`-zsh`, `/bin/bash`,
+#                    `bash --norc -i`) is its bare name in the TREE colour, so
+#                    the rows doing real work are the ones in the accent; a
+#                    shell running something keeps the accent (review UX-01).
 #
 # Assertions are on the exact bytes of the field, colours included, against
 # escapes written out here from the SGR spec for two deliberately unusual
@@ -51,6 +55,7 @@ echo
 
 # 208 and 66 appear nowhere else in a row, so a match can only be the command.
 ACCENT=$'\033[38;5;208m'
+TREE=$'\033[38;5;66m'
 RST=$'\033[0m'
 export INTERDIMUX_COLOR_ACCENT=208 INTERDIMUX_COLOR_TREE=66
 
@@ -74,7 +79,16 @@ CRAFTED=(
   "notinterp|/usr/bin/pythonx|cat '$FIFO'|$FIFO"
   "optslash|perl|grep '-f$FIFO'|-f$FIFO"
   "dirarg|ruby|find '$TMPD/' -maxdepth 0 -exec cat '$FIFO' ';'|$TMPD/ -maxdepth 0 -exec cat $FIFO ;"
+  "loginsh|-zsh|cat|"
+  "pathsh|/bin/bash|cat|"
+  "optsh|-bash|cat -u|-u"
+  "worksh|bash|cat '$FIFO'|$FIFO"
 )
+# A real interactive shell with only options, one busy with a foreground job.
+tmux_cmd new-window -d -t '=t:' -n idle -c "$TMPD" 'exec bash --norc --noprofile -i'
+tmux_cmd new-window -d -t '=t:' -n busy -c "$TMPD" 'exec bash --norc --noprofile -i'
+tmux_cmd send-keys -t '=t:busy' 'sleep 997' Enter
+
 for _row in "${CRAFTED[@]}"; do
   IFS='|' read -r _name _argv0 _prog _ <<< "$_row"
   printf '#!/usr/bin/env bash\nexec -a %q %s\n' "$_argv0" "$_prog" > "$TMPD/launch_$_name"
@@ -95,14 +109,22 @@ argv_of() {  # window name -> argv of its pane process
   pid=$(tmux -L "$SOCK" display-message -p -t "=t:$1" '#{pane_pid}')
   ps -o args= -p "$pid" 2>/dev/null || :
 }
+children_of() {  # window name -> argv of each direct child of its pane process
+  local pid
+  pid=$(tmux -L "$SOCK" display-message -p -t "=t:$1" '#{pane_pid}')
+  ps -eo ppid=,args= | awk -v p="$pid" '$1 == p { $1 = ""; sub(/^ /, ""); print }'
+}
 settled() {
   local row name argv0 args
   [ "$(argv_of abs)" = "$SLEEP_BIN 998" ] || return 1
   case "$(argv_of script)" in */sh\ "$TMPD/tool.sh") ;; *) return 1 ;; esac
   for row in "${CRAFTED[@]}"; do
     IFS='|' read -r name argv0 _ args <<< "$row"
-    [ "$(argv_of "$name")" = "$argv0 $args" ] || return 1
+    [ "$(argv_of "$name")" = "$argv0${args:+ $args}" ] || return 1
   done
+  [ "$(argv_of idle)" = "bash --norc --noprofile -i" ] || return 1
+  [ -z "$(children_of idle)" ] || return 1
+  [ "$(children_of busy)" = "sleep 997" ] || return 1
 }
 for _i in $(seq 1 200); do settled && break; sleep 0.1; done
 settled || echo "  (warning: panes did not settle)" >&2
@@ -148,6 +170,28 @@ for cfg in "$first:" "bash renderer:INTERDIMUX_USE_RUST=off"; do
     "$(cmd_in "$out" optslash)" "${ACCENT}perl -f$FIFO${RST}"
   expect "$label: a first argument with no basename is kept whole" \
     "$(cmd_in "$out" dirarg)" "${ACCENT}ruby $TMPD/ -maxdepth 0 -exec cat $FIFO ;${RST}"
+
+  # --- idle shells in the tree colour (UX-01) ----------------------------------
+  expect "$label: a login shell is its bare name, dimmed" \
+    "$(cmd_in "$out" loginsh)" "${TREE}zsh${RST}"
+  expect "$label: a path-qualified shell is its bare name, dimmed" \
+    "$(cmd_in "$out" pathsh)" "${TREE}bash${RST}"
+  expect "$label: a shell with only options is still idle" \
+    "$(cmd_in "$out" optsh)" "${TREE}bash${RST}"
+  expect "$label: an interactive shell at its prompt is dimmed" \
+    "$(cmd_in "$out" idle)" "${TREE}bash${RST}"
+  expect "$label: the command a shell is running keeps the accent" \
+    "$(cmd_in "$out" busy)" "${ACCENT}sleep 997${RST}"
+  expect "$label: a shell running a script keeps the accent" \
+    "$(cmd_in "$out" worksh)" "${ACCENT}bash in.fifo${RST}"
+
+  # tmux's own short name, when full-command resolution is off
+  # shellcheck disable=SC2086
+  out=$(env ${cfg#*:} INTERDIMUX_SHOW_FULL_COMMAND=off bash "$SCRIPT" --list 2>/dev/null)
+  expect "$label, full command off: tmux's short name for a shell is dimmed" \
+    "$(cmd_in "$out" idle)" "${TREE}bash${RST}"
+  expect "$label, full command off: a running command keeps the accent" \
+    "$(cmd_in "$out" busy)" "${ACCENT}sleep${RST}"
 done
 
 echo
