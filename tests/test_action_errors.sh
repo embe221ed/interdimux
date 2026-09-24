@@ -47,8 +47,8 @@ export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
 # call truncates a plain file and only the last survives.  Render into a REAL
 # pane instead and read the screen — which is also what the user actually sees.
 run_rename()    { run_rename_on 'one' "$1"; }
-run_rename_on() { # $1 = session, $2 = new name -> prints the rendered screen
-  local sess="$1" newname="$2" in="$TMPD/in"
+run_rename_on() { # $1 = session, $2 = new name [, $3 = text to wait for] -> the rendered screen
+  local sess="$1" newname="$2" until="${3:-╭}" in="$TMPD/in"
   printf '\025%s\n' "$newname" > "$in"     # ^U then the name then Enter
   tmux -L "$SOCK" kill-window -t "=$sess:dlg" 2>/dev/null || true
   local wid
@@ -60,17 +60,21 @@ run_rename_on() { # $1 = session, $2 = new name -> prints the rendered screen
   # under load a fixed sleep samples an empty screen and the assertion fails for
   # the wrong reason.  Capture by WINDOW ID, not session:name: a successful
   # rename changes the session name out from under us mid-flight.
+  # Wait for the text the caller's assertion is about, not just for a frame:
+  # the rename dialog's frame is drawn before the input is consumed, and the
+  # refusal or tmux's reason comes in a later frame, so under load a capture
+  # taken at the first '╭' is the input dialog, not the answer.
   local i out=""
-  for i in $(seq 1 60); do
+  for i in $(seq 1 100); do
     out=$(tmux -L "$SOCK" capture-pane -t "$wid" -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r' || true)
-    printf '%s' "$out" | grep -q '╭' && break
+    printf '%s' "$out" | grep -q -- "$until" && break
     sleep 0.1
   done
   printf '%s' "$out"
 }
 
 # --- #23: the real reason, not a generic failure -------------------------------
-out=$(run_rename 'two')
+out=$(run_rename_on 'one' 'two' 'duplicate session')
 if printf '%s' "$out" | grep -q 'duplicate session'; then
   report "a rejected rename shows tmux's own reason" pass
 else
@@ -90,7 +94,9 @@ else
 fi
 
 # --- a rename that should succeed ----------------------------------------------
-out=$(run_rename 'renamed-ok')
+run_rename 'renamed-ok' >/dev/null
+# The rename lands after the dialog has consumed its input: poll for it.
+for _i in $(seq 1 100); do tmux -L "$SOCK" has-session -t '=renamed-ok' 2>/dev/null && break; sleep 0.1; done
 if tmux -L "$SOCK" has-session -t '=renamed-ok' 2>/dev/null; then
   report "a valid rename still works" pass
 else
@@ -166,7 +172,7 @@ tmux -L "$SOCK" list-sessions -F '#{session_name}' | grep -qxF -- '-dash-s' \
 # empty and the assertion fail for the wrong reason.
 tmux -L "$SOCK" new-session -d -s colonsrc -x 100 -y 30
 for _i in $(seq 1 50); do tmux -L "$SOCK" has-session -t '=colonsrc' 2>/dev/null && break; sleep 0.1; done
-out=$(run_rename_on 'colonsrc' 'no:good')
+out=$(run_rename_on 'colonsrc' 'no:good' 'cannot contain')
 if printf '%s' "$out" | grep -q "cannot contain"; then
   report "a rename to a name containing ':' is refused with a reason" pass
 else
@@ -269,15 +275,17 @@ tmux -L "$SOCK" new-window -d -t '=vanishing:' -n doomed
 for _i in $(seq 1 50); do tmux -L "$SOCK" has-session -t '=vanishing' 2>/dev/null && break; sleep 0.1; done
 tmux -L "$SOCK" kill-session -t '=vanishing'
 
-run_on_gone() { # $1 = action, $2 = spec -> the rendered screen
-  local act="$1" gspec="$2" i out=""
+run_on_gone() { # $1 = action, $2 = spec [, $3 = text to wait for] -> the rendered screen
+  local act="$1" gspec="$2" until="${3:-╭}" i out=""
   tmux -L "$SOCK" kill-window -t '=colonsrc:gone' 2>/dev/null || true
   tmux -L "$SOCK" new-window -d -t '=colonsrc:' -n gone \
     "env INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
          TMUX_PANE='$TMUX_PANE' bash '$SCRIPT' --action $act \"$gspec\"; sleep 5"
-  for i in $(seq 1 60); do
+  # As in run_rename_on: wait for what the assertion reads (the frame is drawn
+  # before its text), with a bound, and hand back the last capture either way.
+  for i in $(seq 1 100); do
     out=$(tmux -L "$SOCK" capture-pane -t '=colonsrc:gone' -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
-    printf '%s' "$out" | grep -q '╭' && break
+    printf '%s' "$out" | grep -q -- "$until" && break
     sleep 0.1
   done
   printf '%s' "$out"
@@ -285,7 +293,7 @@ run_on_gone() { # $1 = action, $2 = spec -> the rendered screen
 
 for pair in "kill:S:vanishing" "rename:W:vanishing:1" "send:P:vanishing:1:0"; do
   act="${pair%%:*}"; gspec="${pair#*:}"
-  out=$(run_on_gone "$act" "$gspec")
+  out=$(run_on_gone "$act" "$gspec" 'no longer exists')
   if printf '%s\n' "$out" | grep -q 'no longer exists'; then
     report "$act on a vanished $gspec says so instead of prompting" pass
   else
@@ -297,7 +305,7 @@ done
 # the case dlg_fit used to get wrong: it reserved a column for the ellipsis
 # before checking whether anything needed cutting, so a line that fitted exactly
 # lost its last character to a "…" that bought nothing.
-out=$(run_on_gone kill 'S:vanishing')
+out=$(run_on_gone kill 'S:vanishing' 'reload')
 if printf '%s\n' "$out" | grep -q 'press \^r to reload\.'; then
   report "a dialog line that fits exactly is not ellipsised" pass
 else
@@ -306,7 +314,7 @@ else
 fi
 
 # ...and it must NOT fire for a target that is still there
-out=$(run_on_gone kill 'S:colonsrc')
+out=$(run_on_gone kill 'S:colonsrc' 'Kill ')
 if printf '%s\n' "$out" | grep -q 'no longer exists'; then
   report "a live target is not reported as gone" fail
 else
