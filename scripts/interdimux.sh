@@ -2531,7 +2531,14 @@ build_ctx_field() {
   local disp gbranch fl fn
   fld_reset
   disp="${path/#$HOME/\~}"
-  disp="${disp//$'\t'/ }"   # tabs are the field delimiter
+  # Sanitised, not just de-tabbed: a cwd is arbitrary bytes.  An ESC reached
+  # the popup as a live escape sequence, and ${#disp} counted the bytes the
+  # terminal then swallowed, so the padding came out short and the command
+  # column shifted; a CR redrew the row over itself.  The Rust core's rules
+  # (render.rs ctx_field -> proc::sanitize): newline to a space, every other
+  # control byte -- TAB, the field delimiter, included -- to '?'.  Guarded, so
+  # a clean path costs one pattern test.
+  sanitize_args "$disp"; disp="$REPLY"
   trim_path "$disp" "$PATH_W"; disp="$REPLY"
   fld_add "${SEP} " 2
   fld_add "${DIM_PATH}${disp}${RST}" "${#disp}"
@@ -2547,6 +2554,10 @@ build_ctx_field() {
   fi
   if [ "$BADGE_W" -gt 0 ]; then
     get_git_branch "$path"; gbranch="$REPLY"
+    # .git/HEAD is a file anyone can write: a TAB in the ref name made a
+    # FIVE-field row, breaking the contract --delimiter/--with-nth/--nth all
+    # rest on.  Same rules as the path above.
+    sanitize_args "$gbranch"; gbranch="$REPLY"
     if [ -n "$gbranch" ]; then
       # " ‹" + branch + "›" in BADGE_W + 1 cells: the same budget on every
       # row, whatever flags the row carries.
