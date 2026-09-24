@@ -402,13 +402,13 @@ fn identity_columns_all_have_equal_display_width() {
 /// directory. The binary must REFUSE rather than render a mis-framed list.
 #[test]
 fn a_stray_record_separator_is_rejected_not_misparsed() {
-    let good = "1700000000\u{1f}s\u{1f}1\u{1f}\n\u{1e}\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let good = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
     let (code, out) = try_render(good);
     assert_eq!(code, Some(0), "the well-formed control case must render");
     assert!(!out.is_empty());
 
     // the same dump with an extra RS, as a cwd containing \x1e would produce
-    let bad = "1700000000\u{1f}s\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/we\u{1e}ird\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let bad = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/we\u{1e}ird\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
     let (code, out) = try_render(bad);
     assert_eq!(code, Some(3), "a stray RS must be rejected, not rendered");
     assert!(out.is_empty(), "a rejected input must print nothing");
@@ -419,7 +419,7 @@ fn a_stray_record_separator_is_rejected_not_misparsed() {
 #[test]
 fn a_stray_unit_separator_drops_the_row_rather_than_shifting_fields() {
     // 10 fields where 9 are expected, because the path contains one US
-    let bad = "1700000000\u{1f}s\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/x\u{1f}1\u{1f}1\u{1f}4242\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let bad = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/x\u{1f}1\u{1f}1\u{1f}4242\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
     let (code, out) = try_render(bad);
     assert_eq!(code, Some(0));
     // the session row survives; the malformed window row is dropped, not
@@ -435,7 +435,7 @@ fn a_stray_unit_separator_drops_the_row_rather_than_shifting_fields() {
 /// escape sequence into the popup and silently broke the column maths.
 #[test]
 fn control_bytes_in_a_path_are_neutralised() {
-    let dump = "1700000000\u{1f}s\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/e\u{1b}[31mvil\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let dump = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/e\u{1b}[31mvil\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
     let (code, out) = try_render(dump);
     assert_eq!(code, Some(0));
     // the only ESCs left must be our own SGR colours, never one from the path

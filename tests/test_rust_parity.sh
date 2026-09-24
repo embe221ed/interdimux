@@ -179,8 +179,13 @@ done
 # 31 assertions instead of 36, exit 0, with the `-s` also removed).  This one
 # assertion cannot be skipped, and it covers BOTH sort sites — the kill-fallback
 # MRU hop is not reachable from any case below.
-unstable=$(grep -n "sort .*-k1,1nr" "$SCRIPT" | grep -v 'sort -s' || true)
-if [ -z "$unstable" ]; then
+# (Any numeric-reverse key, not `-k1,1nr` literally: the timestamp became field
+# 2 when the session name moved to the front, and a pattern pinned to the old
+# key would have matched nothing -- and passed -- from then on.  So the count
+# of sort sites is asserted too.)
+unstable=$(grep -nE "sort .*-k[0-9]+,[0-9]+nr" "$SCRIPT" | grep -v 'sort -s' || true)
+mru_sorts=$(grep -cE "sort .*-k[0-9]+,[0-9]+nr" "$SCRIPT" || true)
+if [ -z "$unstable" ] && [ "$mru_sorts" -ge 2 ]; then
   report "every MRU sort is stable (-s), including the kill-fallback hop" pass
 else
   report "every MRU sort is stable (-s), including the kill-fallback hop" fail

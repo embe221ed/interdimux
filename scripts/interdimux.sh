@@ -1700,7 +1700,7 @@ MAX_SESS=0 MAX_WIN=0 MAX_PATH=0
 measure_widths() {
   MAX_SESS=0 MAX_WIN=0 MAX_PATH=0
   local _sla sname _sw _sa _sn widx wname _wa _wc wpath _rest _pi _pa _pc ppath _pr il dp
-  while IFS="$US" read -r _sla sname _sw _sa; do
+  while IFS="$US" read -r sname _sla _sw _sa; do
     [ -z "$sname" ] && continue
     (( ${#sname} > MAX_SESS )) && MAX_SESS=${#sname}
   done <<< "$sessions_raw"
@@ -1972,8 +1972,17 @@ gather_targets() {
   # resolves commands itself now — from /proc on Linux, from its own ps snapshot
   # everywhere else — so when the binary is present bash never forks ps at all.
 
+  # tmux gives each line of a list-* a 100 ms wall-clock budget and, when the
+  # server is descheduled for that long in the middle of one, returns the line
+  # CUT at the next '#{' (format.c, FORMAT_TIME_LIMIT) -- `s^_0^_zsh^_1^_zsh^_`,
+  # with no error.  Rare (it takes a starved server), transient (the next reload
+  # is whole), and both renderers keep such a line rather than drop the row; see
+  # the window and pane grouping below.  For the SESSION line that means the name
+  # has to come FIRST: behind the timestamp, a cut line had no name at all, and
+  # the session vanished along with every window and pane under it (shifting
+  # --jump N onto the wrong session).
   local _sfmt _wfmt _pfmt _curfmt
-  _sfmt="#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}${US}#{session_windows}${US}#{?session_attached,attached,}"
+  _sfmt="#{session_name}${US}#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_windows}${US}#{?session_attached,attached,}"
   _wfmt="#{session_name}${US}#{window_index}${US}#{window_name}${US}#{window_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_panes}${US}#{pane_pid}${US}#{window_zoomed_flag}#{window_bell_flag}#{window_activity_flag}"
   _pfmt="#{session_name}${US}#{window_index}${US}#{pane_index}${US}#{pane_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{pane_pid}${US}#{window_panes}"
   _curfmt="#S${US}#I${US}#P"
@@ -2058,7 +2067,7 @@ gather_targets() {
     local _hp _hname _hkeep _hout=""
     while IFS= read -r _hline; do
       [ -n "$_hline" ] || continue
-      _hname="${_hline#*"$US"}"; _hname="${_hname%%"$US"*}"
+      _hname="${_hline%%"$US"*}"
       _hkeep=1
       if [ "$_hname" != "$current_session" ]; then
         for _hp in $HIDE_PATTERNS; do
@@ -2070,7 +2079,7 @@ gather_targets() {
     done <<< "$sessions_raw"
     sessions_raw="${_hout%$'\n'}"
 
-    # windows and panes carry the session name in field 1
+    # windows and panes carry the session name in field 1 too
     _hout=""
     while IFS= read -r _hline; do
       [ -n "$_hline" ] || continue
@@ -2169,10 +2178,6 @@ IMUX_SECTIONS
   # elsewhere it is the one ps fork, paid only when there is no working binary.
   [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
 
-  # Size the columns to the content we just fetched (fork-free).
-  measure_widths
-  compute_widths
-
   # MRU ordering: most recently attended sessions first (last-attached,
   # falling back to activity for never-attached sessions); the current
   # session moves to the END so the top row is the previous session —
@@ -2187,7 +2192,7 @@ IMUX_SECTIONS
     # ties; bash re-ordered them by locale, and the two renderers listed sessions
     # differently for the same server.
     #
-    # (`-k1,1nr` itself is only incidentally locale-safe: `sort -n` DOES read the
+    # (`-k2,2nr` itself is only incidentally locale-safe: `sort -n` DOES read the
     # locale's thousands separator, so `1,785` sorts differently under en_US than
     # under C.  It cannot bite here because the key is bare epoch digits — but it
     # would the moment that field grew a separator or a fraction.)
@@ -2197,11 +2202,14 @@ IMUX_SECTIONS
     # Under C.UTF-8 they do not, which is why 20 of 30 parity cases failed on a
     # normal desktop and every one of them passed here.  -s disables the
     # last-resort comparison outright, so the order is stable AND locale-free.
-    sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k1,1nr)
+    #
+    # The key is field 2 since the name moved to the front (see _sfmt).  A line
+    # tmux cut before its timestamp has an empty key, which sorts as 0 -- last,
+    # for this one paint -- exactly as the Rust core's unwrap_or(0) does.
+    sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr)
     while IFS= read -r line; do
       [ -z "$line" ] && continue
-      sn_check="${line#*"$US"}"
-      sn_check="${sn_check%%"$US"*}"
+      sn_check="${line%%"$US"*}"
       if [ "$sn_check" = "$current_session" ]; then
         current_line="$line"
       else
@@ -2217,33 +2225,69 @@ IMUX_SECTIONS
   declare -A SESSION_DIRS=()
 
   # Build lookup: windows grouped by session name
+  #
+  # A line tmux cut short (see _sfmt) still names its window, so it is KEPT --
+  # dropping it lost the window and every pane under it -- but only while what
+  # is left is plausibly a window: session, a numeric index, and window_active
+  # as 0 or 1.  That is what tells a cut line from the other short line there
+  # is, the second half of a line split by a newline in a pane's cwd
+  # (`<path tail>^_<panes>^_<pid>^_<flags>`), whose 4th field is the 3-digit
+  # flags.  Filtered HERE rather than in the render loop, which needs the final
+  # count up front to draw the last branch as └─.  The same rules as
+  # rust/src/main.rs; a full line (flags present) is not second-guessed.
   declare -A windows_by_session=()
-  while IFS= read -r line; do
-    local sn="${line%%"$US"*}"
-    if [[ -v "windows_by_session[$sn]" ]]; then
-      windows_by_session["$sn"]+=$'\n'"$line"
+  local _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9 _kept=""
+  while IFS="$US" read -r _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9; do
+    [ -n "$_w1" ] || continue
+    if [ -z "$_w9" ]; then
+      case "$_w2" in ''|*[!0-9]*) continue ;; esac
+      case "$_w4" in 0|1) ;; *) continue ;; esac
+    fi
+    line="$_w1$US$_w2$US$_w3$US$_w4$US$_w5$US$_w6$US$_w7$US$_w8$US$_w9"
+    _kept+="$line"$'\n'
+    if [[ -v "windows_by_session[$_w1]" ]]; then
+      windows_by_session["$_w1"]+=$'\n'"$line"
     else
-      windows_by_session["$sn"]="$line"
+      windows_by_session["$_w1"]="$line"
     fi
   done <<< "$all_windows_raw"
+  all_windows_raw="${_kept%$'\n'}"   # what measure_widths sizes: only what renders
 
-  # Build lookup: panes grouped by "session\x1fwindow_index"
+  # Build lookup: panes grouped by "session\x1fwindow_index".  A cut pane line
+  # is kept on the same terms as a window line: numeric window AND pane index,
+  # pane_active 0 or 1 (a newline in a cwd leaves `<tail>^_<pid>^_<panes>`).
   declare -A panes_by_window=()
-  while IFS="$US" read -r sn widx rest; do
-    local key="${sn}${US}${widx}"
+  local sn _p3 _p4 _p5 _p6 _p7 _p8
+  _kept=""
+  while IFS="$US" read -r sn widx _p3 _p4 _p5 _p6 _p7 _p8; do
+    [ -n "$sn" ] || continue
+    if [ -z "$_p8" ]; then
+      case "$widx" in ''|*[!0-9]*) continue ;; esac
+      case "$_p3" in ''|*[!0-9]*) continue ;; esac
+      case "$_p4" in 0|1) ;; *) continue ;; esac
+    fi
+    local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8"
+    _kept+="$key$US$rest"$'\n'
     if [[ -v "panes_by_window[$key]" ]]; then
       panes_by_window["$key"]+=$'\n'"$rest"
     else
       panes_by_window["$key"]="$rest"
     fi
   done <<< "$all_panes_raw"
+  all_panes_raw="${_kept%$'\n'}"
+
+  # Size the columns to the content we just fetched (fork-free) -- AFTER the
+  # grouping above, so a line it refused cannot widen a column, exactly as the
+  # Rust core measures only the rows it parsed.
+  measure_widths
+  compute_widths
 
   local sla sname swins sattach marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
   local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
 
-  while IFS="$US" read -r sla sname swins sattach; do
+  while IFS="$US" read -r sname sla swins sattach; do
     [ -z "$sname" ] && continue
     marker=" "
     [ "$sname" = "$current_session" ] && marker="${MARKER_COLOR}*${RST}"
@@ -2319,6 +2363,14 @@ IMUX_SECTIONS
 
     wi=0
     while IFS="$US" read -r _sn widx wname _wact wcmd wpath wpanes wpid wflags; do
+      # A line tmux cut short (no flags -- see the grouping above) lost its
+      # pane count and pid.  The pid is NEVER read from such a line: it is the
+      # one field that reaches /proc, and a newline-split fragment can put any
+      # number there.  One pane and no pid, for this one paint.
+      if [ -z "$wflags" ]; then
+        wpanes=1 wpid=0
+      fi
+      case "$wpanes" in ''|*[!0-9]*) wpanes=1 ;; esac
       wi=$((wi + 1))
       branch_glyph='├─'
       cont='│'
@@ -2364,6 +2416,7 @@ IMUX_SECTIONS
         pi=0
 
         while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2; do
+          [ -n "$_wp2" ] || ppid=0   # cut short: never read its pid (see above)
           pi=$((pi + 1))
           pglyph='├╴'
           [ "$pi" -eq "$pane_count" ] && pglyph='└╴'
@@ -2464,6 +2517,8 @@ if [ "${1:-}" = "--preview" ]; then
       tmux list-windows -t "=$SPEC_SESSION" \
         -F "#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}" 2>/dev/null | \
       while IFS="$US" read -r wid wcmd wpath wact wpanes; do
+        # a line tmux cut short (see gather_targets) has no pane count
+        case "$wpanes" in ''|*[!0-9]*) wpanes=1 ;; esac
         marker=" "
         [ "$wact" = "1" ] && marker="${MARKER_COLOR}*${RST}"
         wpath="${wpath/#$HOME/\~}"
@@ -3775,9 +3830,11 @@ if [ "${1:-}" = "--action" ]; then
             # detach-on-destroy), ejecting the user from tmux even when
             # other sessions exist — hop them to the next MRU session
             # first so the stay-open kill workflow survives.
-            fallback=$(tmux list-sessions -F "#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}" 2>/dev/null \
-              | sort -s -t "$US" -k1,1nr | cut -d "$US" -f2- \
-              | grep -vxF -- "$SPEC_SESSION" | head -1)
+            # Name FIRST, as in gather_targets' _sfmt: a line tmux cuts at its
+            # per-line time budget keeps the name, and an empty one is skipped.
+            fallback=$(tmux list-sessions -F "#{session_name}${US}#{?session_last_attached,#{session_last_attached},#{session_activity}}" 2>/dev/null \
+              | sort -s -t "$US" -k2,2nr | cut -d "$US" -f1 \
+              | grep -vxF -e "$SPEC_SESSION" -e '' | head -1)
             if [ -n "$fallback" ]; then
               while IFS= read -r c; do
                 [ -n "$c" ] && tmux switch-client -c "$c" -t "=${fallback}:" 2>/dev/null
