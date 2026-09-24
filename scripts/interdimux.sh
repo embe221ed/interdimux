@@ -614,8 +614,19 @@ tmux_color() {
 # safe on a light terminal too: every colour Dark256 and Light256 disagree on is
 # one this string sets, and the rest are the terminal's own fg/bg.  It parses on
 # every fzf this script supports.
+#
+# Except under NO_COLOR, where the base is `bw`.  From 0.53 fzf honours a
+# non-empty NO_COLOR by starting from its colourless theme, which also drops the
+# colours of --ansi rows (their bold/dim stay), and `dark` threw that choice out
+# along with $FZF_DEFAULT_OPTS: every tree glyph, path and command came back
+# coloured.  `bw` is a base scheme too, so it still discards the shell theme, and
+# it restores exactly the base fzf would have chosen; the keys below still colour
+# the chrome, as they always did.  The test is fzf's own (non-empty), and below
+# 0.53 fzf ignores NO_COLOR, so `dark` stays.
 build_fzf_colors() {
-  FZF_COLORS="--color=dark,hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
+  local base=dark
+  [ -n "${NO_COLOR:-}" ] && fzf_ge 53 && base=bw
+  FZF_COLORS="--color=${base},hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
   # Every one of these names must exist in the running fzf: an unknown colour
   # key is FATAL ("invalid color specification"), not ignored, so a picker that
   # names `footer:` on fzf < 0.63 does not open at all.  Verified on 0.74.

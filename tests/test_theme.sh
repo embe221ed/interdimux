@@ -63,7 +63,9 @@ export XDG_STATE_HOME="$TMPD/state" XDG_DATA_HOME="$TMPD/data" XDG_CONFIG_HOME="
 export XDG_RUNTIME_DIR="$TMPD/run"
 mkdir -p "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
-unset FZF_DEFAULT_OPTS_FILE
+# NO_COLOR changes the base scheme (section 5), so the cases that do not ask
+# for it must not inherit it from whoever runs the suite.
+unset FZF_DEFAULT_OPTS_FILE NO_COLOR
 export FZF_DEFAULT_OPTS=""
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s themeproj -x 200 -y 50 -c "$SCRIPT_DIR" 'sleep 900'
@@ -152,7 +154,7 @@ launch() { # $1 = cols, $2 = rows, rest = NAME=value exports for the navigator
     printf 'export LANG=C.UTF-8 LC_ALL=C.UTF-8\n'
     printf 'export INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_TMUX_VNUM=307\n'
     printf 'export INTERDIMUX_SHOW_DIRS=off INTERDIMUX_USE_ZOXIDE=off FZF_DEFAULT_OPTS=\n'
-    printf 'unset FZF_DEFAULT_OPTS_FILE INTERDIMUX_FZF_MINOR\n'
+    printf 'unset FZF_DEFAULT_OPTS_FILE INTERDIMUX_FZF_MINOR NO_COLOR\n'
     for e in "$@"; do n="${e%%=*}"; v="${e#*=}"; printf 'export %s=%q\n' "$n" "$v"; done
     printf 'bash %q; echo "NAV-EXITED=$?"\n' "$SCRIPT"
   } > "$sh"
@@ -429,6 +431,67 @@ for m in 40 57 58 66 74; do
 done
 [ "$ok" = 1 ] && report "every fzf version gets the palette led by the base scheme" pass \
               || { report "every fzf version gets the palette led by the base scheme" fail; ERRORS+="    $why"$'\n'; }
+
+# NO_COLOR: from 0.53 fzf starts from a colourless theme when it is non-empty,
+# and that theme is also what strips the colours from --ansi rows.  `dark`
+# replaced it, so the rows came back coloured; the base has to be `bw` there.
+# The rows are the oracle: tmux's own grid, with escapes.  A window row, not
+# the session row the cursor starts on (fg+/bg+ colour that one on purpose).
+row_sgrs() { # the colour SGRs on the non-current rows that name themeproj
+  screen_e | grep -a 'themeproj' | grep -av '▌' | grep -aoE '(38|48);[25];[0-9;]*' || true
+}
+if [ "$FZF_REAL" -lt 53 ]; then
+  skip "NO_COLOR strips the row colours" "fzf 0.$FZF_REAL predates NO_COLOR support"
+else
+  # The control first, so "no colour" below cannot pass on a capture that
+  # simply never had any: the same rows, drawn without NO_COLOR, carry the
+  # path colour.
+  launch 120 20
+  if wait_for 'themeproj 1:editor.*sleep 900'; then
+    c=$(row_sgrs)
+    [[ "$c" == *'38;5;180'* ]] \
+      && report "without NO_COLOR the rows carry their colours (control)" pass \
+      || report "without NO_COLOR the rows carry their colours (control; got: $(tr '\n' ' ' <<< "$c"))" fail
+  else
+    report "the navigator draws its rows (control)" fail; why_dead
+  fi
+  launch 120 20 NO_COLOR=1
+  if wait_for 'themeproj 1:editor.*sleep 900'; then
+    c=$(row_sgrs)
+    if [ -z "$c" ]; then
+      report "NO_COLOR: no row carries a colour (fzf's own NO_COLOR base survives)" pass
+    else
+      report "NO_COLOR: no row carries a colour (got: $(sort -u <<< "$c" | tr '\n' ' '))" fail
+    fi
+    # ...while the attributes stay: NO_COLOR is about colour, not about bold/dim.
+    # (Captured first: under pipefail a `grep -q` that stops reading early
+    # fails the pipeline with its writer's SIGPIPE.)
+    r=$(screen_e | grep -a '1:editor' || true)
+    if [[ "$r" == *$'\033[2m'* ]]; then
+      report "NO_COLOR: the rows keep their dim attribute" pass
+    else
+      report "NO_COLOR: the rows keep their dim attribute" fail
+    fi
+  else
+    report "the navigator draws its rows under NO_COLOR" fail; why_dead
+  fi
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
+fi
+# Which versions get which base: fzf ignores NO_COLOR below 0.53, so there
+# `dark` is still what keeps $FZF_DEFAULT_OPTS out; an empty NO_COLOR is unset
+# to fzf ("non-empty"), so it gets `dark` too.
+ok=1 why=""
+for spec in "52:1:dark" "53:1:bw" "74:1:bw" "74::dark"; do
+  IFS=: read -r m nc want <<< "$spec"
+  argv_at "$m" NO_COLOR="$nc"
+  lead=""
+  for x in "${A[@]}"; do
+    case "$x" in --color=*) lead="${x#--color=}"; lead="${lead%%,*}"; break ;; esac
+  done
+  [ "$lead" = "$want" ] || { ok=0; why+=" 0.$m NO_COLOR='$nc': base '$lead', want '$want';"; }
+done
+[ "$ok" = 1 ] && report "NO_COLOR picks the bw base exactly where fzf honours it" pass \
+              || { report "NO_COLOR picks the bw base exactly where fzf honours it" fail; ERRORS+="    $why"$'\n'; }
 
 # =============================================================================
 # 6. The hint bar names ^r on every row type
