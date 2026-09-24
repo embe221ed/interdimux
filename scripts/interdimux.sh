@@ -1036,6 +1036,59 @@ resolve_session_name() {
 # and double-initialises the shell (breaking gitstatus/p10k).  send-keys keeps
 # the command an ordinary thing the user typed.
 
+# ---------------------------------------------------------------------------
+# Typing a line into a pane
+# ---------------------------------------------------------------------------
+#
+# Every place that types the user's text into a pane -- ctrl-t's send, startup
+# commands, and both scheduled paths -- goes through send_line / sh_send_line,
+# because a bare `send-keys -- "$text" Enter` got two things wrong (all
+# measured on tmux 3.7b):
+#
+#   * tmux's ARGV parser reads an argument ending in ';' as a command separator
+#     and turns a trailing '\;' into ';'.  `find . -exec rm {} \;` arrived as
+#     `... {} ;` (find: missing argument to -exec) while the dialog said
+#     "sent"; `echo x;` failed outright ("unknown command: Enter"); and in the
+#     scheduled paths, where the text was the last word, the ';' was silently
+#     dropped.  One backslash before a trailing ';' undoes exactly what tmux
+#     does to it: 'x;' is passed as 'x\;' and arrives as 'x;', and 'x\;' is
+#     passed as 'x\\;' and arrives as 'x\;'.
+#   * without -l every argument is first looked up as a KEY NAME, so a command
+#     that is just `Enter`, `Home` or `C-c` was pressed rather than typed.
+#
+# Enter is a send-keys of its own, so it stays a key (-l would type "Enter").
+# The commands go in ONE tmux invocation, as a `\;` list: no extra fork per
+# pane, and tmux stops at the first one that fails, so a vanished pane still
+# reports failure.
+
+# The argv word that reaches tmux as TEXT.  Sets REPLY.
+tmux_text_arg() {
+  case "$1" in
+    *';') REPLY="${1%;}\\;" ;;
+    *)    REPLY="$1" ;;
+  esac
+}
+
+# send_line TARGET TEXT -- type TEXT into TARGET and press Enter.  Returns
+# tmux's status.  -- so a command starting with '-' is not read as a flag.
+send_line() {
+  local target="$1"
+  tmux_text_arg "$2"
+  tmux send-keys -t "$target" -l -- "$REPLY" \; \
+       send-keys -t "$target" Enter
+}
+
+# sh_send_line TMUX TARGET TEXT -- send_line as a /bin/sh command line, for the
+# paths that run later under a POSIX shell (the at job body and the sub-minute
+# run-shell), where no bash function exists.  TMUX and TARGET are already sh
+# words (e.g. 'tmux -S "$sock"' and '"$pane"'); TEXT is raw and is quoted here,
+# with shq and never %q.  Sets REPLY.
+sh_send_line() {
+  local tm="$1" tg="$2"
+  tmux_text_arg "$3"; shq "$REPLY"
+  REPLY="$tm send-keys -t $tg -l -- $REPLY \\; send-keys -t $tg Enter"
+}
+
 # The startup command for DIR, or empty.  Sets REPLY.
 resolve_startup_command() {
   local dir="$1" conf="${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/startup.conf"
@@ -1143,14 +1196,14 @@ hydrate_session() {
 
   local target="=$name:"
   wait_pane_ready "$target"
-  # One send-keys per line, so a multi-line .interdimux-startup behaves like
-  # typing each command in turn.  A CR from a CRLF file (startup.conf or the
-  # project file) would be typed as a second Enter, so it goes.
+  # One send per line, so a multi-line .interdimux-startup behaves like typing
+  # each command in turn.  A CR from a CRLF file (startup.conf or the project
+  # file) would be typed as a second Enter, so it goes.
   local line
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
     [ -n "$line" ] || continue
-    tmux send-keys -t "$target" -- "$line" Enter 2>/dev/null || true
+    send_line "$target" "$line" 2>/dev/null || true
   done <<< "$cmd"
   return 0
 }
@@ -3040,13 +3093,15 @@ sched_resolve() {
 sched_job_body() {
   local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
   # POSIX quoting, not %q: atd replays this body under /bin/sh.  See shq().
-  local q_logdir q_log q_sock q_want q_pane q_keys
+  local q_logdir q_log q_sock q_want q_pane q_send
   shq "$SCHED_LOGDIR"; q_logdir="$REPLY"
   shq "$SCHED_LOG";    q_log="$REPLY"
   shq "$sock";         q_sock="$REPLY"
   shq "$srvpid";       q_want="$REPLY"
   shq "$pane";         q_pane="$REPLY"
-  shq "$keys";         q_keys="$REPLY"
+  # the whole send, as send_line does it (see there): literal text, with a
+  # trailing ';' that survives tmux's argv parser
+  sh_send_line 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
   # One field per line, each "rest of line".  The single-line form packed all
   # three into "pane=… target=… desc=…", which stops being parseable the moment
   # a session name contains a space or the literal "desc=" — and tmux allows
@@ -3075,8 +3130,7 @@ sched_job_body() {
     "  tmux -S \"\$sock\" display-message 'interdimux: scheduled keys skipped (tmux restarted)' 2>/dev/null" \
     "  exit 0" \
     "fi" \
-    "tmux -S \"\$sock\" send-keys -t \"\$pane\" -- ${q_keys} 2>/dev/null || exit 0" \
-    "tmux -S \"\$sock\" send-keys -t \"\$pane\" Enter 2>/dev/null"
+    "${q_send} 2>/dev/null"
 }
 
 # One line per queued interdimux job:  id US when US target US pane US desc
@@ -3154,11 +3208,11 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
     # '##' is tmux's escape for a literal '#'.
     _rs_keys="${_keys//\#/##}"
     # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
+    # sh_send_line quotes the keys itself, after protecting a trailing ';'.
     shq "$SCHED_SOCK"; _q_sock="$REPLY"
     shq "$SCHED_PANE"; _q_pane="$REPLY"
-    shq "$_rs_keys";   _q_keys="$REPLY"
-    tmux run-shell -b -d "$_when" \
-      "tmux -S $_q_sock send-keys -t $_q_pane -- $_q_keys && tmux -S $_q_sock send-keys -t $_q_pane Enter" \
+    sh_send_line "tmux -S $_q_sock" "$_q_pane" "$_rs_keys"
+    tmux run-shell -b -d "$_when" "$REPLY" \
       2>/dev/null \
       && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
       || { echo "interdimux: could not schedule" >&2; exit 1; }
@@ -3913,8 +3967,8 @@ if [ "${1:-}" = "--action" ]; then
 
         sent=0 failed=0
         for t in "${send_targets[@]}"; do
-          # -- so a command starting with '-' is not parsed as a flag
-          if tmux send-keys -t "$t" -- "$send_cmd" Enter 2>/dev/null; then
+          # send_line: literal text, with a trailing ';' intact
+          if send_line "$t" "$send_cmd" 2>/dev/null; then
             sent=$((sent + 1))
           else
             failed=$((failed + 1))
