@@ -1143,16 +1143,28 @@ hydrate_session() {
 # DIR must already be an absolute, physical path.  SESSION_NAME is derived from
 # DIR when omitted (find-or-create passes its own, derived from the query).
 # Runs under `set -e` in the navigator, so every fallible step is defused.
+#
+# Everything after the name is done by session ID, never by "=name":
+#
+#   * the lookup goes through session_id_of, the one exact-name match: "=$1"
+#     means session ID 1 to tmux whatever the '=' says, and "=c:d" cannot name
+#     anything at all.
+#
+# The ID also goes to hydrate_session in place of the name: it builds "=$ID:",
+# and tmux resolves a '$' session part as an ID before any name.
 connect_dir() {
-  local dir="$1" name="${2:-}"
+  local dir="$1" name="${2:-}" sid
   [ -n "$name" ] || name=$(resolve_session_name "$dir")
   [ -n "$name" ] || return 1
 
-  if ! tmux has-session -t "=$name" 2>/dev/null; then
-    tmux new-session -d -s "$name" -c "$dir" 2>/dev/null || return 1
-    hydrate_session "$name" "$dir"
+  session_id_of "$name"; sid="$REPLY"
+  if [ -z "$sid" ]; then
+    sid=$(tmux new-session -d -P -F '#{session_id}' \
+            -s "$name" -c "$dir" 2>/dev/null) || return 1
+    [ -n "$sid" ] || return 1
+    hydrate_session "$sid" "$dir"
   fi
-  tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "=$name" 2>/dev/null || true
+  tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "$sid" 2>/dev/null || true
   REPLY="$name"
   return 0
 }
@@ -1232,6 +1244,26 @@ imux_msg() {
   tmux display-message ${TMUX_C[@]+"${TMUX_C[@]}"} "${m//'#'/##}" 2>/dev/null || :
 }
 
+# The ID ($N) of the session named exactly NAME, in REPLY; empty when there is
+# none.
+#
+# tmux's own name lookup cannot do this for every name.  It tests a leading '$'
+# as a session ID BEFORE it tries names, and the '=' exact-match prefix does not
+# stop it: "=$1:" is session ID 1, so a session NAMED "$1" had another session
+# killed in its place after the dialog confirmed its name, and one named "$work"
+# could not be reached at all.  A target is also split at its first ':', so no
+# spelling of "=c:d" names a session called "c:d" (legal since tmux 3.7).  A
+# plain string comparison over list-sessions has neither problem.  tmux escapes
+# control characters in names, so neither US nor a newline can occur in one.
+session_id_of() {
+  local want="$1" id name
+  REPLY=""
+  while IFS="$US" read -r id name; do
+    if [ "$name" = "$want" ]; then REPLY="$id"; return 0; fi
+  done <<< "$(tmux list-sessions -F "#{session_id}${US}#{session_name}" 2>/dev/null)"
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Spec parsing
 # ---------------------------------------------------------------------------
@@ -1279,13 +1311,47 @@ parse_spec() {
   esac
 }
 
-# Build the tmux target string (with = prefix for exact matching)
+# A target no session can match: '$' makes tmux read the rest as a session ID,
+# and a non-number is never one.  Used when a spec names nothing, so the command
+# FAILS rather than falling back to some default target.
+NO_SUCH_TARGET='$missing'
+
+# The tmux target for the parsed spec -- one that can only ever mean that
+# session, window or pane, or nothing at all.
+#
+#   S  =NAME:            the trailing ':' matters: a bare "=e.f" is split at
+#                        the '.', while "=e.f:" names the session e.f
+#   W  =NAME:=WIDX       '=' before the index too.  Without it an index that no
+#   P  =NAME:=WIDX.PIDX  longer exists is retried as a window NAME, prefix and
+#                        glob included: "=st:3" found the window called "3rd"
+#                        and ctrl-x killed it
+#
+# Names that no '=' form can reach -- a leading '$' (read as a session ID) or a
+# ':' (split there) -- become "$ID" through session_id_of, and a name that
+# matches nothing becomes NO_SUCH_TARGET.  Only those names pay for the extra
+# list-sessions, so the preview's hot path forks nothing new.
 spec_target() {
+  local s
   case "$SPEC_TYPE" in
-    S) printf '%s' "=$SPEC_SESSION" ;;
-    W) printf '%s' "=$SPEC_SESSION:$SPEC_WIDX" ;;
-    P) printf '%s' "=$SPEC_SESSION:$SPEC_WIDX.$SPEC_PIDX" ;;
-    D) printf '%s' "$SPEC_DIR" ;;
+    D) printf '%s' "$SPEC_DIR"; return 0 ;;
+    S|W|P) ;;
+    *) printf '%s' "$NO_SUCH_TARGET"; return 0 ;;
+  esac
+  case "$SPEC_SESSION" in
+    ''|'$'*|*:*) session_id_of "$SPEC_SESSION"; s="${REPLY:-$NO_SUCH_TARGET}" ;;
+    *)           s="=$SPEC_SESSION" ;;
+  esac
+  # An index that is not a number came from a malformed spec, never from a row.
+  case "$SPEC_TYPE" in
+    W|P) case "$SPEC_WIDX" in ''|*[!0-9]*) s="$NO_SUCH_TARGET" ;; esac ;;
+  esac
+  case "$SPEC_TYPE" in
+    P) case "$SPEC_PIDX" in ''|*[!0-9]*) s="$NO_SUCH_TARGET" ;; esac ;;
+  esac
+  case "$SPEC_TYPE" in
+    S) printf '%s:' "$s" ;;
+    W) printf '%s:=%s' "$s" "$SPEC_WIDX" ;;
+    P) printf '%s:=%s.%s' "$s" "$SPEC_WIDX" "$SPEC_PIDX" ;;
   esac
 }
 
@@ -2484,15 +2550,15 @@ if [ "${1:-}" = "--preview" ]; then
 
   case "$SPEC_TYPE" in
     S)
-      # Trailing colon: resolves the session to its active pane (a bare
-      # "=name" is not a valid pane target on newer tmux)
-      info=$(tmux display-message -p -t "=${SPEC_SESSION}:" \
+      # $target is spec_target's session form ("=name:", or "$ID:" for a name
+      # no '=' form can reach), which resolves to the session's active pane.
+      info=$(tmux display-message -p -t "$target" \
         "#{session_windows}${US}#{?session_attached,attached,detached}" 2>/dev/null)
       IFS="$US" read -r s_wins s_att <<< "$info"
       printf "${BOLD_AMBER}▸ %s${RST}  ${DIM}%s win · %s${RST}\n" \
         "$SPEC_SESSION" "${s_wins:-?}" "${s_att:-}"
       preview_rule
-      tmux list-windows -t "=$SPEC_SESSION" \
+      tmux list-windows -t "$target" \
         -F "#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}" 2>/dev/null | \
       while IFS="$US" read -r wid wcmd wpath wact wpanes; do
         marker=" "
@@ -2507,10 +2573,12 @@ if [ "${1:-}" = "--preview" ]; then
       done
       echo ""
       preview_rule "active pane"
-      print_capture "$(tmux capture-pane -t "=${SPEC_SESSION}:" -p -e -S -30 2>/dev/null)" || echo "(no active pane)"
+      print_capture "$(tmux capture-pane -t "$target" -p -e -S -30 2>/dev/null)" || echo "(no active pane)"
       ;;
     *)
-      info=$(tmux display-message -p -t "$target" \
+      # has-session first, in the same round-trip: display-message alone
+      # answers a stale index with the session's current window (CANFAIL).
+      info=$(tmux has-session -t "$target" \; display-message -p -t "$target" \
         "#{pane_current_command}${US}#{pane_current_path}" 2>/dev/null)
       IFS="$US" read -r p_cmd p_path <<< "$info"
       p_path="${p_path/#$HOME/\~}"
@@ -2909,7 +2977,10 @@ create_from_query() {
   local query="$1"
   REPLY=""
   resolve_create_target "$query" || return 1
-  if ! tmux has-session -t "=$CREATE_NAME" 2>/dev/null; then
+  # session_id_of, not has-session "=name": the same exact match connect_dir
+  # uses, so a query like "$0" is not mistaken for session ID 0.
+  session_id_of "$CREATE_NAME"
+  if [ -z "$REPLY" ]; then
     record_dir_use "$CREATE_DIR"
   fi
   connect_dir "$CREATE_DIR" "$CREATE_NAME" || return 1
@@ -2927,7 +2998,8 @@ describe_create() {
   # "switch to", not "create", when the name already exists -- that is what
   # connect_dir does, and promising a new session it will not make is the same
   # class of lie as naming the wrong one.
-  if tmux has-session -t "=$CREATE_NAME" 2>/dev/null; then
+  session_id_of "$CREATE_NAME"
+  if [ -n "$REPLY" ]; then
     verb="switch to"
   else
     verb="create"
@@ -3786,9 +3858,25 @@ if [ "${1:-}" = "--action" ]; then
   # since taken that index this check passes, because tmux cannot tell us it is
   # a different window from a "session:index" target alone. Fixing that needs
   # the SPEC to carry @id/%id, which is a wider change than this.
+  #
+  # ONE round-trip answers both "is it still there?" and everything the dialogs
+  # below want to say about it.  has-session is the check, because it is the only
+  # one that can fail: display-message resolves its target with CMD_FIND_CANFAIL,
+  # so for a live session whose window is gone it printed the session's CURRENT
+  # window instead of failing -- as the check, it passed every stale W/P row.  A
+  # command that fails aborts the rest of a tmux command list, so a gone target
+  # prints nothing at all.  The indices are compared as well: spec_target's exact
+  # "=idx" form still falls back to a window NAMED exactly "3" once index 3 is
+  # gone.  Free-text fields go last, where a stray separator cannot shift the
+  # fields after them.
+  _t_info=$(tmux has-session -t "$target" \; display-message -p -t "$target" \
+    "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}#{session_windows}${US}#{window_panes}${US}#{session_group}${US}#{session_name}${US}#{window_name}${US}#{pane_current_command}" \
+    2>/dev/null)
+  IFS="$US" read -r T_SID T_WID T_PID T_WIDX T_PIDX T_SWINS T_WPANES T_SGRP T_SNAME T_WNAME T_PCMD <<< "$_t_info"
   case "$SPEC_TYPE" in
-    S) tmux has-session -t "$target" 2>/dev/null ;;
-    *) [ -n "$(tmux display-message -p -t "$target" '#{window_id}' 2>/dev/null)" ] ;;
+    S) [ -n "$T_SID" ] ;;
+    W) [ -n "$T_WID" ] && [ "$T_WIDX" = "$SPEC_WIDX" ] ;;
+    P) [ -n "$T_PID" ] && [ "$T_WIDX" = "$SPEC_WIDX" ] && [ "$T_PIDX" = "$SPEC_PIDX" ] ;;
   esac || {
     if [ "$action" = zoom ]; then
       # zoom has no dialog of its own; it reports through the status line
@@ -3798,6 +3886,16 @@ if [ "${1:-}" = "--action" ]; then
     fi
     exit 0
   }
+
+  # From here on, act on what the check just found, by tmux ID.  A name or an
+  # index can change hands while a dialog waits for an answer (a rename, a closed
+  # window with renumber-windows on); an ID never names anything else, so the
+  # thing that gets killed is the thing the dialog named -- or nothing.
+  case "$SPEC_TYPE" in
+    S) target="$T_SID" ;;
+    W) target="$T_WID" ;;
+    P) target="$T_PID" ;;
+  esac
 
   case "$action" in
     kill)
@@ -3844,33 +3942,37 @@ if [ "${1:-}" = "--action" ]; then
         info_flash "$BOLD_AMBER" "Rename" "Panes cannot be renamed."
         exit 0
       fi
-      current_name=""
+      # The guard's round-trip already fetched both names.
       case "$SPEC_TYPE" in
-        # display-message -t wants a pane target: a bare "=name" is not
-        # valid on newer tmux (expands empty) — use the "=name:" form
-        S) current_name=$(tmux display-message -p -t "=${SPEC_SESSION}:" '#{session_name}' 2>/dev/null) ;;
-        W) current_name=$(tmux display-message -p -t "$target" '#{window_name}' 2>/dev/null) ;;
+        S) current_name="$T_SNAME" ;;
+        W) current_name="$T_WNAME" ;;
       esac
       input_dialog "$BOLD_AMBER" "Rename ${label}" "❯ " "$current_name"
       new_name="$REPLY"
-      # tmux splits a target at the FIRST ':', so a name containing one makes
-      # the session permanently unreachable from this picker: parse_spec is
-      # careful to parse indices from the right, but spec_target still emits
-      # "=name:idx" and tmux resolves that against the wrong thing.  tmux itself
-      # accepts the rename, so refuse it here rather than create a session the
-      # user cannot get back to.  ('.' is fine — "=my.app:0" parses correctly.)
+      # The picker itself reaches any session name -- spec_target resolves the
+      # ones tmux's targets cannot spell to an ID -- but two kinds of name are
+      # still refused here, because nothing ELSE can reach them by name: tmux
+      # splits a target at its first ':' (so `tmux attach -t my:app` cannot find
+      # "my:app"), and reads a leading '$' as a session ID ("$1" is session 1,
+      # whatever it is called).  tmux accepts both renames, so saying no is the
+      # dialog's job.  '.' is fine: "=my.app:" names the session.
+      _bad_name=""
       case "$new_name" in
-        *:*)
-          dialog_status "${RED}✗ a name cannot contain ':' (tmux splits targets there)${RST}"
-          sleep 1.2
-          dialog_close
-          exit 0
-          ;;
+        *:*) _bad_name="a name cannot contain ':' (tmux splits targets there)" ;;
       esac
+      case "$SPEC_TYPE:$new_name" in
+        'S:$'*) _bad_name="a session name cannot start with '\$' (tmux reads it as an ID)" ;;
+      esac
+      if [ -n "$_bad_name" ]; then
+        dialog_status "${RED}✗ ${_bad_name}${RST}"
+        sleep 1.2
+        dialog_close
+        exit 0
+      fi
       if [ -n "$new_name" ] && [ "$new_name" != "$current_name" ]; then
-        # Capture tmux's own message instead of discarding it: "session names
-        # cannot contain '.' or ':'" tells the user what to do, where
-        # "failed to rename" leaves them guessing (IDEAS #23).
+        # Capture tmux's own message instead of discarding it: "duplicate
+        # session: two" tells the user what to do, where "failed to rename"
+        # leaves them guessing (IDEAS #23).
         _err=""
         case "$SPEC_TYPE" in
           S) _err=$(tmux rename-session -t "$target" -- "$new_name" 2>&1) ;;
@@ -3928,14 +4030,14 @@ if [ "${1:-}" = "--action" ]; then
           W)
             # All panes in this window
             while read -r pidx; do
-              send_targets+=("=$SPEC_SESSION:$SPEC_WIDX.$pidx")
-            done < <(tmux list-panes -t "$target" -F '#{pane_index}' 2>/dev/null)
+              send_targets+=("$pidx")
+            done < <(tmux list-panes -t "$target" -F '#{pane_id}' 2>/dev/null)
             ;;
           S)
             # All panes in all windows of this session
-            while IFS=$'\t' read -r widx pidx; do
-              send_targets+=("=$SPEC_SESSION:$widx.$pidx")
-            done < <(tmux list-panes -s -t "$target" -F '#{window_index}	#{pane_index}' 2>/dev/null)
+            while read -r pidx; do
+              send_targets+=("$pidx")
+            done < <(tmux list-panes -s -t "$target" -F '#{pane_id}' 2>/dev/null)
             ;;
         esac
 
@@ -3971,10 +4073,9 @@ if [ "${1:-}" = "--action" ]; then
       # you meant for something that runs unattended an hour later, so a window
       # or session row resolves to its ACTIVE pane — and the dialog names the
       # pane it chose, so the narrowing is never silent.
-      case "$SPEC_TYPE" in
-        S) sched_pick="=${SPEC_SESSION}:" ;;
-        *) sched_pick="$target" ;;
-      esac
+      # $target is the session/window/pane ID the guard resolved, which
+      # sched_resolve narrows to its active pane.
+      sched_pick="$target"
       if ! sched_resolve "$sched_pick"; then
         info_flash "$BOLD_AMBER" "Schedule" "Could not resolve a pane for ${label}."
         exit 0
@@ -4139,8 +4240,9 @@ if [ "${1:-}" = "--action" ]; then
       parse_spec "$dest_spec"
       dest_target=$(spec_target)
 
+      # The source is the ID the guard resolved before the picker opened.
       parse_spec "$spec"
-      src_target=$(spec_target)
+      src_target="$target"
 
       case "$SPEC_TYPE" in
         W) tmux swap-window -s "$src_target" -t "$dest_target" 2>/dev/null ;;
@@ -4314,7 +4416,11 @@ if [ "${1:-}" = "--jump" ]; then
     imux_msg "no session #$_jn"
     exit 1
   fi
-  tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "=$_jt" 2>/dev/null || exit 1
+  # The same target the picker's Enter would use (a "$1" or "c:d" name cannot
+  # be spelled "=name"), and the client that pressed the key -- not whichever
+  # one tmux thinks was active last.
+  parse_spec "S:$_jt"
+  tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "$(spec_target)" 2>/dev/null || exit 1
   exit 0
 fi
 
