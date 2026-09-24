@@ -3762,6 +3762,15 @@ confirm_dialog() {
   [[ "$key" =~ ^[yY]$ ]]
 }
 
+# Cells covered by a WIDTH STRING — one digit per character, each 0, 1 or 2
+# (input_dialog keeps one alongside its buffer).  Two substitutions instead of a
+# loop, because this runs on every keystroke: cells = characters - zeros + twos.
+# Sets REPLY.
+_dlg_cells() {
+  local zeros="${1//[12]/}" twos="${1//[01]/}"
+  REPLY=$(( ${#1} - ${#zeros} + ${#twos} ))
+}
+
 # input_dialog ACCENT TITLE PROMPT INITIAL [NOTE] — a single-line text editor
 # drawn inside the dialog box.  Sets REPLY (empty = cancelled).
 #
@@ -3776,6 +3785,15 @@ confirm_dialog() {
 # the field emptied.  This editor only ever repaints the field region between
 # the prompt and the right border, so the frame can't be corrupted, and it
 # scrolls horizontally rather than wrapping through the border on long input.
+#
+# The field is laid out in CELLS, not characters.  field_w always was a cell
+# count, but the slice, the padding, the scroll and the cursor came from ${#buf}
+# and ${buf:scroll:field_w}, so every CJK or emoji character drew two cells for
+# the one it was counted as.  Three were enough to push the padding through the
+# right border; a long CJK session name in Rename wrapped onto the row below;
+# and the cursor sat in the middle of the text from the first wide character
+# on.  The buffer, and so the value applied on Enter, was always right — only
+# the picture was wrong.  dialog_open had the same bug in the title.
 # Runs under the --action handler's `set +e`, so bare (( … )) tests are safe.
 input_dialog() {
   local accent="$1" title="$2" prompt="$3" initial="$4"
@@ -3789,7 +3807,8 @@ input_dialog() {
 
   local irow=$(( DLG_TOP + 2 ))
   local col_prompt=$(( DLG_LEFT + 4 ))
-  local field_start=$(( col_prompt + ${#prompt} ))
+  dlg_width "$prompt"
+  local field_start=$(( col_prompt + REPLY ))
   local field_end=$(( DLG_LEFT + DLG_W - 3 ))   # one-column gutter before the border
   local field_w=$(( field_end - field_start + 1 ))
   [ "$field_w" -lt 1 ] && field_w=1
@@ -3798,7 +3817,15 @@ input_dialog() {
   printf '\033[%d;%dH%s%s%s\033[?25h' \
     "$irow" "$col_prompt" "$accent" "$prompt" "$RST" >>"$tty_out"
 
-  local buf="$initial" pos=${#initial} scroll=0
+  # cw is buf's shadow: ONE DIGIT PER CHARACTER, that character's width in
+  # cells (0, 1 or 2, from dlg_width).  Every edit below applies the same slice
+  # to both strings, so ${cw:i:1} is always the width of ${buf:i:1}.  Each
+  # character is measured once, as it enters the buffer: re-measuring the whole
+  # buffer on every repaint made a paste quadratic, because every pasted
+  # character is its own keystroke and repaint, and dlg_width costs tens of
+  # microseconds a character.
+  local buf="$initial" pos=${#initial} scroll=0 cw="" i
+  for (( i = 0; i < pos; i++ )); do dlg_width "${buf:i:1}"; cw+="$REPLY"; done
   drain_input
 
   # Read the input source through the process-wide fd (see tty_fd): re-opening
@@ -3824,19 +3851,53 @@ input_dialog() {
   # EOF is accepted below as "take what we have", which is right for one prompt
   # and non-terminating for a loop.
   _input_eof=0
-  local c c2 c3 vis pad len
+  local c c2 c3 vis len off cur k w blank
+  printf -v blank '%*s' "$field_w" ''
   while true; do
     len=${#buf}
     (( pos < scroll )) && scroll=$pos
-    (( pos - scroll >= field_w )) && scroll=$(( pos - field_w + 1 ))
-    (( scroll < 0 )) && scroll=0
-    vis="${buf:scroll:field_w}"
-    printf -v pad '%*s' $(( field_w - ${#vis} )) ''
-    # repaint the field and place the cursor; nothing is written outside
-    # [field_start, field_end], so the borders are never touched
-    printf '\033[%d;%dH%s%s\033[%d;%dH' \
-      "$irow" "$field_start" "$vis" "$pad" \
-      "$irow" $(( field_start + pos - scroll )) >>"$tty_out"
+    # The cursor needs the cells of the character under it — or the one blank
+    # cell after the text — inside the field too.
+    cur=1
+    if (( pos < len )); then cur=${cw:pos:1}; (( cur < 1 )) && cur=1; fi
+    _dlg_cells "${cw:scroll:pos-scroll}"; off=$REPLY
+    if (( off + cur > field_w )); then
+      # The cursor ran off the right edge: start at the leftmost character from
+      # which it fits.  Walked back from the cursor, not forward from the old
+      # start, so End on a long buffer costs one field's width, not its length.
+      scroll=$pos off=0
+      while (( scroll > 0 )); do
+        w=${cw:scroll-1:1}
+        (( off + w + cur > field_w )) && break
+        scroll=$(( scroll - 1 )) off=$(( off + w ))
+      done
+    fi
+    # A zero-width character (a combining mark) cannot open the field: drawn
+    # first, it would attach to the prompt's cell, outside the field.
+    while (( scroll < pos )) && [ "${cw:scroll:1}" = 0 ]; do scroll=$(( scroll + 1 )); done
+    # The visible text is the longest run from `scroll` that fits.  A wide
+    # character that would straddle the edge is left out rather than drawn over
+    # the gutter; the cell it would have started in stays blank.
+    _dlg_cells "${cw:scroll}"
+    if (( REPLY <= field_w )); then
+      vis="${buf:scroll}"
+    else
+      k=$scroll i=0
+      while (( k < len )); do
+        w=${cw:k:1}
+        (( i + w > field_w )) && break
+        i=$(( i + w )) k=$(( k + 1 ))
+      done
+      vis="${buf:scroll:k-scroll}"
+    fi
+    # Blank the field, draw the text, place the cursor.  Blanking first instead
+    # of padding after means a glyph dlg_width over-counts (a ZWJ sequence)
+    # cannot leave stale cells at the end of the field.  Nothing is written
+    # outside [field_start, field_end], so the borders are never touched.
+    printf '\033[%d;%dH%s\033[%d;%dH%s\033[%d;%dH' \
+      "$irow" "$field_start" "$blank" \
+      "$irow" "$field_start" "$vis" \
+      "$irow" $(( field_start + off )) >>"$tty_out"
 
     IFS= read -rsN1 -u "$ifd" c || { _input_eof=1; c=$'\n'; }   # EOF → accept what we have
     case "$c" in
@@ -3854,24 +3915,28 @@ input_dialog() {
               case "$c3" in
                 1|7) pos=0 ;;
                 4|8) pos=$len ;;
-                3) (( pos < len )) && buf="${buf:0:pos}${buf:pos+1}" ;;   # delete
+                3) (( pos < len )) && { buf="${buf:0:pos}${buf:pos+1}" cw="${cw:0:pos}${cw:pos+1}"; } ;;   # delete
               esac ;;
           esac
         else
           buf=""; break                                      # lone ESC → cancel
         fi ;;
-      $'\x7f'|$'\x08') (( pos > 0 )) && { buf="${buf:0:pos-1}${buf:pos}"; pos=$(( pos - 1 )); } ;;
+      $'\x7f'|$'\x08') (( pos > 0 )) && { buf="${buf:0:pos-1}${buf:pos}" cw="${cw:0:pos-1}${cw:pos}"; pos=$(( pos - 1 )); } ;;
       $'\x03') buf=""; break ;;                              # Ctrl-C → cancel
       $'\x01') pos=0 ;;                                       # Ctrl-A → start
       $'\x05') pos=$len ;;                                    # Ctrl-E → end
-      $'\x15') buf="${buf:pos}"; pos=0 ;;                     # Ctrl-U → delete to start
-      $'\x0b') buf="${buf:0:pos}" ;;                          # Ctrl-K → delete to end
+      $'\x15') buf="${buf:pos}" cw="${cw:pos}"; pos=0 ;;      # Ctrl-U → delete to start
+      $'\x0b') buf="${buf:0:pos}" cw="${cw:0:pos}" ;;         # Ctrl-K → delete to end
       $'\x17')                                                # Ctrl-W → delete word before cursor
         local l="${buf:0:pos}" r="${buf:pos}"
         while [ -n "$l" ] && [ "${l: -1}" = ' ' ]; do l="${l%?}"; done
         while [ -n "$l" ] && [ "${l: -1}" != ' ' ]; do l="${l%?}"; done
-        buf="$l$r"; pos=${#l} ;;
-      *) [[ -n "$c" && "$c" != [[:cntrl:]] ]] && { buf="${buf:0:pos}$c${buf:pos}"; pos=$(( pos + 1 )); } ;;
+        buf="$l$r" cw="${cw:0:${#l}}${cw:pos}"; pos=${#l} ;;
+      *)
+        if [[ -n "$c" && "$c" != [[:cntrl:]] ]]; then
+          dlg_width "$c"
+          buf="${buf:0:pos}$c${buf:pos}" cw="${cw:0:pos}$REPLY${cw:pos}"; pos=$(( pos + 1 ))
+        fi ;;
     esac
   done
 
