@@ -1623,6 +1623,35 @@ hydrate_session() {
   return 0
 }
 
+# $1 escaped, in REPLY, for a tmux argument that is FORMAT-EXPANDED and then
+# kept as it comes out: new-session's -s and -c, rename-session and
+# rename-window's new name.  Without it "proj#Sync" is stored as
+# "proj<current session>ync".
+#
+# '##' is tmux's escape for '#' -- except in front of '['.  The expander copies
+# a run of '#' that ends in '[' through untouched, whatever its length, because
+# it may be a style for whatever draws the string later ("#[fg=red]").  So
+# doubling EVERY '#' was an escape that changed the name it escaped: a directory
+# "p#[q" became a session "p##[q" whose shell started in $HOME (no such -c
+# directory), and the next Enter looked for "p#[q", found nothing, and failed on
+# a duplicate.  The rule here -- double a run of '#' unless a '[' follows it --
+# stores exactly what was typed, checked against tmux's stored names and paths
+# for a few hundred random strings of '#', '[', ']', '{', '}', ',' and letters.
+#
+# Not for display-message: its text is expanded AND then drawn, and the drawing
+# step reads "##[" as a literal "#[" -- there plain doubling is the escape
+# (imux_msg).
+esc_fmt() {
+  local s="$1" out="" pre run
+  while [[ $s == *'#'* ]]; do
+    pre="${s%%'#'*}"; s="${s:${#pre}}"
+    run="${s%%[!#]*}"; s="${s:${#run}}"
+    out+="$pre$run"
+    [[ $s == '['* ]] || out+="$run"
+  done
+  REPLY="$out$s"
+}
+
 # connect_dir DIR [SESSION_NAME]
 #
 # The single "open a directory as a session" path: switch to the session for
@@ -1642,8 +1671,8 @@ hydrate_session() {
 #     "proj<current session>ync" whose shell started in $HOME (the expanded -c
 #     did not exist), and the switch-client that followed looked for the name as
 #     typed, found nothing, and silently left the user where they were -- with a
-#     junk session behind them and "duplicate session" on the next Enter.  '##'
-#     is tmux's escape; only the two expanded arguments get it.
+#     junk session behind them and "duplicate session" on the next Enter.
+#     Only the two expanded arguments are escaped, and by esc_fmt.
 #   * the lookup goes through session_id_of, the one exact-name match: "=$1"
 #     means session ID 1 to tmux whatever the '=' says, and "=c:d" cannot name
 #     anything at all.
@@ -1651,14 +1680,16 @@ hydrate_session() {
 # The ID also goes to hydrate_session in place of the name: it builds "=$ID:",
 # and tmux resolves a '$' session part as an ID before any name.
 connect_dir() {
-  local dir="$1" name="${2:-}" sid
+  local dir="$1" name="${2:-}" sid ename edir
   [ -n "$name" ] || name=$(resolve_session_name "$dir")
   [ -n "$name" ] || return 1
 
   session_id_of "$name"; sid="$REPLY"
   if [ -z "$sid" ]; then
+    esc_fmt "$name"; ename="$REPLY"
+    esc_fmt "$dir"; edir="$REPLY"
     sid=$(tmux new-session -d -P -F '#{session_id}' \
-            -s "${name//'#'/##}" -c "${dir//'#'/##}" 2>/dev/null) || return 1
+            -s "$ename" -c "$edir" 2>/dev/null) || return 1
     [ -n "$sid" ] || return 1
     hydrate_session "$sid" "$dir"
   fi
@@ -1736,7 +1767,10 @@ fi
 
 # A status-line message on the pressing client.  display-message FORMAT-EXPANDS
 # its text, so '#' is doubled: a session called "a#Sb" is reported as exactly
-# that, not with the current session's name spliced into it.
+# that, not with the current session's name spliced into it.  Every '#', even
+# before a '[' (unlike esc_fmt): the expander keeps "##[" as it is, and the
+# status line then draws it as a literal "#[" -- where a bare "#[b'" would be
+# swallowed as a style.
 imux_msg() {
   local m="interdimux: $1"
   tmux display-message ${TMUX_C[@]+"${TMUX_C[@]}"} "${m//'#'/##}" 2>/dev/null || :
@@ -4958,13 +4992,14 @@ if [ "${1:-}" = "--action" ]; then
         #
         # The new name is FORMAT-EXPANDED by tmux, the target is not: "proj#Sx"
         # was stored as "proj<this session>x" while the dialog said "renamed to
-        # proj#Sx".  '##' is the escape, and the status line reads the name back
-        # from tmux (by ID, which a rename does not change) rather than echoing
-        # what was typed.
+        # proj#Sx".  esc_fmt is the escape, and the status line reads the name
+        # back from tmux (by ID, which a rename does not change) rather than
+        # echoing what was typed.
         _err=""
+        esc_fmt "$new_name"
         case "$SPEC_TYPE" in
-          S) _err=$(tmux rename-session -t "$target" -- "${new_name//'#'/##}" 2>&1) ;;
-          W) _err=$(tmux rename-window  -t "$target" -- "${new_name//'#'/##}" 2>&1) ;;
+          S) _err=$(tmux rename-session -t "$target" -- "$REPLY" 2>&1) ;;
+          W) _err=$(tmux rename-window  -t "$target" -- "$REPLY" 2>&1) ;;
         esac
         if [ $? -eq 0 ]; then
           case "$SPEC_TYPE" in

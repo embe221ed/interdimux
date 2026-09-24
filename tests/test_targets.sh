@@ -16,7 +16,8 @@
 #   stale    "=st:3" for a window that has since closed is retried as a
 #   index    window NAME, prefix included -- it matched "3rd" and killed it
 #   '#'      new-session and rename-* FORMAT-EXPAND the name (and new-session
-#            its -c too): "proj#Sync" became "proj<session>ync" in $HOME
+#            its -c too): "proj#Sync" became "proj<session>ync" in $HOME --
+#            and '##' is no escape before a '[': "p#[q" became "p##[q"
 #
 # Every oracle is tmux's own state, read back after the fact -- never the
 # script's target-building code.
@@ -271,6 +272,78 @@ T list-windows -t "$(T list-sessions -F '#{session_id} #{session_name}' | awk '$
   | grep -qxF 'w#Sname' \
   && report "renaming a window to 'w#Sname' stores exactly that" pass \
   || report "renaming a window to 'w#Sname' stores exactly that" fail
+
+# --- '#[': the one place '##' is not tmux's escape ---------------------------------
+# The expander copies a run of '#' that ends in '[' through untouched (it may be
+# a style), so doubling it stored the doubled run: "p#[q" became the session
+# "p##[q", its shell started in $HOME (no such directory), and the next Enter
+# found no "p#[q" and failed on a duplicate.
+mkdir -p "$TMPD/dirs/p#[q"
+PQ="$(cd "$TMPD/dirs/p#[q" && pwd -P)"
+US_=$'\x1f'
+sid_of() { T list-sessions -F "#{session_id}${US_}#{session_name}" | awk -F"$US_" -v n="$1" '$2==n {print $1}'; }
+n_before=$(names | wc -l)
+rc1=0 rc2=0
+bash "$SCRIPT" --connect-dir "$PQ" >/dev/null 2>&1 || rc1=$?
+bash "$SCRIPT" --connect-dir "$PQ" >/dev/null 2>&1 || rc2=$?
+n_after=$(names | wc -l)
+if has_name 'p#[q' && [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && [ "$n_after" = $((n_before + 1)) ]; then
+  report "a directory named 'p#[q' opens as that session once, and Enter again reuses it" pass
+else
+  report "a directory named 'p#[q' opens as that session once, and Enter again reuses it" fail
+  ERRORS+="    rc=$rc1/$rc2 sessions: $(names | tr '\n' '|')"$'\n'
+fi
+pq_sid=$(sid_of 'p#[q')
+got=$(T display-message -p -t "${pq_sid:-\$none}" '#{session_path}' 2>/dev/null || true)
+[ -n "$pq_sid" ] && [ "$got" = "$PQ" ] \
+  && report "...started in that directory (its session_path)" pass \
+  || { report "...started in that directory (its session_path)" fail; ERRORS+="    session_path: $got"$'\n'; }
+if [ -n "$pq_sid" ] && wait_for "[ \"\$(T display-message -p -t '$pq_sid:' '#{pane_current_path}' 2>/dev/null)\" = \"\$PQ\" ]"; then
+  report "...with its shell there, not in \$HOME" pass
+else
+  report "...with its shell there, not in \$HOME" fail
+  ERRORS+="    cwd: $(T display-message -p -t "${pq_sid:-\$none}:" '#{pane_current_path}' 2>/dev/null || true)"$'\n'
+fi
+
+n_before=$(names | wc -l)
+rc1=0 rc2=0
+bash "$SCRIPT" --create-from-query 'cq#[z' >/dev/null 2>&1 || rc1=$?
+bash "$SCRIPT" --create-from-query 'cq#[z' >/dev/null 2>&1 || rc2=$?
+n_after=$(names | wc -l)
+if has_name 'cq#[z' && [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && [ "$n_after" = $((n_before + 1)) ]; then
+  report "find-or-create 'cq#[z' makes that session once, and Enter again reuses it" pass
+else
+  report "find-or-create 'cq#[z' makes that session once, and Enter again reuses it" fail
+  ERRORS+="    rc=$rc1/$rc2 sessions: $(names | tr '\n' '|')"$'\n'
+fi
+
+# a mix: '#[' spans, a doubled run before '[', and a '#S' after the span
+T new-session -d -s brsrc -x 120 -y 30 -n brwin
+out=$(act rename 'S:brsrc' '\025b#[r]##[s#Sz\n')
+if has_name 'b#[r]##[s#Sz'; then
+  report "renaming a session to 'b#[r]##[s#Sz' stores exactly that" pass
+else
+  report "renaming a session to 'b#[r]##[s#Sz' stores exactly that" fail
+  ERRORS+="    sessions now: $(names | tr '\n' '|')"$'\n'
+fi
+said=$(printf '%s' "$out" | grep -o 'renamed to [^ ]*' | tail -1 | sed 's/^renamed to //' || true)
+[ "$said" = 'b#[r]##[s#Sz' ] \
+  && report "...and the dialog reports that name" pass \
+  || { report "...and the dialog reports that name" fail; ERRORS+="    dialog said '$said'"$'\n'; }
+br_sid=$(sid_of 'b#[r]##[s#Sz')
+act rename "W:b#[r]##[s#Sz:0" '\025w#[z\n' >/dev/null
+T list-windows -t "${br_sid:-\$none}:" -F '#{window_name}' 2>/dev/null | grep -qxF 'w#[z' \
+  && report "renaming a window to 'w#[z' stores exactly that" pass \
+  || { report "renaming a window to 'w#[z' stores exactly that" fail
+       ERRORS+="    windows: $(T list-windows -t "${br_sid:-\$none}:" -F '#{window_name}' 2>/dev/null | tr '\n' '|' || true)"$'\n'; }
+
+# A leading '-' reaches tmux as the window's name, not as a flag (the session
+# case is above)
+T new-session -d -s dashwsrc -x 120 -y 30
+act rename 'W:dashwsrc:0' '\025-dashw\n' >/dev/null
+T list-windows -t '=dashwsrc:' -F '#{window_name}' 2>/dev/null | grep -qxF -- '-dashw' \
+  && report "a window rename to '-dashw' is taken as the name, not as a flag" pass \
+  || report "a window rename to '-dashw' is taken as the name, not as a flag" fail
 
 # --- the dialogs name windows and panes the way the list does ----------------------
 T new-window -d -t '=st:7' -n buildwin 'exec sleep 1000'
