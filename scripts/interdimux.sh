@@ -5135,13 +5135,15 @@ input_dialog() {
   printf -v blank '%*s' "$field_w" ''
   while true; do
     len=${#buf}
-    if (( pos < scroll )); then
+    if (( pos <= scroll )); then
       # The cursor moved left of the view: start the view at the cursor -- or,
       # when that character is drawn into the cell before it (width 0: a
       # combining mark, say), at the character that cell belongs to.  Started
-      # on the mark, the view drew it onto the prompt's blank, which is never
-      # repainted, so every step Left through decomposed text stacked one more
-      # accent there.
+      # on the mark, the view drew it onto the prompt's blank, so every step
+      # Left through decomposed text stacked one more accent there.  The
+      # cursor AT the view's start needs it too: Delete of the view's first
+      # character, or Backspace between it and its mark, leaves the view on
+      # that mark with the cursor unmoved.
       scroll=$pos
       while (( scroll > 0 )) && [ "${cw:scroll:1}" = 0 ]; do scroll=$(( scroll - 1 )); done
     fi
@@ -5192,13 +5194,29 @@ input_dialog() {
       done
       vis="${buf:scroll:k-scroll}"
     fi
+    # At the buffer's start there is no base to walk back to: a mark or a
+    # U+FE0F that an edit left first (Home, Delete on a decomposed É, or on
+    # ⚙️) would join the prompt's blank -- a U+FE0F widening it to two cells
+    # and pushing the whole field right.  Such characters are left out of the
+    # picture; they have no cells, so `off` stands.
+    if (( scroll == 0 )) && [ "${cw:0:1}" = 0 ]; then
+      k=0
+      while (( k < ${#vis} )) && [ "${cw:k:1}" = 0 ]; do k=$(( k + 1 )); done
+      vis="${vis:k}"
+    fi
     # Blank the field, draw the text, place the cursor.  Blanking first instead
     # of padding after means a glyph dlg_width over-counts (a ZWJ sequence)
-    # cannot leave stale cells at the end of the field.  Nothing is written
+    # cannot leave stale cells at the end of the field.  The prompt is drawn
+    # again AFTER the text: a character tmux draws into the cell before it that
+    # the widths above do not know about (a Thai, Hebrew, Arabic or Devanagari
+    # mark, which dlg_width counts as a cell) can still open the view, and
+    # joins the prompt's blank -- rewritten, that cell drops it in the same
+    # frame instead of stacking one more on each.  Nothing else is written
     # outside [field_start, field_end], so the borders are never touched.
-    printf '\033[%d;%dH%s\033[%d;%dH%s\033[%d;%dH' \
+    printf '\033[%d;%dH%s\033[%d;%dH%s\033[%d;%dH%s%s%s\033[%d;%dH' \
       "$irow" "$field_start" "$blank" \
       "$irow" "$field_start" "$vis" \
+      "$irow" "$col_prompt" "$accent" "$prompt" "$RST" \
       "$irow" $(( field_start + off )) >>"$tty_out"
 
     IFS= read -rsN1 -u "$ifd" c || { _input_eof=1; c=$'\n'; }   # EOF → accept what we have

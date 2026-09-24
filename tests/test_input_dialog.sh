@@ -13,6 +13,10 @@
 #   * Send keys, three CJK characters typed: the padding erased the right border
 #     and the cursor sat inside the second character.
 #
+#   * an edit could still open the view on a mark (Home, Delete on NFD "École";
+#     Backspace between a base and its mark), and NFD Hangul's medial and final
+#     jamo -- one wide cell a syllable in tmux -- counted a cell each: the
+#     cursor drifted right, and marks and jamo piled up on the prompt's blank.
 #   * the common emoji below U+1F000 (✅ ⭐ ⚡) counted one cell for the two tmux
 #     draws, and an emoji sequence (👍🏽, 🇵🇱, 👨‍👩‍👧, ⚙ + U+FE0F) was counted one
 #     character at a time, so the cursor drifted off the text by the error.
@@ -562,6 +566,90 @@ wait_vis "ab" || true
 run cursor_after "a${FILLER}b"
 check "the cursor follows text with a Hangul filler (U+3164) in it" \
       "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# An EDIT can leave the view's start on a mark with the cursor right at it,
+# where neither guard above looks -- they run when the cursor is left or right
+# of the start, not on it.  Deleting the first letter of a decomposed name (NFD
+# "École" in Rename) is exactly that: Home, Delete.  The mark was drawn onto
+# the prompt's blank, one more on every repaint that reopened the view there,
+# and stayed after it had left the buffer.  At the buffer's start there is no
+# base to walk back to, so the mark is not drawn at all.
+open_send "a mark left first by Delete"
+typed "e${MARK}xyz"
+wait_vis "e${MARK}xyz" || true
+keys Home DC
+run wait_vis "xyz"
+check "Home, Delete of a mark's base draws the mark nowhere" "field: '$FIELD_ROW'" "$RC"
+run cursor_after ""
+check "...and the cursor stays on the field's first cell" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Right Left Right Left DC
+run wait_vis "xyz"
+check "...nor after moving over it and deleting it too" "field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# Backspace with the cursor between the view's first character and its mark:
+# the mark before it slides onto the view's start.  The view opens on its base
+# instead, one character further left.
+open_send "Backspace at the view's start"
+snap
+field_geometry
+decomposed=""
+for (( _k = 0; _k < FIELD_W + 4; _k++ )); do decomposed+="e$MARK"; done
+typed "${decomposed}z"
+wait_vis "e${MARK}z" tail || true
+# back to just after the second e: the view starts on that e
+_lefts=()
+for (( _k = 0; _k < ${#decomposed} + 1 - 3; _k++ )); do _lefts+=(Left); done
+keys "${_lefts[@]}"
+run cursor_after "e"
+check "Left stops with the view on an e and the cursor after it (fixture)" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys BSpace
+run cursor_after "e${MARK}"
+check "Backspace at the view's start opens the view on the mark's base" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run test "${VIS:0:1}" != "$MARK"
+check "...and draws no mark onto the prompt" "field: '$FIELD_ROW'" "$RC"
+keys End
+wait_vis "e${MARK}z" tail || true
+run test "${VIS:0:1}" != "$MARK"
+check "...not even once it has scrolled away" "field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# ⚙️ with its ⚙ deleted leaves a U+FE0F first, and one drawn first widens the
+# prompt's blank to two cells -- shifting the whole field one cell right of
+# where the editor puts the cursor.
+open_send "a U+FE0F left first by Delete"
+typed "⚙${VS16}abc"
+wait_vis "⚙${VS16}abc" || true
+keys Home DC
+run wait_vis "abc"
+check "Home, Delete of ⚙ in ⚙️ leaves the field starting at its first cell" \
+      "field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# A character tmux draws into the cell before it that the editor does not
+# know about -- this Thai vowel sign, like marks in Hebrew, Arabic or
+# Devanagari, is counted one cell -- can still open the view.  The prompt is
+# repainted after the text on every frame, so whatever joined its blank is
+# gone before the frame is.
+open_send "an unmodelled mark at the left edge"
+snap
+field_geometry
+THAI=$'กั'                                     # กั: a consonant and its vowel sign
+thai=""
+for (( _k = 0; _k < FIELD_W + 4; _k++ )); do thai+="$THAI"; done
+typed "${thai}z"
+wait_vis "${THAI}z" tail || true
+_lefts=()
+for (( _k = 0; _k < ${#thai} + 1; _k++ )); do _lefts+=(Left); done
+keys "${_lefts[@]}"
+wait_vis "$THAI" head || true
+run test "${VIS:0:1}" != "${THAI:1:1}"
+check "Left through a mark the editor counts as a cell draws none onto the prompt" \
+      "field: '$FIELD_ROW'" "$RC"
 keys Escape
 
 # ---------------------------------------------------------------------------
