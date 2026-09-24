@@ -2911,6 +2911,15 @@ IMUX_SECTIONS
   local _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9 _kept=""
   while IFS="$US" read -r _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9; do
     [ -n "$_w1" ] || continue
+    # MORE than nine fields: a US inside pane_current_path (a directory may be
+    # named anything but '/' and NUL).  `read` hands the surplus to its last
+    # name, so every field after the path was the one to its left -- the pane
+    # count read "part2", the flags "1<US>000", and the PID the pane count, so
+    # the row showed PID 1's command (`init`) with a bell it did not have and
+    # stderr got "integer expression expected".  There is no telling which US
+    # is the path's, so the row is dropped, as the Rust core drops it
+    # (main.rs, `f.len() > 9`); its session header still renders.
+    case "$_w9" in *"$US"*) continue ;; esac
     if [ -z "$_w9" ]; then
       case "$_w2" in ''|*[!0-9]*) continue ;; esac
       case "$_w4" in 0|1) ;; *) continue ;; esac
@@ -2933,6 +2942,7 @@ IMUX_SECTIONS
   _kept=""
   while IFS="$US" read -r sn widx _p3 _p4 _p5 _p6 _p7 _p8; do
     [ -n "$sn" ] || continue
+    case "$_p8" in *"$US"*) continue ;; esac   # a US in its cwd: see above
     if [ -z "$_p8" ]; then
       case "$widx" in ''|*[!0-9]*) continue ;; esac
       case "$_p3" in ''|*[!0-9]*) continue ;; esac
