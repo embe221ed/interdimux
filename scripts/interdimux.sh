@@ -7,12 +7,16 @@
 # new-session-from-directory actions via fzf keybindings.
 
 # bash >= 4.3, checked before anything can need it.  Every option read goes
-# through a nameref (`local -n`), and namerefs, `[[ -v arr[k] ]]` and the rules
-# this file writes its array expansions to are all 4.3; macOS's own /bin/bash is
-# 3.2.  Unchecked, 3.2 died at the first `declare -A` and 4.2 at the first
-# `local -n`, each naming a builtin rather than the problem -- and behind a key
-# binding or in a popup nobody saw even that.  So it is said here: on stderr,
-# and from inside tmux on the status line, which outlives a popup.
+# through a nameref (`local -n`), and namerefs and the rules this file writes its
+# array expansions to are 4.3; macOS's own /bin/bash is 3.2.  (An assoc key is
+# tested as `[[ ${arr[$k]+x} ]]`, never `[[ -v "arr[$k]" ]]`: every bash before
+# 5.2 expands that subscript a second time, so a '$' in a session name or a
+# directory was read as a parameter -- "unbound variable" under set -u, and a
+# name like `$(cmd)` ran.)  Unchecked, 3.2 died at the first `declare -A` and
+# 4.2 at the first `local -n`, each naming a builtin rather than the problem --
+# and behind a key binding or in a popup nobody saw even that.  So it is said
+# here: on stderr, and from inside tmux on the status line, which outlives a
+# popup.
 #
 # POSIX sh, and BASH_VERSION rather than BASH_VERSINFO, because this has to run
 # in whatever shell the file is handed to.  bash reads a script one command at a
@@ -1139,7 +1143,7 @@ _mounts_bps() {
   local p
   local -A seen=()
   for p in "$@"; do
-    [ "${_MOUNT_TBL[$p]:-0}" = 1 ] && ! [[ -v "seen[$p]" ]] || continue
+    [ "${_MOUNT_TBL[$p]:-0}" = 1 ] && ! [[ ${seen[$p]+x} ]] || continue
     seen["$p"]=1
     _MOUNT_BPS+=("$p")
   done
@@ -1200,7 +1204,7 @@ _mount_of() {
   local p="$1"
   case "$p" in /*) ;; *) return 1 ;; esac   # relative: on no recorded mount
   while :; do
-    [[ -v "_MOUNT_TBL[$p]" ]] && { _MOUNT_AT="$p"; return 0; }
+    [[ ${_MOUNT_TBL[$p]+x} ]] && { _MOUNT_AT="$p"; return 0; }
     [ "$p" = / ] && return 1
     p="${p%/*}"; [ -n "$p" ] || p=/
   done
@@ -1280,7 +1284,7 @@ load_recent_dirs() {
     while IFS= read -r d; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
-      [[ -v "_recent_seen[$d]" ]] && continue
+      [[ ${_recent_seen[$d]+x} ]] && continue
       _recent_seen["$d"]=1
       echo "$d"
       count=$((count + 1))
@@ -1294,7 +1298,7 @@ load_recent_dirs() {
     while IFS= read -r d; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
-      [[ -v "_recent_seen[$d]" ]] && continue
+      [[ ${_recent_seen[$d]+x} ]] && continue
       _recent_seen["$d"]=1
       echo "$d"
       zcount=$((zcount + 1))
@@ -2366,7 +2370,7 @@ get_git_branch() {
   [ -z "$dir" ] && return
 
   local _cache_key="$dir"
-  if [[ -v "GIT_BRANCH_CACHE[$_cache_key]" ]]; then
+  if [[ ${GIT_BRANCH_CACHE[$_cache_key]+x} ]]; then
     REPLY="${GIT_BRANCH_CACHE[$_cache_key]}"
     return
   fi
@@ -3040,7 +3044,7 @@ emit_dir_rows() {
     [ -n "$d" ] || continue
     # A tab would break the 4-field row contract; a session already covers it
     case "$d" in *$'\t'*) continue ;; esac
-    [[ -v "SESSION_DIRS[$d]" ]] && continue
+    [[ ${SESSION_DIRS[$d]+x} ]] && continue
 
     base="${d##*/}"
     [ -n "$base" ] || base="$d"
@@ -3471,7 +3475,7 @@ IMUX_SECTIONS
     fi
     line="$_w1$US$_w2$US$_w3$US$_w4$US$_w5$US$_w6$US$_w7$US$_w8$US$_w9"
     _kept+="$line"$'\n'
-    if [[ -v "windows_by_session[$_w1]" ]]; then
+    if [[ ${windows_by_session[$_w1]+x} ]]; then
       windows_by_session["$_w1"]+=$'\n'"$line"
     else
       windows_by_session["$_w1"]="$line"
@@ -3508,7 +3512,7 @@ IMUX_SECTIONS
     fi
     local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8"
     _kept+="$key$US$rest"$'\n'
-    if [[ -v "panes_by_window[$key]" ]]; then
+    if [[ ${panes_by_window[$key]+x} ]]; then
       panes_by_window["$key"]+=$'\n'"$rest"
     else
       panes_by_window["$key"]="$rest"
@@ -3947,7 +3951,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
     # A tab in the path can't be represented in the tab-delimited row
     # (the selection would resolve to the post-tab fragment) — skip it
     case "$dir" in *$'\t'*) return ;; esac
-    [[ -v "seen[$dir]" ]] && return
+    [[ ${seen[$dir]+x} ]] && return
     seen["$dir"]=1
     local display_path="${dir/#$HOME/\~}"
     trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
