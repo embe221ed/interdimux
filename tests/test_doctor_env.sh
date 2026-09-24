@@ -65,6 +65,17 @@ senv()     { tmux -L "$SOCK" set-environment -g "$1" "$2"; }
 unsenv()   { tmux -L "$SOCK" set-environment -gu "$1" 2>/dev/null || true; }
 doctor()   { bash "$SCRIPT" --doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g'; return 0; }
 doctor_rc() { bash "$SCRIPT" --doctor >/dev/null 2>&1; echo $?; }
+# $1 = name, $2 = the exit status wanted, then the environment to run it in (as
+# for env(1)).  On a mismatch the report's problem lines go into the failure.
+rc_is() {
+  local name="$1" want="$2" rep rc; shift 2
+  rc=0; rep=$(env "$@" bash "$SCRIPT" --doctor 2>&1) || rc=$?   # set -e: exit 1 is an answer
+  if [ "$rc" = "$want" ]; then report "$name" pass
+  else
+    report "$name" fail
+    ERRORS+="      exit $rc, wanted $want:"$'\n'"$(printf '%s\n' "$rep" | sed 's/\x1b\[[0-9;]*m//g' | grep '[✗⚠]' | sed 's/^/      /' || true)"$'\n'
+  fi
+}
 
 SRV_PATH=$(tmux -L "$SOCK" show-environment -g PATH); SRV_PATH="${SRV_PATH#PATH=}"
 
@@ -129,6 +140,26 @@ senv PATH "$SRV_PATH"
 bv=$(bash --version | sed -n '1s/.*version \([0-9]*\.[0-9]*\).*/\1/p')
 has "a modern bash on the server's PATH is named with its version" "$(doctor)" "✓ bash $bv on the tmux server's PATH"
 
+# The fzf the popups run is the one JUDGED, by its own --version -- not this
+# shell's, and not INTERDIMUX_FZF_MINOR (pinned to 74 above, as a binding bakes
+# it).  A distro's old fzf ahead of the one you installed is the usual shape:
+# the report used to say "✓ fzf 0.74" and exit 0 while every popup failed.  The
+# stubs answer the one thing the doctor asks an fzf, the way that version would.
+mkdir -p "$TMPD/fzf030" "$TMPD/fzf060"
+printf '#!/bin/sh\necho "0.30.0 (stub)"\n' > "$TMPD/fzf030/fzf"
+printf '#!/bin/sh\necho "0.60.0 (stub)"\n' > "$TMPD/fzf060/fzf"
+chmod +x "$TMPD/fzf030/fzf" "$TMPD/fzf060/fzf"
+senv PATH "$TMPD/fzf030:$SRV_PATH"
+out=$(doctor)
+has "an fzf older than 0.40 first on the server's PATH is a problem" "$out" "✗ fzf 0.30.0 is older than 0.40"
+hasnt "...not a tick for this shell's fzf" "$out" "✓ fzf "
+has "...naming where it is" "$out" "that is $TMPD/fzf030/fzf, first on the tmux server's PATH"
+rc_is "...and --doctor exits 1" 1
+# The tiers follow the same fzf: 0.60 is below every tier the pinned 74 passes.
+senv PATH "$TMPD/fzf060:$SRV_PATH"
+has "the feature tier is the server fzf's, not the pinned minor" "$(doctor)" "⚠ fzf 0.60.0 — 0.63 moves the key hints"
+senv PATH "$SRV_PATH"
+
 # fzf missing from --doctor's OWN PATH: the preflight used to stop the report
 # with one line ("fzf is not installed"), so the check written for exactly this
 # case never ran.  The PATH here is everything this one has, minus fzf.
@@ -142,10 +173,49 @@ rm -f "$TMPD/farm/fzf"
 if PATH="$TMPD/farm" command -v fzf >/dev/null 2>&1; then
   report "premise: the stripped PATH has no fzf" fail
 else
-  out=$(PATH="$TMPD/farm" bash "$SCRIPT" --doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
-  has "with no fzf at all, --doctor still reports" "$out" "interdimux doctor"
-  has "...and says fzf is missing" "$out" "✗ fzf is not on PATH"
+  nofzf_doctor() { PATH="$TMPD/farm" bash "$SCRIPT" --doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true; }
+  # ...while the server's PATH has one, which is all a popup needs: this shell's
+  # PATH is not the popups'.  It used to be "✗ fzf is not on PATH", exit 1.
+  out=$(nofzf_doctor)
+  has "with no fzf in this shell, --doctor still reports" "$out" "interdimux doctor"
+  has "...judging the server's fzf, which is fine" "$out" "✓ fzf "
+  hasnt "...not calling fzf missing" "$out" "✗ fzf is not"
+  has "...and saying this shell's has none" "$out" "this shell finds none"
+  rc_is "...and --doctor exits 0" 0 PATH="$TMPD/farm"
+  # The option check asks the same fzf: a flag it rejects is still caught.
+  setopt fzf-opts '--bogus-flag'
+  has "...and @interdimux-fzf-opts is still checked against it" "$(nofzf_doctor)" \
+    "✗ @interdimux-fzf-opts = '--bogus-flag' — fzf rejects it"
+  unsetopt fzf-opts
+  # With none on the server's PATH either, that is the problem.
+  senv PATH "$TMPD/farm"
+  has "with no fzf anywhere, it says so, of the server's PATH" "$(nofzf_doctor)" \
+    "✗ fzf is not on the tmux server's PATH"
+  senv PATH "$SRV_PATH"
 fi
+
+# A literal `~` in the server's PATH: `export PATH="~/bin:$PATH"`, quoted by
+# mistake, works silently, because bash -- which runs fzf for every picker --
+# tilde-expands a PATH element (/bin/sh does not).  A literal lookup called fzf
+# missing, exit 1, on a working setup.  The ~ is the server's $HOME, which is
+# the one a popup's bash expands; a directory name no real home has.
+tdir="imux-tilde-$$"
+mkdir -p "$TMPD/home/$tdir"
+ln -s "$(command -v fzf)" "$TMPD/home/$tdir/fzf"
+senv HOME "$TMPD/home"
+senv PATH "~/$tdir:$TMPD/nofzf"
+# bash's own search is the authority: it finds fzf there, and a literal one does not.
+if [ -n "$(env HOME="$TMPD/home" PATH="~/$tdir:$TMPD/nofzf" bash -c 'type -P fzf')" ] \
+   && ! [ -x "~/$tdir/fzf" ]; then
+  out=$(doctor)
+  hasnt "a ~ in the server's PATH is searched as bash searches it" "$out" "✗ fzf is not on the tmux server's PATH"
+  has "...so the fzf there is judged" "$out" "✓ fzf "
+  rc_is "...and --doctor exits 0" 0
+else
+  report "premise: bash finds fzf through a literal ~ in PATH" fail
+fi
+senv HOME "$HOME"
+senv PATH "$SRV_PATH"
 
 # --- the locale, measured in the popups' environment --------------------------------
 # A UTF-8 name that is not installed: bash falls back to C and counts bytes.  The
