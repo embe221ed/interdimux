@@ -2156,14 +2156,25 @@ build_process_table() {
 # '?'.  This is not cosmetic.  ps was implicitly protecting the row contract —
 # a raw newline in argv would split the row in two, detaching its trailing SPEC
 # field, and a raw \x1f would reach an fzf-visible field.  The scan is guarded,
-# so the common (clean) case costs one pattern test.
+# so the common (clean) case costs one pattern test per class below.
+#
+# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR become '?' as well, by
+# name.  glibc's [[:cntrl:]] holds them, but that is the locale's say: the Rust
+# core's rule was Cc only, so a cwd or a branch holding one rendered differently
+# in the two renderers, and on a libc whose class leaves them out bash would
+# pass them through too.  Both renderers now list them explicitly (rust/src/
+# proc.rs sanitize), as bytes, so the test is the same in any locale.
+_LSEP=$'\xe2\x80\xa8' _PSEP=$'\xe2\x80\xa9'
 sanitize_args() {
   REPLY="$1"
   case "$REPLY" in
-    *[[:cntrl:]]*) ;;
+    *[[:cntrl:]]*|*"$_LSEP"*|*"$_PSEP"*) ;;
     *) return 0 ;;
   esac
   REPLY="${REPLY//$'\n'/ }"
+  REPLY="${REPLY//"$_LSEP"/?}"
+  REPLY="${REPLY//"$_PSEP"/?}"
+  case "$REPLY" in *[[:cntrl:]]*) ;; *) return 0 ;; esac
   local out="" i ch
   for (( i = 0; i < ${#REPLY}; i++ )); do
     ch="${REPLY:i:1}"

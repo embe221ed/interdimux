@@ -66,16 +66,26 @@ pub fn is_idle_shell(cmd: &str) -> bool {
 /// bash NESTED_SHELL_MAX.
 const NESTED_SHELL_MAX: usize = 4;
 
+/// A character no row may carry raw: the C0 and C1 controls (`char::is_control`),
+/// and U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR, which glibc's
+/// `[[:cntrl:]]` -- the class bash's sanitize_args tests -- also holds, which
+/// some terminals break a line at, and which ps's own escaping turns into '?'
+/// (they are not printable).  Named here, not left to a locale's class, so the
+/// two renderers agree on every platform; bash lists the two just as explicitly.
+fn unsafe_char(c: char) -> bool {
+    c.is_control() || c == '\u{2028}' || c == '\u{2029}'
+}
+
 /// Render argv the way `ps args=` does, so both backends produce identical rows.
 /// Used only by the /proc backend — the ps backend gets already-sanitized bytes.
 pub fn sanitize(s: &str) -> String {
-    if !s.chars().any(|c| c.is_control()) {
+    if !s.chars().any(unsafe_char) {
         return s.to_string();
     }
     s.chars()
         .map(|c| match c {
             '\n' | '\0' => ' ',
-            c if c.is_control() => '?',
+            c if unsafe_char(c) => '?',
             c => c,
         })
         .collect()
@@ -473,6 +483,10 @@ mod tests {
         assert_eq!(sanitize("o\x1fp"), "o?p");
         assert_eq!(sanitize("q\x7fr"), "q?r");
         assert_eq!(sanitize("plain text"), "plain text");
+        // U+0085 is a C1 control; U+2028/U+2029 are in glibc's [[:cntrl:]] too
+        assert_eq!(sanitize("s\u{85}t"), "s?t");
+        assert_eq!(sanitize("a\u{2028}b\u{2029}c"), "a?b?c");
+        assert_eq!(sanitize("\u{2027}\u{202a}"), "\u{2027}\u{202a}");
     }
 
     #[test]
