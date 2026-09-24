@@ -6128,13 +6128,21 @@ if [ "${1:-}" = "--doctor" ]; then
         # `tmux bind-key` as it is, and C-f, M-g, F5 and Space all bind fine — a
         # length test called them wrong in the same report that confirmed them
         # bound.  So ask tmux: `list-keys -T prefix <key>` changes nothing and
-        # fails with "invalid key" on exactly what bind-key would refuse ('ff').
+        # fails with "invalid key: …" on exactly what bind-key would refuse ('ff',
+        # 'C-', 'X-f').  By that text, not by its exit status: tmux 3.6 — the
+        # floor — ALSO fails, with "unknown key: …", for a perfectly good key that
+        # is merely not bound in the prefix table yet (3.7 dropped that).  So a
+        # key set after the plugin loaded, the very case this report exists for,
+        # was called unknown while the message listed it as an example.
         # A bare ';' is the one it cannot judge — tmux reads it as a command
         # separator, so the query "succeeds" and the binding never happens.
+        local _ke
         case "$v" in
           ';') printf "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
-          *)   tmux list-keys -T prefix "$v" >/dev/null 2>&1 \
-                 || printf 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
+          *)   _ke=$(tmux list-keys -T prefix "$v" 2>&1 >/dev/null) \
+                 || case "$_ke" in
+                      'invalid key'*) printf 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
+                    esac ;;
         esac ;;
       fzf-opts)
         # Two ways this option silently does nothing, both checked the way the

@@ -346,6 +346,46 @@ setopt key 'ff'
 has "a key tmux does not know is still a problem" "$(doctor)" "✗ @interdimux-key = 'ff'"
 unsetopt key
 
+# A valid key that is not BOUND yet -- set after the plugin loaded, the case this
+# report exists for.  tmux 3.6, the floor, fails `list-keys -T prefix <key>` for
+# it ("unknown key: C-f"), where 3.7 returns 0 and only an unparseable name gets
+# "invalid key".  The check read the exit status, so on 3.6 it called C-f "not a
+# key tmux knows" while listing C-f as an example.  Every case above runs
+# --bind-keys first, so none of them could see it.  Run against 3.6's behaviour:
+# the real tmux, except that list-keys fails the way 3.6's does
+# (cmd-list-keys.c: `if (only != KEYC_UNKNOWN && !found)`).  On a real 3.6 the
+# wrapper changes nothing.
+REAL_TMUX=$(command -v tmux)
+mkdir -p "$TMPD/tmux36"
+cat > "$TMPD/tmux36/tmux" <<EOF
+#!/bin/sh
+if [ "\$1" = list-keys ] && [ "\$2" = -T ] && [ \$# = 4 ]; then
+  '$REAL_TMUX' list-keys -T "\$3" "\$4" >/dev/null || exit \$?
+  '$REAL_TMUX' list-keys -T "\$3" | awk -v k="\$4" '\$4 == k { f = 1 } END { exit !f }' && exit 0
+  echo "unknown key: \$4" >&2; exit 1
+fi
+exec '$REAL_TMUX' "\$@"
+EOF
+chmod +x "$TMPD/tmux36/tmux"
+T36="$TMPD/tmux36:$PATH"
+e36=$(PATH="$T36" tmux list-keys -T prefix C-f 2>&1 >/dev/null) || true
+if [ "$e36" = "unknown key: C-f" ]; then
+  setopt key C-f
+  setopt dashboard-key M-g
+  out=$(PATH="$T36" doctor)
+  hasnt "a valid key that is not bound yet is not called unknown (tmux 3.6)" "$out" "not a key tmux knows"
+  has "...its missing binding is what is reported" "$out" "✗ prefix+C-f is not bound to the navigator"
+  has "...and the option itself is a tick" "$out" "✓ @interdimux-key = 'C-f'"
+  has "...as is the dashboard's" "$out" "✓ @interdimux-dashboard-key = 'M-g'"
+  setopt key 'ff'
+  has "...while a name tmux cannot parse is still refused there" "$(PATH="$T36" doctor)" \
+    "✗ @interdimux-key = 'ff' — not a key tmux knows"
+  unsetopt key
+  unsetopt dashboard-key
+else
+  report "premise: the 3.6 stand-in fails list-keys for an unbound key (got: $e36)" fail
+fi
+
 # --- colours: exactly #rrggbb, 0-255, -1, default --------------------------------------
 # color-border feeds only fzf's --color, so a bad value there cannot stop the
 # script before the report.
