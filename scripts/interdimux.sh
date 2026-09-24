@@ -1438,6 +1438,14 @@ collect_dir() {
 #
 # Now every one of them reads the same table through dir_session, which does
 # its own exact string matching, and never asks tmux to parse a name.
+#
+# And it matches DIRECTORIES, not spellings (canon_dir, on both sides).  tmux
+# keeps #{session_path} exactly as it was given: `-c ~/repo/` tab-completed
+# keeps its slash, and a `tmux new -s bar` typed in a shell whose $PWD runs
+# through a symlink keeps the logical path.  Enter resolves the row it opens
+# with `pwd -P`, while the badge looked the row up as written -- so the badge
+# on a zoxide row (logical, by default) promised `bar`, and Enter missed bar
+# at the physical path and created a second session for the same directory.
 
 # The table: each session's ID, name, start directory (#{session_path}, what
 # `new-session -c` recorded; a `cd` never changes it) and its active pane's cwd,
@@ -1447,7 +1455,9 @@ collect_dir() {
 #
 # A path holding a US or a newline would break the line apart; tmux blanks it
 # instead (#{m/r:}), and a blank path matches no directory.  tmux escapes control
-# characters in names, so neither can occur in one.
+# characters in names, so neither can occur in one.  The start directory is kept
+# in its canon_dir form, the one dir_session looks a directory up by; the pane's
+# cwd already is one (tmux reads it from the kernel).
 SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=()
 declare -A SESS_AT=() SESS_BYNAME=()
 load_session_table() {
@@ -1455,6 +1465,7 @@ load_session_table() {
   SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=() SESS_AT=() SESS_BYNAME=()
   while IFS="$US" read -r id name spath cwd; do
     [ -n "$id" ] && [ -n "$name" ] || continue
+    if [ -n "$spath" ]; then canon_dir "$spath"; spath="$REPLY"; fi
     SESS_ID[i]="$id" SESS_NAME[i]="$name" SESS_SPATH[i]="$spath" SESS_CWD[i]="$cwd"
     SESS_BYNAME["$name"]=$i
     if [ -n "$spath" ]; then
@@ -1468,6 +1479,38 @@ load_session_table() {
     fi
     i=$((i + 1))
   done <<< "$(tmux list-sessions -F "#{session_id}${US}#{session_name}${US}#{?#{m/r:[${US}${nl}],#{session_path}},,#{session_path}}${US}#{?#{m/r:[${US}${nl}],#{pane_current_path}},,#{pane_current_path}}" 2>/dev/null)"
+  return 0
+}
+
+# canon_dir DIR -- REPLY is the directory DIR names, spelled one way: what
+# `pwd -P` prints there, so every spelling of one directory -- a trailing or
+# doubled '/', a path through a symlink -- comes out the same.  Both sides of
+# "does this directory have a session" go through it: the start directories
+# (load_session_table), the directory asked about (dir_session), and the
+# navigator's directory rows in both renderers (emit_dir_rows, and canon_dir in
+# rust/src/dirs.rs, which must stay in step).
+#
+# Without a fork, and without touching what cannot be touched safely:
+#   * the builtin `cd -P`, then straight back.  ~40 us, where a $(cd; pwd -P)
+#     is a fork per row of the ctrl-o picker.  Nothing here has a relative path
+#     in flight, and the way back is the logical $PWD it came from.
+#   * a path on a filesystem whose stat can block (is_remote_path) keeps its
+#     spelling, only tidied: resolving it could hang the list on a stalled
+#     mount, as every other probe of such a path could.  So a symlink INSIDE
+#     such a mount is the one spelling still told apart from its target.
+#   * so does a path that is not there, or not absolute: tmux keeps `-c .`
+#     as ".", relative to a client long gone, and it names nothing now.
+canon_dir() {
+  local p="$1" here
+  while [[ $p == *//* ]]; do p="${p//\/\///}"; done
+  while [ "${#p}" -gt 1 ] && [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+  REPLY="$p"
+  case "$p" in /*) ;; *) return 0 ;; esac
+  is_remote_path "$p" && return 0
+  here="$PWD"
+  builtin cd -P -- "$p" 2>/dev/null || return 0
+  REPLY="$PWD"
+  builtin cd -- "$here" 2>/dev/null || :
   return 0
 }
 
@@ -1534,10 +1577,15 @@ sess_row_at_dir() {
 #      same branch (sess_row_at_dir).
 #   3. a same-named session from somewhere else is not reused: `<parent>-<name>`,
 #      then `<name>-2`, `-3`... -- the first that is free or is DIR's.
+#
+# DIR is taken as canon_dir spells it, as the table's start directories are, so
+# every spelling of a directory gets the same answer -- and the name is the one
+# its physical path gives, which is where connect_dir creates it.
 dir_session() {
-  local dir="$1" name base i n
+  local dir name base i n
   REPLY="" DIR_SID=""
-  [ -n "$dir" ] || return 0
+  [ -n "$1" ] || return 0
+  canon_dir "$1"; dir="$REPLY"; REPLY=""
   i="${SESS_AT[$dir]-}"
   if [ -n "$i" ]; then
     REPLY="${SESS_NAME[i]}" DIR_SID="${SESS_ID[i]}"
@@ -3067,12 +3115,21 @@ emit_dir_rows() {
   [ "$DIRS_LIMIT" -gt 0 ] || return 0
 
   local d disp base ident ctx type_badge n=0
+  # ...and under whatever spelling: each of them as canon_dir has it, so a
+  # session started at `~/repo/`, or through a symlink, hides the row for its
+  # directory however the recent list or zoxide spells it -- as it must, since
+  # Enter on that row resolves it and switches to the session (dir_session).
+  # The Rust core's canon_dir (rust/src/dirs.rs) does the same.
+  local _k
+  local -A _taken=()
+  for _k in ${SESSION_DIRS[@]+"${!SESSION_DIRS[@]}"}; do canon_dir "$_k"; _taken["$REPLY"]=1; done
   while IFS= read -r d; do
     [ -n "$d" ] || continue
     # A tab would break the 4-field row contract; a session already covers it
     case "$d" in *$'\t'*) continue ;; esac
     [[ -v "SESSION_DIRS[$d]" ]] && continue
 
+    canon_dir "$d"; [ -n "${_taken[$REPLY]-}" ] && continue
     base="${d##*/}"
     [ -n "$base" ] || base="$d"
     base="${base//$'\t'/ }"
@@ -8142,8 +8199,13 @@ while true; do
     # whole point of listing dirs inline (IDEAS #14).
     if [ "$SPEC_TYPE" = "D" ]; then
       if [ -d "$SPEC_DIR" ]; then
-        record_dir_use "$SPEC_DIR"
-        connect_dir "$SPEC_DIR" || imux_msg "could not open $SPEC_DIR"
+        # Physical, as ctrl-o's accept and --connect-dir resolve theirs (the
+        # D: path is the recent list's or zoxide's spelling): the session is
+        # then created where every lookup of it expects it, and hydrated by
+        # the same startup.conf glob as from anywhere else.
+        dir_path=$(cd -- "$SPEC_DIR" 2>/dev/null && pwd -P) || dir_path="$SPEC_DIR"
+        record_dir_use "$dir_path"
+        connect_dir "$dir_path" || imux_msg "could not open $SPEC_DIR"
       else
         imux_msg "$(spec_label) no longer exists"
       fi
