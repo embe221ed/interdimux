@@ -241,7 +241,9 @@ fi
 # Preflight
 # ---------------------------------------------------------------------------
 
-if ! command -v fzf >/dev/null 2>&1; then
+# Except for --doctor, whose job is to report exactly this: stopping it here
+# printed one line where the report should have been.
+if ! command -v fzf >/dev/null 2>&1 && [ "${1:-}" != "--doctor" ]; then
   echo "interdimux: fzf is not installed" >&2
   exit 1
 fi
@@ -261,7 +263,7 @@ else
   fzf_version="${fzf_version%% *}"   # "0.74.0 (rev)" -> "0.74.0", no awk fork
   IFS=. read -r fzf_major fzf_minor _ <<< "$fzf_version"
   if [[ "${fzf_major:-}" =~ ^[0-9]+$ && "${fzf_minor:-}" =~ ^[0-9]+$ ]]; then
-    if [ "$fzf_major" -eq 0 ] && [ "$fzf_minor" -lt 40 ]; then
+    if [ "$fzf_major" -eq 0 ] && [ "$fzf_minor" -lt 40 ] && [ "${1:-}" != "--doctor" ]; then
       echo "interdimux: fzf >= 0.40 is required (found $fzf_version)" >&2
       exit 1
     fi
@@ -4460,6 +4462,70 @@ if [ "${1:-}" = "--doctor" ]; then
 
   _sec environment
 
+  # The environment the popups actually run in.  prefix+f's display-popup and
+  # every run-shell binding start their command from the tmux SERVER's
+  # environment — the global one, overlaid by the session's — not from the shell
+  # this was typed into, and the two differ in exactly the cases worth
+  # diagnosing: fzf on PATH only through a shell rc, a locale only a login
+  # profile exports, an $FZF_DEFAULT_OPTS set after the server started.  Every
+  # check of that kind below reads it from here.  Run from the Health popup the
+  # two are the same, so either way the answer is the popup's.
+  #
+  # One dump per scope, not a query per name: each is a tmux round-trip.  Both
+  # are parsed once into a map, session scope over global, the way tmux merges
+  # them; `-NAME` is tmux's "removed".  (Matching each lookup against the raw
+  # dumps instead cost more than every other check here together: a glob over a
+  # few KB of environment, per name, per scope.)
+  declare -A _senv_v=() _senv_sc=()
+  _senv_load() { # $1 = a show-environment dump, $2 = its scope: g or s
+    local line name IFS=$'\n'
+    local -a lines=()
+    set -f; lines=($1); set +f
+    for line in ${lines[@]+"${lines[@]}"}; do
+      case "$line" in
+        -*) name="${line#-}" ;;
+        *=*) name="${line%%=*}" ;;
+        *) continue ;;
+      esac
+      # A line of a value that spans lines is not a variable; this skips most.
+      [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+      if [ "$line" = "-$name" ]; then unset "_senv_v[$name]"
+      else _senv_v["$name"]="${line#*=}"
+      fi
+      _senv_sc["$name"]="$2"
+    done
+  }
+  _senv_ok=0
+  if _senv_dump=$(tmux show-environment -g 2>/dev/null); then
+    _senv_ok=1
+    _senv_load "$_senv_dump" g
+    _senv_dump=$(tmux show-environment ${TMUX_PANE:+-t "$TMUX_PANE"} 2>/dev/null) \
+      && _senv_load "$_senv_dump" s
+  fi
+  # $1 = a variable name.  Sets REPLY to the value a popup would get and returns
+  # 0, or returns 1 when a popup would not have it at all.  $2 = exact re-reads
+  # the value on its own, because a dump line holds only the first line of a
+  # value that spans several — and $FZF_DEFAULT_OPTS often does.  When tmux could
+  # not be asked at all, this process's own value stands in.
+  _srv_env() {
+    local line
+    if [ "$_senv_ok" = 0 ]; then
+      [ -n "${!1+set}" ] || return 1
+      REPLY="${!1}"
+      return 0
+    fi
+    [ -n "${_senv_v[$1]+set}" ] || return 1
+    REPLY="${_senv_v[$1]}"
+    if [ "${2:-}" = exact ]; then
+      if [ "${_senv_sc[$1]}" = s ]; then
+        line=$(tmux show-environment ${TMUX_PANE:+-t "$TMUX_PANE"} "$1" 2>/dev/null) && REPLY="${line#*=}"
+      else
+        line=$(tmux show-environment -g "$1" 2>/dev/null) && REPLY="${line#*=}"
+      fi
+    fi
+    return 0
+  }
+
   if [ "$TMUX_VNUM" -ge 304 ]; then
     _ok "tmux $(tmux -V 2>/dev/null | awk '{print $2}') (fast prefix-key binding available)"
   elif [ "$TMUX_VNUM" -ge 300 ]; then
@@ -4470,16 +4536,105 @@ if [ "${1:-}" = "--doctor" ]; then
   fi
 
   if command -v fzf >/dev/null 2>&1; then
-    if   [ "$FZF_MINOR" -ge 74 ]; then _ok "fzf $(fzf --version | awk '{print $1}') (raw filter mode available)"
-    elif [ "$FZF_MINOR" -ge 67 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.74 adds raw mode, which stops the tree collapsing as you type"
-    elif [ "$FZF_MINOR" -ge 66 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.67 adds --freeze-left, which keeps a row's identity while a long command scrolls"
-    elif [ "$FZF_MINOR" -ge 63 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.66 dims the columns the ^] scope is not searching"
-    elif [ "$FZF_MINOR" -ge 58 ]; then _warn "fzf $(fzf --version | awk '{print $1}') — 0.63 moves the key hints to a footer, so the top of the list stops twitching"
-    else _warn "fzf $(fzf --version | awk '{print $1}') — old, but supported (0.58 adds the ^] match scope)"
+    # The version with the user's defaults kept out of it: fzf parses those
+    # before it looks at --version, so a bad $FZF_DEFAULT_OPTS made this line
+    # print no version at all.
+    _fzv=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' fzf --version 2>/dev/null </dev/null)
+    _fzv="${_fzv%% *}"
+    # Below 0.40 the preflight refuses to start a picker at all (--doctor alone
+    # is let past it, to say so here).  Judged from the version string itself,
+    # because FZF_MINOR is also 0 for a version it could not parse.
+    _fzf_old=0
+    [[ "$_fzv" =~ ^0\.([0-9]+) ]] && [ "${BASH_REMATCH[1]}" -lt 40 ] && _fzf_old=1
+    if   [ "$_fzf_old" = 1 ];      then _bad "fzf $_fzv is older than 0.40 — the picker refuses to start"
+    elif [ "$FZF_MINOR" -ge 74 ]; then _ok "fzf $_fzv (raw filter mode available)"
+    elif [ "$FZF_MINOR" -ge 67 ]; then _warn "fzf $_fzv — 0.74 adds raw mode, which stops the tree collapsing as you type"
+    elif [ "$FZF_MINOR" -ge 66 ]; then _warn "fzf $_fzv — 0.67 adds --freeze-left, which keeps a row's identity while a long command scrolls"
+    elif [ "$FZF_MINOR" -ge 63 ]; then _warn "fzf $_fzv — 0.66 dims the columns the ^] scope is not searching"
+    elif [ "$FZF_MINOR" -ge 58 ]; then _warn "fzf $_fzv — 0.63 moves the key hints to a footer, so the top of the list stops twitching"
+    else _warn "fzf $_fzv — old, but supported (0.58 adds the ^] match scope)"
     fi
   else
     _bad "fzf is not on PATH"
     _note "it must be on the PATH the TMUX SERVER inherited, not just your shell's"
+  fi
+
+  # fzf and bash as the popups will find them.  Only the tmux server's PATH
+  # counts, and nothing on the way sources a shell rc: run-shell runs /bin/sh on
+  # it, display-popup a non-interactive default-shell.  So "fzf is on my PATH"
+  # in a terminal proves nothing about either — this used to say ✓ from a shell
+  # that had fzf while every popup closed the moment it opened, and never looked
+  # at bash, whose version is a hard floor too.
+  #
+  # `command -v` against a PATH that is not ours, without a fork.  Sets REPLY.
+  _which_in() {
+    local d
+    local -a dirs=()
+    IFS=: read -r -a dirs <<< "$1"
+    for d in ${dirs[@]+"${dirs[@]}"}; do
+      [ -n "$d" ] || d=.
+      if [ -f "$d/$2" ] && [ -x "$d/$2" ]; then REPLY="$d/$2"; return 0; fi
+    done
+    return 1
+  }
+  _spath="" _sfzf="" _sbash=""
+  if _srv_env PATH; then
+    _spath="$REPLY"
+    _which_in "$_spath" fzf  && _sfzf="$REPLY"
+    _which_in "$_spath" bash && _sbash="$REPLY"
+  fi
+
+  # The locale the popups get, gathered here because the same probe measures it
+  # (the check itself is further down, with the others about text).
+  _lc_env=(env -u LC_ALL -u LC_CTYPE -u LANG) _lc_name="" _lc_var=""
+  for _lv in LANG LC_CTYPE LC_ALL; do     # rising precedence: the last one set wins
+    _srv_env "$_lv" || continue
+    _lc_env+=("$_lv=$REPLY")
+    [ -n "$REPLY" ] && { _lc_name="$REPLY"; _lc_var="$_lv"; }
+  done
+  # ONE bash started the way a popup starts it — the server's PATH picks it, the
+  # server's locale configures it — reports its version and how many characters
+  # it counts in two box-drawing ones (2 in UTF-8; 6 when it is counting bytes).
+  # With no bash on that PATH, this process's own stands in for the count only.
+  _pv=$("${_lc_env[@]}" "${_sbash:-$BASH}" -c \
+          'printf "%s %s %s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${#1}"' _ '├─' \
+          2>/dev/null </dev/null)
+  read -r _sbmaj _sbmin _lc_w _ <<< "$_pv"
+
+  if [ -n "$_spath" ]; then
+    # Only when this shell HAS fzf: otherwise the line above already said so.
+    if command -v fzf >/dev/null 2>&1; then
+      _myfzf=""; _which_in "$PATH" fzf && _myfzf="$REPLY"
+      if [ -z "$_sfzf" ]; then
+        _bad "fzf is not on the tmux server's PATH — every popup closes the moment it opens"
+        _note "the server's PATH: $_spath"
+        _note "for the running server: tmux set-environment -g PATH \"\$PATH\", from a shell that finds fzf"
+      elif [ "$_sfzf" != "$_myfzf" ]; then
+        # A different fzf is only worth a word if it is a different version: a
+        # distro's old package ahead of the one you installed is the usual shape.
+        _sfzv=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' "$_sfzf" --version 2>/dev/null </dev/null)
+        _sfzv="${_sfzv%% *}"
+        if [ "$_sfzv" != "$_fzv" ]; then
+          _warn "the popups run fzf ${_sfzv:-(unknown version)} from $_sfzf, not $_fzv"
+          _note "they get the tmux server's PATH, where that one comes first"
+        fi
+      fi
+    fi
+    # bash >= 4.3: namerefs (`local -n`, which every option read goes through)
+    # are 4.3, `[[ -v arr[k] ]]` and printf's %(...)T are 4.2.  macOS's /bin/bash
+    # is 3.2 and dies at the first `declare -A`, before anything can draw — and it
+    # is the bash a server PATH without Homebrew's finds.
+    if [ -z "$_sbash" ]; then
+      _bad "bash is not on the tmux server's PATH — every binding runs it by name"
+      _note "the server's PATH: $_spath"
+    elif ! [[ "${_sbmaj:-}" =~ ^[0-9]+$ && "${_sbmin:-}" =~ ^[0-9]+$ ]]; then
+      _warn "could not ask the bash on the tmux server's PATH its version ($_sbash)"
+    elif [ $(( _sbmaj * 100 + _sbmin )) -lt 403 ]; then
+      _bad "bash $_sbmaj.$_sbmin on the tmux server's PATH is older than 4.3 — every popup dies before it draws"
+      _note "$_sbash: install a newer bash, and put it ahead of that one on the server's PATH"
+    else
+      _ok "bash $_sbmaj.$_sbmin on the tmux server's PATH"
+    fi
   fi
 
   _repo="${SCRIPT_PATH%/scripts/*}"
@@ -4515,17 +4670,45 @@ if [ "${1:-}" = "--doctor" ]; then
   # The tree glyphs and every width calculation assume UTF-8.  Without it the
   # box-drawing characters arrive as mojibake and the column arithmetic — which
   # counts CELLS — is measuring something the terminal is not drawing.
-  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
-    *[Uu][Tt][Ff]*8*) _ok "character encoding is UTF-8 (${LC_ALL:-${LC_CTYPE:-$LANG}})" ;;
-    '')  _warn "no locale is set — the tree glyphs need a UTF-8 one"
-         _note "export LANG=C.UTF-8 (or your own) where the tmux SERVER can see it" ;;
-    *)   _warn "locale '${LC_ALL:-${LC_CTYPE:-$LANG}}' is not UTF-8 — the tree glyphs will be mojibake"
-         _note "the column widths count cells, so a non-UTF-8 terminal misaligns them" ;;
+  #
+  # Measured, not read off the name, and in the popups' environment.  A UTF-8
+  # locale that is named but not installed — LANG sent over ssh to a host that
+  # never generated it, a minimal container — makes bash fall back to C: ${#…}
+  # counts BYTES, every column misaligns, and every bash the navigator starts
+  # prints a setlocale warning.  The name looked perfect, so this used to say ✓.
+  # The probe near the top of this section counted the characters in a bash
+  # started with the popups' locale (_lc_w).
+  #
+  # "<chars>:<name>".  An empty count means the probe itself could not run, and
+  # then the name is all there is to go on.
+  case "$_lc_w:$_lc_name" in
+    2:*|:*[Uu][Tt][Ff]*8*)
+      _ok "character encoding is UTF-8 (${_lc_name:-the system default})" ;;
+    *:*[Uu][Tt][Ff]*8*)
+      _bad "locale '$_lc_name' is not installed — bash falls back to C and counts bytes, so every column misaligns"
+      _note "generate it (locale-gen $_lc_name), or give tmux one that exists: tmux set-environment -g $_lc_var C.UTF-8"
+      _note "it is also what bash's 'setlocale: cannot change locale' warning is about" ;;
+    *:)
+      _warn "no locale is set — the tree glyphs need a UTF-8 one"
+      _note "export LANG=C.UTF-8 (or your own) where the tmux SERVER can see it" ;;
+    *)
+      _warn "locale '$_lc_name' is not UTF-8 — the tree glyphs will be mojibake"
+      _note "the column widths count cells, so a non-UTF-8 terminal misaligns them" ;;
   esac
+  # The shell this was typed into is the obvious place to look, and the wrong
+  # one; say so when it disagrees.
+  _lc_self="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+  [ "$_lc_self" != "$_lc_name" ] \
+    && _note "that is the tmux server's locale, which the popups get — this shell's is '${_lc_self:-unset}'"
 
   # $FZF_DEFAULT_OPTS is applied to every picker before this tool's own flags and
   # is invisible to the option validator below, which only reads
-  # @interdimux-fzf-opts.  Three of its flags are not a matter of taste:
+  # @interdimux-fzf-opts.  The server's copy, again: it is the one the pickers get.
+  _fdo="" _fdof=""
+  _srv_env FZF_DEFAULT_OPTS exact && _fdo="$REPLY"
+  _srv_env FZF_DEFAULT_OPTS_FILE && _fdof="$REPLY"
+
+  # The flags that are not a matter of taste:
   #   --border/--margin/--padding shrink fzf's window WITHOUT shrinking
   #     FZF_COLUMNS, which is what the column widths and the hint bar are sized
   #     from, so every row comes out too wide and gets clipped;
@@ -4533,11 +4716,11 @@ if [ "${1:-}" = "--doctor" ]; then
   #     the same flag in @interdimux-fzf-opts it does NOT switch this tool to its
   #     re-exec fallback — so a fish there gets POSIX snippets it cannot parse;
   #   --height turns off full-screen mode inside a popup that is already sized.
-  if [ -n "${FZF_DEFAULT_OPTS:-}" ]; then
+  if [ -n "$_fdo" ]; then
     # Normalise the whitespace first.  fzf splits these on ANY of it, and a long
     # one is usually written across several LINES — matched against spaces only,
     # every flag in the multi-line form reported clean.
-    _fzfopts=" ${FZF_DEFAULT_OPTS//[$'\n\t']/ } "
+    _fzfopts=" ${_fdo//[$'\n\t']/ } "
     _fzfhaz=""
     for _f in --border --margin --padding --height --with-shell --style; do
       case "$_fzfopts" in *" $_f"*) _fzfhaz+=" $_f" ;; esac
@@ -4549,13 +4732,16 @@ if [ "${1:-}" = "--doctor" ]; then
     else
       _ok "\$FZF_DEFAULT_OPTS is set, and none of it changes fzf's geometry"
     fi
+    if [ -n "$_fzfhaz" ] && [ "$_fdo" != "${FZF_DEFAULT_OPTS:-}" ]; then
+      _note "that is the tmux server's copy, which the pickers get — this shell's differs"
+    fi
   fi
   # Its own statement, not a note under the line above: fzf reads this file even
   # when $FZF_DEFAULT_OPTS is empty, and claiming "none of it changes fzf's
   # geometry" while an unread file sets the geometry is worse than saying nothing.
-  if [ -n "${FZF_DEFAULT_OPTS_FILE:-}" ]; then
+  if [ -n "$_fdof" ]; then
     _warn "\$FZF_DEFAULT_OPTS_FILE is set — fzf reads it, and its contents are not checked here"
-    _note "$FZF_DEFAULT_OPTS_FILE"
+    _note "$_fdof"
   fi
 
   # A binary older than the sources it was built from renders differently from

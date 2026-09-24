@@ -42,6 +42,17 @@ report() {
 echo "interdimux doctor tests"
 echo
 
+# Two ambient inputs are pinned BEFORE the server starts.  The report checks the
+# LOCALE (a container with none, or LC_ALL=C, is normal) and $FZF_DEFAULT_OPTS
+# (most people have one) — and both feed assertions below about a HEALTHY
+# install.  Unpinned, this suite failed 2/62 under `LC_ALL=C` and 1/62 with a
+# --height in the developer's own fzf opts, neither of which is about the code.
+# Before the server, because --doctor reads both from the tmux SERVER's
+# environment — the one the popups get — and the server copies the environment
+# it was started in.
+export LC_ALL=C.UTF-8 LANG=C.UTF-8
+unset FZF_DEFAULT_OPTS FZF_DEFAULT_OPTS_FILE
+
 tmux -f /dev/null -L "$SOCK" new-session -d -s doc -x 120 -y 40
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -a -F '#{pane_id}' | head -1)"
@@ -55,16 +66,13 @@ export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307
 # INTERDIMUX_FZF_MINOR/TMUX_VNUM pin the version probes; the down/unknown paths
 # get their own assertions below that override it locally.
 export INTERDIMUX_AT_DAEMON=up
-# Two more ambient inputs, for the same reason.  The report now checks the
-# LOCALE (a container with none, or LC_ALL=C, is normal) and $FZF_DEFAULT_OPTS
-# (most people have one) — and both feed assertions below about a HEALTHY
-# install.  Unpinned, this suite failed 2/62 under `LC_ALL=C` and 1/62 with a
-# --height in the developer's own fzf opts, neither of which is about the code.
-export LC_ALL=C.UTF-8 LANG=C.UTF-8
-unset FZF_DEFAULT_OPTS FZF_DEFAULT_OPTS_FILE
 
 setopt()   { tmux -L "$SOCK" set -g "@interdimux-$1" "$2"; }
 unsetopt() { tmux -L "$SOCK" set -gu "@interdimux-$1" 2>/dev/null || true; }
+# The server's environment, which is what --doctor reads the locale, PATH and
+# $FZF_DEFAULT_OPTS from.
+senv()     { tmux -L "$SOCK" set-environment -g "$1" "$2"; }
+unsenv()   { tmux -L "$SOCK" set-environment -gu "$1" 2>/dev/null || true; }
 # --doctor exits 1 when it finds a problem, which is the point of it -- so
 # every caller must defuse it or `set -e` ends the suite at the first bad config.
 doctor()   { bash "$SCRIPT" --doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g'; return 0; }
@@ -471,27 +479,34 @@ case "$(doctor)" in
 esac
 
 # A non-UTF-8 locale is a warning, not a failure: the tool works, its tree
-# glyphs do not.
-case "$(LC_ALL=C LANG=C LC_CTYPE=C doctor)" in
+# glyphs do not.  Set where the popups get it — the server's environment; the
+# shell --doctor happens to run in is not what the picker sees.
+senv LC_ALL C; senv LANG C
+case "$(doctor)" in
   *"is not UTF-8"*) report "a non-UTF-8 locale is reported" pass ;;
   *) report "a non-UTF-8 locale is reported" fail ;;
 esac
-[ "$(LC_ALL=C LANG=C LC_CTYPE=C doctor_rc)" = 0 ] \
+[ "$(doctor_rc)" = 0 ] \
   && report "...as a warning, not a failure" pass \
   || report "...as a warning, not a failure" fail
+senv LC_ALL C.UTF-8; senv LANG C.UTF-8
 
 # $FZF_DEFAULT_OPTS is invisible to the option validator, and three of its flags
 # move fzf's geometry WITHOUT moving FZF_COLUMNS — which is what the column
 # widths and the hint bar are sized from.
-case "$(FZF_DEFAULT_OPTS='--border --margin=2' doctor)" in
+# In the server's environment too, for the same reason as the locale.
+senv FZF_DEFAULT_OPTS '--border --margin=2'
+case "$(doctor)" in
   *'$FZF_DEFAULT_OPTS sets'*--border*) report "a geometry flag in \$FZF_DEFAULT_OPTS is reported" pass ;;
   *) report "a geometry flag in \$FZF_DEFAULT_OPTS is reported" fail
-     ERRORS+="      $(FZF_DEFAULT_OPTS='--border --margin=2' doctor | grep -i fzf_default | head -2 || true)"$'\n' ;;
+     ERRORS+="      $(doctor | grep -i fzf_default | head -2 || true)"$'\n' ;;
 esac
-case "$(FZF_DEFAULT_OPTS='--color=fg:blue --cycle' doctor)" in
+senv FZF_DEFAULT_OPTS '--color=fg:blue --cycle'
+case "$(doctor)" in
   *"none of it changes fzf's geometry"*) report "a harmless \$FZF_DEFAULT_OPTS is not nagged about" pass ;;
   *) report "a harmless \$FZF_DEFAULT_OPTS is not nagged about" fail ;;
 esac
+unsenv FZF_DEFAULT_OPTS
 
 # A hide pattern that matches nothing looks exactly like one that works.
 setopt hide 'nosuch-session-xyz'

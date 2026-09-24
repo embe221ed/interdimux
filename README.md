@@ -62,7 +62,7 @@ A portal gun for your tmux sessions.
   highlight, 0.67 the frozen identity column, 0.74 raw filter mode) — but 0.74
   is the only version the test suite exercises, so anything older is untested
   rather than unsupported.
-- `bash` >= 4.0
+- `bash` >= 4.3, on the tmux server's PATH (macOS's own `/bin/bash` is 3.2)
 - A UTF-8 locale. The tree glyphs are multibyte and every column width is
   counted in cells; under `LC_ALL=C` the columns misalign. `--doctor` says so.
 - `fd` or `find` (for directory picker)
@@ -318,6 +318,11 @@ only because of it), whether `$FZF_DEFAULT_OPTS` contains a flag that moves fzf'
 geometry without moving `FZF_COLUMNS` — which is what the columns are sized from
 — and which of the two dashboards your client is tall enough for. Plus every
 `@interdimux-*` option you have set, with its value checked.
+
+The environment it checks is the one the popups get: the tmux server's `PATH`,
+locale and `$FZF_DEFAULT_OPTS`, not your shell's. The two differ exactly when
+it matters — fzf on `PATH` only through a shell rc, a UTF-8 locale that is named
+but not installed — so run from a shell, it says which one it read.
 
 That last part is the one worth running. tmux user options are free-form, so a
 mistyped name is not an error to tmux — the setting simply never applies, with
