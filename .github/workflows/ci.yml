@@ -80,10 +80,11 @@ jobs:
     timeout-minutes: 30
     # Two renderers ship, so both are tested.  `rust` is the developer's setup:
     # the core built, every suite on it, the parity suites comparing it with the
-    # fallback.  `bash` is what every install WITHOUT cargo runs -- README's TPM
-    # route never builds rust/ -- and before this leg the fallback ran only in
-    # the few places a suite forced it (INTERDIMUX_USE_RUST=off), because a
-    # built binary is preferred everywhere else.  That leg runs the shell suites
+    # fallback.  `bash` is what every install WITHOUT cargo runs -- a TPM
+    # install builds rust/ only when interdimux.tmux finds cargo -- and before
+    # this leg the fallback ran only in the few places a suite forced it
+    # (INTERDIMUX_USE_RUST=off), because a built binary is preferred
+    # everywhere else.  That leg runs the shell suites
     # with IMUX_RENDERER=bash (tests/run_all.sh), which exports
     # INTERDIMUX_USE_RUST=off: the renderer path is then exactly a cargo-less
     # install's.  The binary is still BUILT there, because the suites that
@@ -165,10 +166,11 @@ jobs:
       # everything else: 3.2 and 4.2 must be refused in one line, and 4.3 and
       # 5.1 must list, search and survive `$` in names.  Built from source --
       # no apt route installs a second bash -- and cached by version, so a
-      # push pays for this only when OLD_BASH_VERSIONS changes.  A modern gcc
-      # rejects these K&R-era sources without the -std/-Wno flags, and there is
-      # deliberately no -O2: 3.2's configure then spins forever in its mktime
-      # probe, whose loop relies on signed overflow wrapping.
+      # push pays for this only when OLD_BASH_VERSIONS changes.  The -std/-Wno
+      # flags are for gcc 14, which rejects these K&R-era sources outright (13
+      # only warns), and CFLAGS deliberately has no -O2 (configure's default):
+      # with it, 3.2's configure spins in its mktime probe, a loop that relies
+      # on signed overflow wrapping.  See docs/CI.md §12.
       - name: Cache bash ${{ env.OLD_BASH_VERSIONS }}
         id: old-bash-cache
         uses: actions/cache@v4
