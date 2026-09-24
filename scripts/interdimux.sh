@@ -815,9 +815,25 @@ fi
 PROJECT_MARKERS=(.git Makefile package.json Cargo.toml go.mod pyproject.toml CMakeLists.txt .hg .svn build.gradle pom.xml mix.exs flake.nix)
 
 # Additional user-defined markers (colon-separated)
+#
+# A marker that names the directory ITSELF is dropped, because is_project_root
+# tests `[ -e "$dir/$m" ]`, and for an empty marker that is `[ -e "$dir/" ]`:
+# true for every directory there is.  `read -a` keeps the empty field a doubled
+# or leading ':' produces ('Move.toml::deno.json', ':Gemfile' -- only a TRAILING
+# ':' is dropped), so one typo turned every scanned directory into a ◆ project.
+# '.', '..', '/' and './' are the same mistake spelled differently.  A marker
+# with a real name in it -- '.github/workflows' -- is kept.
 if [ -n "$EXTRA_MARKERS" ]; then
   IFS=':' read -ra _extra_markers <<< "$EXTRA_MARKERS"
-  PROJECT_MARKERS+=("${_extra_markers[@]}")
+  for _m in "${_extra_markers[@]}"; do
+    IFS='/' read -ra _m_parts <<< "$_m"
+    _m_named=0
+    for _p in "${_m_parts[@]}"; do
+      case "$_p" in ''|.|..) ;; *) _m_named=1 ;; esac
+    done
+    [ "$_m_named" = 1 ] && PROJECT_MARKERS+=("$_m")
+  done
+  unset _m _p _m_parts _m_named
 fi
 
 is_project_root() {
