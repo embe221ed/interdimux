@@ -2326,21 +2326,20 @@ PFX_FLOOR=6  PFX_CEIL=16
 WIN_FLOOR=8  WIN_CEIL=40
 PATH_FLOOR=12 PATH_CEIL=44
 PATH_KEEP=24          # how far the path may shrink to keep the git badge
-MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0 HAS_BRANCH=0
+MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0
 
 # Longest session name, window identity ("index:name") and displayed
-# (~-substituted) path across every target, the most Z/!/# flags on any
-# one window, and whether any window or pane has a git branch to show.
-# Fork-free; reads the raw tmux dumps gather_targets already fetched
-# (visible via dynamic scope) and sets the MAX_* / HAS_BRANCH globals.
-# The branch lookups fill get_git_branch's cache, so build_ctx_field's
-# lookups for the same paths cost nothing — the same file reads as before,
-# just earlier.  Every (( … )) test sits on the LEFT of && (set-e-exempt);
+# (~-substituted) path across every target, and the most Z/!/# flags on any
+# one window.  Fork-free and file-free; reads the raw tmux dumps
+# gather_targets already fetched (visible via dynamic scope) and sets the
+# MAX_* globals.  Whether any row has a git branch is NOT measured here: it
+# costs file reads, and compute_widths asks it only where the answer counts
+# (_probe_has_branch).  Every (( … )) test sits on the LEFT of && (set-e-exempt);
 # the explicit `return 0` keeps the function's own status 0 — the trailing
 # loop would otherwise propagate a false (( … )) and abort a set -e caller
 # of the bare call in gather_targets.
 measure_widths() {
-  MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0 HAS_BRANCH=0
+  MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0
   local _sla sname _sw _sa _sn widx wname _wa _wc wpath _wp _wpid wflags _pi _pa _pc ppath _pr il dp nf
   while IFS="$US" read -r sname _sla _sw _sa; do
     [ -z "$sname" ] && continue
@@ -2360,21 +2359,39 @@ measure_widths() {
     [ "${wflags:1:1}" = "1" ] && nf=$(( nf + 1 ))
     [ "${wflags:2:1}" = "1" ] && nf=$(( nf + 1 ))
     (( nf > MAX_FLAGS )) && MAX_FLAGS=$nf
-    if [ "$HAS_BRANCH" = 0 ]; then
-      get_git_branch "$wpath"
-      [ -n "$REPLY" ] && HAS_BRANCH=1
-    fi
   done <<< "$all_windows_raw"
   while IFS="$US" read -r _sn widx _pi _pa _pc ppath _pr; do
     [ -z "$_sn" ] && continue
     dp="${ppath/#$HOME/\~}"
     (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
-    if [ "$HAS_BRANCH" = 0 ]; then
-      get_git_branch "$ppath"
-      [ -n "$REPLY" ] && HAS_BRANCH=1
-    fi
   done <<< "$all_panes_raw"
   return 0
+}
+
+# Does any window or pane row have a git branch to show?  The one question the
+# squeeze asks that reads files: each cwd is walked up to / (get_git_branch)
+# until one has a branch, so on a tree with none it is every directory of every
+# path -- plus the mount table, on the first walk step (is_remote_path).  It was
+# asked up front in measure_widths, at every width; but it decides only whether
+# the path gives up cells to keep the badge, and at most widths the badge fits,
+# or goes, whatever the answer (at 80 columns it never matters).  So
+# compute_widths asks it there and nowhere else, and it stops at the first
+# branch.  Windows before panes, as it always was.  The lookups fill
+# get_git_branch's cache, so build_ctx_field's for the same paths cost nothing.
+# Reads gather_targets' dumps through dynamic scope.
+_probe_has_branch() {
+  local _sn _wx _wn _wa _wc wpath _wr _pi _pa _pc ppath _pr
+  while IFS="$US" read -r _sn _wx _wn _wa _wc wpath _wr; do
+    [ -n "$_sn" ] || continue
+    get_git_branch "$wpath"
+    [ -n "$REPLY" ] && return 0
+  done <<< "$all_windows_raw"
+  while IFS="$US" read -r _sn _wx _pi _pa _pc ppath _pr; do
+    [ -n "$_sn" ] || continue
+    get_git_branch "$ppath"
+    [ -n "$REPLY" ] && return 0
+  done <<< "$all_panes_raw"
+  return 1
 }
 
 
@@ -2454,6 +2471,8 @@ compute_widths() {
   #      build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate) and the
   #      path keeps its cells.  Only while some row actually HAS a branch; a
   #      badge column that would be blank on every tree row goes first.
+  #      That is asked last, and only when the cells would be enough: it is
+  #      the one test here that reads files (_probe_has_branch).
   #   2. the path, down to PATH_FLOOR
   #   3. the session prefix, down to PFX_FLOOR
   #   4. the window name, down to WIN_FLOOR
@@ -2461,13 +2480,13 @@ compute_widths() {
   # The Z/!/# flags are never squeezed: their own slot, at most 4 cells.
   # Any deficit left after the floors lands on the flowing COMMAND column,
   # which fzf clips anyway.  rust/src/widths.rs is the same ladder.
-  local over give keep
+  local over give
   _squeeze_over; over=$REPLY
   if (( BADGE_W > 0 && over > 0 )); then
-    keep=$PATH_W
-    (( HAS_BRANCH )) && keep=$PATH_KEEP
-    if (( PATH_W - keep >= over )); then PATH_W=$(( PATH_W - over ))
-    else                                 BADGE_W=0
+    if (( PATH_W - PATH_KEEP >= over )) && _probe_has_branch; then
+      PATH_W=$(( PATH_W - over ))
+    else
+      BADGE_W=0
     fi
   fi
   _squeeze_over; give=$(( PATH_W - PATH_FLOOR ))
