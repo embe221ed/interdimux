@@ -144,7 +144,7 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 | `Ctrl-z` | Toggle zoom on the selected pane |
 | `Ctrl-s` | Swap the selected window or pane |
 | `Ctrl-d` | Detach clients from the selected session |
-| `Ctrl-t` | Send a command to the selected pane |
+| `Ctrl-t` | Send a command to the selected pane — typed as text, then Enter; a pane scrolled back in copy-mode is taken out of it first, so the command runs |
 | `Ctrl-]` | Cycle the match scope: name / path / cmd / all / name+cmd (fzf >= 0.58). The prompt names the active scope |
 | `Ctrl-/` | Toggle preview pane |
 | `Ctrl-r` | Reload the list |
@@ -484,7 +484,9 @@ interdimux.sh --sched-cancel 42     # drop one
 ```
 
 The target is any tmux target (`%5`, `work:1.0`, `=name:`) or `.` for the
-current pane, resolved to a pane id at submit time.
+current pane, resolved to a pane id at submit time. If that pane is scrolled
+back in copy-mode when the command fires, it is taken out of copy-mode first,
+so the command runs instead of being read as copy-mode keys.
 
 **Jobs refuse to fire if the tmux server has restarted.** Pane ids are recycled,
 so `%0` after a restart is somebody else's pane — a scheduled `make deploy`

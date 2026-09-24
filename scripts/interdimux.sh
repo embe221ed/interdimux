@@ -1042,7 +1042,7 @@ resolve_session_name() {
 #
 # Every place that types the user's text into a pane -- ctrl-t's send, startup
 # commands, and both scheduled paths -- goes through send_line / sh_send_line,
-# because a bare `send-keys -- "$text" Enter` got two things wrong (all
+# because a bare `send-keys -- "$text" Enter` got three things wrong (all
 # measured on tmux 3.7b):
 #
 #   * tmux's ARGV parser reads an argument ending in ';' as a command separator
@@ -1055,6 +1055,15 @@ resolve_session_name() {
 #     passed as 'x\\;' and arrives as 'x\;'.
 #   * without -l every argument is first looked up as a KEY NAME, so a command
 #     that is just `Enter`, `Home` or `C-c` was pressed rather than typed.
+#   * a pane in copy-mode reads keys as copy-mode bindings: the command never
+#     ran, vi's `D` in "echo COPYMODE" copied into a NEW paste buffer on its way
+#     out of the mode, and the dialog said only "1 failed".  `copy-mode -q`
+#     leaves copy-mode and any other mode (a no-op for a pane in none), so the
+#     command runs as if you had pressed q and typed it -- which is what sending
+#     to that pane asked for, and what a scheduled command firing into a pane
+#     you happen to have scrolled back needs too.  Refusing instead would turn
+#     a W:/S: fan-out into a partial broadcast, and the mode was being left
+#     anyway, minus the command.
 #
 # Enter is a send-keys of its own, so it stays a key (-l would type "Enter").
 # The commands go in ONE tmux invocation, as a `\;` list: no extra fork per
@@ -1074,7 +1083,8 @@ tmux_text_arg() {
 send_line() {
   local target="$1"
   tmux_text_arg "$2"
-  tmux send-keys -t "$target" -l -- "$REPLY" \; \
+  tmux copy-mode -q -t "$target" \; \
+       send-keys -t "$target" -l -- "$REPLY" \; \
        send-keys -t "$target" Enter
 }
 
@@ -1086,7 +1096,7 @@ send_line() {
 sh_send_line() {
   local tm="$1" tg="$2"
   tmux_text_arg "$3"; shq "$REPLY"
-  REPLY="$tm send-keys -t $tg -l -- $REPLY \\; send-keys -t $tg Enter"
+  REPLY="$tm copy-mode -q -t $tg \\; send-keys -t $tg -l -- $REPLY \\; send-keys -t $tg Enter"
 }
 
 # The startup command for DIR, or empty.  Sets REPLY.
@@ -3099,8 +3109,8 @@ sched_job_body() {
   shq "$sock";         q_sock="$REPLY"
   shq "$srvpid";       q_want="$REPLY"
   shq "$pane";         q_pane="$REPLY"
-  # the whole send, as send_line does it (see there): literal text, with a
-  # trailing ';' that survives tmux's argv parser
+  # the whole send, as send_line does it (see there): a trailing ';' survives
+  # tmux's argv parser, and a pane left in copy-mode still runs the command
   sh_send_line 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
   # One field per line, each "rest of line".  The single-line form packed all
   # three into "pane=… target=… desc=…", which stops being parseable the moment
@@ -3967,7 +3977,8 @@ if [ "${1:-}" = "--action" ]; then
 
         sent=0 failed=0
         for t in "${send_targets[@]}"; do
-          # send_line: literal text, with a trailing ';' intact
+          # send_line: literal text, a trailing ';' intact, and a pane in
+          # copy-mode taken out of it first so the command actually runs
           if send_line "$t" "$send_cmd" 2>/dev/null; then
             sent=$((sent + 1))
           else

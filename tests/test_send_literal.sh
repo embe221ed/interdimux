@@ -166,7 +166,9 @@ submit_at() {
     bash "$SCRIPT" --send-at 'now + 1 hour' "$P0" "$1" >/dev/null 2>&1 || true
 }
 
-if [ "$(PATH="$shimdir:$PATH" command -v at)" != "$shimdir/at" ]; then
+AT_SHIM_OK=0
+[ "$(PATH="$shimdir:$PATH" command -v at)" = "$shimdir/at" ] && AT_SHIM_OK=1
+if [ "$AT_SHIM_OK" != 1 ]; then
   report "send-at: the at shim is the at that runs (else a real job would be queued)" fail
 else
   for text in 'echo at;' 'find . -maxdepth 0 -exec echo AT {} \;'; do
@@ -182,6 +184,59 @@ else
     expect "send-at (job body under /bin/sh): '$text' arrives intact" \
       "$(next_line "$TMPD/p0" "$n")" "$text"
   done
+fi
+
+# --- a pane in copy-mode ------------------------------------------------------------
+# Keys sent to a pane in copy-mode were read as copy-mode BINDINGS: with vi keys
+# the `D` in "echo COPYMODE" copied into a new paste buffer and left the mode,
+# the rest failed with "not in a mode", the command never ran, and the dialog
+# said "1 failed" with no reason.  A W: fan-out silently missed that one pane.
+# The pane is now taken out of the mode first, at every site.
+T set -g mode-keys vi
+in_mode() { T display-message -p -t "$1" '#{pane_in_mode}' 2>/dev/null; }
+bufs() { T list-buffers 2>/dev/null | wc -l | tr -d ' '; }
+
+T copy-mode -t '=lit:1.1'
+if [ "$(in_mode '=lit:1.1')" = 1 ]; then
+  b0=$(bufs)
+  na=$(( $(nlines "$TMPD/w1a") + 1 )); nb=$(( $(nlines "$TMPD/w1b") + 1 ))
+  run_send 'W:lit:1' 'echo COPYMODE'
+  expect "copy-mode: a W: fan-out reaches the pane that is not in a mode" \
+    "$(next_line "$TMPD/w1a" "$na")" 'echo COPYMODE'
+  expect "copy-mode: ...and the pane that was in copy-mode runs it too" \
+    "$(next_line "$TMPD/w1b" "$nb")" 'echo COPYMODE'
+  if [[ "$DIALOG" == *'sent to 2 pane(s)'* && "$DIALOG" != *failed* ]]; then
+    report "copy-mode: ...and the dialog reports 2 sent, none failed" pass
+  else
+    report "copy-mode: ...and the dialog reports 2 sent, none failed" fail
+    ERRORS+="    drew: $(printf '%s' "$DIALOG" | tr -s ' ' | tail -c 120)"$'\n'
+  fi
+  expect "copy-mode: ...and no paste buffer was written on the way" "$(bufs)" "$b0"
+else
+  report "copy-mode: the pane entered copy-mode (precondition)" fail
+fi
+
+# the scheduled paths: the pane is scrolled back when the command fires
+T copy-mode -t "$P0"
+if [ "$(in_mode "$P0")" = 1 ]; then
+  n=$(( $(nlines "$TMPD/p0") + 1 ))
+  bash "$SCRIPT" --send-in 1 "$P0" 'echo COPY_SUB' >/dev/null 2>&1 || true
+  expect "copy-mode: a --send-in firing into a pane in copy-mode runs" \
+    "$(next_line "$TMPD/p0" "$n" 15)" 'echo COPY_SUB'
+else
+  report "copy-mode: pane 0 entered copy-mode for --send-in (precondition)" fail
+fi
+T copy-mode -t "$P0"
+if [ "$AT_SHIM_OK" != 1 ]; then
+  :   # already reported above; never let a real at run
+elif [ "$(in_mode "$P0")" = 1 ]; then
+  submit_at 'echo COPY_AT'
+  n=$(( $(nlines "$TMPD/p0") + 1 ))
+  [ -s "$TMPD/body" ] && /bin/sh "$TMPD/body" >/dev/null 2>&1
+  expect "copy-mode: an at job firing into a pane in copy-mode runs" \
+    "$(next_line "$TMPD/p0" "$n")" 'echo COPY_AT'
+else
+  report "copy-mode: pane 0 entered copy-mode for --send-at (precondition)" fail
 fi
 
 echo
