@@ -523,6 +523,14 @@ The first match wins:
    ~/notes            nvim index.md
    ```
 
+   The pattern is matched against the directory's absolute path. A leading
+   `~/` (or a bare `~`) means your home directory; nothing else is expanded, so
+   `$HOME`, other variables and `~user` stay literal text. `*` also matches `/`,
+   so `~/code/*-cli` matches `~/code/a/b-cli` too. When a line contains a TAB,
+   everything before the first TAB is the pattern, so a pattern can contain
+   spaces (`~/My Projects/*`, then a TAB, then the command); without a TAB the
+   pattern ends at the first space.
+
 2. **`.interdimux-startup`** in the directory itself — its contents are the
    command. Multiple lines are sent as separate commands, so this doubles as a
    small bootstrap script:

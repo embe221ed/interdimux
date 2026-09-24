@@ -1025,7 +1025,7 @@ resolve_session_name() {
 # ---------------------------------------------------------------------------
 #
 # Resolution order, first match wins:
-#   1. ~/.config/interdimux/startup.conf   "<glob><whitespace><command>"
+#   1. ~/.config/interdimux/startup.conf   "<glob><TAB or whitespace><command>"
 #   2. a .interdimux-startup file in the directory itself (contents = command)
 #   3. @interdimux-startup-command          (global fallback)
 #
@@ -1042,17 +1042,53 @@ resolve_startup_command() {
   REPLY=""
 
   # 1. glob table.  Patterns are matched against the absolute path; the first
-  #    matching line wins, so put specific patterns above general ones.
+  #    matching line wins, so put specific patterns above general ones.  A case
+  #    glob's `*` also matches '/', so `~/code/*-cli` matches ~/code/a/b-cli.
   if [ -f "$conf" ]; then
-    local line pat cmd
+    local line pat cmd rest home_p="" home_p_done=0
     while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"   # an indented line still counts
       case "$line" in ''|'#'*) continue ;; esac
-      pat="${line%%[[:space:]]*}"
-      cmd="${line#"$pat"}"
+      # A TAB, when there is one, is THE separator, so a pattern can contain a
+      # space ("~/My Projects/*").  Otherwise the first run of whitespace.
+      if [[ "$line" == *$'\t'* ]]; then
+        pat="${line%%$'\t'*}"
+        pat="${pat%"${pat##*[![:space:]]}"}"
+        cmd="${line#*$'\t'}"
+      else
+        pat="${line%%[[:space:]]*}"
+        cmd="${line#"$pat"}"
+      fi
       cmd="${cmd#"${cmd%%[![:space:]]*}"}"
       [ -n "$pat" ] && [ -n "$cmd" ] || continue
-      # shellcheck disable=SC2254  # the pattern is a glob by design
-      case "$dir" in $pat) REPLY="$cmd"; return 0 ;; esac
+      case "$pat" in
+        '~'|'~/'*)
+          # bash never tilde-expands a variable's value, so `~/work/api*` --
+          # the only form the README showed -- matched nothing.  Expand a
+          # leading ~ (never ~user) by hand: the home part QUOTED so a glob
+          # character in it is literal, the rest left a pattern.  $dir is a
+          # physical path (pwd -P), so when $HOME is reached through a
+          # symlink, also try the physical home.
+          rest="${pat#\~}"
+          # shellcheck disable=SC2254  # the rest is a glob by design
+          case "$dir" in "${HOME%/}"$rest) REPLY="$cmd"; return 0 ;; esac
+          if [ "$home_p_done" = 0 ]; then
+            home_p_done=1
+            home_p=$(cd "$HOME" 2>/dev/null && pwd -P) || home_p=""
+            # an if, not `[ ] && home_p=`: that list's failure is the if's
+            # status, and connect_dir runs under the navigator's set -e
+            if [ "$home_p" = "$HOME" ]; then home_p=""; fi
+          fi
+          if [ -n "$home_p" ]; then
+            # shellcheck disable=SC2254
+            case "$dir" in "${home_p%/}"$rest) REPLY="$cmd"; return 0 ;; esac
+          fi
+          ;;
+        *)
+          # shellcheck disable=SC2254  # the pattern is a glob by design
+          case "$dir" in $pat) REPLY="$cmd"; return 0 ;; esac
+          ;;
+      esac
     done < "$conf"
   fi
 
@@ -1108,9 +1144,11 @@ hydrate_session() {
   local target="=$name:"
   wait_pane_ready "$target"
   # One send-keys per line, so a multi-line .interdimux-startup behaves like
-  # typing each command in turn.
+  # typing each command in turn.  A CR from a CRLF file (startup.conf or the
+  # project file) would be typed as a second Enter, so it goes.
   local line
   while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
     [ -n "$line" ] || continue
     tmux send-keys -t "$target" -- "$line" Enter 2>/dev/null || true
   done <<< "$cmd"
