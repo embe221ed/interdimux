@@ -4735,7 +4735,12 @@ if [ "${1:-}" = "--doctor" ]; then
   #   --with-shell replaces the shell that runs the inline callbacks, and unlike
   #     the same flag in @interdimux-fzf-opts it does NOT switch this tool to its
   #     re-exec fallback — so a fish there gets POSIX snippets it cannot parse;
-  #   --height turns off full-screen mode inside a popup that is already sized.
+  #   --height turns off full-screen mode inside a popup that is already sized;
+  #   --tmux (--popup since fzf 0.74) is ignored outside tmux, which is exactly
+  #     why it ends up in a global $FZF_DEFAULT_OPTS — but the pickers ARE inside
+  #     tmux, in a popup already, and there fzf opens a second popup underneath
+  #     the first.  The list draws in the one you cannot see; the one you can
+  #     stays blank, and even Esc is typed into it.
   if [ -n "$_fdo" ]; then
     # Normalise the whitespace first.  fzf splits these on ANY of it, and a long
     # one is usually written across several LINES — matched against spaces only,
@@ -4745,14 +4750,28 @@ if [ "${1:-}" = "--doctor" ]; then
     for _f in --border --margin --padding --height --with-shell --style; do
       case "$_fzfopts" in *" $_f"*) _fzfhaz+=" $_f" ;; esac
     done
+    # Word by word, because the last of --tmux / --no-tmux wins, as in fzf.
+    _fzftmux=""
+    set -f
+    for _f in $_fzfopts; do
+      case "$_f" in
+        --tmux|--tmux=*|--popup|--popup=*) _fzftmux="${_f%%=*}" ;;
+        --no-tmux|--no-popup)              _fzftmux="" ;;
+      esac
+    done
+    set +f
+    if [ -n "$_fzftmux" ]; then
+      _warn "\$FZF_DEFAULT_OPTS sets $_fzftmux — the pickers already run in a tmux popup, and fzf's own opens underneath it"
+      _note "keep it out of the global opts, or cancel it for this tool: @interdimux-fzf-opts '--no-tmux'"
+    fi
     if [ -n "$_fzfhaz" ]; then
       _warn "\$FZF_DEFAULT_OPTS sets${_fzfhaz} — those change fzf's geometry or its shell"
       _note "this tool sizes its columns from FZF_COLUMNS, which those flags do not move"
       _note "keep them out of the global opts, or move them to @interdimux-fzf-opts"
-    else
+    elif [ -z "$_fzftmux" ]; then
       _ok "\$FZF_DEFAULT_OPTS is set, and none of it changes fzf's geometry"
     fi
-    if [ -n "$_fzfhaz" ] && [ "$_fdo" != "${FZF_DEFAULT_OPTS:-}" ]; then
+    if { [ -n "$_fzftmux" ] || [ -n "$_fzfhaz" ]; } && [ "$_fdo" != "${FZF_DEFAULT_OPTS:-}" ]; then
       _note "that is the tmux server's copy, which the pickers get — this shell's differs"
     fi
   fi

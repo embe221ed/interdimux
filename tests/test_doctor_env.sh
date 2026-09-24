@@ -168,6 +168,22 @@ has "...and says this shell's differs" "$out" "this shell's is 'C'"
 out=$(FZF_DEFAULT_OPTS='--tmux --border' doctor)
 hasnt "this shell's \$FZF_DEFAULT_OPTS is not the one judged" "$out" 'FZF_DEFAULT_OPTS sets'
 
+# --tmux (--popup since 0.74) opens fzf's own popup underneath the picker's.
+# Server and doctor both set, as in the Health popup.
+senv FZF_DEFAULT_OPTS '--tmux 80%'
+out=$(FZF_DEFAULT_OPTS='--tmux 80%' doctor)
+has "--tmux in the server's \$FZF_DEFAULT_OPTS is warned about" "$out" '⚠ $FZF_DEFAULT_OPTS sets --tmux'
+hasnt "...instead of being called harmless" "$out" "none of it changes fzf's geometry"
+senv FZF_DEFAULT_OPTS '--popup=center'
+has "...and so is its 0.74 spelling, --popup" "$(doctor)" '⚠ $FZF_DEFAULT_OPTS sets --popup'
+# fzf honours the LAST of --tmux / --no-tmux.
+senv FZF_DEFAULT_OPTS '--tmux 80% --no-tmux'
+hasnt "a --tmux cancelled by a later --no-tmux is not" "$(doctor)" 'sets --tmux'
+# A value that spans lines — the dump shows only its first line.
+senv FZF_DEFAULT_OPTS $'--cycle\n--tmux'
+has "a --tmux on the second line of a multi-line value is found" "$(doctor)" '⚠ $FZF_DEFAULT_OPTS sets --tmux'
+unsenv FZF_DEFAULT_OPTS
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi
