@@ -1876,22 +1876,36 @@ only_options() {
   [[ "$1" != *[$' \t\n'][!$' \t\n'-]* ]]
 }
 
-# /proc/<pid>/stat after its comm field: state ppid pgrp session tty_nr tpgid.
-STAT_IDS_RE='^[^ ]+ [^ ]+ (-?[0-9]+) [^ ]+ [^ ]+ (-?[0-9]+)'
-
 # Process group and the controlling tty's foreground process group of a pid:
-# REPLY="<pgrp> <tpgid>", either half empty when unknown.  The comm field is
-# parenthesised and may itself hold spaces, ')' and even a newline, so the file
-# is read whole and the fields are counted from its LAST ") ".
+# REPLY="<pgrp> <tpgid>", either half empty when unknown.
+#
+# /proc/<pid>/stat is `pid (comm) state ppid pgrp session tty_nr tpgid ...`,
+# read straight into words.  comm may itself hold blanks, ')' and even a
+# newline, so it ends at the LAST word with a ')' in it: every field after comm
+# is a number or a state letter.  comm is at most 15 bytes (TASK_COMM_LEN), so
+# at most 7 blanks, and that word is one of f[1]..f[8].  The usual comm (no
+# blank, so f[1] is all of it) is one test.
+#
+# No regex and no whole-line pattern strip.  `${line##*) }` over the ~300-byte
+# line is quadratic in its length, and with the regex after it cost ~0.3 ms a
+# call, for every shell with two or more children the bash renderer draws
+# (review #29).
 proc_group_ids() {
   REPLY=""
-  local pid="$1" line=""
+  local pid="$1" f=() i last=0
   [ -n "$pid" ] || return 0
   if [ "$PROC_CMDLINE_OK" = 1 ]; then
-    { read -r -d '' line < "/proc/$pid/stat"; } 2>/dev/null || :
-    line="${line##*) }"
-    [[ "$line" =~ $STAT_IDS_RE ]] || return 0
-    REPLY="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+    { IFS=$' \t\n' read -r -d '' -a f < "/proc/$pid/stat"; } 2>/dev/null || :
+    if [[ "${f[1]-}" == *')' && "${f[*]:2:7}" != *')'* ]]; then
+      last=1
+    else
+      for (( i = 1; i <= 8 && i < ${#f[@]}; i++ )); do
+        case "${f[i]}" in *')'*) last=$i ;; esac
+      done
+      [ "$last" -gt 0 ] || return 0
+    fi
+    [ -n "${f[last+6]-}" ] || return 0      # a vanished or short record: unknown
+    REPLY="${f[last+3]} ${f[last+6]}"
   else
     REPLY="${PS_PGID[$pid]:-} ${PS_TPGID[$pid]:-}"
   fi
