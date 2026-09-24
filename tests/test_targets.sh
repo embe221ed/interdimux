@@ -272,6 +272,23 @@ T list-windows -t "$(T list-sessions -F '#{session_id} #{session_name}' | awk '$
   && report "renaming a window to 'w#Sname' stores exactly that" pass \
   || report "renaming a window to 'w#Sname' stores exactly that" fail
 
+# --- the dialogs name windows and panes the way the list does ----------------------
+T new-window -d -t '=st:7' -n buildwin 'exec sleep 1000'
+wait_for "[ \"\$(T display-message -p -t '=st:=7.0' '#{pane_current_command}')\" = sleep ]" || true
+out=$(act kill 'W:st:7' 'n')
+printf '%s' "$out" | grep -q "Kill window 'st:7' buildwin?" \
+  && report "the kill dialog names the window as the list does ('st:7' buildwin)" pass \
+  || { report "the kill dialog names the window as the list does" fail
+       ERRORS+="    drew: $(printf '%s' "$out" | tr '\n' ' ' | head -c 200 || true)"$'\n'; }
+out=$(act kill 'P:st:7:0' 'n')
+printf '%s' "$out" | grep -q "Kill pane 'st:7.0' sleep?" \
+  && report "...and a pane by what runs in it ('st:7.0' sleep)" pass \
+  || { report "...and a pane by what runs in it" fail
+       ERRORS+="    drew: $(printf '%s' "$out" | tr '\n' ' ' | head -c 200 || true)"$'\n'; }
+T list-windows -t '=st:' -F '#{window_name}' | grep -qx 'buildwin' \
+  && report "...and answering n kills nothing" pass \
+  || report "...and answering n kills nothing" fail
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

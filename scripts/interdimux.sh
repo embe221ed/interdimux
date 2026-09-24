@@ -3904,6 +3904,21 @@ if [ "${1:-}" = "--action" ]; then
     P) target="$T_PID" ;;
   esac
 
+  # The list shows a window by its NAME ("2:build") and a pane by what runs in
+  # it, so the dialogs say that too -- "Kill window 'demo:2'?" made you map a
+  # number back to the row you had just read, in the one place where getting it
+  # wrong is final.  Names are user-controlled: control characters are made
+  # visible, as they are for the list.
+  _t_what=""
+  case "$SPEC_TYPE" in
+    W) _t_what="$T_WNAME" ;;
+    P) _t_what="$T_PCMD" ;;
+  esac
+  if [ -n "$_t_what" ]; then
+    sanitize_args "$_t_what"
+    label="$label $REPLY"
+  fi
+
   # Destroying a session detaches its clients (default detach-on-destroy),
   # ejecting the user from tmux even when other sessions exist -- so hop them to
   # the most recently used session that survives first, and the stay-open kill
@@ -4277,10 +4292,9 @@ if [ "${1:-}" = "--action" ]; then
       # wrong pair is not obviously wrong until you look for the window you
       # meant to move.  parse_spec already ran on "$spec" for the type check
       # above, so the label is free.
-      # Re-parse first: gather_targets ran in between, and the code below already
-      # re-parses "$spec" for the same reason before computing src_target.
-      parse_spec "$spec"
-      _swap_src=$(spec_label)
+      # $label is the guard's: it names the window or what runs in the pane,
+      # the same words the dialogs use.
+      _swap_src="$label"
       # A session name can contain a newline, which a prompt cannot.
       _swap_src="${_swap_src//$'\n'/ }"
 
