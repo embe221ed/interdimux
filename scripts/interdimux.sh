@@ -3904,28 +3904,73 @@ if [ "${1:-}" = "--action" ]; then
     P) target="$T_PID" ;;
   esac
 
+  # Destroying a session detaches its clients (default detach-on-destroy),
+  # ejecting the user from tmux even when other sessions exist -- so hop them to
+  # the most recently used session that survives first, and the stay-open kill
+  # workflow carries on.  SID is the session going away; GROUP, when given,
+  # takes every session of that group with it (grouped sessions share their
+  # windows, so the last window's death empties all of them).  With nowhere to
+  # go the clients stay, and tmux's detach is the honest outcome.
+  hop_clients_off() {
+    local sid="$1" grp="${2:-}" fb="" id g c csid cgrp
+    while IFS="$US" read -r _ id g; do
+      [ -n "$id" ] || continue
+      [ "$id" = "$sid" ] && continue
+      [ -n "$grp" ] && [ "$g" = "$grp" ] && continue
+      fb="$id"; break
+    done <<< "$(tmux list-sessions -F "#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_id}${US}#{session_group}" 2>/dev/null \
+                | sort -s -t "$US" -k1,1nr)"
+    [ -n "$fb" ] || return 0
+    while IFS="$US" read -r c csid cgrp; do
+      [ -n "$c" ] || continue
+      if [ "$csid" = "$sid" ] || { [ -n "$grp" ] && [ "$cgrp" = "$grp" ]; }; then
+        tmux switch-client -c "$c" -t "$fb" 2>/dev/null
+      fi
+    done <<< "$(tmux list-clients -F "#{client_name}${US}#{session_id}${US}#{session_group}" 2>/dev/null)"
+    return 0
+  }
+
   case "$action" in
     kill)
       popup_accent danger
-      if confirm_dialog "$BOLD_RED" "Kill ${label}?" "This cannot be undone."; then
+      # The last window of a session -- or the last pane of its last window --
+      # takes the session with it, and every client on it with the session.
+      # Say so while there is still a choice, and hop the clients off first,
+      # exactly as for a session kill: the README's "no surprise detach" was
+      # only ever kept for session rows, and ctrl-x on the only window of the
+      # session you were in dropped you out of tmux mid-dialog.
+      _k_last=0
+      case "$SPEC_TYPE" in
+        W) [ "$T_SWINS" = 1 ] && _k_last=1 ;;
+        P) [ "$T_SWINS" = 1 ] && [ "$T_WPANES" = 1 ] && _k_last=1 ;;
+      esac
+      _k_body=("This cannot be undone.")
+      if [ "$_k_last" = 1 ]; then
+        sanitize_args "$T_SNAME"
+        _k_what=window; [ "$SPEC_TYPE" = P ] && _k_what=pane
+        _k_body=("It is the last $_k_what of '$REPLY', so the session closes too." "${_k_body[@]}")
+      fi
+      if confirm_dialog "$BOLD_RED" "Kill ${label}?" "${_k_body[@]}"; then
         case "$SPEC_TYPE" in
           S)
-            # Destroying a session detaches its clients (default
-            # detach-on-destroy), ejecting the user from tmux even when
-            # other sessions exist — hop them to the next MRU session
-            # first so the stay-open kill workflow survives.
-            fallback=$(tmux list-sessions -F "#{?session_last_attached,#{session_last_attached},#{session_activity}}${US}#{session_name}" 2>/dev/null \
-              | sort -s -t "$US" -k1,1nr | cut -d "$US" -f2- \
-              | grep -vxF -- "$SPEC_SESSION" | head -1)
-            if [ -n "$fallback" ]; then
-              while IFS= read -r c; do
-                [ -n "$c" ] && tmux switch-client -c "$c" -t "=${fallback}:" 2>/dev/null
-              done < <(tmux list-clients -F '#{client_name}' -t "$target" 2>/dev/null)
-            fi
+            hop_clients_off "$T_SID"
             tmux kill-session -t "$target" 2>/dev/null
             ;;
-          W) tmux kill-window  -t "$target" 2>/dev/null ;;
-          P) tmux kill-pane    -t "$target" 2>/dev/null ;;
+          W|P)
+            # Asked again now, not trusted from before the dialog: a window
+            # opened or closed while it waited changes the answer, and a hop
+            # that was not needed moves the user for nothing.
+            _k_now=$(tmux display-message -p -t "$target" "#{session_windows}${US}#{window_panes}" 2>/dev/null)
+            IFS="$US" read -r _k_sw _k_wp <<< "$_k_now"
+            if [ "$_k_sw" = 1 ] && { [ "$SPEC_TYPE" = W ] || [ "$_k_wp" = 1 ]; }; then
+              hop_clients_off "$T_SID" "$T_SGRP"
+            fi
+            if [ "$SPEC_TYPE" = W ]; then
+              tmux kill-window -t "$target" 2>/dev/null
+            else
+              tmux kill-pane   -t "$target" 2>/dev/null
+            fi
+            ;;
         esac
         if [ $? -eq 0 ]; then
           dialog_status "${GREEN}✓ killed${RST}"
