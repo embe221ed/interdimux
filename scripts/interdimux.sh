@@ -1059,6 +1059,13 @@ fi
 # bash on every --dirs-preview cursor move and every --list reload, twice per
 # --dirs-list.  A mount that comes or goes while one picker is open is picked
 # up by the next one.
+#
+# When the Rust core draws the navigator's list, bash classifies nothing up
+# front -- that would be a parse on the way to the first frame -- and the core,
+# which classifies anyway, writes its answer in the same form to the file
+# INTERDIMUX_MOUNTS_FILE names, on every list it renders (rust/src/mounts.rs).
+# A directory row's preview, Enter on one and ctrl-o read that file, and parse
+# the table themselves only while it is not there yet (review B08).
 _MOUNTS_READ=0
 _MOUNT_BPS=()                 # the points that can block -- usually one to three
 declare -A _MOUNT_TBL=()      # point -> 1 (can block) | 0; the LAST mount at a point wins
@@ -1067,7 +1074,22 @@ _MOUNT_UNDER=0                # is_remote_path's last path lies below a blocking
 _mounts_read() {
   _MOUNTS_READ=1
   _MOUNT_BPS=() _MOUNT_TBL=()
-  if [ -n "${INTERDIMUX_MOUNTS+set}" ]; then _mounts_import; return 0; fi
+  local -a _me=()
+  if [ -n "${INTERDIMUX_MOUNTS+set}" ]; then
+    local IFS=$'\n' _noglob=0
+    case $- in *f*) _noglob=1 ;; esac
+    set -f
+    _me=($INTERDIMUX_MOUNTS)
+    [ "$_noglob" = 1 ] || set +f
+    _mounts_import ${_me[@]+"${_me[@]}"}
+    return 0
+  fi
+  # Only a file of our own: in a shared /tmp, anyone could have put one there.
+  if [ -n "${INTERDIMUX_MOUNTS_FILE:-}" ] && [ -f "$INTERDIMUX_MOUNTS_FILE" ] \
+     && [ -O "$INTERDIMUX_MOUNTS_FILE" ] && mapfile -t _me 2>/dev/null < "$INTERDIMUX_MOUNTS_FILE"; then
+    _mounts_import ${_me[@]+"${_me[@]}"}
+    return 0
+  fi
   local f="${INTERDIMUX_MOUNTINFO:-/proc/self/mountinfo}"
   [ -r "$f" ] || return 0
   # One buffered read.  `while read` on a /proc file seeks back after every
@@ -1195,14 +1217,11 @@ mounts_export() {
   export INTERDIMUX_MOUNTS="$out"
 }
 
+# $@ = the lines of such a hand-off (INTERDIMUX_MOUNTS, or the Rust core's file).
 _mounts_import() {
-  local -a _me=() _cand=()
-  local e p IFS=$'\n' _noglob=0
-  case $- in *f*) _noglob=1 ;; esac
-  set -f
-  _me=($INTERDIMUX_MOUNTS)
-  [ "$_noglob" = 1 ] || set +f
-  for e in ${_me[@]+"${_me[@]}"}; do
+  local -a _cand=()
+  local e p
+  for e in "$@"; do
     p="${e:1}"
     case "$p" in /*) ;; *) continue ;; esac
     case "$p" in *\\*) _mount_unescape "$p"; p=$_MOUNT_DEC ;; esac
@@ -7571,16 +7590,23 @@ _report_stderr() {
 QUERY_STATE_FILE="${RESUME_FILE}.query"
 export INTERDIMUX_QUERY_STATE="$QUERY_STATE_FILE"
 
-trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" "$QUERY_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"}' EXIT
+trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" "$QUERY_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"} ${MOUNTS_FILE:+"$MOUNTS_FILE"}' EXIT
 
 # When bash draws the list, every --list reload asks is_remote_path, and so do
 # the directory rows' previews and ctrl-o's picker: classify the mount table
 # once, here, for all of them (see mounts_export) -- the first list inherits it
 # too, so it costs nothing it did not already.  Not with the Rust core, which
 # reads the table itself: there this would be a parse on the way to the first
-# frame, to save one in an asynchronous preview.
+# frame, to save one in an asynchronous preview.  Instead the core writes what
+# it read to MOUNTS_FILE (named like the preview state: private, no mktemp) on
+# every list, for those same callbacks and for this process's Enter on a
+# directory row -- each of which parsed the table again (review B08).
 if [ -z "$IMUX_BIN" ] && { [ "$SHOW_GIT_BRANCH" = on ] || [ "$SHOW_DIRS" = on ]; }; then
   mounts_export
+elif [ -n "$IMUX_BIN" ]; then
+  MOUNTS_FILE="${RESUME_FILE}.mounts"
+  rm -f "$MOUNTS_FILE" 2>/dev/null || :
+  export INTERDIMUX_MOUNTS_FILE="$MOUNTS_FILE"
 fi
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"

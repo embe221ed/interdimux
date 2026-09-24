@@ -379,6 +379,59 @@ fi
   && report "navigator (bash renderer): so does a directory row's preview" pass \
   || report "navigator (bash renderer): so does a directory row's preview (got: $(head -5 "$TMPD/cb-preview" 2>/dev/null | tr '\n' ' '))" fail
 
+# ...and when the Rust core draws the navigator's list (review B08).  bash does
+# not classify up front there -- it would put a parse before the first frame --
+# so a directory row's preview, and Enter on a directory row, each parsed the
+# table again.  The core, which reads it anyway, now leaves its answer in a file
+# the navigator names.  Same oracle: the table on disk loses its NFS line once
+# the list is drawn.  The preview must not probe the "NFS" directory, and
+# Enter's rewrite of the recent list must keep the entry there that does not
+# exist -- a stat it skipped, where one that re-read the table prunes it.
+if [ -x "$BIN" ]; then
+  mkdir -p "$TMPD/fzfnav"
+  cat > "$TMPD/fzfnav/fzf" <<FZF
+#!/bin/sh
+cat > /dev/null
+if [ -n "\${INTERDIMUX_MOUNTS_FILE:-}" ]; then cp "\$INTERDIMUX_MOUNTS_FILE" "$TMPD/cb-handoff"
+else printf '%s' "\${INTERDIMUX_MOUNTS-unset}" > "$TMPD/cb-handoff"; fi
+cp "$TMPD/mi-plain" "$TMPD/mi-live"
+bash "$SCRIPT" --preview "D:$TMPD/nas/proj" > "$TMPD/cb-navpreview" 2>&1
+printf '\n%s\n' "x	x	x	D:$TMPD/local/work"
+exit 0
+FZF
+  chmod +x "$TMPD/fzfnav/fzf"
+  cp "$TMPD/data/interdimux/recent_dirs" "$TMPD/recent.saved"
+  for r in on off; do
+    cp "$MI" "$TMPD/mi-live"; rm -f "$TMPD"/cb-*
+    cp "$TMPD/recent.saved" "$TMPD/data/interdimux/recent_dirs"
+    PATH="$TMPD/fzfnav:$PATH" INTERDIMUX_MOUNTINFO="$TMPD/mi-live" XDG_RUNTIME_DIR="$TMPD/run" \
+      INTERDIMUX_USE_RUST="$r" bash "$SCRIPT" </dev/null >/dev/null 2>&1 || :
+    label=$([ "$r" = on ] && echo "Rust core" || echo "bash renderer")
+    grep -v '^$' "$TMPD/cb-handoff" 2>/dev/null | LC_ALL=C sort > "$TMPD/handoff.$r" || :
+    [ -s "$TMPD/cb-navpreview" ] && ! grep -q 'Type:' "$TMPD/cb-navpreview" \
+      && report "navigator ($label): a directory row's preview classifies with the table the list was drawn with" pass \
+      || report "navigator ($label): a directory row's preview classifies with the table the list was drawn with (got: $(head -5 "$TMPD/cb-navpreview" 2>/dev/null | tr '\n' ' '))" fail
+    if head -1 "$TMPD/data/interdimux/recent_dirs" | grep -qxF "$TMPD/local/work" \
+       && grep -qxF "$TMPD/nas/gone" "$TMPD/data/interdimux/recent_dirs"; then
+      report "navigator ($label): Enter on a directory row stats nothing on the mount the list skipped" pass
+    else
+      report "navigator ($label): Enter on a directory row stats nothing on the mount the list skipped (recent: $(tr '\n' ' ' < "$TMPD/data/interdimux/recent_dirs"))" fail
+    fi
+  done
+  # the core's classification is bash's own, line for line (as sets: each is
+  # written in its map's order): the blocking points, and a local mount in one
+  if [ -s "$TMPD/handoff.on" ] && cmp -s "$TMPD/handoff.on" "$TMPD/handoff.off"; then
+    report "the core hands over the same classification bash exports ($(wc -l < "$TMPD/handoff.on") mount points)" pass
+  else
+    report "the core hands over the same classification bash exports" fail
+    ERRORS+="$(diff "$TMPD/handoff.off" "$TMPD/handoff.on" | head -6 || true)"$'\n'
+  fi
+  ls "$TMPD/run"/interdimux-resume.* >/dev/null 2>&1 \
+    && report "the navigator leaves no scratch file behind (the mounts file included)" fail \
+    || report "the navigator leaves no scratch file behind (the mounts file included)" pass
+  cp "$TMPD/recent.saved" "$TMPD/data/interdimux/recent_dirs"
+fi
+
 # zoxide stats every entry of its database unless told --all; a zoxide that
 # does not know the flag still gets asked the plain way.
 printf '#!/bin/sh\necho "$*" >> "%s/zargs"\nprintf "%%s\\n" "%s/local/zdir"\n' "$TMPD" "$TMPD" > "$TMPD/bin/zoxide"
