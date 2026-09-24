@@ -141,8 +141,8 @@ set-environment -g INTERDIMUX_BIN '/path/to/imux'
 ```
 
 That is an environment variable, not a tmux option, on purpose: it chooses the
-program every picker runs. `--doctor` says which binary is in use, whether it is
-older than its sources, and what to do when there is none. More in
+program every picker runs. `--doctor` says which binary the popups use, whether
+it is older than its sources, and what to do when there is none. More in
 [rust/README.md](rust/README.md).
 
 ## Usage
@@ -402,10 +402,11 @@ not, the command that builds it — or, with no cargo, where to get one), whethe
 the key bindings are actually installed, whether the state directories are
 writable, whether your locale is UTF-8 (the tree glyphs and every column width
 assume it), whether `sort -s` works (the session order is stable and locale-free
-only because of it), whether `$FZF_DEFAULT_OPTS` contains a flag that moves fzf's
-geometry without moving `FZF_COLUMNS` — which is what the columns are sized from
-— and which of the two dashboards your client is tall enough for. Plus every
-`@interdimux-*` option you have set, with its value checked.
+only because of it), whether fzf accepts your `$FZF_DEFAULT_OPTS` — one flag it
+does not know stops every picker, while its layout flags are harmless, because
+the pickers reset them — and which of the two dashboards your client is tall
+enough for. Plus every `@interdimux-*` option you have set, with its value
+checked.
 
 That last part is the one worth running. tmux user options are free-form, so a
 mistyped name is not an error to tmux — the setting simply never applies, with
@@ -419,10 +420,12 @@ nothing to tell you why:
 
 Exits non-zero if anything is wrong, so it works in a health check.
 
-The environment it checks is the one the popups get: the tmux server's `PATH`,
-locale and `$FZF_DEFAULT_OPTS`, not your shell's. The two differ exactly when
-it matters — fzf on `PATH` only through a shell rc, a UTF-8 locale that is named
-but not installed — so run from a shell, it says which one it read.
+The environment it checks is the one the popups get: the tmux server's `PATH`
+(and the fzf and bash on it, versions included), locale, `$FZF_DEFAULT_OPTS`
+and `INTERDIMUX_BIN`, not your shell's. The two differ exactly when it matters —
+fzf on `PATH` only through a shell rc, a distro's old fzf ahead of the one you
+installed, a UTF-8 locale that is named but not installed — so run from a
+shell, it says which one it read.
 `interdimux.sh --help` lists the other command-line modes, and `--version` prints
 the version; an argument that is not a mode is refused with exit status 2
 rather than opening the navigator.

@@ -5639,30 +5639,6 @@ if [ "${1:-}" = "--doctor" ]; then
     _ok "tmux $_tvs (fast prefix-key binding available)"
   fi
 
-  if command -v fzf >/dev/null 2>&1; then
-    # The version with the user's defaults kept out of it: fzf parses those
-    # before it looks at --version, so a bad $FZF_DEFAULT_OPTS made this line
-    # print no version at all.  Whether fzf accepts them is its own check below.
-    _fzv=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' fzf --version 2>/dev/null </dev/null)
-    _fzv="${_fzv%% *}"
-    # Below 0.40 the preflight refuses to start a picker at all (--doctor alone
-    # is let past it, to say so here).  Judged from the version string itself,
-    # because FZF_MINOR is also 0 for a version it could not parse.
-    _fzf_old=0
-    [[ "$_fzv" =~ ^0\.([0-9]+) ]] && [ "${BASH_REMATCH[1]}" -lt 40 ] && _fzf_old=1
-    if   [ "$_fzf_old" = 1 ];      then _bad "fzf $_fzv is older than 0.40 — the picker refuses to start"
-    elif [ "$FZF_MINOR" -ge 74 ]; then _ok "fzf $_fzv (raw filter mode available)"
-    elif [ "$FZF_MINOR" -ge 67 ]; then _warn "fzf $_fzv — 0.74 adds raw mode, which stops the tree collapsing as you type"
-    elif [ "$FZF_MINOR" -ge 66 ]; then _warn "fzf $_fzv — 0.67 adds --freeze-left, which keeps a row's identity while a long command scrolls"
-    elif [ "$FZF_MINOR" -ge 63 ]; then _warn "fzf $_fzv — 0.66 dims the columns the ^] scope is not searching"
-    elif [ "$FZF_MINOR" -ge 58 ]; then _warn "fzf $_fzv — 0.63 moves the key hints to a footer, so the top of the list stops twitching"
-    else _warn "fzf $_fzv — old, but supported (0.58 adds the ^] match scope)"
-    fi
-  else
-    _bad "fzf is not on PATH"
-    _note "it must be on the PATH the TMUX SERVER inherited, not just your shell's"
-  fi
-
   # fzf and bash as the popups will find them.  Only the tmux server's PATH
   # counts, and nothing on the way sources a shell rc: run-shell runs /bin/sh on
   # it, display-popup a non-interactive default-shell.  So "fzf is on my PATH"
@@ -5670,7 +5646,10 @@ if [ "${1:-}" = "--doctor" ]; then
   # that had fzf while every popup closed the moment it opened, and never looked
   # at bash, whose version is a hard floor too.
   #
-  # `command -v` against a PATH that is not ours, without a fork.  Sets REPLY.
+  # `command -v` against a PATH that is not ours, without a fork, searched the
+  # way a POSIX shell searches it: each element as written.  That is how the
+  # popups' `bash` is found (by /bin/sh, or the default-shell).  fzf is found by
+  # bash, which searches differently; see the probe below.  Sets REPLY.
   _which_in() {
     local d
     local -a dirs=()
@@ -5681,10 +5660,10 @@ if [ "${1:-}" = "--doctor" ]; then
     done
     return 1
   }
-  _spath="" _sfzf="" _sbash=""
+  # _spath_ok, not a test on _spath: an EMPTY PATH is still the one the popups get.
+  _spath="" _spath_ok=0 _sfzf="" _sbash=""
   if _srv_env PATH; then
-    _spath="$REPLY"
-    _which_in "$_spath" fzf  && _sfzf="$REPLY"
+    _spath="$REPLY" _spath_ok=1
     _which_in "$_spath" bash && _sbash="$REPLY"
   fi
 
@@ -5696,34 +5675,91 @@ if [ "${1:-}" = "--doctor" ]; then
     _lc_env+=("$_lv=$REPLY")
     [ -n "$REPLY" ] && { _lc_name="$REPLY"; _lc_var="$_lv"; }
   done
-  # ONE bash started the way a popup starts it — the server's PATH picks it, the
-  # server's locale configures it — reports its version and how many characters
-  # it counts in two box-drawing ones (2 in UTF-8; 6 when it is counting bytes).
-  # With no bash on that PATH, this process's own stands in for the count only.
-  _pv=$("${_lc_env[@]}" "${_sbash:-$BASH}" -c \
-          'printf "%s %s %s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${#1}"' _ '├─' \
+  # ONE bash started the way a popup starts it — the server's PATH picks it and
+  # is its PATH, the server's locale configures it — reports its version, how
+  # many characters it counts in two box-drawing ones (2 in UTF-8; 6 when it is
+  # counting bytes), and which fzf it would run.
+  #
+  # That last is bash's OWN command search, because bash is what runs fzf for
+  # every picker, and it is not the literal one above: bash tilde-expands a PATH
+  # element.  A `~/.local/bin` quoted into PATH by mistake works in every popup,
+  # and a literal lookup called fzf missing and exited 1 on a working setup.
+  # $HOME is the server's, since that is the one the popup's bash expands.
+  # With no bash on that PATH, this process's own stands in.
+  _pr_env=("${_lc_env[@]}")
+  if [ "$_spath_ok" = 1 ]; then
+    _pr_env+=("PATH=$_spath")
+    _srv_env HOME && _pr_env+=("HOME=$REPLY")
+  fi
+  _pv=$("${_pr_env[@]}" "${_sbash:-$BASH}" -c \
+          'printf "%s %s %s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${#1}"; printf fzf:; type -P fzf' _ '├─' \
           2>/dev/null </dev/null)
-  read -r _sbmaj _sbmin _lc_w _ <<< "$_pv"
+  read -r _sbmaj _sbmin _lc_w _ <<< "${_pv%%$'\n'*}"
+  # No "fzf:" line means the probe did not run at all (a bash that cannot start
+  # is its own finding, below); the literal search is then the best there is.
+  case "$_pv" in
+    *$'\n'fzf:*) _sfzf="${_pv##*$'\n'fzf:}" ;;
+    *) [ "$_spath_ok" = 1 ] && _which_in "$_spath" fzf && _sfzf="$REPLY" ;;
+  esac
 
-  if [ -n "$_spath" ]; then
-    # Only when this shell HAS fzf: otherwise the line above already said so.
-    if command -v fzf >/dev/null 2>&1; then
-      _myfzf=""; _which_in "$PATH" fzf && _myfzf="$REPLY"
-      if [ -z "$_sfzf" ]; then
-        _bad "fzf is not on the tmux server's PATH — every popup closes the moment it opens"
-        _note "the server's PATH: $_spath"
-        _note "for the running server: tmux set-environment -g PATH \"\$PATH\", from a shell that finds fzf"
-      elif [ "$_sfzf" != "$_myfzf" ]; then
-        # A different fzf is only worth a word if it is a different version: a
-        # distro's old package ahead of the one you installed is the usual shape.
-        _sfzv=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' "$_sfzf" --version 2>/dev/null </dev/null)
-        _sfzv="${_sfzv%% *}"
-        if [ "$_sfzv" != "$_fzv" ]; then
-          _warn "the popups run fzf ${_sfzv:-(unknown version)} from $_sfzf, not $_fzv"
-          _note "they get the tmux server's PATH, where that one comes first"
-        fi
+  # The fzf every picker runs is that one, so it is the one judged, by its own
+  # --version.  Not this shell's, and not $FZF_MINOR either, which is this
+  # process's or whatever --bind-keys baked into the binding: judged from here,
+  # a distro's 0.38 ahead of the fzf you installed got "✓ fzf 0.74" and exit 0
+  # while every popup failed to start, and a shell with no fzf at all got "not
+  # on PATH" from a server that had one.  This shell's fzf stands in only when
+  # tmux has no PATH to give.  (`hash` is bash's search without the fork a
+  # $(type -P) costs; BASH_CMDS then holds what it found.)
+  _myfzf=""; hash fzf 2>/dev/null && _myfzf="${BASH_CMDS[fzf]:-}"
+  if [ "$_spath_ok" = 1 ]; then _jfzf="$_sfzf"; else _jfzf="$_myfzf"; fi
+  _fzv=""
+  if [ -n "$_jfzf" ]; then
+    # The version with the user's defaults kept out of it: fzf parses those
+    # before it looks at --version, so a bad $FZF_DEFAULT_OPTS made this line
+    # print no version at all.  Whether fzf accepts them is its own check below.
+    _fzv=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' "$_jfzf" --version 2>/dev/null </dev/null)
+    _fzv="${_fzv%% *}"
+    # The minor the tiers compare, derived as the preflight derives FZF_MINOR:
+    # a 1.x is past all of them.
+    _fzm=""
+    if [[ "$_fzv" =~ ^([0-9]+)\.([0-9]+) ]]; then
+      _fzm=$(( 10#${BASH_REMATCH[2]} ))
+      [ $(( 10#${BASH_REMATCH[1]} )) -gt 0 ] && _fzm=999
+    fi
+    # Below 0.40 the preflight refuses to start a picker at all (--doctor alone
+    # is let past it, to say so here).
+    if   [ -z "$_fzm" ];        then _warn "could not ask the fzf the popups run its version ($_jfzf)"
+    elif [ "$_fzm" -lt 40 ];    then _bad "fzf $_fzv is older than 0.40 — the picker refuses to start"
+    elif [ "$_fzm" -ge 74 ];    then _ok "fzf $_fzv (raw filter mode available)"
+    elif [ "$_fzm" -ge 67 ];    then _warn "fzf $_fzv — 0.74 adds raw mode, which stops the tree collapsing as you type"
+    elif [ "$_fzm" -ge 66 ];    then _warn "fzf $_fzv — 0.67 adds --freeze-left, which keeps a row's identity while a long command scrolls"
+    elif [ "$_fzm" -ge 63 ];    then _warn "fzf $_fzv — 0.66 dims the columns the ^] scope is not searching"
+    elif [ "$_fzm" -ge 58 ];    then _warn "fzf $_fzv — 0.63 moves the key hints to a footer, so the top of the list stops twitching"
+    else _warn "fzf $_fzv — old, but supported (0.58 adds the ^] match scope)"
+    fi
+    # Which fzf that was, when this shell would have named another.  A different
+    # path is only worth a word as a different version: a distro's old package
+    # ahead of the one you installed is the usual shape.
+    if [ "$_jfzf" != "$_myfzf" ]; then
+      if [ -z "$_myfzf" ]; then
+        _note "that is $_jfzf, on the tmux server's PATH — this shell finds none, which the popups do not mind"
+      else
+        _myfzv=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' "$_myfzf" --version 2>/dev/null </dev/null)
+        _myfzv="${_myfzv%% *}"
+        [ "$_myfzv" != "$_fzv" ] \
+          && _note "that is $_jfzf, first on the tmux server's PATH — this shell's is ${_myfzv:-another one}, at $_myfzf"
       fi
     fi
+  elif [ "$_spath_ok" = 1 ]; then
+    _bad "fzf is not on the tmux server's PATH — every popup closes the moment it opens"
+    _note "the server's PATH: $_spath"
+    _note "for the running server: tmux set-environment -g PATH \"\$PATH\", from a shell that finds fzf"
+  else
+    _bad "fzf is not on PATH"
+    _note "it must be on the PATH the TMUX SERVER inherited, not just your shell's"
+  fi
+
+  if [ "$_spath_ok" = 1 ]; then
     # bash >= 4.3: namerefs (`local -n`, which every option read goes through)
     # are 4.3, `[[ -v arr[k] ]]` and printf's %(...)T are 4.2.  macOS's /bin/bash
     # is 3.2 and dies at the first `declare -A`, before anything can draw — and it
@@ -5773,34 +5809,51 @@ if [ "${1:-}" = "--doctor" ]; then
       case "$last" in "== failed"*) _note "the plugin's last build of it failed: $blog" ;; esac
     fi
   }
-  if [ -n "${IMUX_BIN:-}" ] && [ -x "$IMUX_BIN" ]; then
+  # The helper the POPUPS run, picked the way the top of this file picks it, but
+  # from the tmux server's environment: that is where INTERDIMUX_BIN belongs
+  # (`tmux set-environment -g`, as the notes here advise), and it is the one a
+  # popup starts from.  Judged from this process's own, a doctor run from a
+  # terminal vetted the in-repo build while every popup ran whatever the
+  # server's INTERDIMUX_BIN named.  Run from the Health popup the two agree.
+  _pur=on; _srv_env INTERDIMUX_USE_RUST && _pur="${REPLY:-on}"
+  _pib="";  _srv_env INTERDIMUX_BIN && _pib="$REPLY"
+  _pbin=""
+  if [ "$_pur" != off ]; then
+    for _c in "$_pib" "$_repo/rust/target/release/imux" "$_repo/bin/imux"; do
+      if [ -n "$_c" ] && [ -x "$_c" ]; then _pbin="$_c"; break; fi
+    done
+  fi
+  if [ -n "$_pbin" ]; then
     # Ask it what it is.  The helper is picked by an -x test, which any
     # executable passes, and this used to give a green tick to whatever printed
     # anything at all — `/bin/ls` got "✓ ls (GNU coreutils) 9.4".  The real one
     # answers "imux <version>".  </dev/null: something that reads stdin instead
     # must not hang the report.
-    if _v=$("$IMUX_BIN" --version 2>/dev/null </dev/null) && [ -n "$_v" ]; then
+    if _v=$("$_pbin" --version 2>/dev/null </dev/null) && [ -n "$_v" ]; then
       case "$_v" in
-        'imux '*) _ok "$_v at $IMUX_BIN" ;;
-        *) _bad "$IMUX_BIN is not the interdimux helper — its --version says: ${_v%%$'\n'*}"
+        'imux '*) _ok "$_v at $_pbin" ;;
+        *) _bad "$_pbin is not the interdimux helper — its --version says: ${_v%%$'\n'*}"
            _note "the list notices, and falls back to the slow bash renderer; point INTERDIMUX_BIN at an imux build" ;;
       esac
     else
-      _bad "rust helper at $IMUX_BIN is present but does not run"
+      _bad "rust helper at $_pbin is present but does not run"
       _build_hint rebuild
     fi
-  elif [ "${INTERDIMUX_USE_RUST:-on}" = off ]; then
+  elif [ "$_pur" = off ]; then
     _warn "rust helper disabled by INTERDIMUX_USE_RUST=off"
   else
     _warn "rust helper not found — falling back to the minimal bash renderer"
     _build_hint build
   fi
+  # The shell this was typed into is the obvious place to look, and the wrong
+  # one; say so when it would have picked differently.
+  [ "$_pbin" != "${IMUX_BIN:-}" ] \
+    && _note "that is the tmux server's pick, which the popups get — this shell's environment picks ${IMUX_BIN:-the bash renderer}"
   # An INTERDIMUX_BIN that is not executable is skipped in favour of the in-repo
   # build, silently — the line above then names a different binary than the one
   # asked for, with nothing to say why.
-  if [ -n "${INTERDIMUX_BIN:-}" ] && [ "${INTERDIMUX_USE_RUST:-on}" != off ] \
-     && [ "${IMUX_BIN:-}" != "$INTERDIMUX_BIN" ]; then
-    _warn "INTERDIMUX_BIN=$INTERDIMUX_BIN is not an executable file, so it is ignored"
+  if [ -n "$_pib" ] && [ "$_pur" != off ] && [ "$_pbin" != "$_pib" ]; then
+    _warn "INTERDIMUX_BIN=$_pib is not an executable file, so it is ignored"
   fi
 
   # The MRU order is stable only because the sort is: without `-s`, GNU sort
@@ -5852,77 +5905,44 @@ if [ "${1:-}" = "--doctor" ]; then
   [ "$_lc_self" != "$_lc_name" ] \
     && _note "that is the tmux server's locale, which the popups get — this shell's is '${_lc_self:-unset}'"
 
-  # $FZF_DEFAULT_OPTS is applied to every picker before this tool's own flags and
-  # is invisible to the option validator below, which only reads
+  # $FZF_DEFAULT_OPTS (and _FILE) is applied to every picker before this tool's
+  # own flags and is invisible to the option validator below, which only reads
   # @interdimux-fzf-opts.  The server's copy, again: it is the one the pickers get.
   _fdo="" _fdof=""
   _srv_env FZF_DEFAULT_OPTS exact && _fdo="$REPLY"
   _srv_env FZF_DEFAULT_OPTS_FILE && _fdof="$REPLY"
 
-  # First, whether fzf takes them at all.  It parses its defaults before any
-  # flag, so one option it does not know — a typo, a flag from a newer fzf —
-  # makes EVERY picker exit before it draws, and --version is enough to find out.
-  if { [ -n "$_fdo" ] || [ -n "$_fdof" ]; } && command -v fzf >/dev/null 2>&1; then
-    if ! _fe=$(FZF_DEFAULT_OPTS="$_fdo" FZF_DEFAULT_OPTS_FILE="$_fdof" fzf --version 2>&1 >/dev/null </dev/null); then
+  # Whether fzf takes them at all is the one thing here that can break a picker.
+  # fzf parses its defaults before any flag, so one option it does not know — a
+  # typo, a flag from a newer fzf — makes EVERY picker exit before it draws, and
+  # --version is enough to find out.  Asked of the fzf the popups run.
+  #
+  # Nothing else in them can.  build_fzf_theme resets what people usually put
+  # there — --tmux/--popup, --height, --border, --margin, --padding, --style,
+  # --with-shell, and every colour — on each fzf that parses the flag, and an
+  # fzf too old to parse one rejects it here.  This used to warn about those
+  # very flags, and to advise moving them to @interdimux-fzf-opts: the one place
+  # they DO take effect, since it comes after the resets.  Following it turned a
+  # harmless global setting into the nested frame and shrunk list the resets
+  # exist to prevent.  (Whether the flags there are sensible is the option
+  # check's business, and a deliberate choice's.)
+  if { [ -n "$_fdo" ] || [ -n "$_fdof" ]; } && [ -n "$_jfzf" ]; then
+    if ! _fe=$(FZF_DEFAULT_OPTS="$_fdo" FZF_DEFAULT_OPTS_FILE="$_fdof" "$_jfzf" --version 2>&1 >/dev/null </dev/null); then
       _bad "fzf rejects its default options — every picker exits before it draws"
       _note "${_fe%%$'\n'*}"
+      [ "$_fdo" != "${FZF_DEFAULT_OPTS:-}" ] \
+        && _note "that is the tmux server's \$FZF_DEFAULT_OPTS, which the pickers get — this shell's differs"
+    else
+      if [ -n "$_fdo" ] && [ -n "$_fdof" ]; then
+        _ok "\$FZF_DEFAULT_OPTS and \$FZF_DEFAULT_OPTS_FILE are set, and fzf accepts them — the pickers reset their layout and colours"
+      elif [ -n "$_fdo" ]; then
+        _ok "\$FZF_DEFAULT_OPTS is set, and fzf accepts it — the pickers reset its layout and colours"
+      else
+        _ok "\$FZF_DEFAULT_OPTS_FILE is set, and fzf accepts it — the pickers reset its layout and colours"
+      fi
+      _note "--tmux/--popup, --height, --border, --margin, --padding, --style and --with-shell are all overridden;"
+      _note "@interdimux-fzf-opts is where a deliberate one goes"
     fi
-  fi
-
-  # Then the flags that are not a matter of taste:
-  #   --border/--margin/--padding shrink fzf's window WITHOUT shrinking
-  #     FZF_COLUMNS, which is what the column widths and the hint bar are sized
-  #     from, so every row comes out too wide and gets clipped;
-  #   --with-shell replaces the shell that runs the inline callbacks, and unlike
-  #     the same flag in @interdimux-fzf-opts it does NOT switch this tool to its
-  #     re-exec fallback — so a fish there gets POSIX snippets it cannot parse;
-  #   --height turns off full-screen mode inside a popup that is already sized;
-  #   --tmux (--popup since fzf 0.74) is ignored outside tmux, which is exactly
-  #     why it ends up in a global $FZF_DEFAULT_OPTS — but the pickers ARE inside
-  #     tmux, in a popup already, and there fzf opens a second popup underneath
-  #     the first.  The list draws in the one you cannot see; the one you can
-  #     stays blank, and even Esc is typed into it.
-  if [ -n "$_fdo" ]; then
-    # Normalise the whitespace first.  fzf splits these on ANY of it, and a long
-    # one is usually written across several LINES — matched against spaces only,
-    # every flag in the multi-line form reported clean.
-    _fzfopts=" ${_fdo//[$'\n\t']/ } "
-    _fzfhaz=""
-    for _f in --border --margin --padding --height --with-shell --style; do
-      case "$_fzfopts" in *" $_f"*) _fzfhaz+=" $_f" ;; esac
-    done
-    # Word by word, because the last of --tmux / --no-tmux wins, as in fzf.
-    _fzftmux=""
-    set -f
-    for _f in $_fzfopts; do
-      case "$_f" in
-        --tmux|--tmux=*|--popup|--popup=*) _fzftmux="${_f%%=*}" ;;
-        --no-tmux|--no-popup)              _fzftmux="" ;;
-      esac
-    done
-    set +f
-    if [ -n "$_fzftmux" ]; then
-      _warn "\$FZF_DEFAULT_OPTS sets $_fzftmux — the pickers already run in a tmux popup, and fzf's own opens underneath it"
-      _note "keep it out of the global opts, or cancel it for this tool: @interdimux-fzf-opts '--no-tmux'"
-    fi
-    if [ -n "$_fzfhaz" ]; then
-      _warn "\$FZF_DEFAULT_OPTS sets${_fzfhaz} — those change fzf's geometry or its shell"
-      _note "this tool sizes its columns from FZF_COLUMNS, which those flags do not move"
-      _note "keep them out of the global opts, or move them to @interdimux-fzf-opts"
-    elif [ -z "$_fzftmux" ]; then
-      _ok "\$FZF_DEFAULT_OPTS is set, and none of it changes fzf's geometry"
-    fi
-    if { [ -n "$_fzftmux" ] || [ -n "$_fzfhaz" ]; } && [ "$_fdo" != "${FZF_DEFAULT_OPTS:-}" ]; then
-      _note "that is the tmux server's copy, which the pickers get — this shell's differs"
-    fi
-  fi
-  # Its own statement, not a note under the line above: fzf reads this file even
-  # when $FZF_DEFAULT_OPTS is empty, and claiming "none of it changes fzf's
-  # geometry" while an unread file sets the geometry is worse than saying nothing.
-  # (Whether fzf ACCEPTS it is the check above.)
-  if [ -n "$_fdof" ]; then
-    _warn "\$FZF_DEFAULT_OPTS_FILE is set — fzf reads it, and its flags are not checked here"
-    _note "$_fdof"
   fi
 
   # A binary older than the sources it was built from renders differently from
@@ -5931,10 +5951,10 @@ if [ "${1:-}" = "--doctor" ]; then
   # no relationship to these sources, and a fresh clone — which stamps every
   # source with the checkout time — would otherwise report it stale for ever.
   # -type f as well, or find returns the start directory and it takes one of the
-  # three slots below.
-  if [ -n "${IMUX_BIN:-}" ] && [ -x "$IMUX_BIN" ] && [ -d "$_repo/rust/src" ] \
-     && case "$IMUX_BIN" in "$_repo"/*) true ;; *) false ;; esac; then
-    _newer=$(find "$_repo/rust/src" "$_repo/rust/Cargo.toml" -type f -newer "$IMUX_BIN" 2>/dev/null | head -3)
+  # three slots below.  The popups' helper, as picked above.
+  if [ -n "$_pbin" ] && [ -d "$_repo/rust/src" ] \
+     && case "$_pbin" in "$_repo"/*) true ;; *) false ;; esac; then
+    _newer=$(find "$_repo/rust/src" "$_repo/rust/Cargo.toml" -type f -newer "$_pbin" 2>/dev/null | head -3)
     if [ -n "$_newer" ]; then
       _warn "the rust helper is older than its sources — it is rendering last build's layout"
       while IFS= read -r _nf; do [ -n "$_nf" ] && _note "newer: ${_nf#"$_repo/"}"; done <<< "$_newer"
@@ -6027,12 +6047,16 @@ if [ "${1:-}" = "--doctor" ]; then
   # Read the table once and match the key column ourselves: `list-keys -T prefix
   # <key>` prints nothing on tmux 3.7b, so filtering with it silently reports
   # every binding as missing.
+  # Here-strings, not `printf … | grep -q`: grep -q exits at its first match,
+  # and a printf still writing the rest of the table then dies of SIGPIPE —
+  # which pipefail (on for this whole file) turns into "no match".  Under load,
+  # or with a big enough table, the report said no bindings were installed.
   _keytable=$(tmux list-keys -T prefix 2>/dev/null)
-  if printf '%s' "$_keytable" | grep -q interdimux; then
+  if grep -q interdimux <<< "$_keytable"; then
     for _pair in "$_k:navigator" "$_dk:dashboard"; do
       _key="${_pair%%:*}"; _what="${_pair#*:}"
-      if printf '%s\n' "$_keytable" | awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k' \
-           | grep -q interdimux; then
+      if awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k && /interdimux/ { f = 1 }
+                           END { exit !f }' <<< "$_keytable"; then
         _ok "prefix+$_key opens the $_what"
       else
         _bad "prefix+$_key is not bound to the $_what"
@@ -6125,13 +6149,21 @@ if [ "${1:-}" = "--doctor" ]; then
         # `tmux bind-key` as it is, and C-f, M-g, F5 and Space all bind fine — a
         # length test called them wrong in the same report that confirmed them
         # bound.  So ask tmux: `list-keys -T prefix <key>` changes nothing and
-        # fails with "invalid key" on exactly what bind-key would refuse ('ff').
+        # fails with "invalid key: …" on exactly what bind-key would refuse ('ff',
+        # 'C-', 'X-f').  By that text, not by its exit status: tmux 3.6 — the
+        # floor — ALSO fails, with "unknown key: …", for a perfectly good key that
+        # is merely not bound in the prefix table yet (3.7 dropped that).  So a
+        # key set after the plugin loaded, the very case this report exists for,
+        # was called unknown while the message listed it as an example.
         # A bare ';' is the one it cannot judge — tmux reads it as a command
         # separator, so the query "succeeds" and the binding never happens.
+        local _ke
         case "$v" in
           ';') printf "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
-          *)   tmux list-keys -T prefix "$v" >/dev/null 2>&1 \
-                 || printf 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
+          *)   _ke=$(tmux list-keys -T prefix "$v" 2>&1 >/dev/null) \
+                 || case "$_ke" in
+                      'invalid key'*) printf 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
+                    esac ;;
         esac ;;
       fzf-opts)
         # Two ways this option silently does nothing, both checked the way the
@@ -6151,8 +6183,8 @@ if [ "${1:-}" = "--doctor" ]; then
           return 0
         fi
         eval "_u=($v)" 2>/dev/null
-        # --tmux/--popup here is worse than in $FZF_DEFAULT_OPTS: these words
-        # come last, so nothing overrides them.
+        # --tmux/--popup here is not what it is in $FZF_DEFAULT_OPTS, which the
+        # theme cancels: these words come last, so nothing overrides them.
         local _w _pop=""
         for _w in ${_u[@]+"${_u[@]}"}; do
           case "$_w" in
@@ -6164,9 +6196,10 @@ if [ "${1:-}" = "--doctor" ]; then
           printf '%s makes fzf open a popup of its own, underneath the one the picker is in, which stays blank' "$_pop"
           return 0
         fi
+        # The fzf the popups run, as the environment section found it.
         local _e
-        if command -v fzf >/dev/null 2>&1 \
-           && ! _e=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' fzf --version ${_u[@]+"${_u[@]}"} 2>&1 >/dev/null </dev/null); then
+        if [ -n "$_jfzf" ] \
+           && ! _e=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' "$_jfzf" --version ${_u[@]+"${_u[@]}"} 2>&1 >/dev/null </dev/null); then
           printf 'fzf rejects it, so every picker exits before it draws: %s' "${_e%%$'\n'*}"
         fi ;;
       jump-keys)
