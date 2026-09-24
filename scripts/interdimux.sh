@@ -6047,12 +6047,16 @@ if [ "${1:-}" = "--doctor" ]; then
   # Read the table once and match the key column ourselves: `list-keys -T prefix
   # <key>` prints nothing on tmux 3.7b, so filtering with it silently reports
   # every binding as missing.
+  # Here-strings, not `printf … | grep -q`: grep -q exits at its first match,
+  # and a printf still writing the rest of the table then dies of SIGPIPE —
+  # which pipefail (on for this whole file) turns into "no match".  Under load,
+  # or with a big enough table, the report said no bindings were installed.
   _keytable=$(tmux list-keys -T prefix 2>/dev/null)
-  if printf '%s' "$_keytable" | grep -q interdimux; then
+  if grep -q interdimux <<< "$_keytable"; then
     for _pair in "$_k:navigator" "$_dk:dashboard"; do
       _key="${_pair%%:*}"; _what="${_pair#*:}"
-      if printf '%s\n' "$_keytable" | awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k' \
-           | grep -q interdimux; then
+      if awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k && /interdimux/ { f = 1 }
+                           END { exit !f }' <<< "$_keytable"; then
         _ok "prefix+$_key opens the $_what"
       else
         _bad "prefix+$_key is not bound to the $_what"

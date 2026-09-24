@@ -107,16 +107,44 @@ else
 fi
 bash "$SCRIPT" --bind-keys
 
+# --- ...and a present one is not reported missing, whatever the table's size ------
+# The check matched the table with `printf … | grep -q` under pipefail: grep -q
+# exits at its first match, the printf still writing the rest dies of SIGPIPE,
+# and pipefail makes that "no match" -- "✗ no interdimux key bindings are
+# installed" on a machine that had them.  Under load that was a race any table
+# could lose (the suites flaked on it); with this much bound AFTER prefix+f
+# (function and meta keys sort after the letters) it is lost every time.  The
+# premise is the shell's own verdict on that pipeline.
+long=$(printf 'x%.0s' $(seq 1 3000))
+bigkeys="F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 M-a M-b M-c M-d M-e M-h M-i M-j M-k M-l M-m M-q M-r M-s M-t M-u M-v M-w M-x M-y M-z"
+for k in $bigkeys; do tmux -L "$SOCK" bind-key -T prefix "$k" display-message "$long"; done
+table=$(tmux -L "$SOCK" list-keys -T prefix)
+if printf '%s' "$table" | grep -q interdimux; then
+  report "premise: a pipe into grep -q loses this table's match to SIGPIPE" fail
+else
+  out=$(doctor)
+  case "$out" in
+    *"✓ prefix+f opens the navigator"*) report "a big key table still shows prefix+f bound" pass ;;
+    *) report "a big key table still shows prefix+f bound" fail
+       ERRORS+="$(printf '%s\n' "$out" | sed -n '/key bindings/,/^$/p' | sed 's/^/    /' || true)"$'\n' ;;
+  esac
+  case "$out" in
+    *"✓ prefix+g opens the dashboard"*) report "...and prefix+g" pass ;;
+    *) report "...and prefix+g" fail ;;
+  esac
+fi
+for k in $bigkeys; do tmux -L "$SOCK" unbind-key -T prefix "$k"; done
+
 # --- a mistyped option name ------------------------------------------------------
 setopt fzf-opt '--cycle'
 out=$(doctor) || true
-if printf '%s' "$out" | grep -q 'unknown option @interdimux-fzf-opt'; then
+if grep -q 'unknown option @interdimux-fzf-opt' <<< "$out"; then
   report "a mistyped option name is reported" pass
 else
   report "a mistyped option name is reported" fail
   ERRORS+="$(printf '%s' "$out" | sed -n '/options/,$p' | sed 's/^/    /' || true)"$'\n'
 fi
-if printf '%s' "$out" | grep -q 'did you mean @interdimux-fzf-opts'; then
+if grep -q 'did you mean @interdimux-fzf-opts' <<< "$out"; then
   report "...with the intended name suggested" pass
 else
   report "...with the intended name suggested" fail
@@ -131,8 +159,8 @@ unsetopt fzf-opt
 # --- an unrecognisable name gets no bogus suggestion ------------------------------
 setopt wibble x
 out=$(doctor) || true
-if printf '%s' "$out" | grep -q 'unknown option @interdimux-wibble' && \
-   ! printf '%s' "$out" | grep -q 'wibble — did you mean'; then
+if grep -q 'unknown option @interdimux-wibble' <<< "$out" && \
+   ! grep -q 'wibble — did you mean' <<< "$out"; then
   report "an unrecognisable name is reported without a made-up suggestion" pass
 else
   report "an unrecognisable name is reported without a made-up suggestion" fail
@@ -188,7 +216,7 @@ chmod 500 "$TMPD/ro"
 # capture first: under `set -o pipefail` the doctor's exit 1 -- which is exactly
 # what it should return here -- would fail the pipeline even though grep matched
 ro_out=$(XDG_DATA_HOME="$TMPD/ro" bash "$SCRIPT" --doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g') || true
-if printf '%s' "$ro_out" | grep -q '✗ not writable'; then
+if grep -q '✗ not writable' <<< "$ro_out"; then
   report "an unwritable data dir is reported" pass
 else
   report "an unwritable data dir is reported" fail
@@ -234,13 +262,13 @@ mkdir -p "$XDG_STATE_HOME/interdimux"
 printf '== 2026-01-01 00:00:00 navigator stderr\nsomething went wrong\n' \
   > "$XDG_STATE_HOME/interdimux/errors.log"
 out=$(doctor)
-if printf '%s' "$out" | grep -q '✗ the navigator has logged 1 error'; then
+if grep -q '✗ the navigator has logged 1 error' <<< "$out"; then
   report "a logged error is surfaced by --doctor" pass
 else
   report "a logged error is surfaced by --doctor" fail
   ERRORS+="$(printf '%s' "$out" | grep -i 'error' | sed 's/^/    /' || true)"$'\n'
 fi
-if printf '%s' "$out" | grep -q 'something went wrong'; then
+if grep -q 'something went wrong' <<< "$out"; then
   report "...and it quotes the most recent one" pass
 else
   report "...and it quotes the most recent one" fail
@@ -272,7 +300,7 @@ if command -v fzf >/dev/null 2>&1; then
     ERRORS+="    log: $( (cat "$ERRD/interdimux/errors.log" 2>/dev/null || true) | head -2 | tr '\n' '|')"$'\n'
   fi
   # ...and it was ALSO announced, so the user is not expected to go looking
-  if tmux -L "$SOCK" show-messages 2>/dev/null | grep -q 'interdimux: unknown option'; then
+  if grep -q 'interdimux: unknown option' <<< "$(tmux -L "$SOCK" show-messages 2>/dev/null || true)"; then
     report "...and announced on the status line" pass
   else
     report "...and announced on the status line" fail
@@ -350,8 +378,8 @@ if command -v at >/dev/null 2>&1; then
   # down: a real problem — flagged red, with the enable command, and it makes
   # --doctor exit non-zero (a queued job that never fires is the whole point).
   out=$(INTERDIMUX_AT_DAEMON=down doctor)
-  if printf '%s' "$out" | grep -q "✗ at's job-runner is not active" \
-     && printf '%s' "$out" | grep -q 'enable it:'; then
+  if grep -q "✗ at's job-runner is not active" <<< "$out" \
+     && grep -q 'enable it:' <<< "$out"; then
     report "a stopped at job-runner is flagged with how to fix it" pass
   else
     report "a stopped at job-runner is flagged with how to fix it" fail
@@ -365,8 +393,8 @@ if command -v at >/dev/null 2>&1; then
   # unknown (BSD / no pgrep): we cannot tell, so it is a NOTE, never a failure —
   # the false "not active" alarm is exactly what this must not do.
   out=$(INTERDIMUX_AT_DAEMON=unknown doctor)
-  if printf '%s' "$out" | grep -q 'could not verify' \
-     && ! printf '%s' "$out" | grep -q "✗ at's job-runner"; then
+  if grep -q 'could not verify' <<< "$out" \
+     && ! grep -q "✗ at's job-runner" <<< "$out"; then
     report "an unverifiable at job-runner is a note, not an alarm" pass
   else
     report "an unverifiable at job-runner is a note, not an alarm" fail
@@ -420,7 +448,7 @@ esac
 # Every section still gets a heading, and the headings are ruled.
 missing=""
 for sec in environment "key bindings" options; do
-  printf '%s\n' "$out" | grep -q "^$sec ─" || missing+=" $sec"
+  grep -q "^$sec ─" <<< "$out" || missing+=" $sec"
 done
 [ -z "$missing" ] && report "every section is headed and ruled" pass \
                   || report "every section is headed and ruled (missing:$missing)" fail
@@ -543,7 +571,7 @@ mkdir -p "$TMPD/globtrap"
 : > "$TMPD/globtrap/nosuch-session-bbb"
 setopt hide 'nosuch-session-*'
 globbed=$(cd "$TMPD/globtrap" && doctor)
-if printf '%s\n' "$globbed" | grep -q "pattern 'nosuch-session-\*'"; then
+if grep -q "pattern 'nosuch-session-\*'" <<< "$globbed"; then
   report "the reported pattern is the pattern, not a filename from the cwd" pass
 else
   report "the reported pattern is the pattern, not a filename from the cwd" fail
