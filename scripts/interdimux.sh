@@ -2946,7 +2946,7 @@ IMUX_SECTIONS
   local sla sname swins sattach spath marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
-  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover
+  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax
 
   while IFS="$US" read -r sname sla swins sattach spath; do
     [ -z "$sname" ] && continue
@@ -3091,14 +3091,40 @@ IMUX_SECTIONS
           # (dim) session prefix, never the pane id itself.
           pdisp="$sdisp"
           pover=$(( 9 + ${#pdisp} + ${#widx} + ${#pidx} - IDENT_W ))
-          if [ "$pover" -gt 0 ] && [ "${#pdisp}" -gt $(( pover + 1 )) ]; then
-            pdisp="${pdisp:0:${#pdisp}-pover-1}…"
+          if [ "$pover" -gt 0 ]; then
+            if [ "${#pdisp}" -gt $(( pover + 1 )) ]; then
+              pdisp="${pdisp:0:${#pdisp}-pover-1}…"
+            else
+              # Too short to absorb the overflow (a short session name, wide
+              # indexes): drop it.  Left in, the row ran past every other one,
+              # since fld_pad can only pad.  rust/src/render.rs pane_ident.
+              pdisp=""
+            fi
           fi
-          pprefix="${pdisp} ${widx}."
+          if [ -n "$pdisp" ]; then pprefix="${pdisp} ${widx}."; else pprefix="${widx}."; fi
+          # Still over with the prefix gone: the bare indexes can outrun the
+          # column's floor too (a window index near INT_MAX and a pane index near
+          # 65535, in a narrow popup).  A shortened id beats a shifted column --
+          # the SPEC still carries both indexes exactly.  Same ladder as the Rust
+          # core; ASCII digits, so characters are cells here.
+          pid_disp="$pidx"
+          if (( 7 + ${#pprefix} + ${#pid_disp} > IDENT_W )); then
+            pmax=$(( IDENT_W - 7 - ${#pprefix} )); (( pmax < 0 )) && pmax=0
+            if (( ${#pid_disp} > pmax )); then
+              if (( pmax == 0 )); then pid_disp=""; else pid_disp="${pid_disp:0:pmax-1}…"; fi
+            fi
+            if (( 7 + ${#pprefix} + ${#pid_disp} > IDENT_W )); then
+              pmax=$(( IDENT_W - 7 )); (( pmax < 0 )) && pmax=0
+              if (( ${#pprefix} > pmax )); then
+                if (( pmax == 0 )); then pprefix=""; else pprefix="${pprefix:0:pmax-1}…"; fi
+              fi
+              pid_disp=""
+            fi
+          fi
           fld_reset
           fld_add "$pmarker" 1
           fld_add " ${DIM_TREE}${cont} ${pglyph}${RST} " 6
-          fld_add "${DIM}${pprefix}${RST}${pidx}" $(( ${#pprefix} + ${#pidx} ))
+          fld_add "${DIM}${pprefix}${RST}${pid_disp}" $(( ${#pprefix} + ${#pid_disp} ))
           fld_pad "$IDENT_W"
           ident="$FLD"
 
