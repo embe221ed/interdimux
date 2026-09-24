@@ -1871,7 +1871,9 @@ SHELL_NAMES=' sh bash zsh fish dash ash ksh tcsh csh login '
 #
 # A shell and nothing but its options is an idle shell's argv: `-zsh`,
 # `/bin/bash`, `bash --norc -i`, not `bash build.sh` or `sh -c …`.
-# format_command dims such a row.
+# format_command dims such a row, and full_command looks through such a shell
+# while something else is the foreground job.  rust/src/proc.rs is_idle_shell
+# is the same rule.
 only_options() {
   [[ "$1" != *[$' \t\n'][!$' \t\n'-]* ]]
 }
@@ -1949,12 +1951,23 @@ pick_child() {
 # deeper children are subprocesses of that command (LSPs, formatters,
 # watchers, …) and showing those is misleading.
 #
+# One exception: a child that is itself an interactive shell (`bash`, `zsh -f`:
+# a shell and nothing but options, see only_options) and is NOT the tty's
+# foreground group is running something -- the user typed `bash`, then a
+# command in it.  Look through it the same way, so the row names that command,
+# as tmux's #{pane_current_command} does.  Without this the busy nested shell's
+# own argv was shown, and format_command drew it as an idle shell (review #24).
+# A nested shell that IS the foreground group sits at its own prompt: it is
+# the answer.  Only such shells are looked through, at most NESTED_SHELL_MAX
+# deep -- never a command's subprocesses, nor a shell running a script.
+#
 # The shell test MUST come from the pane process's own argv.  tmux's
 # #{pane_current_command} names the pane tty's FOREGROUND process group, which
 # is the running command, not the shell — so gating on it inverts the test
 # exactly when a command is running and every busy pane renders as "-zsh".
+NESTED_SHELL_MAX=4
 full_command() {
-  local pid="$1" args children child
+  local pid="$1" args children child fg depth=0 c0
 
   if [ "$PROC_CMDLINE_OK" = 1 ]; then
     read_cmdline "$pid"; args="$REPLY"
@@ -1965,29 +1978,41 @@ full_command() {
   local cmd_name="${args%% *}"
   cmd_name="${cmd_name##*/}"
 
-  # If the pane process is a shell, look one level down
+  # If the pane process is a shell, look one level down -- and on through
+  # nested interactive shells that are busy
   if [[ "$SHELL_NAMES" == *" ${cmd_name#-} "* ]]; then
-    if [ "$PROC_CMDLINE_OK" = 1 ]; then
-      children=""
-      # The children file has NO trailing newline, so `read` assigns the value
-      # and THEN reports EOF.  A `|| children=""` fallback here would wipe what
-      # it just read and silently disable child resolution for every pane.
-      { read -r children < "/proc/$pid/task/$pid/children"; } 2>/dev/null || :
-    else
-      children="${PS_CHILDREN[$pid]:-}"
-    fi
-    if [ -n "$children" ]; then
+    while :; do
+      if [ "$PROC_CMDLINE_OK" = 1 ]; then
+        children=""
+        # The children file has NO trailing newline, so `read` assigns the
+        # value and THEN reports EOF.  A `|| children=""` fallback here would
+        # wipe what it just read and silently disable child resolution for
+        # every pane.
+        { read -r children < "/proc/$pid/task/$pid/children"; } 2>/dev/null || :
+      else
+        children="${PS_CHILDREN[$pid]:-}"
+      fi
+      [ -n "$children" ] || break
       pick_child "$pid" "$children"; child="$REPLY"
       if [ "$PROC_CMDLINE_OK" = 1 ]; then
         read_cmdline "$child"
       else
         REPLY="${PS_ARGS[$child]:-}"
       fi
-      return 0
-    fi
+      # The pick is the answer unless it is an interactive shell -- the name
+      # first: it is rarely a shell at all.
+      c0="${REPLY%% *}"; c0="${c0##*/}"
+      [[ "$SHELL_NAMES" == *" ${c0#-} "* ]] && [ "$depth" -lt "$NESTED_SHELL_MAX" ] \
+        && only_options "${REPLY#"${REPLY%% *}"}" || return 0
+      # A nested interactive shell: busy unless it is the foreground group.
+      args="$REPLY"
+      proc_group_ids "$child"; fg="${REPLY#* }"
+      case "$fg" in ''|0|-*|"${REPLY%% *}") REPLY="$args"; return 0 ;; esac
+      pid="$child"; depth=$(( depth + 1 ))
+    done
   fi
 
-  # Not a shell (or shell has no children) — use as-is
+  # Not a shell, or a shell with no children — use as-is
   REPLY="$args"
   return 0
 }

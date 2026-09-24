@@ -4,7 +4,7 @@
 //! flag-skipping tables and its "last positional wins" behaviour.
 
 use crate::palette::{Palette, RST};
-use crate::proc::is_shell;
+use crate::proc::{is_idle_shell, is_shell};
 
 /// ssh/mosh flags that consume the following argument.
 fn ssh_flag_takes_value(w: &str) -> bool {
@@ -107,7 +107,7 @@ pub fn format_command(cmd: &str, p: &Palette) -> (String, String) {
     // `/bin/bash`, `bash --norc -i`.  Its bare name, in the tree colour, so the
     // rows doing real work are the ones in the accent (IDEAS #10).  A shell
     // running something (`bash build.sh`, `sh -c …`) is real work.
-    if is_shell(base) && args.iter().all(|w| w.starts_with('-')) {
+    if is_idle_shell(cmd) {
         let name = base.strip_prefix('-').unwrap_or(base);
         return (format!("{}{}{}", p.dim_tree, name, RST), name.to_string());
     }
