@@ -74,6 +74,8 @@ A portal gun for your tmux sessions.
 - `fd` or `find` (for directory picker)
 - `at` (optional — the Schedule and Jobs entries; needs its job-runner enabled)
 - `zoxide` (optional — feeds the recent tier and find-or-create)
+- A Rust toolchain (optional, recommended — builds the fast renderer; see
+  [The Rust core](#the-rust-core-optional-recommended))
 
 CI builds tmux 3.7b and installs fzf 0.74 rather than using the distro packages,
 for exactly these reasons — see [docs/CI.md](docs/CI.md).
@@ -107,6 +109,40 @@ Reload tmux:
 ```bash
 tmux source-file ~/.tmux.conf
 ```
+
+### The Rust core (optional, recommended)
+
+The list is rendered by a small Rust binary when there is one, and by a bash
+fallback when there is not. The fallback works, but it slows down as the list
+grows — 1.7× slower at a dozen rows, 7.8× at five hundred — and it pads columns
+by character count, so a CJK or emoji name shifts every column after it.
+
+When `cargo` is on the tmux server's `PATH` (or in `~/.cargo/bin`, where rustup
+puts it), the plugin builds the binary itself. Loading it — `prefix + I`, a
+`tmux source-file`, a new server — starts `cargo build --release` in the
+background whenever `rust/target/release/imux` is missing or older than its
+sources. Nothing waits for it: tmux starts and the keys are bound while it
+compiles, niced; the status line says when it is done or has failed, and the
+output goes to `~/.local/state/interdimux/build.log` (`$XDG_STATE_HOME`). The
+first build downloads one crate. `set -g @interdimux-autobuild 'off'` stops it,
+and this is the same build by hand:
+
+```bash
+cd ~/.tmux/plugins/interdimux/rust && cargo build --release
+```
+
+No cargo? Install Rust from [rustup.rs](https://rustup.rs), or use an `imux`
+built elsewhere by naming it in the tmux server's environment (in
+`~/.tmux.conf`, or run once):
+
+```tmux
+set-environment -g INTERDIMUX_BIN '/path/to/imux'
+```
+
+That is an environment variable, not a tmux option, on purpose: it chooses the
+program every picker runs. `--doctor` says which binary is in use, whether it is
+older than its sources, and what to do when there is none. More in
+[rust/README.md](rust/README.md).
 
 ## Usage
 
@@ -333,7 +369,8 @@ interdimux doctor                                    23 ok, 2 warn, 1 problem
 ```
 
 Reports what tmux, fzf and interdimux itself can see: versions and the features
-they gate, whether the Rust helper is built *and newer than its sources*, whether
+they gate, whether the Rust helper is built *and newer than its sources* (and if
+not, the command that builds it — or, with no cargo, where to get one), whether
 the key bindings are actually installed, whether the state directories are
 writable, whether your locale is UTF-8 (the tree glyphs and every column width
 assume it), whether `sort -s` works (the session order is stable and locale-free
@@ -471,6 +508,11 @@ set -g @interdimux-hydrate 'on'
 
 # Fallback startup command, used when nothing more specific matches
 set -g @interdimux-startup-command 'nvim .'
+
+# Build the Rust core in the background when the plugin loads, if cargo is
+# available and the binary is missing or older than its sources (default: on).
+# See "The Rust core" under Installation.
+set -g @interdimux-autobuild 'on'
 ```
 
 ### Scheduled keys

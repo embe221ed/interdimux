@@ -5647,6 +5647,37 @@ if [ "${1:-}" = "--doctor" ]; then
   fi
 
   _repo="${SCRIPT_PATH%/scripts/*}"
+  # What to do about a helper that is missing or stale.  The build command only
+  # where there is a cargo to run it -- this used to tell a machine with no Rust
+  # at all to run cargo.  rustup's own directory counts too: a PATH that only a
+  # shell rc extends (~/.cargo/env) is the usual way to have cargo and not find
+  # it.  Then what interdimux.tmux's background build is doing, if anything: a
+  # build under way, or one that failed, is the answer to "why is it missing".
+  _cargo=""
+  if command -v cargo >/dev/null 2>&1; then _cargo=cargo
+  elif [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]; then _cargo="${CARGO_HOME:-$HOME/.cargo}/bin/cargo"
+  fi
+  _build_hint() { # $1 = build | rebuild
+    local owner first last blog="$SCHED_LOGDIR/build.log"
+    if [ ! -f "$_repo/rust/Cargo.toml" ]; then
+      _note "this install has no rust/ sources to build: point INTERDIMUX_BIN at a prebuilt imux"
+      _note "for the popups: tmux set-environment -g INTERDIMUX_BIN <path>"
+      return 0
+    elif [ -n "$_cargo" ]; then
+      _note "$1 it with: (cd '$_repo/rust' && $_cargo build --release)"
+    else
+      _note "no cargo here: install Rust (https://rustup.rs) and $1 it, or point INTERDIMUX_BIN at a prebuilt imux"
+      _note "for the popups: tmux set-environment -g INTERDIMUX_BIN <path>"
+    fi
+    if owner=$(readlink "$_repo/rust/target/.interdimux-autobuild.lock" 2>/dev/null) \
+       && kill -0 "$owner" 2>/dev/null; then
+      _note "the plugin is building it in the background right now: $blog"
+    elif [ -s "$blog" ] && IFS= read -r first < "$blog" \
+         && case "$first" in "== building $_repo/rust "*) true ;; *) false ;; esac; then
+      last=$(tail -n 1 "$blog" 2>/dev/null)
+      case "$last" in "== failed"*) _note "the plugin's last build of it failed: $blog" ;; esac
+    fi
+  }
   if [ -n "${IMUX_BIN:-}" ] && [ -x "$IMUX_BIN" ]; then
     # Ask it what it is.  The helper is picked by an -x test, which any
     # executable passes, and this used to give a green tick to whatever printed
@@ -5661,13 +5692,13 @@ if [ "${1:-}" = "--doctor" ]; then
       esac
     else
       _bad "rust helper at $IMUX_BIN is present but does not run"
-      _note "rebuild with: (cd '$_repo/rust' && cargo build --release)"
+      _build_hint rebuild
     fi
   elif [ "${INTERDIMUX_USE_RUST:-on}" = off ]; then
     _warn "rust helper disabled by INTERDIMUX_USE_RUST=off"
   else
     _warn "rust helper not found — falling back to the minimal bash renderer"
-    _note "build it with: (cd '$_repo/rust' && cargo build --release)"
+    _build_hint build
   fi
   # An INTERDIMUX_BIN that is not executable is skipped in favour of the in-repo
   # build, silently — the line above then names a different binary than the one
@@ -5812,7 +5843,7 @@ if [ "${1:-}" = "--doctor" ]; then
     if [ -n "$_newer" ]; then
       _warn "the rust helper is older than its sources — it is rendering last build's layout"
       while IFS= read -r _nf; do [ -n "$_nf" ] && _note "newer: ${_nf#"$_repo/"}"; done <<< "$_newer"
-      _note "rebuild with: (cd '$_repo/rust' && cargo build --release)"
+      _build_hint rebuild
     fi
   fi
 
@@ -5944,7 +5975,8 @@ if [ "${1:-}" = "--doctor" ]; then
   # (No `binary`: the helper's path is read from $INTERDIMUX_BIN only, and an
   # option by that name was once accepted here and green-ticked while nothing
   # read it.  Unknown now, so setting it says so.)
-  _known=("${OPT_NAMES[@]}" key dashboard-key project-dirs jump-keys)
+  # (`autobuild` is read by interdimux.tmux, at plugin load.)
+  _known=("${OPT_NAMES[@]}" key dashboard-key project-dirs jump-keys autobuild)
 
   _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 
@@ -5968,7 +6000,7 @@ if [ "${1:-}" = "--doctor" ]; then
     local n="$1" v="$2"
     [ -n "$v" ] || return 0
     case "$n" in
-      show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw|session-rule|scope-highlight)
+      show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw|session-rule|scope-highlight|autobuild)
         case "$v" in on|off) ;; *) printf "expected 'on' or 'off'" ;; esac ;;
       order)
         case "$v" in mru|index) ;; *) printf "expected 'mru' or 'index'" ;; esac ;;
