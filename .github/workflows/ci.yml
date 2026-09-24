@@ -41,7 +41,8 @@ jobs:
       #
       # scripts/ excludes only what is deliberate there:
       #   SC2191  `--"$HINT_BAR"="$REPLY"` as an array element; the `=` is literal
-      #   SC2206  the RS split in gather_targets, unquoted on purpose under `set -f`
+      #   SC2206  the RS split and the grouping loops' line and field splits in
+      #           gather_targets, unquoted on purpose under `set -f`
       - name: Lint the plugin
         run: |
           shellcheck -S warning -e SC2191,SC2206 \

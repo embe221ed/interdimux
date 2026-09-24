@@ -83,6 +83,15 @@ if [ "${INTERDIMUX_USE_RUST:-on}" != "off" ]; then
   done
   unset _c _imux_repo
 fi
+# The stdin protocol the binary is asked to speak.  It is the SUBCOMMAND, and
+# its name is its version: bump it with every change to the section framing or
+# to the position of any field, in step with PROTOCOL in rust/src/main.rs.  A
+# binary built from other sources -- routine after a `git pull` or a TPM update,
+# which never rebuild rust/ -- then exits 2 on the name instead of reading new
+# fields at old positions (when the session name moved to the front, an old
+# binary drew every session as its timestamp and no window at all, with exit
+# 0), and the list falls back to the bash renderer.  See imux_refused.
+IMUX_PROTO=gather2
 
 # ---------------------------------------------------------------------------
 # Option table
@@ -2461,21 +2470,20 @@ PFX_FLOOR=6  PFX_CEIL=16
 WIN_FLOOR=8  WIN_CEIL=40
 PATH_FLOOR=12 PATH_CEIL=44
 PATH_KEEP=24          # how far the path may shrink to keep the git badge
-MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0 HAS_BRANCH=0
+MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0
 
 # Longest session name, window identity ("index:name") and displayed
-# (~-substituted) path across every target, the most Z/!/# flags on any
-# one window, and whether any window or pane has a git branch to show.
-# Fork-free; reads the raw tmux dumps gather_targets already fetched
-# (visible via dynamic scope) and sets the MAX_* / HAS_BRANCH globals.
-# The branch lookups fill get_git_branch's cache, so build_ctx_field's
-# lookups for the same paths cost nothing — the same file reads as before,
-# just earlier.  Every (( … )) test sits on the LEFT of && (set-e-exempt);
+# (~-substituted) path across every target, and the most Z/!/# flags on any
+# one window.  Fork-free and file-free; reads the raw tmux dumps
+# gather_targets already fetched (visible via dynamic scope) and sets the
+# MAX_* globals.  Whether any row has a git branch is NOT measured here: it
+# costs file reads, and compute_widths asks it only where the answer counts
+# (_probe_has_branch).  Every (( … )) test sits on the LEFT of && (set-e-exempt);
 # the explicit `return 0` keeps the function's own status 0 — the trailing
 # loop would otherwise propagate a false (( … )) and abort a set -e caller
 # of the bare call in gather_targets.
 measure_widths() {
-  MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0 HAS_BRANCH=0
+  MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0
   local _sla sname _sw _sa _sn widx wname _wa _wc wpath _wp _wpid wflags _pi _pa _pc ppath _pr il dp nf
   while IFS="$US" read -r sname _sla _sw _sa; do
     [ -z "$sname" ] && continue
@@ -2495,21 +2503,39 @@ measure_widths() {
     [ "${wflags:1:1}" = "1" ] && nf=$(( nf + 1 ))
     [ "${wflags:2:1}" = "1" ] && nf=$(( nf + 1 ))
     (( nf > MAX_FLAGS )) && MAX_FLAGS=$nf
-    if [ "$HAS_BRANCH" = 0 ]; then
-      get_git_branch "$wpath"
-      [ -n "$REPLY" ] && HAS_BRANCH=1
-    fi
   done <<< "$all_windows_raw"
   while IFS="$US" read -r _sn widx _pi _pa _pc ppath _pr; do
     [ -z "$_sn" ] && continue
     dp="${ppath/#$HOME/\~}"
     (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
-    if [ "$HAS_BRANCH" = 0 ]; then
-      get_git_branch "$ppath"
-      [ -n "$REPLY" ] && HAS_BRANCH=1
-    fi
   done <<< "$all_panes_raw"
   return 0
+}
+
+# Does any window or pane row have a git branch to show?  The one question the
+# squeeze asks that reads files: each cwd is walked up to / (get_git_branch)
+# until one has a branch, so on a tree with none it is every directory of every
+# path -- plus the mount table, on the first walk step (is_remote_path).  It was
+# asked up front in measure_widths, at every width; but it decides only whether
+# the path gives up cells to keep the badge, and at most widths the badge fits,
+# or goes, whatever the answer (at 80 columns it never matters).  So
+# compute_widths asks it there and nowhere else, and it stops at the first
+# branch.  Windows before panes, as it always was.  The lookups fill
+# get_git_branch's cache, so build_ctx_field's for the same paths cost nothing.
+# Reads gather_targets' dumps through dynamic scope.
+_probe_has_branch() {
+  local _sn _wx _wn _wa _wc wpath _wr _pi _pa _pc ppath _pr
+  while IFS="$US" read -r _sn _wx _wn _wa _wc wpath _wr; do
+    [ -n "$_sn" ] || continue
+    get_git_branch "$wpath"
+    [ -n "$REPLY" ] && return 0
+  done <<< "$all_windows_raw"
+  while IFS="$US" read -r _sn _wx _pi _pa _pc ppath _pr; do
+    [ -n "$_sn" ] || continue
+    get_git_branch "$ppath"
+    [ -n "$REPLY" ] && return 0
+  done <<< "$all_panes_raw"
+  return 1
 }
 
 
@@ -2589,6 +2615,8 @@ compute_widths() {
   #      build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate) and the
   #      path keeps its cells.  Only while some row actually HAS a branch; a
   #      badge column that would be blank on every tree row goes first.
+  #      That is asked last, and only when the cells would be enough: it is
+  #      the one test here that reads files (_probe_has_branch).
   #   2. the path, down to PATH_FLOOR
   #   3. the session prefix, down to PFX_FLOOR
   #   4. the window name, down to WIN_FLOOR
@@ -2596,13 +2624,13 @@ compute_widths() {
   # The Z/!/# flags are never squeezed: their own slot, at most 4 cells.
   # Any deficit left after the floors lands on the flowing COMMAND column,
   # which fzf clips anyway.  rust/src/widths.rs is the same ladder.
-  local over give keep
+  local over give
   _squeeze_over; over=$REPLY
   if (( BADGE_W > 0 && over > 0 )); then
-    keep=$PATH_W
-    (( HAS_BRANCH )) && keep=$PATH_KEEP
-    if (( PATH_W - keep >= over )); then PATH_W=$(( PATH_W - over ))
-    else                                 BADGE_W=0
+    if (( PATH_W - PATH_KEEP >= over )) && _probe_has_branch; then
+      PATH_W=$(( PATH_W - over ))
+    else
+      BADGE_W=0
     fi
   fi
   _squeeze_over; give=$(( PATH_W - PATH_FLOOR ))
@@ -2805,6 +2833,45 @@ emit_dir_rows() {
   return 0
 }
 
+# The Rust core refused IMUX_PROTO (exit 2): it was built from other sources
+# than this script.  The list has already fallen back to the bash renderer --
+# correct, only slower -- so this is about telling the user, and ONCE: the list
+# is fetched on every open and every reload, and a message per fetch would
+# bury the status line and errors.log alike.  Said on the status line and in
+# errors.log, which --doctor reports, naming the binary and how to rebuild it.
+#
+# The stamp in the state directory names the binary it was said for, and a
+# rebuild makes the binary newer than the stamp, so a rebuild that is still the
+# wrong version is reported again.  Nothing is said while interdimux.tmux's
+# background build is replacing this very binary: that job announces its own
+# result, and the next open uses what it built.  All of it is off the fast path
+# -- only a refused binary gets here -- and nothing in it can fail the list.
+imux_refused() {
+  local dir="${SCHED_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/interdimux}"
+  local repo="${SCRIPT_PATH%/scripts/*}" stamp seen="" owner how msg
+  stamp="$dir/imux-refused"
+  if [ -f "$stamp" ] && ! [ "$IMUX_BIN" -nt "$stamp" ]; then
+    { IFS= read -r seen < "$stamp"; } 2>/dev/null || :
+    [ "$seen" = "$IMUX_BIN" ] && return 0
+  fi
+  if [ "$IMUX_BIN" = "$repo/rust/target/release/imux" ]; then
+    if owner=$(readlink "$repo/rust/target/.interdimux-autobuild.lock" 2>/dev/null) \
+       && [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
+      return 0
+    fi
+    how="rebuild it: (cd '$repo/rust' && cargo build --release)"
+  else
+    how="rebuild it, or point INTERDIMUX_BIN at a build of this version"
+  fi
+  msg="the Rust core at $IMUX_BIN is from another version of interdimux (it does not speak $IMUX_PROTO), so the list uses the slower bash renderer; $how"
+  imux_msg "$msg"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '== %(%Y-%m-%d %H:%M:%S)T rust core refused %s\ninterdimux: %s\n' -1 "$IMUX_PROTO" "$msg" \
+    >> "$dir/errors.log" 2>/dev/null || :
+  printf '%s\n' "$IMUX_BIN" > "$stamp" 2>/dev/null || :
+  return 0
+}
+
 gather_targets() {
   local current_session current_window current_pane cur_raw
   local sessions_raw all_windows_raw all_panes_raw
@@ -2851,7 +2918,7 @@ gather_targets() {
   if [ -n "${INTERDIMUX_DUMP_IN:-}" ]; then
     # Test seam: the four sections from a FILE instead of from tmux, framed
     # exactly as the batched query below returns them -- which is also the
-    # framing `imux gather` reads on stdin.  It is what lets the golden corpus
+    # framing `imux gather2` reads on stdin.  It is what lets the golden corpus
     # (rust/tests/corpus/*.dump) reach THIS renderer, the one every install
     # without cargo runs, with no server and no timing:
     # tests/test_corpus_parity.sh.  Same family as INTERDIMUX_NO_BATCH and
@@ -3010,6 +3077,14 @@ gather_targets() {
     # The assignments live INSIDE the substitution on purpose: written as a
     # `VAR=v \ _imux_out=$(...)` prefix chain, bash parses the lot as a list of
     # assignments with NO command, so the binary would run without any of them.
+    #
+    # Its stderr is dropped.  Every failure falls back to the bash renderer
+    # below, which draws the right list, and the one failure worth telling the
+    # user about is reported by imux_refused, once.  Left to reach the
+    # navigator's stderr, a binary older than IMUX_PROTO printed its usage line
+    # on every open and every reload, and each one became another entry in
+    # errors.log and another status-line message.
+    local _imux_rc=0
     _imux_out=$(
       INTERDIMUX_COLS="$(term_cols)" \
       INTERDIMUX_NOW="$NOW_EPOCH" \
@@ -3030,7 +3105,7 @@ gather_targets() {
       INTERDIMUX_COLOR_DANGER="$COLOR_DANGER" \
       INTERDIMUX_COLOR_TREE="$COLOR_TREE" \
       INTERDIMUX_COLOR_SEPARATOR="$COLOR_SEPARATOR" \
-      "$IMUX_BIN" gather <<IMUX_SECTIONS
+      "$IMUX_BIN" "$IMUX_PROTO" 2>/dev/null <<IMUX_SECTIONS
 ${sessions_raw}
 $RS
 ${all_windows_raw}
@@ -3039,7 +3114,10 @@ ${all_panes_raw}
 $RS
 ${cur_raw}
 IMUX_SECTIONS
-    ) || _imux_out=""
+    ) || { _imux_rc=$?; _imux_out=""; }
+    # Exit 2 is a subcommand the binary does not know: it was built from other
+    # sources than this script, and speaks another version of the protocol.
+    if [ "$_imux_rc" = 2 ]; then imux_refused; fi
     # A failed or empty render must fall through to the bash renderer, never be
     # mistaken for "there is nothing to show".  Capturing costs ~2ms (the binary
     # renders the whole list in about that) and buys a safe failure mode.
@@ -3113,28 +3191,47 @@ IMUX_SECTIONS
   # A line tmux cut short (see _sfmt) still names its window, so it is KEPT --
   # dropping it lost the window and every pane under it -- but only while what
   # is left is plausibly a window: session, a numeric index, and window_active
-  # as 0 or 1.  That is what tells a cut line from the other short line there
-  # is, the second half of a line split by a newline in a pane's cwd
-  # (`<path tail>^_<panes>^_<pid>^_<flags>`), whose 4th field is the 3-digit
-  # flags.  Filtered HERE rather than in the render loop, which needs the final
-  # count up front to draw the last branch as └─.  The same rules as
-  # rust/src/main.rs; a full line (flags present) is not second-guessed.
+  # as 0 or 1, or ABSENT when the cut came before it.  What tells a cut line
+  # from the other short line there is, the second half of a line split by a
+  # newline in a pane's cwd (`<path tail>^_<panes>^_<pid>^_<flags>`, whose 4th
+  # field is the 3-digit flags), is the mark every cut line carries: tmux stops
+  # at a '#{', after the separator in front of it, so a cut line ENDS in US and
+  # a fragment never does.  Filtered HERE rather than in the render loop, which
+  # needs the final count up front to draw the last branch as └─.  The same
+  # rules as rust/src/main.rs (short_active); a full line (flags present) is
+  # not second-guessed.
+  #
+  # So the loop needs each raw LINE, not only its fields: `read` drops a
+  # trailing separator.  The section is split into lines once and each line
+  # into fields by word splitting -- no here-string per line, and cheaper than
+  # the `read` loop it replaces (which read its input a byte at a time).  set -f,
+  # or a cwd like `/tmp/*` would be glob-expanded into the fields; IFS goes back
+  # to the default before anything else in the body runs.
   declare -A windows_by_session=()
-  local _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9 _kept=""
-  while IFS="$US" read -r _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9; do
-    [ -n "$_w1" ] || continue
+  local _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9 _kept="" _gl _gf
+  local -a _glines=()
+  set -f
+  IFS=$'\n'; _glines=($all_windows_raw); unset IFS
+  for _gl in ${_glines[@]+"${_glines[@]}"}; do
+    IFS="$US"; _gf=($_gl); unset IFS
     # MORE than nine fields: a US inside pane_current_path (a directory may be
-    # named anything but '/' and NUL).  `read` hands the surplus to its last
-    # name, so every field after the path was the one to its left -- the pane
-    # count read "part2", the flags "1<US>000", and the PID the pane count, so
-    # the row showed PID 1's command (`init`) with a bell it did not have and
-    # stderr got "integer expression expected".  There is no telling which US
-    # is the path's, so the row is dropped, as the Rust core drops it
-    # (main.rs, `f.len() > 9`); its session header still renders.
-    case "$_w9" in *"$US"*) continue ;; esac
+    # named anything but '/' and NUL).  Every field after the path was then the
+    # one to its left -- the pane count read "part2", the flags "1<US>000", and
+    # the PID the pane count, so the row showed PID 1's command (`init`) with a
+    # bell it did not have and stderr got "integer expression expected".  There
+    # is no telling which US is the path's, so the row is dropped, as the Rust
+    # core drops it (main.rs, `f.len() > 9`); its session header still renders.
+    [ "${#_gf[@]}" -gt 9 ] && continue
+    _w1=${_gf[0]-} _w2=${_gf[1]-} _w3=${_gf[2]-} _w4=${_gf[3]-} _w5=${_gf[4]-}
+    _w6=${_gf[5]-} _w7=${_gf[6]-} _w8=${_gf[7]-} _w9=${_gf[8]-}
+    [ -n "$_w1" ] || continue
     if [ -z "$_w9" ]; then
       case "$_w2" in ''|*[!0-9]*) continue ;; esac
-      case "$_w4" in 0|1) ;; *) continue ;; esac
+      case "$_w4" in
+        0|1) ;;
+        '') [[ "$_gl" == *"$US" ]] || continue ;;   # cut before #{window_active}
+        *) continue ;;
+      esac
     fi
     line="$_w1$US$_w2$US$_w3$US$_w4$US$_w5$US$_w6$US$_w7$US$_w8$US$_w9"
     _kept+="$line"$'\n'
@@ -3143,22 +3240,35 @@ IMUX_SECTIONS
     else
       windows_by_session["$_w1"]="$line"
     fi
-  done <<< "$all_windows_raw"
+  done
+  set +f
   all_windows_raw="${_kept%$'\n'}"   # what measure_widths sizes: only what renders
 
   # Build lookup: panes grouped by "session\x1fwindow_index".  A cut pane line
   # is kept on the same terms as a window line: numeric window AND pane index,
-  # pane_active 0 or 1 (a newline in a cwd leaves `<tail>^_<pid>^_<panes>`).
+  # pane_active 0 or 1, or absent on a line that ends in US.  Here the mark is
+  # the ONLY difference: a newline in a cwd leaves `<tail>^_<pid>^_<panes>`,
+  # three fields with nothing in the fourth, exactly like `s^_0^_1^_`, a line
+  # cut before #{pane_active}.
   declare -A panes_by_window=()
   local sn _p3 _p4 _p5 _p6 _p7 _p8
   _kept=""
-  while IFS="$US" read -r sn widx _p3 _p4 _p5 _p6 _p7 _p8; do
+  set -f
+  IFS=$'\n'; _glines=($all_panes_raw); unset IFS
+  for _gl in ${_glines[@]+"${_glines[@]}"}; do
+    IFS="$US"; _gf=($_gl); unset IFS
+    [ "${#_gf[@]}" -gt 8 ] && continue   # a US in its cwd: see above
+    sn=${_gf[0]-} widx=${_gf[1]-} _p3=${_gf[2]-} _p4=${_gf[3]-}
+    _p5=${_gf[4]-} _p6=${_gf[5]-} _p7=${_gf[6]-} _p8=${_gf[7]-}
     [ -n "$sn" ] || continue
-    case "$_p8" in *"$US"*) continue ;; esac   # a US in its cwd: see above
     if [ -z "$_p8" ]; then
       case "$widx" in ''|*[!0-9]*) continue ;; esac
       case "$_p3" in ''|*[!0-9]*) continue ;; esac
-      case "$_p4" in 0|1) ;; *) continue ;; esac
+      case "$_p4" in
+        0|1) ;;
+        '') [[ "$_gl" == *"$US" ]] || continue ;;   # cut before #{pane_active}
+        *) continue ;;
+      esac
     fi
     local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8"
     _kept+="$key$US$rest"$'\n'
@@ -3167,7 +3277,8 @@ IMUX_SECTIONS
     else
       panes_by_window["$key"]="$rest"
     fi
-  done <<< "$all_panes_raw"
+  done
+  set +f
   all_panes_raw="${_kept%$'\n'}"
 
   # Size the columns to the content we just fetched (fork-free) -- AFTER the

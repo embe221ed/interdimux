@@ -4,9 +4,10 @@
 //! the part that was 181ms of in-process bash: parsing the tmux dumps, sizing
 //! the columns, resolving commands and git branches, and rendering the rows.
 //!
-//! Contract: `imux gather` writes exactly what `interdimux.sh --list` writes.
+//! Contract: `imux gather2` writes exactly what `interdimux.sh --list` writes.
 //! bash falls back to its own implementation when this binary is absent, so the
-//! two must stay in step — tests/test_rust_parity.sh enforces that.
+//! two must stay in step — tests/test_rust_parity.sh enforces that.  The
+//! subcommand's name is the stdin protocol's version: see PROTOCOL.
 
 mod dirs;
 mod format;
@@ -28,6 +29,23 @@ use text::{age_of, truncate, width};
 use widths::{Maxima, Widths};
 
 const US: char = '\u{1f}';
+
+/// The stdin protocol this build speaks, and the subcommand bash runs it with.
+/// The name IS the version: bump it (gather3, ...) with every change to the
+/// framing or to the position of any field, in step with IMUX_PROTO in
+/// scripts/interdimux.sh.
+///
+/// Nothing else can make an old binary refuse new input.  Neither TPM's update
+/// nor a `git pull` rebuilds rust/, and an INTERDIMUX_BIN installed elsewhere
+/// is never rebuilt at all, so a script newer than its binary is routine.  When
+/// the session name moved from the second field to the first, a binary built
+/// before that read the timestamp as the name: every session was drawn as
+/// `S:1790254646`, no window or pane matched one, and the exit status was 0, so
+/// that WAS the picker.  An old binary exits 2 on a subcommand it does not
+/// know, and an extra argument or an environment variable would only have been
+/// ignored.  So a mismatch in either direction fails closed: bash falls back to
+/// its own renderer and says, once, that the binary needs rebuilding.
+const PROTOCOL: &str = "gather2";
 
 fn env_is(name: &str, want: &str) -> bool {
     std::env::var(name).map(|v| v == want).unwrap_or(false)
@@ -73,10 +91,20 @@ struct Pane {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("gather") => gather(),
+        Some(PROTOCOL) => gather(),
         Some("--version") | Some("-V") => println!("imux {}", env!("CARGO_PKG_VERSION")),
+        // Another version of the protocol: a script older (`gather`) or newer
+        // than this build.  Refused like any unknown subcommand -- exit 2 and
+        // nothing on stdout -- so that script renders the list itself.
+        Some(other) if other.starts_with("gather") => {
+            eprintln!(
+                "imux: this build speaks {}, not {}: the script and this binary are from different versions of interdimux",
+                PROTOCOL, other
+            );
+            std::process::exit(2);
+        }
         _ => {
-            eprintln!("imux: usage: imux gather");
+            eprintln!("imux: usage: imux {}", PROTOCOL);
             std::process::exit(2);
         }
     }
@@ -196,20 +224,21 @@ fn gather() {
                 });
             }
             // Cut short.  Kept only while it is plausibly a window: a numeric
-            // index and window_active as 0/1.  The other short line there is,
-            // the tail of a line split by a newline in a pane cwd
-            // (`<path tail>^_<panes>^_<pid>^_<flags>`), has the 3-digit flags
-            // where `active` belongs.  And the pid is NEVER read from a short
-            // line: it is the one field that reaches /proc, and such a fragment
-            // can put any number in that position.
-            if !is_index(f.get(1)) || !matches!(f.get(3), Some(&"0") | Some(&"1")) {
+            // index and window_active as 0/1 -- or no window_active at all
+            // when tmux cut the line before it (short_active).  The other
+            // short line there is, the tail of a line split by a newline in a
+            // pane cwd (`<path tail>^_<panes>^_<pid>^_<flags>`), has the
+            // 3-digit flags where `active` belongs.  And the pid is NEVER read
+            // from a short line: it is the one field that reaches /proc, and
+            // such a fragment can put any number in that position.
+            if !is_index(f.get(1)) || !short_active(f.get(3), l.ends_with(US)) {
                 return None;
             }
             Some(Window {
                 session: f[0].into(),
                 idx: f[1].into(),
-                name: f[2].into(),
-                active: f[3] == "1",
+                name: f.get(2).unwrap_or(&"").to_string(),
+                active: f.get(3) == Some(&"1"),
                 cmd: f.get(4).unwrap_or(&"").to_string(),
                 path: f.get(5).unwrap_or(&"").to_string(),
                 panes: 1,
@@ -230,11 +259,15 @@ fn gather() {
                 return None;
             }
             let whole = f.len() == 8 && !f[7].is_empty();
-            // a cut pane line is kept on the same terms as a window line
+            // A cut pane line is kept on the same terms as a window line.  Here
+            // the trailing separator is the ONLY difference between a line cut
+            // before #{pane_active} (`s^_0^_1^_`) and the tail of a line split
+            // by a newline in a pane cwd (`<tail>^_<pid>^_<window_panes>`):
+            // both are three fields, numeric in the second and third.
             if !whole
                 && (!is_index(f.get(1))
                     || !is_index(f.get(2))
-                    || !matches!(f.get(3), Some(&"0") | Some(&"1")))
+                    || !short_active(f.get(3), l.ends_with(US)))
             {
                 return None;
             }
@@ -398,6 +431,20 @@ fn gather() {
 /// A tmux window or pane index: present, and nothing but ASCII digits.
 fn is_index(f: Option<&&str>) -> bool {
     matches!(f, Some(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// window_active / pane_active on a line that is not whole: 0 or 1 -- or
+/// nothing, when tmux `cut` the line before it.  tmux stops at a `#{`, so the
+/// separator in front of it has already been copied and every cut line ends
+/// in US; the fragment a newline in a cwd leaves ends in a flag or a count.
+/// Keyed on that mark, not on the field: a pane fragment's fourth field is
+/// just as empty as a cut line's.
+fn short_active(f: Option<&&str>, cut: bool) -> bool {
+    match f {
+        Some(&"0") | Some(&"1") => true,
+        None | Some(&"") => cut,
+        _ => false,
+    }
 }
 
 fn out_flush<W: Write>(w: &mut W) {

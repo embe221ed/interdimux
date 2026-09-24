@@ -5,7 +5,7 @@
 # rust/tests/corpus/*.dump are recorded tmux dumps -- hostile names, bad ages,
 # every window flag, indexes at tmux's ceilings, an empty server -- and until
 # this suite only the Rust core ever saw them (rust/tests/golden.rs feeds them to
-# `imux gather` on stdin).  The bash renderer is the one every install without
+# `imux gather2` on stdin).  The bash renderer is the one every install without
 # cargo runs, and it had no way to read a dump: its sections came straight from
 # tmux.  INTERDIMUX_DUMP_IN=<file> is that way in, at gather_targets' fetch site.
 #
@@ -104,7 +104,7 @@ render_script() {
 render_bin() {
   local dump="$1" cols="$2" rule="$3"
   env -i "${GENV[@]}" INTERDIMUX_COLS="$cols" INTERDIMUX_SESSION_RULE="$rule" \
-      "$BIN" gather < "$dump"
+      "$BIN" gather2 < "$dump"
 }
 
 # every row has exactly four tab-separated fields and a known spec kind

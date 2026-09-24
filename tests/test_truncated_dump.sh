@@ -143,6 +143,23 @@ for r in $renderers; do
   [ -z "$ERR" ] && report "$label: a cut pane line writes nothing to stderr" pass \
                 || report "$label: a cut pane line writes nothing to stderr (got: $ERR)" fail
 
+  # Cut before #{window_active} (k=3) or even #{window_name} (k=2): a cut
+  # line ends in the separator before the '#{' it stopped at, so an EMPTY
+  # active field is a cut, not a fragment.  Both used to drop the window --
+  # and with it every row the window would have carried.
+  for k in 3 2; do
+    list_cut "$r" "w/s2/$k"
+    has "W:s2:0" && has "W:s2:1" && has "S:s3" && [ -z "$ERR" ] \
+      && report "$label: a window line cut after $k fields still renders its window" pass \
+      || report "$label: a window line cut after $k fields still renders its window (got: $ROWS / $ERR)" fail
+  done
+
+  # the same for a pane line, cut before #{pane_active}
+  list_cut "$r" "p/s2/3"
+  has "P:s2:0:0" && has "P:s2:0:1" && [ -z "$ERR" ] \
+    && report "$label: a pane line cut after 3 fields still renders its pane" pass \
+    || report "$label: a pane line cut after 3 fields still renders its pane (got: $ROWS / $ERR)" fail
+
   # the session line of s2, cut right after its name
   list_cut "$r" "s/s2/1"
   has "S:s2" && report "$label: a session line cut after its name keeps the session" pass \
@@ -171,6 +188,44 @@ for r in $renderers; do
     report "$label: a newline in a cwd renders its window once, with no phantom" pass
   else
     report "$label: a newline in a cwd renders its window once, with no phantom (got: $ROWS / $ERR)" fail
+  fi
+done
+
+# ...and a newline in a PANE's cwd leaves `<tail>^_<pid>^_<window_panes>`:
+# three fields, the second and third numeric, and nothing in the fourth -- the
+# very shape of a pane line cut before #{pane_active}, except that a cut line
+# ends in the separator and a fragment does not.  So the trailing separator is
+# what must decide: accepting any empty pane_active would file this fragment
+# as pane 2 of window b:4242 and draw a pane that does not exist.  A dump, fed
+# through the INTERDIMUX_DUMP_IN seam, because the collision needs a window
+# index equal to a pid; both renderers get the same bytes.  b:4242 sits in `/*`:
+# the bash renderer word-splits each line into its fields, and without set -f
+# that path became every entry of / and the row was dropped.
+US=$'\x1f' RS=$'\x1e'
+{
+  printf '%s\n' "s${US}1700000300${US}1${US}${US}/home/u" "b${US}1700000200${US}1${US}${US}/home/u"
+  printf '%s\n' "$RS"
+  # s:0's line split by the newline in its cwd (/x<NL>b), then b's real window
+  printf '%s\n' "s${US}0${US}w${US}1${US}zsh${US}/x" "b${US}2${US}4242${US}000" \
+                "b${US}4242${US}real${US}1${US}zsh${US}/*${US}2${US}0${US}000"
+  printf '%s\n' "$RS"
+  # the pane line split the same way; then b:4242's panes, the second one CUT
+  # before #{pane_active} -- the fragment's shape plus the trailing separator
+  printf '%s\n' "s${US}0${US}0${US}1${US}zsh${US}/x" "b${US}4242${US}2" \
+                "b${US}4242${US}0${US}1${US}zsh${US}/*${US}0${US}2" \
+                "b${US}4242${US}1${US}"
+  printf '%s\n' "$RS"
+  printf '%s\n' "s${US}0${US}0"
+} > "$TMPD/fragment.dump"
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  ROWS=$(INTERDIMUX_DUMP_IN="$TMPD/fragment.dump" INTERDIMUX_USE_RUST="$r" FZF_COLUMNS=160 \
+         bash "$SCRIPT" --list 2>"$TMPD/err" | cut -f4 | tr '\n' ' ')
+  ERR=$(cat "$TMPD/err")
+  if [ "$ROWS" = "S:b W:b:4242 P:b:4242:0 P:b:4242:1 S:s W:s:0 " ] && [ -z "$ERR" ]; then
+    report "$label: a pane cut before its active flag renders; a newline fragment of that shape does not" pass
+  else
+    report "$label: a pane cut before its active flag renders; a newline fragment of that shape does not (got: $ROWS / $ERR)" fail
   fi
 done
 
