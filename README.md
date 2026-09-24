@@ -126,8 +126,11 @@ background whenever `rust/target/release/imux` is missing or older than its
 sources. Nothing waits for it: tmux starts and the keys are bound while it
 compiles, niced; the status line says when it is done or has failed, and the
 output goes to `~/.local/state/interdimux/build.log` (`$XDG_STATE_HOME`). The
-first build downloads one crate. `set -g @interdimux-autobuild 'off'` stops it,
-and this is the same build by hand:
+first build downloads one crate. A build that fails is announced once and not
+repeated on every load: it is tried again when the sources or cargo change, or
+quietly a day later, and `--doctor` names the failure meanwhile.
+`set -g @interdimux-autobuild 'off'` stops it, and this is the same build by
+hand (a retry at once, say):
 
 ```bash
 cd ~/.tmux/plugins/interdimux/rust && cargo build --release
