@@ -97,6 +97,53 @@ for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
 unset _m
 
 # ---------------------------------------------------------------------------
+# --help / --version
+# ---------------------------------------------------------------------------
+#
+# Answered here, ahead of --bind-keys and the preflight, so both work anywhere:
+# outside tmux and without fzf, which is exactly where someone reading about the
+# plugin types them.  Any OTHER argument nothing handles is refused at the end of
+# the dispatch, just before the navigator — only there is "no mode took it"
+# actually known, and a list of modes kept up here would drift from the handlers.
+#
+# The one version string the script has.  The Rust helper reports its own
+# (`imux --version`, from rust/Cargo.toml).
+VERSION=0.1.0
+
+# Builtins only (no `cat`): --help has to work on a PATH that has nothing on it.
+usage() {
+  local text
+  IFS= read -r -d '' text <<'USAGE' || :
+usage: interdimux.sh [mode]
+
+With no mode, runs the navigator.  It expects a tmux popup around it: prefix+f
+opens one (the plugin binds it), and so does `--launch switch`.
+
+  --doctor                   check the setup; exits 1 if anything is wrong
+  --list                     print the navigator's rows
+  --jump N                   switch to session #N, in the picker's own order
+  --connect-dir DIR          switch to DIR's session, creating it if needed
+  --session-name-for DIR     print the session name DIR would get
+  --send-at WHEN TARGET CMD  type CMD into TARGET at WHEN (an at(1) time)
+  --send-in SECS TARGET CMD  the same, SECS seconds from now
+  --sched-list               list what --send-at / --send-in have queued
+  --sched-cancel ID          cancel one of those
+  --launch MODE              open a picker in a popup: switch kill rename zoom
+                             swap detach send dirs schedule jobs doctor
+  --dashboard-launch         open the dashboard (what prefix+g runs)
+  --bind-keys                install the key bindings (the plugin does this)
+  --version                  print the version
+  --help, -h                 print this
+USAGE
+  printf '%s' "$text"
+}
+
+case "${1:-}" in
+  --help|-h) usage; exit 0 ;;
+  --version) printf 'interdimux %s\n' "$VERSION"; exit 0 ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Key bindings (called once by interdimux.tmux at plugin load)
 # ---------------------------------------------------------------------------
 #
@@ -5520,6 +5567,27 @@ if [ "${1:-}" = "--dashboard" ]; then
   # can't nest, so this runs after the dashboard popup closes)
   tmux run-shell -b "bash '$SQ_SCRIPT_FMT' --launch $action"
   exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# An argument no mode took
+# ---------------------------------------------------------------------------
+#
+# Every handler above ends in `exit`, so arriving here with an argument means
+# none of them recognised it.  It used to fall straight into the navigator: a
+# typo'd mode (`--sched-lsit`), --version, anything, opened the picker from a
+# terminal, and from a script — no tty — failed inside it, appended a bogus
+# "navigator stderr" entry to the error log and turned --doctor red.
+#
+# The navigator itself takes no arguments.  Every launcher (the prefix+f
+# binding, --launch, the dashboard) hands it its mode in INTERDIMUX_MODE, never
+# on the command line, so anything at all is refused — a bare word too, since
+# `interdimux.sh doctor` is the same mistake as `--doctr`.  Refused HERE, before
+# the scratch files and the stderr log below exist, so a bad invocation leaves
+# nothing behind.
+if [ -n "${1:-}" ]; then
+  printf "interdimux: unknown mode '%s' (see --help)\n" "$1" >&2
+  exit 2
 fi
 
 # ---------------------------------------------------------------------------

@@ -323,6 +323,7 @@ The environment it checks is the one the popups get: the tmux server's `PATH`,
 locale and `$FZF_DEFAULT_OPTS`, not your shell's. The two differ exactly when
 it matters — fzf on `PATH` only through a shell rc, a UTF-8 locale that is named
 but not installed — so run from a shell, it says which one it read.
+`interdimux.sh --help` lists the other command-line modes.
 
 That last part is the one worth running. tmux user options are free-form, so a
 mistyped name is not an error to tmux — the setting simply never applies, with
