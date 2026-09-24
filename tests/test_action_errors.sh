@@ -146,8 +146,10 @@ fi
 
 # tmux parses a leading '-' as a flag unless -- separates it.
 _dash_ok=1
-grep -q 'rename-session -t "$target" -- "$new_name"' "$SCRIPT" || _dash_ok=0
-grep -q 'rename-window  -t "$target" -- "$new_name"' "$SCRIPT" || _dash_ok=0
+# (the new name is '#'-escaped, since tmux format-expands it -- see
+# tests/test_targets.sh, which also renames to '-dash' through the dialog)
+grep -qF -- "rename-session -t \"\$target\" -- \"\${new_name//'#'/##}\"" "$SCRIPT" || _dash_ok=0
+grep -qF -- "rename-window  -t \"\$target\" -- \"\${new_name//'#'/##}\"" "$SCRIPT" || _dash_ok=0
 # (send's leading dash is checked by what the pane receives, in
 # tests/test_send_literal.sh -- send goes through send_line now)
 [ "$_dash_ok" = 1 ] && report "user text is passed after -- so a leading dash is not a flag" pass \

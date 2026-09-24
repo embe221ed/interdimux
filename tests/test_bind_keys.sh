@@ -64,6 +64,8 @@ bash "$TMPD/probe.sh" --bind-keys || { echo "--bind-keys failed"; exit 1; }
 "$T" -L "$SOCK" select-window -t '=main:second'
 sleep 1
 EXPECT_PANE=$("$T" -L "$SOCK" display-message -p '#{pane_id}')
+# the one client attached to the server under test is the one that presses keys
+EXPECT_CLIENT=$("$T" -L "$SOCK" list-clients -F '#{client_name}' | head -1)
 
 # type prefix+f into the OUTER pane -> the inner client sees a real key press
 "$T" -L "$OUTER" send-keys -t '=drv:' C-b
@@ -99,6 +101,10 @@ ck "order forwarded"                                "$(get INTERDIMUX_ORDER)" "i
 ck "unset option arrives empty (-> built-in default)" "$(get INTERDIMUX_SHOW_PREVIEW)" ""
 ck "OPTS_PRIMED set"                                "$(get INTERDIMUX_OPTS_PRIMED)" "1"
 ck "TMUX_PANE is the PRESSING client's pane"        "$(get TMUX_PANE)" "$EXPECT_PANE"
+# ...and the client itself: with several clients on one session the pane cannot
+# say which of them pressed the key, and tmux's own guess is the one with the most
+# recent activity -- which, once the popup is open, need not be this one.
+ck "INTERDIMUX_CLIENT is the PRESSING client"       "$(get INTERDIMUX_CLIENT)" "$EXPECT_CLIENT"
 # The title names the session you are in: once the list is longer than the
 # popup the current row scrolls away, and the title is the only thing left on
 # screen saying where you are.  Free here -- it comes from a tmux format
@@ -116,7 +122,7 @@ ck "TMUX_VNUM baked numerically"                    "$(get INTERDIMUX_TMUX_VNUM)
 
 ck "every option in OPT_MAP is forwarded" \
    "$(grep -c '^INTERDIMUX_' "$OUT")" \
-   "$(( $(grep -c '"' <<< "$(sed -n '/^OPT_MAP=(/,/^)/p' "$REPO/scripts/interdimux.sh" | grep -o '"[a-z-]*:[A-Z_]*"')" ) + 4 ))"
+   "$(( $(grep -c '"' <<< "$(sed -n '/^OPT_MAP=(/,/^)/p' "$REPO/scripts/interdimux.sh" | grep -o '"[a-z-]*:[A-Z_]*"')" ) + 5 ))"
 
 # --- an install path containing '#' ---------------------------------------------
 # run-shell FORMAT-EXPANDS its argument, so a '#' in the install path is read as

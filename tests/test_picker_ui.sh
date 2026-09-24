@@ -54,6 +54,9 @@ printf '%s\n' "$TMPD/onlydir" > "$TMPD/data/interdimux/recent_dirs"
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s alpha -x 120 -y 30
 tmux -L "$SOCK" new-window -d -t '=alpha:' -n second
+# a fixed name for window 0: the swap prompt names it, and automatic-rename would
+# otherwise make that name whatever happens to be running
+tmux -L "$SOCK" rename-window -t '=alpha:=0' first
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=alpha:0' -F '#{pane_id}' | head -1)"
 
@@ -125,7 +128,7 @@ tmux -L "$OUTER" send-keys -t '=drv:' Escape 2>/dev/null || true
 if drive --action swap "'W:alpha:0'"; then
   p=$(prompt)
   case "$p" in
-    *"swap window 'alpha:0' with ❯"*) report "the swap picker names the source window" pass ;;
+    *"swap window 'alpha:0' first with ❯"*) report "the swap picker names the source window" pass ;;
     *) report "the swap picker names the source window (got: $p)" fail
        ERRORS+="    $p"$'\n' ;;
   esac
