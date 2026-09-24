@@ -3396,10 +3396,35 @@ popup_user_style() {
 }
 
 # The user's border style with the frame colour swapped to the danger
-# red (later attributes win in tmux styles, so bg/attrs are preserved)
+# red (later attributes win in tmux styles, so bg/attrs are preserved).
+#
+# danger_style [LINES] -- LINES is popup-border-lines, read when not given.
+#
+# With "padded" the frame is made of SPACES, so a red foreground on it is
+# invisible: the only thing left carrying the danger cue was the title text,
+# which tmux draws in the border style.  There the danger colour becomes the
+# BACKGROUND, and the text takes the frame's own background colour (or the
+# terminal's default) -- setting bg alone would leave the title red on red, and
+# `reverse` is no help: tmux keeps only the colours of a popup border style and
+# zeroes its attributes.  ("none" draws no frame and no title, so no border
+# style can show anything there.)
 danger_style() {
-  local base
+  local base lines="${1:-}" tok ink=default
+  local -a toks=()
+  [ -n "$lines" ] || lines=$(popup_user_lines)
   base=$(popup_user_style)
+  if [ "$lines" = padded ]; then
+    IFS=', ' read -r -a toks <<< "$base"
+    for tok in ${toks[@]+"${toks[@]}"}; do
+      case "$tok" in bg=*) ink="${tok#bg=}" ;; esac
+    done
+    [ -n "$ink" ] || ink=default
+    case "$base" in
+      default) printf 'bg=%s,fg=%s' "$POPUP_BORDER_DANGER" "$ink" ;;
+      *)       printf '%s,bg=%s,fg=%s' "$base" "$POPUP_BORDER_DANGER" "$ink" ;;
+    esac
+    return 0
+  fi
   case "$base" in
     default) printf 'fg=%s' "$POPUP_BORDER_DANGER" ;;
     *)       printf '%s,fg=%s' "$base" "$POPUP_BORDER_DANGER" ;;
@@ -3415,8 +3440,9 @@ danger_style() {
 # forwarded into the popup by --launch.
 popup_accent() {
   tmux_ge 303 || return 0
-  local style
-  if [ "$1" = "danger" ]; then style=$(danger_style); else style=$(popup_user_style); fi
+  local style lines
+  lines=$(popup_user_lines)
+  if [ "$1" = "danger" ]; then style=$(danger_style "$lines"); else style=$(popup_user_style); fi
   local -a t=()
   # -T is a FORMAT, and the title now carries the session name, so any '#' in it
   # would be re-expanded on every repaint.  In practice tmux already expands a
@@ -3429,7 +3455,7 @@ popup_accent() {
   # -c: the popup to repaint is the PRESSING client's.  Without it tmux picks
   # the most recently active client, and on any other client -- one with no
   # popup open -- a display-popup without -E OPENS a shell popup and blocks.
-  tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -b "$(popup_user_lines)" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
+  tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -b "$lines" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
 }
 
 # Display cells for a string, ignoring SGR escapes.  Sets REPLY.
