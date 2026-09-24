@@ -20,11 +20,19 @@ on:
 #
 # And what runs below them, as real binaries rather than emulated:
 #
+#   bash 4.3  the documented floor; 3.2 (macOS) and 4.2 (RHEL 7) must be
+#             refused in one line.  The runner's own bash is 5.2, and 5.2
+#             hides what behaves differently below it: a `$` in a session name
+#             was re-expanded inside `[[ -v "a[$k]" ]]` on 4.3 to 5.1 while
+#             every suite passed.  5.1 is Ubuntu 22.04's and RHEL 9's.  Listed
+#             with their patch levels; tests/test_bash_floor.sh finds each
+#             under its major.minor.
 #   fzf       0.44.1 and 0.52.1, one per failure tests/test_old_fzf.sh guards
 #             (that suite names the same two; keep them in step).
 env:
   TMUX_VERSION: "3.7b"
   FZF_VERSION: "0.74.0"
+  OLD_BASH_VERSIONS: "3.2.57 4.2.53 4.3.30 5.1.16"
   OLD_FZF_VERSIONS: "0.44.1 0.52.1"
   # The tree glyphs are multibyte and the column maths counts CELLS.  Runners do
   # not reliably set a locale, and without a UTF-8 one widths are measured in
@@ -153,6 +161,41 @@ jobs:
           done
           echo "INTERDIMUX_OLD_FZF_DIR=$HOME/fzf-old" >> "$GITHUB_ENV"
 
+      # Real old bashes for tests/test_bash_floor.sh, which run_all.sh runs with
+      # everything else: 3.2 and 4.2 must be refused in one line, and 4.3 and
+      # 5.1 must list, search and survive `$` in names.  Built from source --
+      # no apt route installs a second bash -- and cached by version, so a
+      # push pays for this only when OLD_BASH_VERSIONS changes.  A modern gcc
+      # rejects these K&R-era sources without the -std/-Wno flags, and there is
+      # deliberately no -O2: 3.2's configure then spins forever in its mktime
+      # probe, whose loop relies on signed overflow wrapping.
+      - name: Cache bash ${{ env.OLD_BASH_VERSIONS }}
+        id: old-bash-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/bash-old
+          key: bash-old-${{ env.OLD_BASH_VERSIONS }}-${{ runner.os }}
+
+      - name: Build bash ${{ env.OLD_BASH_VERSIONS }}
+        if: steps.old-bash-cache.outputs.cache-hit != 'true'
+        run: |
+          for v in $OLD_BASH_VERSIONS; do
+            curl -fsSL --retry 3 -o "/tmp/bash-$v.tar.gz" "https://ftp.gnu.org/gnu/bash/bash-$v.tar.gz"
+            tar -xzf "/tmp/bash-$v.tar.gz" -C /tmp
+            cd "/tmp/bash-$v"
+            if ! { ./configure --without-bash-malloc \
+                     CFLAGS="-std=gnu89 -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion -Wno-incompatible-pointer-types" \
+                   && make -j"$(nproc)"; } > "/tmp/bash-$v.log" 2>&1; then
+              tail -40 "/tmp/bash-$v.log"; exit 1
+            fi
+            mkdir -p "$HOME/bash-old/${v%.*}"
+            cp bash "$HOME/bash-old/${v%.*}/bash"
+            cd - >/dev/null
+          done
+
+      - name: Point the bash-floor suite at them
+        run: echo "INTERDIMUX_OLD_BASH_DIR=$HOME/bash-old" >> "$GITHUB_ENV"
+
       - name: Put the built tmux first on PATH
         run: echo "$HOME/tmux-prefix/bin" >> "$GITHUB_PATH"
 
@@ -161,7 +204,7 @@ jobs:
         # reporting "0 passed, 0 failed" is indistinguishable from coverage.
         run: sudo systemctl start atd || sudo service atd start
 
-      # The old fzfs too: the suite that uses them SKIPS when one is missing,
+      # The old binaries too: the suites that use them SKIP when one is missing,
       # and a skip reads as a pass in a total.  Here a missing one fails.
       - name: Versions under test
         run: |
@@ -171,6 +214,9 @@ jobs:
           cargo --version
           locale charmap
           for v in $OLD_FZF_VERSIONS; do "$INTERDIMUX_OLD_FZF_DIR/$v/fzf" --version; done
+          for v in $OLD_BASH_VERSIONS; do
+            "$INTERDIMUX_OLD_BASH_DIR/${v%.*}/bash" -c 'echo "bash $BASH_VERSION"'
+          done
 
       - name: Build the Rust core
         # Without it every suite runs against the bash fallback and
