@@ -75,6 +75,8 @@ CJK='日本語のセッション名前とても長い名前です本当に長い
 tmux -f /dev/null -L "$SOCK" new-session -d -s host -x 120 -y 30 'sleep 900'
 tmux -L "$SOCK" new-session -d -s solo -x 120 -y 30 'sleep 900'
 tmux -L "$SOCK" new-session -d -s "$CJK" -x 120 -y 30 'sleep 900'
+LONGNAME="$(printf '%*s' 110 '' | tr ' ' w)"                 # a title wider than a narrow pane
+tmux -L "$SOCK" new-session -d -s "$LONGNAME" -x 120 -y 30 'sleep 900'
 SOCKPATH="$(tmux -L "$SOCK" display-message -p '#{socket_path}')"
 ANCHOR="$(tmux -L "$SOCK" list-panes -t '=host:' -F '#{pane_id}' | head -1)"
 
@@ -116,12 +118,18 @@ cells() {
 # canonical mode off exactly as the edit loop's own `read -rsN1` does.  (A
 # poll on -icanon lost the first keys 4 times in 12.)  Only the edit loop's
 # repaint says the drain is over -- see wait_vis and editor_ready_empty.
-open_dialog() { # $1 cols, $2 rows, $3 action, $4 spec
+#
+# With a 5th argument the dialog runs under `bash -x`, its trace going to that
+# file through BASH_XTRACEFD: stderr would not do, the action sends it to
+# /dev/null once it opens its input.
+open_dialog() { # $1 cols, $2 rows, $3 action, $4 spec, [$5 xtrace file]
+  local pre="" x=""
+  [ -n "${5:-}" ] && pre="exec 7>'$5'; " x="BASH_XTRACEFD=7 bash -x"
   tmux -L "$SOCK" kill-session -t '=drv' 2>/dev/null || true
   tmux -L "$SOCK" new-session -d -s drv -x "$1" -y "$2" \
-    "env TMUX='$SOCKPATH,99999,0' TMUX_PANE='$ANCHOR' INTERDIMUX_OPTS_PRIMED=1 \
+    "${pre}env TMUX='$SOCKPATH,99999,0' TMUX_PANE='$ANCHOR' INTERDIMUX_OPTS_PRIMED=1 \
          INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
-         bash '$SCRIPT' --action $3 '$4'; exec sleep 60"
+         ${x:-bash} '$SCRIPT' --action $3 '$4'; exec sleep 60"
   local i
   for i in $(seq 1 200); do
     tmux -L "$SOCK" capture-pane -t '=drv:' -p 2>/dev/null | grep -q '❯ ' && return 0
@@ -209,8 +217,8 @@ editor_ready_empty() {
 
 # Open a Send keys dialog in an 80x20 pane and make sure its edit loop is
 # reading.  A failure here is reported, not counted as a pass.
-open_send() { # $1 what the section is about
-  if ! open_dialog 80 20 send 'P:solo:0:0' || ! editor_ready_empty; then
+open_send() { # $1 what the section is about, [$2 cols, $3 spec, $4 xtrace file]
+  if ! open_dialog "${2:-80}" 20 send "${3:-P:solo:0:0}" "${4:-}" || ! editor_ready_empty; then
     report "the send editor opens and reads keys ($1)" fail
     ERRORS+="      screen: $(printf '%s' "$SCREEN" | grep '❯' || true)"$'\n'
   fi
@@ -492,6 +500,55 @@ run test "${VIS:0:1}" != "$MARK"
 check "Left through combining marks never draws a mark onto the prompt" \
       "field: '$FIELD_ROW'" "$RC"
 keys Escape
+
+# ---------------------------------------------------------------------------
+# 8. Typing at the end of a long line costs the same in any field width
+# ---------------------------------------------------------------------------
+# With the cursor at the end of a line wider than the field -- every keystroke
+# of a long paste -- the editor re-derived the view's start by walking back
+# from the cursor across the whole field, one character at a time.  A paste is
+# one keystroke per character, so it cost O(field width) per character: 3-6x
+# slower than before the field was laid out in cells (1500 characters, 0.3 s
+# then, 1.5-3.8 s now).  Moving the start forward from where it was costs O(1).
+#
+# Wall-clock time is the load of the box as much as the code, so the cost is
+# counted instead: the dialog runs under `bash -x`, and every command it
+# executes is a line of trace.  The same text is typed at the end of the same
+# line into a narrow field (a 60-column pane) and a wide one (250 columns --
+# the long session name widens the box); per character, the two must cost the
+# same, give or take a few commands.
+
+# trace_cost COLS -- commands the editor runs per character typed at the end
+# of a scrolled line, in a COLSx20 pane.  Sets REPLY (-1 on failure).
+trace_cost() {
+  local tf="$TMPD/trace.$1" pre paste n0 n1
+  REPLY=-1
+  open_send "the cost of typing, $1 columns" "$1" "P:$LONGNAME:0:0" "$tf" || return 1
+  snap
+  field_geometry
+  # first scroll the line, so every character measured below scrolls it
+  pre=$(printf '%*s' $(( FIELD_W + 10 )) '' | tr ' ' b)
+  typed "${pre}PRE"
+  wait_vis "PRE" tail || return 1
+  n0=$(wc -l < "$tf")
+  paste="$(printf '%*s' 200 '' | tr ' ' a)END"
+  typed "$paste"
+  wait_vis "END" tail || return 1
+  n1=$(wc -l < "$tf")
+  keys Escape
+  REPLY=$(( (n1 - n0) / ${#paste} ))
+  COST_FIELD[$1]=$FIELD_W
+}
+declare -A COST_FIELD=()
+trace_cost 60;  NARROW=$REPLY
+trace_cost 250; WIDE=$REPLY
+run test "$NARROW" -gt 0 -a "$WIDE" -gt 0
+check "the editor's cost per character can be counted" "narrow=$NARROW wide=$WIDE" "$RC"
+run test "$WIDE" -le $(( NARROW + 5 ))
+check "typing at the end of a long line costs no more in a wide field than a narrow one" \
+      "commands per character: ${COST_FIELD[60]:-?}-cell field $NARROW, ${COST_FIELD[250]:-?}-cell field $WIDE" "$RC"
+printf '    \033[2m(commands per character typed: %s in a %s-cell field, %s in a %s-cell one)\033[0m\n' \
+  "$NARROW" "${COST_FIELD[60]:-?}" "$WIDE" "${COST_FIELD[250]:-?}"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

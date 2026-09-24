@@ -4583,22 +4583,35 @@ input_dialog() {
     _dlg_cells "${cw:scroll:pos-scroll}"; off=$REPLY
     if (( off + cur > field_w )); then
       # The cursor ran off the right edge: start at the leftmost character from
-      # which it fits.  Walked back from the cursor, not forward from the old
-      # start, so End on a long buffer costs one field's width, not its length.
-      scroll=$pos off=0
-      while (( scroll > 0 )); do
-        w=${cw:scroll-1:1}
-        (( off + w + cur > field_w )) && break
-        scroll=$(( scroll - 1 )) off=$(( off + w ))
-      done
+      # which it fits.  Stepping the start forward from where it was finds
+      # exactly that one -- the cells from the start to the cursor only shrink
+      # as the start moves right, and every start left of the old one failed
+      # already -- and typing at the end, it is one step or two.  A paste is
+      # one keystroke per character, and the walk back across the whole field
+      # this used to do on each made a paste 3-6x slower.  A big jump (End on
+      # a long line) walks back from the cursor instead: one field's width,
+      # not the length of the jump.
+      if (( off + cur - field_w < field_w )); then
+        while (( off + cur > field_w && scroll < pos )); do
+          off=$(( off - ${cw:scroll:1} )) scroll=$(( scroll + 1 ))
+        done
+      else
+        scroll=$pos off=0
+        while (( scroll > 0 )); do
+          w=${cw:scroll-1:1}
+          (( off + w + cur > field_w )) && break
+          scroll=$(( scroll - 1 )) off=$(( off + w ))
+        done
+      fi
     fi
     # A zero-width character (a combining mark) cannot open the field: drawn
     # first, it would attach to the prompt's cell, outside the field.
     while (( scroll < pos )) && [ "${cw:scroll:1}" = 0 ]; do scroll=$(( scroll + 1 )); done
     # The visible text is the longest run from `scroll` that fits.  A wide
     # character that would straddle the edge is left out rather than drawn over
-    # the gutter; the cell it would have started in stays blank.
-    _dlg_cells "${cw:scroll}"
+    # the gutter; the cell it would have started in stays blank.  At the end of
+    # the text, the run is the one `off` already measured.
+    if (( pos == len )); then REPLY=$off; else _dlg_cells "${cw:scroll}"; fi
     if (( REPLY <= field_w )); then
       vis="${buf:scroll}"
     else
@@ -4654,8 +4667,16 @@ input_dialog() {
         buf="$l$r" cw="${cw:0:${#l}}${cw:pos}"; pos=${#l} ;;
       *)
         if [[ -n "$c" && "$c" != [[:cntrl:]] ]]; then
-          dlg_width "$c"
-          buf="${buf:0:pos}$c${buf:pos}" cw="${cw:0:pos}$REPLY${cw:pos}"; pos=$(( pos + 1 ))
+          printf -v k '%d' "'$c" 2>/dev/null || k=0
+          if (( pos == len && k >= 0x20 && k < 0x7f )); then
+            # ASCII at the end -- typing, and every character of a paste:
+            # one cell, so append, and slice nothing
+            buf+="$c" cw+=1
+          else
+            dlg_width "$c"
+            buf="${buf:0:pos}$c${buf:pos}" cw="${cw:0:pos}$REPLY${cw:pos}"
+          fi
+          pos=$(( pos + 1 ))
         fi ;;
     esac
   done
