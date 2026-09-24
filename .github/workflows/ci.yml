@@ -108,6 +108,21 @@ jobs:
             -o /tmp/fzf.tar.gz
           sudo tar -xzf /tmp/fzf.tar.gz -C /usr/local/bin
 
+      # Real release binaries for tests/test_old_fzf.sh, which checks that the
+      # navigator opens AND draws on fzf older than the pinned one.  Neither
+      # failure it guards can be emulated with INTERDIMUX_FZF_MINOR on 0.74:
+      # 0.44 refuses to start on an event it does not know, and 0.52 and older
+      # draw the whole interface on stderr.  Without these the suite skips, by
+      # version, rather than failing.
+      - name: Fetch old fzf releases
+        run: |
+          for v in 0.44.1 0.52.1; do
+            mkdir -p "$HOME/fzf-old/$v"
+            curl -fsSL "https://github.com/junegunn/fzf/releases/download/v$v/fzf-$v-linux_amd64.tar.gz" \
+              | tar -xz -C "$HOME/fzf-old/$v"
+          done
+          echo "INTERDIMUX_OLD_FZF_DIR=$HOME/fzf-old" >> "$GITHUB_ENV"
+
       - name: Put the built tmux first on PATH
         run: echo "$HOME/tmux-prefix/bin" >> "$GITHUB_PATH"
 

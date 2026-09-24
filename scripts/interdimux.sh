@@ -4351,6 +4351,17 @@ fi
 # inline snippet reads the same two variables to stay level with it.
 
 if [ "${1:-}" = "--footer-for" ]; then
+  # Zero matches: Enter creates a session, so the bar announces that instead of
+  # a row's hints -- exactly what the navigator's inline dispatcher prints there
+  # (it runs --describe-create), so the two paths cannot disagree.  fzf exports
+  # the count and the query from 0.46; below that this cannot know, and the bar
+  # stays the generic one.
+  if [ "${FZF_MATCH_COUNT:-}" = 0 ]; then
+    set +e
+    describe_create "${FZF_QUERY:-}"
+    printf '%s\n' "$REPLY"
+    exit 0
+  fi
   spec="${2:-}"
   spec="${spec%%	*}"
   hint_set "${spec%%:*}"
@@ -5337,8 +5348,16 @@ export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
 # rendered rows and then vanishes with the popup, which is how a read-only
 # $XDG_DATA_HOME turned into three "Permission denied" lines smeared across the
 # tree, and how every other silent failure this picker has had stayed silent.
-# fzf draws its interface on /dev/tty rather than stderr, so redirecting fd 2
-# costs the UI nothing.
+# From fzf 0.53 on, fzf draws its interface on /dev/tty rather than stderr, so
+# redirecting fd 2 costs the UI nothing.
+#
+# BEFORE 0.53 it costs the whole UI.  Those releases paint every frame on
+# stderr (0.52.1's LightRenderer.flush writes to os.Stderr; 0.53.0's writes to
+# the tty it opens), and an execute() child such as ctrl-o's directory picker
+# inherits that stderr and draws on it the same way.  Redirected, the popup
+# stayed black, Esc still quit, and errors.log filled with the rendered frames.
+# There the picker keeps its real stderr and the redirect is simply skipped:
+# a stray error line over the list is the price of a picker that draws at all.
 #
 # Reported, never swallowed: the first line goes to `display-message` (which
 # also lands in `tmux show-messages`) and the whole thing is appended to a log
@@ -5347,7 +5366,7 @@ export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
 # Only on this path.  Child modes (--list, --preview, --action, --doctor …) keep
 # their real stderr: they are called by fzf, by the test suites, and by the user.
 ERR_FILE="${RESUME_FILE}.err"
-if : > "$ERR_FILE" 2>/dev/null; then
+if fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null; then
   exec 2>"$ERR_FILE"
 else
   ERR_FILE=""
@@ -5371,7 +5390,15 @@ _report_stderr() {
   fi
 }
 
-trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"}' EXIT
+# The query (and match scope) the raw-mode `result` bind last answered, so it
+# can tell a new query from a reload of the same one -- see _best_guard below.
+# Named off RESUME_FILE for the same reason the preview state is: private, and
+# no mktemp fork on the way to the first frame.  Exported rather than spliced
+# into the bind, so no path character can reach the snippet's quoting.
+QUERY_STATE_FILE="${RESUME_FILE}.query"
+export INTERDIMUX_QUERY_STATE="$QUERY_STATE_FILE"
+
+trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" "$QUERY_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"}' EXIT
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"
 ACTION_CMD="bash '$SCRIPT_PATH' --action"
@@ -5421,16 +5448,22 @@ while true; do
   )
 
 
-  # Cursor stability across the execute+reload cycle every action performs.
-  # --id-nth keys rows by their SPEC (field 4), so after a reload the cursor
-  # stays on the same TARGET rather than the same row number — which in kill
-  # mode is the difference between confirming what you meant and confirming
-  # whatever slid into that position.
+  # Row identity by SPEC (field 4) for fzf's cross-reload operations.
   #
-  # Deliberately WITHOUT --track: --track arms trackBlocked, which DISCARDS
-  # every keystroke except abort while a reload is in flight
+  # What it does NOT do, whatever it looks like: keep the CURSOR on the same
+  # target across a plain `reload`.  fzf consults --id-nth for the cursor only
+  # while tracking is on (--track, or a track-current action); otherwise it
+  # keeps the same row NUMBER.  Measured on 0.74.3: rows a b c d, cursor on c,
+  # reloaded as a x y b c d -- the cursor lands on y with --id-nth=1, exactly
+  # as with no flag, and stays on c only with --id-nth=1 --track.  So after a
+  # kill the cursor is on whatever slid into the row, and that row-number rule
+  # is what the raw-mode `result` bind below has to leave alone.
+  #
+  # Deliberately still WITHOUT --track: --track arms trackBlocked, which
+  # DISCARDS every keystroke except abort while a reload is in flight
   # (fzf src/terminal.go:6821-6827), and that window is widest right after the
-  # popup opens.  --id-nth alone never blocks.
+  # popup opens.  The flag costs nothing and never blocks, and a reload-sync
+  # carrying a multi-selection across by SPEC would need it (IDEAS #16).
   fzf_ge 71 && fzf_opts+=(--id-nth=4)
 
   # Keep the row's identity while a long command hscrolls.  The command is the
@@ -5551,12 +5584,6 @@ while true; do
       fzf_opts+=(
         --prompt='❯ '
         --print-query
-        --bind="ctrl-x:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
-        --bind="ctrl-e:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
-        --bind="ctrl-z:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
-        --bind="ctrl-s:${_wait}execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
-        --bind="ctrl-d:${_wait}execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
-        --bind="ctrl-t:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
         --bind="ctrl-o:execute(bash '$SCRIPT_PATH' --dirs || echo resume > '$RESUME_FILE')+abort"
         # Column widths are computed against the space actually available, so
         # toggling the preview or resizing the popup invalidates them: without
@@ -5564,8 +5591,13 @@ while true; do
         # A reload used to cost ~195ms, which is why this was deferred; it is
         # ~25ms now.
         --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload($LIST_CMD)$_refit"
-        --bind="resize:reload($LIST_CMD)$_refit"
       )
+      # The `resize` event arrived in fzf 0.46 (its CHANGELOG), and fzf REFUSES
+      # TO START on an event it does not know ("unsupported key: resize"), so
+      # ungated this one bind closed the popup the instant it opened on
+      # 0.40-0.45 -- Ubuntu 24.04 ships 0.44.1.  Below 0.46 a resized popup
+      # keeps its old column widths until ^r, which is the whole loss.
+      fzf_ge 46 && fzf_opts+=(--bind="resize:reload($LIST_CMD)$_refit")
       # An empty bar means nothing fits at this width.  Passing --footer='' still
       # costs a row (measured — the section is drawn, blank), so omit the flag
       # entirely; a transform that emits nothing later removes the section again
@@ -5610,14 +5642,35 @@ while true; do
       _hint_case+=' [ "${x%%:*}" -le "$c" ] || continue;'
       _hint_case+=' f=${x#*:}; [ -n "$f" ] && printf "%s\n" "$f"; break;'
       _hint_case+=' done'
+
+      # At ZERO matches the bar is not a row's hints at all: Enter creates a
+      # session there, and the bar has to say so (IDEAS #1, the announcement
+      # below).  Two binds write the bar -- `focus` here and `result` further
+      # down -- and when the list empties BOTH fire, focus last (the current
+      # item changes to none).  So both must give the same answer.  They used
+      # not to: focus ran the bare row case, whose `*)` arm printed the generic
+      # ladder, and on fzf >= 0.63 its bg-cancel also killed the announcement
+      # that result had just started.  With raw off, or on any fzf below 0.74,
+      # the bar said "enter switch" while Enter created a session.
+      #
+      # One dispatcher, bound to both: whichever runs last prints the same
+      # text, and bg-cancel's ordering stops mattering.  Cost: the create
+      # description is a real process, but it only runs at zero matches, where
+      # focus fires once on the transition (and, in raw mode, on each move over
+      # the dimmed rows -- which is right, since Enter creates from every one).
+      _hint_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hint_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
+      # The fallback path's dispatcher is --footer-for, which makes the same
+      # zero-match decision itself (FZF_MATCH_COUNT and FZF_QUERY reach it as
+      # environment, from fzf 0.46).
+      _footer_for="bash '$SCRIPT_PATH' --footer-for {-1}"
       if [ "$INLINE_CALLBACKS" = 1 ] && fzf_ge 63; then
-        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR:$_hint_case")
+        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR:$_hint_bind")
       elif [ "$INLINE_CALLBACKS" = 1 ]; then
-        fzf_opts+=(--bind="focus:transform-$HINT_BAR:$_hint_case")
+        fzf_opts+=(--bind="focus:transform-$HINT_BAR:$_hint_bind")
       elif fzf_ge 63; then
-        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
+        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
       else
-        fzf_opts+=(--bind="focus:transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
+        fzf_opts+=(--bind="focus:transform-$HINT_BAR($_footer_for)")
       fi
       if fzf_ge 58; then
         # Same treatment for the match-scope prompt: FZF_NTH already holds the
@@ -5662,53 +5715,138 @@ while true; do
         )
       fi
 
-      # Raw mode still needs the cursor moved even when the inline header
-      # snippets are unavailable (old fzf, or a user-supplied --with-shell).
-      if [ "$_raw_on" = 1 ] && [ "$INLINE_CALLBACKS" != 1 ]; then
-        fzf_opts+=(--bind='result:best')
+      # `best` on `result`, in raw mode: every row stays displayed, so nothing
+      # moves the cursor onto a match and `--bind=change:first` actively pins it
+      # to row 1 -- filter, press ctrl-x, and you kill whatever happened to be
+      # at the top.  Verified: with --raw, typing "delta" left the cursor on
+      # "alpha" under change:first AND under change:best (which fires before
+      # the search completes); result:best lands on "delta".
+      #
+      # But `result` does not only follow a query change.  fzf fires it after
+      # EVERY reload too, and ^r, ^/, a resize, ^z and every ^x/^e/^d/^s/^t
+      # (execute+reload, confirmed or cancelled) end in one.  An unconditional
+      # `best` answered each of those as if the query had just been typed: with
+      # an empty query that is row 1, so cancel a ^x on gamma and the next ^x
+      # offered to kill whatever sat at the top.  Left alone, fzf keeps the
+      # cursor on the same row NUMBER across a reload, which is the same row
+      # whenever the list did not change -- and ^r, ^/ and a resize never
+      # change it.  (--id-nth does not help here: without --track it keys
+      # nothing about the cursor.)
+      #
+      # So `best` fires when the query or the ^] scope differs from the last one
+      # answered, remembered in a file (a `wait` in `change` would need no
+      # process, but fzf DROPS every keystroke while a wait blocks).  Also:
+      #   * when rows arrive that were never there before and a query is typed
+      #     -- the list still loading under a query typed ahead (the directory
+      #     rows are printed after the sessions and can land in a second
+      #     snapshot).  "Never there" is the largest total seen, so a reload,
+      #     which may pass through a partial snapshot, does not qualify;
+      #   * when a reload left the cursor on a row that no longer matches -- a
+      #     kill slid a dimmed one under it -- the one reload after which the
+      #     match set, not the row number, is what the user was on.
+      # Synchronous by necessity: a cursor move that lands late would undo the
+      # user's own.  Degrades to the old unconditional `best` if the file cannot
+      # be made.  No commas, no single quotes, no parentheses and no `${x}` that
+      # fzf would read as a placeholder: it rides inside transform(...), and on
+      # the fallback path inside `sh -c '...'` too.
+      _res_pre=""
+      if [ "$_raw_on" = 1 ]; then
+        _best_guard='f=$INTERDIMUX_QUERY_STATE; k="$FZF_NTH $FZF_QUERY"; t=${FZF_TOTAL_COUNT:-0}; b=;'
+        _best_guard+=' { read -r n; IFS= read -r p; } 2>/dev/null < "$f";'
+        _best_guard+=' [ "$n" -ge 0 ] 2>/dev/null || n=0;'
+        _best_guard+=' [ "$p" = "$k" ] || b=1;'
+        _best_guard+=' if [ "$t" -gt "$n" ]; then n=$t; [ -z "$FZF_QUERY" ] || b=1; fi;'
+        _best_guard+=' [ "${FZF_RAW:-1}" = 0 ] && [ "${FZF_MATCH_COUNT:-0}" -gt 0 ] && b=1;'
+        _best_guard+=' { printf "%s\n%s" "$n" "$k" > "$f"; } 2>/dev/null;'
+        _best_guard+=' [ -z "$b" ] || echo best'
+        if ! : > "$QUERY_STATE_FILE" 2>/dev/null; then
+          _res_pre="best+"
+        elif [ "$INLINE_CALLBACKS" = 1 ]; then
+          _res_pre="transform($_best_guard)+"
+        else
+          # A user-supplied --with-shell may not speak POSIX (fish)
+          _res_pre="transform(sh -c '$_best_guard')+"
+        fi
       fi
 
       # Announce find-or-create in the zero-match state (IDEAS #1).  Without it
       # the feature is invisible and a typo silently creates a junk session; now
       # the bar says exactly which session would be created, and where.
-      # The announcement is precomputed per-keystroke by the same inline-snippet
-      # trick the row hints use: describe_create needs zoxide and the
-      # filesystem, so it cannot be inlined, but `zero` only fires when the
-      # match count reaches 0 — not on every keystroke — so one process there is
-      # acceptable where one per cursor move would not be.
-      # The `focus` bind restores the normal per-row hints as soon as matches
-      # come back, so no explicit restore bind is needed.
+      # describe_create needs zoxide and the filesystem, so it cannot be inlined;
+      # the dispatchers above run it only at zero matches.  The `focus` bind
+      # restores the normal per-row hints as soon as matches come back.
       #
       # This bind is also what re-fits the bar after ^/ and after a resize: both
       # end in a reload, and a reload fires `result`.
+      #
+      # ONE bind owns the bar on result changes, because two of them fight: a
+      # `zero` bind that announces the create, plus a `result` bind that
+      # restores the row hints, means the result bind emits nothing at zero
+      # matches -- and an empty transform CLEARS the bar, wiping the
+      # announcement that `zero` just set.
+      #
+      # bg- where it exists, so it never blocks typing: `result` fires on every
+      # keystroke.  `best` is chained FIRST because fzf's last --bind for an
+      # event replaces the earlier one.
       if [ "$INLINE_CALLBACKS" = 1 ]; then
-        # ONE bind owns the bar on result changes, because two of them fight:
-        # a `zero` bind that announces the create, plus a `result` bind that
-        # restores the row hints, means the result bind emits nothing at zero
-        # matches — and an empty transform CLEARS the bar, wiping the
-        # announcement that `zero` just set.
-        #
-        # bg- so it never blocks typing: the create description has to shell out
-        # (it consults zoxide and the filesystem), and `result` fires on every
-        # keystroke.
-        _hint_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hint_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
-        # `best` FIRST, and only on `result`: in raw mode every row stays
-        # displayed, so nothing moves the cursor onto a match and
-        # `--bind=change:first` actively pins it to row 1 — filter, press ctrl-x,
-        # and you kill whatever happened to be at the top.  Verified: with --raw,
-        # typing "delta" left the cursor on "alpha" under change:first AND under
-        # change:best (which fires before the search completes); result:best
-        # lands on "delta".
-        # It must be chained here rather than bound separately, because fzf's
-        # last --bind for an event replaces the earlier one.
-        _res_pre=""
-        [ "$_raw_on" = 1 ] && _res_pre="best+"
         if fzf_ge 63; then
           fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR:$_hint_bind")
         else
           fzf_opts+=(--bind="result:${_res_pre}transform-$HINT_BAR:$_hint_bind")
         fi
+      elif [ "$_raw_on" = 1 ]; then
+        # Fallback path in raw mode (a user --with-shell on fzf >= 0.74).  Rows
+        # stay displayed, so the cursor sits on a dimmed row at zero matches and
+        # `focus` does not fire there, nor when a keystroke brings the match
+        # back under an unmoved cursor: only `result` sees every change.
+        fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+      elif fzf_ge 46; then
+        # Fallback path, plain filtering: `focus` covers the way into and out
+        # of zero matches (the current item becomes none and back), `zero` the
+        # keystrokes in between -- without it the bar kept describing the query
+        # as it was when the list emptied.  --footer-for needs fzf 0.46's
+        # FZF_MATCH_COUNT and FZF_QUERY; below that it cannot tell, and the bar
+        # stays the generic one.
+        if fzf_ge 63; then
+          fzf_opts+=(--bind="zero:bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+        else
+          fzf_opts+=(--bind="zero:transform-$HINT_BAR($_footer_for)")
+        fi
       fi
+
+      # The row actions.  In raw mode a query that matches NOTHING still leaves
+      # every row on screen, dimmed, with the cursor on one of them -- and fzf
+      # runs an execute against it: ^x offered to kill a session the query had
+      # excluded, ^e to rename it, and ^z zoomed it with no dialog at all.
+      # (Without raw the list is empty there, and fzf skips an execute whose
+      # template names a field when there is no current item.)  Enter already
+      # dispatches on FZF_MATCH_COUNT; these do the same, inside fzf, so the
+      # dialog never takes over the terminal.  At zero matches the bar says why
+      # nothing happened; the next keystroke puts the announcement back.
+      #
+      # The action text is ECHOED by the transform and then parsed by fzf, so
+      # its placeholder is written \{-1}: fzf expands a bare {-1} in the
+      # transform's own command -- quoted for a shell, but those quotes would be
+      # consumed by the echo -- where the escaped form reaches the emitted
+      # execute intact and is expanded, and quoted, when that runs.  No single
+      # quotes (hence SQ_SCRIPT in double quotes) and no commas.  The test is a
+      # plain string compare so it parses in any shell a user's --with-shell
+      # may name, fish included; raw mode means fzf >= 0.74, which always
+      # exports the count.
+      _action_bind() { # key action exec-kind nomatch-label [trailing actions]
+        if [ "$_raw_on" = 1 ]; then
+          hint_r '∅' "nothing matches · no row to $4"
+          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY' || echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload(bash \"$SQ_SCRIPT\" --list)${5:-}'")
+        else
+          fzf_opts+=(--bind="$1:${_wait}$3($ACTION_CMD $2 {-1})+reload($LIST_CMD)${5:-}")
+        fi
+      }
+      _action_bind ctrl-x kill   execute        kill
+      _action_bind ctrl-e rename execute        rename
+      _action_bind ctrl-z zoom   execute-silent zoom +refresh-preview
+      _action_bind ctrl-s swap   execute        swap
+      _action_bind ctrl-d detach execute        detach
+      _action_bind ctrl-t send   execute        'send keys to'
       ;;
   esac
 

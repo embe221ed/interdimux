@@ -101,6 +101,14 @@ below their version floors. Installing 0.74 was worth +22 assertions on its own.
 
 **Fix:** install the fzf release tarball, not the distro package.
 
+The skip also hid that on that very fzf the navigator did not open at all: an
+unconditional `resize` bind (an event from 0.46) made 0.44 refuse to start, and
+on 0.46–0.52, which draw their whole interface on stderr, the navigator's
+stderr log swallowed it and the popup stayed black. `tests/test_old_fzf.sh`
+runs the navigator on real 0.44.1 and 0.52.1 release binaries, which the
+workflow fetches into the directory named by `INTERDIMUX_OLD_FZF_DIR`; without
+them it skips, naming each version it could not find.
+
 ## 6. The Rust core was never built
 
 Without `rust/target/release/imux` every suite runs against the bash fallback,
