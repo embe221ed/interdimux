@@ -125,6 +125,37 @@ pub fn project_type(dir: &str) -> Option<&'static str> {
     None
 }
 
+/// The directory `p` names, spelled one way: what `pwd -P` prints there, so
+/// every spelling of one directory -- a trailing or doubled '/', a path through
+/// a symlink -- comes out the same.  A directory row is hidden when a session
+/// was started in it (or its active window is in it) under ANY spelling, since
+/// Enter on the row resolves it and switches to that session: tmux keeps
+/// `-c ~/repo/` with its slash, and a session started from a shell in a
+/// symlinked directory keeps the logical path, while the recent list and zoxide
+/// have their own spellings.  bash's canon_dir -- keep them in step: runs of
+/// '/' collapse and trailing ones go, then the physical path of a directory
+/// that exists, except on a filesystem whose stat can block (mounts.rs), which
+/// keeps its spelling; so does a relative path.
+pub fn canon_dir(p: &str) -> String {
+    let mut s = String::with_capacity(p.len());
+    for c in p.chars() {
+        if c == '/' && s.ends_with('/') {
+            continue;
+        }
+        s.push(c);
+    }
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if !s.starts_with('/') || crate::mounts::is_remote(&s) {
+        return s;
+    }
+    match fs::canonicalize(&s) {
+        Ok(r) if r.is_dir() => r.to_str().map(str::to_string).unwrap_or(s),
+        _ => s,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +201,32 @@ mod tests {
     fn an_empty_dir_has_no_type() {
         let d = tmp("empty");
         assert_eq!(project_type(d.to_str().unwrap()), None);
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// Every spelling of one directory is one directory: a trailing or doubled
+    /// '/', and a path through a symlink, come out as `pwd -P` prints it.  One
+    /// that is not there (or not absolute) is only tidied -- as bash's canon_dir.
+    #[test]
+    fn canon_dir_spells_a_directory_one_way() {
+        let d = tmp("canon");
+        let real = d.join("real");
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, d.join("link")).unwrap();
+        let phys = fs::canonicalize(&real).unwrap().to_str().unwrap().to_string();
+        let base = d.to_str().unwrap();
+        for spelling in [
+            format!("{}/real", base),
+            format!("{}/real/", base),
+            format!("{}//real//", base),
+            format!("{}/link", base),
+            format!("{}/link/", base),
+        ] {
+            assert_eq!(canon_dir(&spelling), phys, "{}", spelling);
+        }
+        assert_eq!(canon_dir(&format!("{}//gone//", base)), format!("{}/gone", base));
+        assert_eq!(canon_dir("rel//x/"), "rel/x");
+        assert_eq!(canon_dir("//"), "/");
         fs::remove_dir_all(&d).ok();
     }
 }

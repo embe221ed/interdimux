@@ -403,12 +403,18 @@ fn gather() {
         // "off" here would be the two renderers disagreeing again -- this time
         // with the Rust one silently dropping every directory row.
         let limit: usize = env_or("INTERDIMUX_DIRS_LIMIT", "15").parse().unwrap_or(15);
+        // ...under whatever spelling (dirs::canon_dir, as bash's emit_dir_rows).
+        let taken: std::collections::HashSet<String> =
+            session_dirs.iter().map(|s| dirs::canon_dir(s)).collect();
         let mut n = 0;
         for d in dirs::candidates() {
             if n >= limit {
                 break;
             }
-            if d.contains('\t') || session_dirs.contains(&d) {
+            if d.contains('\t')
+                || session_dirs.contains(&d)
+                || taken.contains(&dirs::canon_dir(&d))
+            {
                 continue;
             }
             let base = d.rsplit('/').next().unwrap_or(&d);
