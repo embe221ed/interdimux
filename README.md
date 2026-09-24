@@ -57,12 +57,13 @@ A portal gun for your tmux sessions.
   Ubuntu 24.04 ships 3.4 and Debian 13 ships 3.5a, so on those you want tmux
   from source or a backport.
 - **`fzf` >= 0.74.** Older versions still open a working picker — every feature
-  is version-gated and degrades on its own (0.46 re-fitting on resize, 0.52
-  full-line highlight, 0.53 errors logged instead of drawn over the list, 0.58
-  match-scope cycling, 0.61 ghost text, 0.63 the footer hint bar, 0.66 the
-  scope highlight, 0.67 the frozen identity column, 0.74 raw filter mode) — but
-  0.74 is the only version the test suite exercises in full;
-  `tests/test_old_fzf.sh` checks just that 0.44 and 0.52 open and draw.
+  is version-gated and degrades on its own (0.46 the find-or-create
+  announcement and re-fitting on resize, 0.52 full-line highlight, 0.53 errors
+  logged instead of drawn over the list, 0.58 match-scope cycling, 0.61 ghost
+  text, 0.63 the footer hint bar, 0.66 the scope highlight, 0.67 the frozen
+  identity column, 0.74 raw filter mode) — but 0.74 is the only version the
+  test suite exercises in full; `tests/test_old_fzf.sh` checks just that 0.44
+  and 0.52 open and draw.
 - `bash` >= 4.0
 - A UTF-8 locale. The tree glyphs are multibyte and every column width is
   counted in cells; under `LC_ALL=C` the columns misalign. `--doctor` says so.

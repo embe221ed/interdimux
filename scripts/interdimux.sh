@@ -4267,6 +4267,17 @@ fi
 # inline snippet reads the same two variables to stay level with it.
 
 if [ "${1:-}" = "--footer-for" ]; then
+  # Zero matches: Enter creates a session, so the bar announces that instead of
+  # a row's hints -- exactly what the navigator's inline dispatcher prints there
+  # (it runs --describe-create), so the two paths cannot disagree.  fzf exports
+  # the count and the query from 0.46; below that this cannot know, and the bar
+  # stays the generic one.
+  if [ "${FZF_MATCH_COUNT:-}" = 0 ]; then
+    set +e
+    describe_create "${FZF_QUERY:-}"
+    printf '%s\n' "$REPLY"
+    exit 0
+  fi
   spec="${2:-}"
   spec="${spec%%	*}"
   hint_set "${spec%%:*}"
@@ -5539,14 +5550,35 @@ while true; do
       _hint_case+=' [ "${x%%:*}" -le "$c" ] || continue;'
       _hint_case+=' f=${x#*:}; [ -n "$f" ] && printf "%s\n" "$f"; break;'
       _hint_case+=' done'
+
+      # At ZERO matches the bar is not a row's hints at all: Enter creates a
+      # session there, and the bar has to say so (IDEAS #1, the announcement
+      # below).  Two binds write the bar -- `focus` here and `result` further
+      # down -- and when the list empties BOTH fire, focus last (the current
+      # item changes to none).  So both must give the same answer.  They used
+      # not to: focus ran the bare row case, whose `*)` arm printed the generic
+      # ladder, and on fzf >= 0.63 its bg-cancel also killed the announcement
+      # that result had just started.  With raw off, or on any fzf below 0.74,
+      # the bar said "enter switch" while Enter created a session.
+      #
+      # One dispatcher, bound to both: whichever runs last prints the same
+      # text, and bg-cancel's ordering stops mattering.  Cost: the create
+      # description is a real process, but it only runs at zero matches, where
+      # focus fires once on the transition (and, in raw mode, on each move over
+      # the dimmed rows -- which is right, since Enter creates from every one).
+      _hint_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hint_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
+      # The fallback path's dispatcher is --footer-for, which makes the same
+      # zero-match decision itself (FZF_MATCH_COUNT and FZF_QUERY reach it as
+      # environment, from fzf 0.46).
+      _footer_for="bash '$SCRIPT_PATH' --footer-for {-1}"
       if [ "$INLINE_CALLBACKS" = 1 ] && fzf_ge 63; then
-        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR:$_hint_case")
+        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR:$_hint_bind")
       elif [ "$INLINE_CALLBACKS" = 1 ]; then
-        fzf_opts+=(--bind="focus:transform-$HINT_BAR:$_hint_case")
+        fzf_opts+=(--bind="focus:transform-$HINT_BAR:$_hint_bind")
       elif fzf_ge 63; then
-        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
+        fzf_opts+=(--bind="focus:bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
       else
-        fzf_opts+=(--bind="focus:transform-$HINT_BAR(bash '$SCRIPT_PATH' --footer-for {-1})")
+        fzf_opts+=(--bind="focus:transform-$HINT_BAR($_footer_for)")
       fi
       if fzf_ge 58; then
         # Same treatment for the match-scope prompt: FZF_NTH already holds the
@@ -5591,51 +5623,57 @@ while true; do
         )
       fi
 
-      # Raw mode still needs the cursor moved even when the inline header
-      # snippets are unavailable (old fzf, or a user-supplied --with-shell).
-      if [ "$_raw_on" = 1 ] && [ "$INLINE_CALLBACKS" != 1 ]; then
-        fzf_opts+=(--bind='result:best')
-      fi
+      # `best` on `result`, in raw mode: every row stays displayed, so nothing
+      # moves the cursor onto a match and `--bind=change:first` actively pins it
+      # to row 1 -- filter, press ctrl-x, and you kill whatever happened to be
+      # at the top.  Verified: with --raw, typing "delta" left the cursor on
+      # "alpha" under change:first AND under change:best (which fires before
+      # the search completes); result:best lands on "delta".
+      _res_pre=""
+      [ "$_raw_on" = 1 ] && _res_pre="best+"
 
       # Announce find-or-create in the zero-match state (IDEAS #1).  Without it
       # the feature is invisible and a typo silently creates a junk session; now
       # the bar says exactly which session would be created, and where.
-      # The announcement is precomputed per-keystroke by the same inline-snippet
-      # trick the row hints use: describe_create needs zoxide and the
-      # filesystem, so it cannot be inlined, but `zero` only fires when the
-      # match count reaches 0 — not on every keystroke — so one process there is
-      # acceptable where one per cursor move would not be.
-      # The `focus` bind restores the normal per-row hints as soon as matches
-      # come back, so no explicit restore bind is needed.
+      # describe_create needs zoxide and the filesystem, so it cannot be inlined;
+      # the dispatchers above run it only at zero matches.  The `focus` bind
+      # restores the normal per-row hints as soon as matches come back.
       #
       # This bind is also what re-fits the bar after ^/ and after a resize: both
       # end in a reload, and a reload fires `result`.
+      #
+      # ONE bind owns the bar on result changes, because two of them fight: a
+      # `zero` bind that announces the create, plus a `result` bind that
+      # restores the row hints, means the result bind emits nothing at zero
+      # matches -- and an empty transform CLEARS the bar, wiping the
+      # announcement that `zero` just set.
+      #
+      # bg- where it exists, so it never blocks typing: `result` fires on every
+      # keystroke.  `best` is chained FIRST because fzf's last --bind for an
+      # event replaces the earlier one.
       if [ "$INLINE_CALLBACKS" = 1 ]; then
-        # ONE bind owns the bar on result changes, because two of them fight:
-        # a `zero` bind that announces the create, plus a `result` bind that
-        # restores the row hints, means the result bind emits nothing at zero
-        # matches — and an empty transform CLEARS the bar, wiping the
-        # announcement that `zero` just set.
-        #
-        # bg- so it never blocks typing: the create description has to shell out
-        # (it consults zoxide and the filesystem), and `result` fires on every
-        # keystroke.
-        _hint_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hint_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
-        # `best` FIRST, and only on `result`: in raw mode every row stays
-        # displayed, so nothing moves the cursor onto a match and
-        # `--bind=change:first` actively pins it to row 1 — filter, press ctrl-x,
-        # and you kill whatever happened to be at the top.  Verified: with --raw,
-        # typing "delta" left the cursor on "alpha" under change:first AND under
-        # change:best (which fires before the search completes); result:best
-        # lands on "delta".
-        # It must be chained here rather than bound separately, because fzf's
-        # last --bind for an event replaces the earlier one.
-        _res_pre=""
-        [ "$_raw_on" = 1 ] && _res_pre="best+"
         if fzf_ge 63; then
           fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR:$_hint_bind")
         else
           fzf_opts+=(--bind="result:${_res_pre}transform-$HINT_BAR:$_hint_bind")
+        fi
+      elif [ "$_raw_on" = 1 ]; then
+        # Fallback path in raw mode (a user --with-shell on fzf >= 0.74).  Rows
+        # stay displayed, so the cursor sits on a dimmed row at zero matches and
+        # `focus` does not fire there, nor when a keystroke brings the match
+        # back under an unmoved cursor: only `result` sees every change.
+        fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+      elif fzf_ge 46; then
+        # Fallback path, plain filtering: `focus` covers the way into and out
+        # of zero matches (the current item becomes none and back), `zero` the
+        # keystrokes in between -- without it the bar kept describing the query
+        # as it was when the list emptied.  --footer-for needs fzf 0.46's
+        # FZF_MATCH_COUNT and FZF_QUERY; below that it cannot tell, and the bar
+        # stays the generic one.
+        if fzf_ge 63; then
+          fzf_opts+=(--bind="zero:bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+        else
+          fzf_opts+=(--bind="zero:transform-$HINT_BAR($_footer_for)")
         fi
       fi
       ;;
