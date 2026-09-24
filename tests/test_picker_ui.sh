@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 SOCK="interdimux-pickerui-test-$$"
-OUTER="${SOCK}-outer"
+OUTER="" OUTERS=() OUTER_N=0   # a fresh outer server per launch: see drive()
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-pui.XXXXXX")"
 PASS=0
 FAIL=0
@@ -26,7 +26,8 @@ ERRORS=""
 
 cleanup() {
   tmux -L "$SOCK" kill-server 2>/dev/null || true
-  tmux -L "$OUTER" kill-server 2>/dev/null || true
+  local o
+  for o in ${OUTERS[@]+"${OUTERS[@]}"}; do tmux -L "$o" kill-server 2>/dev/null || true; done
   rm -rf "$TMPD"
 }
 trap cleanup EXIT
@@ -61,7 +62,13 @@ export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=alpha:0' -F '#{pane_id}' | head -1)"
 
 drive() { # $1.. = args to the script; opens it under a real client
-  tmux -L "$OUTER" kill-server 2>/dev/null || true
+  # A NEW outer socket every time.  Reusing one meant `kill-server` then
+  # `new-session` on the same name: the kill returns before the old server has
+  # exited, the new session can land in that dying server and vanish with it,
+  # and the pane never shows a prompt -- "the swap picker opens" failed that way
+  # once in a full run (25 s wait, then nothing), though it passes alone.
+  [ -n "$OUTER" ] && { tmux -L "$OUTER" kill-server 2>/dev/null || true; }
+  OUTER_N=$((OUTER_N + 1)); OUTER="${SOCK}-outer-$OUTER_N"; OUTERS+=("$OUTER")
   tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
     "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_DATA_HOME='$TMPD/data' \
          INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
