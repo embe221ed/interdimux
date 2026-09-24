@@ -22,8 +22,11 @@
 # holding <version>/fzf (CI fetches them; see docs/CI.md), e.g.
 #
 #   for v in 0.44.1 0.52.1; do mkdir -p "$d/$v"; curl -fsSL \
-#     "https://github.com/junegunn/fzf/releases/download/v$v/fzf-$v-linux_amd64.tar.gz" \
+#     "https://github.com/junegunn/fzf/releases/download/$v/fzf-$v-linux_amd64.tar.gz" \
 #     | tar -xz -C "$d/$v"; done
+#
+# (no `v` in the tag: fzf's tags gained it at 0.54.0, and .../download/v0.44.1/
+# is a 404).
 #
 # A version that is not there is reported as skipped, by name.
 
