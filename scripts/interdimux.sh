@@ -4526,13 +4526,33 @@ if [ "${1:-}" = "--doctor" ]; then
     return 0
   }
 
-  if [ "$TMUX_VNUM" -ge 304 ]; then
-    _ok "tmux $(tmux -V 2>/dev/null | awk '{print $2}') (fast prefix-key binding available)"
-  elif [ "$TMUX_VNUM" -ge 300 ]; then
-    _warn "tmux $(tmux -V 2>/dev/null | awk '{print $2}') — works, but opening the picker forks a shell first"
-    _note "tmux 3.4 adds run-shell -C, which binds the popup with no shell at all"
+  # The version every check branches on is TMUX_VNUM (forwarded by the binding,
+  # or parsed from `tmux -V` at startup), so that is the one named — spelled the
+  # way tmux spells it (3.7b) when the two agree.  Printing a fresh `tmux -V`
+  # while branching on something else let this line name one version and judge
+  # another.
+  _tvs=$(tmux -V 2>/dev/null); _tvs="${_tvs#tmux }"
+  _tv_same=0
+  [[ "$_tvs" =~ ([0-9]+)\.([0-9]+) ]] \
+    && [ $(( 10#${BASH_REMATCH[1]} * 100 + 10#${BASH_REMATCH[2]} )) = "$TMUX_VNUM" ] \
+    && _tv_same=1
+  if [ "$_tv_same" = 0 ]; then
+    if [ "$TMUX_VNUM" = 999 ]; then _tvs="${_tvs:-of unknown version}"   # unparseable: assumed modern
+    else _tvs="$(( TMUX_VNUM / 100 )).$(( TMUX_VNUM % 100 ))"
+    fi
+  fi
+  # 3.6 is a floor, not a preference.  Every row is delimited with a raw US byte
+  # inside a `-F` format, and tmux 3.5a and older rewrite that byte as the four
+  # characters `\037`: each row then parses as ONE field, and the picker is simply
+  # blank — measured 3.4 -> 0 rows, 3.5a -> 0, 3.6 -> all of them (README,
+  # docs/CI.md).  Those are the versions stock Ubuntu 24.04 and Debian 13 ship,
+  # which makes this the likeliest real failure there is — and it used to get a
+  # green tick here.
+  if [ "$TMUX_VNUM" -lt 306 ]; then
+    _bad "tmux $_tvs is older than 3.6 — it rewrites the row delimiter as \\037, so the picker lists nothing"
+    _note "Ubuntu 24.04 ships 3.4 and Debian 13 ships 3.5a: build tmux from source, or use a backport"
   else
-    _bad "tmux $(tmux -V 2>/dev/null | awk '{print $2}') is older than 3.0"
+    _ok "tmux $_tvs (fast prefix-key binding available)"
   fi
 
   if command -v fzf >/dev/null 2>&1; then

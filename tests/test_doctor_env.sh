@@ -73,6 +73,32 @@ else
   ERRORS+="$(doctor | grep '✗' | sed 's/^/    /' || true)"$'\n'
 fi
 
+# --- tmux: 3.6 is a floor ---------------------------------------------------------
+# tmux <= 3.5a rewrites the US row delimiter as `\037`, and the picker is blank
+# (README, docs/CI.md: 3.4 -> 0 rows, 3.5a -> 0 rows).  3.4 is Ubuntu 24.04's and
+# 3.5a Debian 13's; both used to get a green tick.
+for v in 304 305; do
+  want="tmux ${v:0:1}.${v:2} is older than 3.6"
+  out=$(INTERDIMUX_TMUX_VNUM="$v" doctor)
+  has "tmux $v is a problem, not a tick" "$out" "✗ $want"
+  [ "$(INTERDIMUX_TMUX_VNUM="$v" doctor_rc)" = 1 ] \
+    && report "...and --doctor exits 1 for it" pass \
+    || report "...and --doctor exits 1 for it" fail
+done
+# The line names the version it JUDGED, not whatever `tmux -V` says now: it used
+# to print this box's 3.7b while branching on the forwarded 3.4.
+live=$(tmux -V); live="${live#tmux }"
+out=$(INTERDIMUX_TMUX_VNUM=304 doctor | grep -E '^  . tmux ' || true)
+if [ -z "$out" ]; then
+  report "the tmux line names the version it judged (no tmux line at all)" fail
+else
+  hasnt "the tmux line names the version it judged, not the live one ($live)" "$out" "tmux $live "
+fi
+out=$(INTERDIMUX_TMUX_VNUM=306 doctor)
+has "tmux 3.6 itself passes" "$out" "✓ tmux 3.6"
+[ "$(INTERDIMUX_TMUX_VNUM=306 doctor_rc)" = 0 ] \
+  && report "...and exits 0" pass || report "...and exits 0" fail
+
 # --- fzf and bash, on the SERVER's PATH ---------------------------------------------
 # The premise: this shell has fzf, so a doctor reading its own PATH says ✓.
 command -v fzf >/dev/null 2>&1 && report "premise: this shell finds fzf" pass \
