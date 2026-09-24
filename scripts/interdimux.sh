@@ -145,8 +145,21 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # session.  run-shell format-expands its argument, so #{pane_id} is the
   # pressing client's pane, resolved in-server at keypress.
   #
+  # INTERDIMUX_CLIENT=#{client_name} rides along for the same reason, one level
+  # up: which CLIENT pressed the key.  Everything the script later does to "the
+  # current client" -- switch-client, display-popup, display-menu, a status
+  # message -- otherwise lets tmux guess, and it guesses the attached client with
+  # the most recent activity.  Keys typed into a popup or menu never update that
+  # (tmux hands them to the overlay first), so while the picker is open a single
+  # keystroke on another terminal attached to the same session made THAT one the
+  # current client: Enter moved the other terminal, and the kill dialog's border
+  # repaint opened a blocking shell popup on it.  Resolved at keypress, the name
+  # is exact.  #{q:} because run-shell hands the expansion to /bin/sh; a client
+  # name is a tty path or "client-<pid>", so in practice it is a no-op.
+  _bk_who="TMUX_PANE=#{pane_id} INTERDIMUX_CLIENT=#{q:client_name}"
+
   # The dashboard is not the hot path — it keeps the simple launcher.
-  tmux bind-key "$_bk_dash" run-shell -b "TMUX_PANE=#{pane_id} bash '$SQ_SCRIPT_FMT' --dashboard-launch"
+  tmux bind-key "$_bk_dash" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --dashboard-launch"
 
   # Opt-in numbered jumps (@interdimux-jump-keys 'M-1 M-2 M-3').  Space-separated
   # keys, in order: the first jumps to session #1 in the picker's own ordering,
@@ -166,14 +179,14 @@ if [ "${1:-}" = "--bind-keys" ]; then
     _bk_i=0
     for _bk_k in $_bk_jump; do
       _bk_i=$(( _bk_i + 1 ))
-      tmux bind-key -n "$_bk_k" run-shell -b "TMUX_PANE=#{pane_id} bash '$SQ_SCRIPT_FMT' --jump $_bk_i" 2>/dev/null
+      tmux bind-key -n "$_bk_k" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --jump $_bk_i" 2>/dev/null
     done
     unset _bk_i _bk_k
   fi
 
   # run-shell -C needs tmux >= 3.4; below it, keep the original binding.
   if [ "$_bk_tvnum" -lt 304 ]; then
-    tmux bind-key "$_bk_nav" run-shell -b "TMUX_PANE=#{pane_id} bash '$SQ_SCRIPT_FMT' --launch switch"
+    tmux bind-key "$_bk_nav" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --launch switch"
     exit 0
   fi
 
@@ -206,6 +219,8 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # empty target — current-row marker and MRU's move-current-to-end both break,
   # silently.  #{pane_id} is the pressing client's pane.
   _bk_env+=" -e \"TMUX_PANE=#{pane_id}\""
+  # ...and the pressing CLIENT, for the reason given above _bk_who.
+  _bk_env+=" -e \"INTERDIMUX_CLIENT=#{q:client_name}\""
   _bk_env+=" -e \"INTERDIMUX_TMUX_VNUM=$_bk_tvnum\""
   [ -n "$_bk_fzf" ] && _bk_env+=" -e \"INTERDIMUX_FZF_MINOR=$_bk_fzf\""
   # popup_accent re-sends -T on every repaint, and on tmux >= 3.6 a partial
@@ -1137,7 +1152,7 @@ connect_dir() {
     tmux new-session -d -s "$name" -c "$dir" 2>/dev/null || return 1
     hydrate_session "$name" "$dir"
   fi
-  tmux switch-client -t "=$name" 2>/dev/null || true
+  tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "=$name" 2>/dev/null || true
   REPLY="$name"
   return 0
 }
@@ -1166,6 +1181,55 @@ emit_sorted_tiers() {
       emit_dir "$d" dir ""
     done < <(printf '%s\n' "${_others[@]}" | sort -u)
   fi
+}
+
+# ---------------------------------------------------------------------------
+# The pressing client
+# ---------------------------------------------------------------------------
+#
+# INTERDIMUX_CLIENT is the #{client_name} of the client whose keypress started
+# us.  Every binding captures it at keypress (--bind-keys), and --launch, the
+# dashboard and the popup's -e flags carry it on from there.
+#
+# Without it every client-affecting command lets tmux pick "the current
+# client", which for a command run from a popup or run-shell is the attached
+# client with the most recent activity on the session holding $TMUX_PANE.  Keys
+# typed into a popup or a menu never update that timestamp, so once the picker
+# was open a single keystroke on ANOTHER terminal attached to the same session
+# made that terminal "current": Enter switched it instead of yours, and the kill
+# dialog's border repaint opened a blocking shell popup on it.
+#
+#   TMUX_C  "-c <client>" for switch-client, display-popup/-menu/-message
+#   CUR_T   "-t <target>" naming where the pressing client is standing
+#
+# Unset -- a direct invocation, a hand-written binding -- keeps the old
+# behaviour exactly.  Set but since detached, the -c calls fail and do nothing,
+# which is the right outcome: the client that asked is gone, and acting on
+# whichever one tmux would guess instead is the very bug.  "=<client>:" is a
+# session target that tmux resolves through the client (exact name first, then
+# the client lookup, before any prefix match), i.e. that client's session and
+# the window it is showing.
+#
+# The value is validated because the dashboard bakes it into command strings
+# that both /bin/sh and tmux's parser re-read; a tty path or tmux's own
+# "client-<pid>" never contain anything outside this set.
+TMUX_C=() CUR_T=()
+case "${INTERDIMUX_CLIENT:-}" in
+  ''|*[!A-Za-z0-9/._-]*) INTERDIMUX_CLIENT="" ;;
+  *) TMUX_C=(-c "$INTERDIMUX_CLIENT") ;;
+esac
+if [ -n "$INTERDIMUX_CLIENT" ]; then
+  CUR_T=(-t "=$INTERDIMUX_CLIENT:")
+elif [ -n "${TMUX_PANE:-}" ]; then
+  CUR_T=(-t "$TMUX_PANE")
+fi
+
+# A status-line message on the pressing client.  display-message FORMAT-EXPANDS
+# its text, so '#' is doubled: a session called "a#Sb" is reported as exactly
+# that, not with the current session's name spliced into it.
+imux_msg() {
+  local m="interdimux: $1"
+  tmux display-message ${TMUX_C[@]+"${TMUX_C[@]}"} "${m//'#'/##}" 2>/dev/null || :
 }
 
 # ---------------------------------------------------------------------------
@@ -1617,7 +1681,7 @@ term_cols() {
 # server does not resolve here and would otherwise read as "unknown".
 client_dim() {
   local fmt="$1" v
-  v=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$fmt" 2>/dev/null)
+  v=$(tmux display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} "$fmt" 2>/dev/null)
   case "$v" in ''|*[!0-9]*) v=$(tmux display-message -p "$fmt" 2>/dev/null) ;; esac
   case "$v" in ''|*[!0-9]*) v=0 ;; esac
   REPLY="$v"
@@ -1963,7 +2027,7 @@ gather_targets() {
       display-message -p "$RS" \; \
       list-panes -a -F "$_pfmt" \; \
       display-message -p "$RS" \; \
-      display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$_curfmt" 2>/dev/null)
+      display-message -p ${CUR_T[@]+"${CUR_T[@]}"} "$_curfmt" 2>/dev/null)
     # Split on RS by word-splitting, NOT by ${var#*pat}: the latter is
     # quadratic in the offset and costs hundreds of ms on a large dump.
     if [ -n "$_all" ]; then
@@ -1985,10 +2049,10 @@ gather_targets() {
     all_panes_raw="${_parts[2]#$'\n'}";   all_panes_raw="${all_panes_raw%$'\n'}"
     cur_raw="${_parts[3]#$'\n'}"
   else
-    # Current target: anchor to $TMUX_PANE when tmux provides it (popups
-    # and run-shell both do) — a bare display-message in a clientless
-    # context silently resolves to the most recently attached session.
-    cur_raw=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$_curfmt")
+    # Current target: anchor to the pressing client, else to $TMUX_PANE (see
+    # CUR_T) — a bare display-message in a clientless context silently
+    # resolves to the most recently attached session.
+    cur_raw=$(tmux display-message -p ${CUR_T[@]+"${CUR_T[@]}"} "$_curfmt")
     sessions_raw=$(tmux list-sessions -F "$_sfmt")
     all_windows_raw=$(tmux list-windows -a -F "$_wfmt")
     all_panes_raw=$(tmux list-panes -a -F "$_pfmt")
@@ -3283,7 +3347,10 @@ popup_accent() {
   # gains a format character.  The style prefix is left alone: its '#[' is meant
   # as a format.
   [ -n "${INTERDIMUX_TITLE:-}" ] && t=(-T "${POPUP_TITLE_STYLE}${INTERDIMUX_TITLE//'#'/##}")
-  tmux display-popup -b "$(popup_user_lines)" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
+  # -c: the popup to repaint is the PRESSING client's.  Without it tmux picks
+  # the most recently active client, and on any other client -- one with no
+  # popup open -- a display-popup without -E OPENS a shell popup and blocks.
+  tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -b "$(popup_user_lines)" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
 }
 
 # Display cells for a string, ignoring SGR escapes.  Sets REPLY.
@@ -3673,7 +3740,7 @@ if [ "${1:-}" = "--action" ]; then
   # Every action below operates on a live tmux target; a directory row has none.
   if [ "$SPEC_TYPE" = "D" ]; then
     case "$action" in
-      zoom) tmux display-message "interdimux: $label is not a tmux target" 2>/dev/null ;;
+      zoom) imux_msg "$label is not a tmux target" ;;
       *)    info_flash "$BOLD_AMBER" "Not applicable" "That row is a directory, not a session." ;;
     esac
     exit 0
@@ -3725,7 +3792,7 @@ if [ "${1:-}" = "--action" ]; then
   esac || {
     if [ "$action" = zoom ]; then
       # zoom has no dialog of its own; it reports through the status line
-      tmux display-message "interdimux: $label is gone — press ^r to reload" 2>/dev/null
+      imux_msg "$label is gone — press ^r to reload"
     else
       info_flash "$BOLD_AMBER" "Gone" "$label no longer exists." "The list is stale — press ^r to reload."
     fi
@@ -3826,11 +3893,10 @@ if [ "${1:-}" = "--action" ]; then
       # Bound via execute-silent (no terminal handover) — errors go to
       # the tmux status line instead of a dialog.
       if [ "$SPEC_TYPE" != "P" ]; then
-        tmux display-message "interdimux: only panes can be zoomed" 2>/dev/null
+        imux_msg "only panes can be zoomed"
         exit 0
       fi
-      tmux resize-pane -Z -t "$target" 2>/dev/null || \
-        tmux display-message "interdimux: failed to toggle zoom" 2>/dev/null
+      tmux resize-pane -Z -t "$target" 2>/dev/null || imux_msg "failed to toggle zoom"
       ;;
 
     detach)
@@ -4082,7 +4148,7 @@ if [ "${1:-}" = "--action" ]; then
       esac
 
       if [ $? -ne 0 ]; then
-        tmux display-message "interdimux: swap failed" 2>/dev/null
+        imux_msg "swap failed"
       fi
       ;;
   esac
@@ -4245,10 +4311,10 @@ if [ "${1:-}" = "--jump" ]; then
   _jt=$(gather_targets 2>/dev/null | awk -F'\t' -v n="$_jn" '
     $4 ~ /^S:/ { c++; if (c == n) { print substr($4, 3); exit } }')
   if [ -z "$_jt" ]; then
-    tmux display-message "interdimux: no session #$_jn" 2>/dev/null
+    imux_msg "no session #$_jn"
     exit 1
   fi
-  tmux switch-client -t "=$_jt" 2>/dev/null || exit 1
+  tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "=$_jt" 2>/dev/null || exit 1
   exit 0
 fi
 
@@ -4914,7 +4980,7 @@ if [ "${1:-}" = "--launch" ]; then
   # here" anchor even once the current row has scrolled out of the list.  The
   # baked prefix+f binding gets this from a tmux format for free; this path is
   # already forking, so one more round-trip costs nothing that matters.
-  _cur_sess=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S' 2>/dev/null) || _cur_sess=""
+  _cur_sess=$(tmux display-message -p ${CUR_T[@]+"${CUR_T[@]}"} '#S' 2>/dev/null) || _cur_sess=""
   title=' interdimux '
   [ -n "$_cur_sess" ] && title=" interdimux · $_cur_sess "
   case "$mode" in
@@ -4937,10 +5003,14 @@ if [ "${1:-}" = "--launch" ]; then
     # only destructive modes recolour the frame
     chrome=(-T "${POPUP_TITLE_STYLE}${title}")
     [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
-    # Popups don't inherit TMUX_PANE — forward it (run-shell sets it for
-    # this process) so current-target detection is exact even with
-    # multiple attached clients
+    # Popups don't inherit TMUX_PANE — forward it so current-target detection
+    # is exact.  It is the PRESSING pane only because every route here passes
+    # it explicitly (the bindings' TMUX_PANE=#{pane_id}, the dashboard's baked
+    # items): run-shell itself hands over the server's global TMUX_PANE, which
+    # can belong to another server entirely.  The pressing client rides along
+    # for the same reason (see TMUX_C).
     [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
+    [ -n "$INTERDIMUX_CLIENT" ] && chrome+=(-e "INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT")
     env_fwd_flags
     chrome+=("${ENV_FWD_FLAGS[@]}")
     # The title rides along so popup_accent can re-send it (a style-only
@@ -4969,7 +5039,10 @@ if [ "${1:-}" = "--launch" ]; then
     esac
   fi
 
-  exec tmux display-popup -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
+  # -c: open on the client that asked.  Left to tmux it lands on the most
+  # recently active client, which from a menu or a popup is not reliably this
+  # one (keys pressed in an overlay do not count as activity).
+  exec tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
     ${chrome[@]+"${chrome[@]}"} -E "$cmd"
 fi
 
@@ -5084,6 +5157,26 @@ fi
 # Dashboard
 # ---------------------------------------------------------------------------
 
+# The "who pressed the key" prefix for a `run-shell … --launch X` the dashboard
+# builds, in REPLY: "TMUX_PANE=%N INTERDIMUX_CLIENT=<client> ", either part
+# omitted when unknown.
+#
+# run-shell does NOT pass the pressing pane: its job gets the tmux SERVER's
+# global environment, whose TMUX_PANE is whatever the process that started the
+# server exported -- a pane of another server when it was started from inside
+# tmux.  The dashboard's own binding carries the right values, but every item
+# it launched dropped them, so a picker opened from prefix+g marked the wrong
+# session current (or none), ordered MRU against it, and could open on another
+# client.  Menu item commands are not expanded in the pressing client's
+# context, so the values are baked in as literals; both are checked against a
+# charset that needs no quoting in /bin/sh or tmux's parser.
+launch_env_prefix() {
+  REPLY=""
+  [[ "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] && REPLY+="TMUX_PANE=$TMUX_PANE "
+  [ -n "$INTERDIMUX_CLIENT" ] && REPLY+="INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT "
+  return 0
+}
+
 # Entry point for the prefix+g binding: a native styled menu on
 # tmux >= 3.4, otherwise a compact fzf menu in a popup.
 if [ "${1:-}" = "--dashboard-launch" ]; then
@@ -5110,6 +5203,8 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     menu_sp="${menu_sp//\\/\\\\}"
     menu_sp="${menu_sp//\"/\\\"}"
     menu_sp="${menu_sp//\$/\\\$}"
+    launch_env_prefix
+    _mp="${REPLY}bash '$menu_sp' --launch"
 
     # A menu item whose name begins with '-' is DISABLED: tmux dims it and drops
     # its key column (verified against 3.7b).  Offering Schedule on a box with no
@@ -5133,30 +5228,31 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     # Item names are FORMATS, so #[...] styles them.  Kill is the only entry here
     # that destroys something; give it the same danger colour as the frame it
     # turns red.
-    tmux display-menu -x C -y C \
+    tmux display-menu -x C -y C ${TMUX_C[@]+"${TMUX_C[@]}"} \
       -T '#[align=centre,bold] interdimux ' \
       -H "bg=${MENU_SEL_BG},fg=${MENU_SEL_FG},bold" \
-      'Switch'      s "run-shell -b \"bash '$menu_sp' --launch switch\"" \
-      'New session' n "run-shell -b \"bash '$menu_sp' --launch dirs\"" \
+      'Switch'      s "run-shell -b \"$_mp switch\"" \
+      'New session' n "run-shell -b \"$_mp dirs\"" \
       '' \
-      'Rename'      r "run-shell -b \"bash '$menu_sp' --launch rename\"" \
-      "#[fg=${POPUP_BORDER_DANGER}]Kill" i "run-shell -b \"bash '$menu_sp' --launch kill\"" \
-      'Swap'        w "run-shell -b \"bash '$menu_sp' --launch swap\"" \
-      'Zoom'        z "run-shell -b \"bash '$menu_sp' --launch zoom\"" \
+      'Rename'      r "run-shell -b \"$_mp rename\"" \
+      "#[fg=${POPUP_BORDER_DANGER}]Kill" i "run-shell -b \"$_mp kill\"" \
+      'Swap'        w "run-shell -b \"$_mp swap\"" \
+      'Zoom'        z "run-shell -b \"$_mp zoom\"" \
       '' \
-      'Detach'      d "run-shell -b \"bash '$menu_sp' --launch detach\"" \
-      'Send keys'   t "run-shell -b \"bash '$menu_sp' --launch send\"" \
+      'Detach'      d "run-shell -b \"$_mp detach\"" \
+      'Send keys'   t "run-shell -b \"$_mp send\"" \
       '' \
-      "$_m_sched"   a "run-shell -b \"bash '$menu_sp' --launch schedule\"" \
-      "$_m_jobs"    o "run-shell -b \"bash '$menu_sp' --launch jobs\"" \
+      "$_m_sched"   a "run-shell -b \"$_mp schedule\"" \
+      "$_m_jobs"    o "run-shell -b \"$_mp jobs\"" \
       '' \
-      'Health'      h "run-shell -b \"bash '$menu_sp' --launch doctor\""
+      'Health'      h "run-shell -b \"$_mp doctor\""
   else
     chrome=()
     cmd="$(build_env_fwd) bash '$sp' --dashboard"
     if tmux_ge 303; then
       chrome=(-T "${POPUP_TITLE_STYLE} interdimux ")
       [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
+      [ -n "$INTERDIMUX_CLIENT" ] && chrome+=(-e "INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT")
       env_fwd_flags
       chrome+=("${ENV_FWD_FLAGS[@]}")
       cmd="bash '$sp' --dashboard"
@@ -5177,7 +5273,7 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     _pop_w=64 _pop_h=16
     [ "$_cli_w" -gt 0 ] && [ "$_cli_w" -lt "$_pop_w" ] && _pop_w="$_cli_w"
     [ "$_cli_h" -gt 0 ] && [ "$_cli_h" -lt "$_pop_h" ] && _pop_h="$_cli_h"
-    tmux display-popup -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
+    tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
       -E "$cmd"
   fi
   exit 0
@@ -5215,8 +5311,11 @@ if [ "${1:-}" = "--dashboard" ]; then
   action="${choice%%	*}"
 
   # Launch the selected tool in a new popup via run-shell -b (popups
-  # can't nest, so this runs after the dashboard popup closes)
-  tmux run-shell -b "bash '$SQ_SCRIPT_FMT' --launch $action"
+  # can't nest, so this runs after the dashboard popup closes).  The pane and
+  # client this popup was opened for go along: run-shell would hand --launch
+  # the server's global TMUX_PANE instead (see launch_env_prefix).
+  launch_env_prefix
+  tmux run-shell -b "${REPLY}bash '$SQ_SCRIPT_FMT' --launch $action"
   exit 0
 fi
 
@@ -5676,16 +5775,18 @@ while true; do
     if [ "$SPEC_TYPE" = "D" ]; then
       if [ -d "$SPEC_DIR" ]; then
         record_dir_use "$SPEC_DIR"
-        connect_dir "$SPEC_DIR" || \
-          tmux display-message "interdimux: could not open $SPEC_DIR"
+        connect_dir "$SPEC_DIR" || imux_msg "could not open $SPEC_DIR"
       else
-        tmux display-message "interdimux: $(spec_label) no longer exists"
+        imux_msg "$(spec_label) no longer exists"
       fi
       exit 0
     fi
+    # The client that opened the picker, not whichever one tmux would guess
+    # (see TMUX_C) -- a key on another terminal while this one was picking used
+    # to make THAT terminal the one that switched.
     target=$(spec_target)
-    tmux switch-client -t "$target" 2>/dev/null || \
-      tmux display-message "interdimux: $(spec_label) no longer exists"
+    tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "$target" 2>/dev/null || \
+      imux_msg "$(spec_label) no longer exists"
     exit 0
   fi
 
