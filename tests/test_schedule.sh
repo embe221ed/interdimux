@@ -66,7 +66,25 @@ tmux -L "$SOCK" new-window -d -t '=target:' -n second
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=target:0' -F '#{pane_id}' | head -1)"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
-sleep 1
+# Bounded polls, not fixed sleeps: the one here was `sleep 1`, and the two
+# sub-minute cases below each slept 4 s for a 2 s timer.
+pane_has() { # $1 = fixed string; until the target pane shows it, up to 10 s
+  local i out
+  for i in $(seq 1 100); do
+    out=$(tmux -L "$SOCK" capture-pane -t '=target:0' -p 2>/dev/null) || out=""
+    [[ "$out" == *"$1"* ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+# The target pane's shell is up (it has a cwd and has exec'd) before keys are
+# scheduled into it.
+for _i in $(seq 1 100); do
+  case "$(tmux -L "$SOCK" display-message -p -t '=target:0' '#{pane_current_path}|#{pane_current_command}' 2>/dev/null)" in
+    ''|'|'*|*'|'|*'|tmux') sleep 0.1 ;;
+    *) break ;;
+  esac
+done
 
 before_other=$(count_other_jobs)
 
@@ -169,8 +187,7 @@ if printf '%s' "$out" | grep -q 'tmux timer'; then
 else
   report "a sub-minute delay uses tmux's own timer" fail; ERRORS+="    $out"$'\n'
 fi
-sleep 4
-if tmux -L "$SOCK" capture-pane -t '=target:0' -p 2>/dev/null | grep -q 'FAST_MARKER'; then
+if pane_has FAST_MARKER; then
   report "the sub-minute job actually delivered the keys" pass
 else
   report "the sub-minute job actually delivered the keys" fail
@@ -181,7 +198,7 @@ fi
 # tmux rewrote the user's command, and because the substituted text is not
 # re-quoted, a value like a pane title could inject shell.  '##' is the escape.
 out=$(bash "$SCRIPT" --send-in 2 '=target:0' 'echo fmt-#H-and-#S' 2>&1) || true
-sleep 4
+pane_has 'fmt-' || true
 pane=$(tmux -L "$SOCK" capture-pane -t '=target:0' -p 2>/dev/null | grep -m1 'fmt-' || true)
 case "$pane" in
   *'fmt-#H-and-#S'*) report "a scheduled command is not rewritten by tmux format expansion" pass ;;

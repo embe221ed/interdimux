@@ -57,8 +57,23 @@ name_for() {
 
 mkdir -p "$TMPDIR_TEST/alpha/api" "$TMPDIR_TEST/beta/api" "$TMPDIR_TEST/gamma/api"
 
-tmux_cmd new-session -d -s bootstrap -x 80 -y 24
-sleep 0.5
+# A session is found by where its pane IS, and tmux lists a new pane before
+# /proc has its cwd.  So each new session is waited for until tmux reports the
+# directory it was started in (physical, as /proc has it), rather than for a
+# fixed half second.
+cwd_is() { # $1 = session, $2 = directory
+  local want i
+  want=$(cd "$2" && pwd -P)
+  for i in $(seq 1 100); do
+    [ "$(tmux_cmd display-message -p -t "=$1:" '#{pane_current_path}' 2>/dev/null)" = "$want" ] && return 0
+    sleep 0.1
+  done
+  echo "  (session $1 never reported its cwd $want)" >&2
+  return 1
+}
+
+tmux_cmd new-session -d -s bootstrap -x 80 -y 24 -c "$TMPDIR_TEST"
+cwd_is bootstrap "$TMPDIR_TEST" || true
 
 echo "interdimux session-name tests"
 echo
@@ -77,7 +92,7 @@ fi
 
 # Create the session, then resolving the same dir reuses the name
 tmux_cmd new-session -d -s api -c "$TMPDIR_TEST/alpha/api" -x 80 -y 24
-sleep 0.5
+cwd_is api "$TMPDIR_TEST/alpha/api" || true
 got=$(name_for "$TMPDIR_TEST/alpha/api")
 if [ "$got" = "api" ]; then
   report "same directory reuses existing session name" pass
@@ -95,7 +110,7 @@ fi
 
 # Occupy the parent-prefixed name with yet another dir → numeric suffix
 tmux_cmd new-session -d -s beta-api -c "$TMPDIR_TEST/beta/api" -x 80 -y 24
-sleep 0.5
+cwd_is beta-api "$TMPDIR_TEST/beta/api" || true
 got=$(name_for "$TMPDIR_TEST/gamma/api")
 if [ "$got" = "gamma-api" ]; then
   report "third same-named project gets its own parent prefix" pass
@@ -105,7 +120,7 @@ fi
 
 # Parent prefix also taken by a foreign dir → numeric suffix fallback
 tmux_cmd new-session -d -s gamma-api -c "$TMPDIR_TEST/alpha" -x 80 -y 24
-sleep 0.5
+cwd_is gamma-api "$TMPDIR_TEST/alpha" || true
 got=$(name_for "$TMPDIR_TEST/gamma/api")
 if [ "$got" = "api-2" ]; then
   report "taken parent prefix falls back to numeric suffix" pass

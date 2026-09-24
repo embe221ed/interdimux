@@ -110,14 +110,45 @@ Two recurring lessons, both of which cost real time here:
    and failed in a batch; every one was a `sleep` that should have been a
    poll for the condition the test actually depended on.
 
-   `tests/test_hydration.sh` is the one that still has them — seven, at 1.5 s to
-   2.5 s, and one of its own comments records that an eighth had to be converted
-   because "under load `clear` had" not landed in time. It fails roughly one run
-   in four when the box is busy (measured: green three times alone, red once in a
-   batch while four other agents were running suites) and green every time on its
-   own. That is not flakiness in the product; it is the assertion being about the
-   machine's spare capacity. Converting those seven to condition-polls is the
-   remaining work on this lesson.
+   Every such sleep is gone now.  There were far more than this lesson used to
+   admit — about 65 s of single-shot waits across bind_keys (16 s, more than
+   hydration's 13), hydration, schedule, raw_mode, rust_parity, gather_batch,
+   list_format, session_names, send_keys, rendered_ui and hint_bar — and each
+   became a bounded poll for what the next step reads.  Three shapes recur:
+
+   * **Wait for the thing, not for "long enough".** A dump file carrying its
+     last line, `#{client_key_table}` reading `prefix` before the second key,
+     a pane's `#{pane_current_path}` (tmux lists a pane before /proc has its
+     cwd), a query shown in the prompt and then a cursor row that reads the
+     same twice (test_pick_order.sh's `query()`).
+   * **A negative assertion needs a sentinel.** "Nothing was sent" cannot be
+     polled for; "wait 2 s and look" is the same guess as before.  Keys reach a
+     pane in order, so type a sentinel of your own and wait for ITS output:
+     anything sent earlier is on screen above it by then.
+   * **A quiet pane has no condition to wait for, so remove the race.** A
+     window name follows its pane's output a timer tick behind; panes that
+     print nothing may never be renamed at all.  The parity and batching
+     benches freeze names (`automatic-rename off`) instead of waiting.
+
+   One sub-lesson from the conversion itself: under `set -o pipefail`,
+   `producer | grep -q` inside a poll can report "not found" for a line that is
+   there — grep's early exit SIGPIPEs a producer still writing.  The rendered-UI
+   gating checks flaked exactly that way once the argv they grep grew.  Capture
+   first, then match.
+
+   What is genuinely left is physical, not a guess:
+
+   * `tests/test_list_format.sh`'s `sleep 1` in `visit()`:
+     `#{session_last_attached}` has one-second resolution, and the MRU
+     assertion needs two different timestamps.  That is the clock, not the box.
+   * Delays that are part of a FIXTURE, not a wait: the zoxide stand-in in
+     test_cursor_reload.sh answers 1.5 s late on purpose (rows that arrive
+     after a typed query), test_squeeze.sh's panes ring their bell after a
+     beat, test_pipefail.sh's producer sleeps so it is still writing when the
+     pipe closes, and the `; sleep N` after a dialog keeps its finished pane
+     open to be captured.
+   * Hydration's shell start is the product's own wait (`wait_pane_ready`,
+     before the startup command is typed); the suite no longer adds one.
 
 3. **The suite is not safe to run concurrently with itself.** `at`'s queue is
    machine-global, so two copies of `test_schedule_ui.sh` see each other's jobs:

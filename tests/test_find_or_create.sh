@@ -167,7 +167,8 @@ fi
 # --- and switching really does not make a second session ---------------------------
 before=$(sessions | wc -l)
 bash "$SCRIPT" --create-from-query 'brandnewthing' >/dev/null 2>&1 || true
-sleep 0.5
+# no wait needed: connect_dir's new-session is synchronous, so a session it
+# made would already be listed when the command returns
 after=$(sessions | wc -l)
 if [ "$before" = "$after" ]; then
   report "re-running an existing query switches instead of duplicating" pass

@@ -39,7 +39,7 @@ tmux -L "$SOCK" new-session -d -s two -x 100 -y 30
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=one:' -F '#{pane_id}' | head -1)"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
-sleep 1
+# (No `sleep 1` here: every dialog below polls for its own render.)
 
 # Drive the rename dialog: the initial value is pre-filled, so ctrl-u clears it,
 # then we type the new name and press Enter.

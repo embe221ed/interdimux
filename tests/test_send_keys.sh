@@ -61,13 +61,21 @@ run_send_action() {
 
   printf '%s\n' "$cmd" > "$input_file"
 
-  # run-shell executes synchronously inside the tmux server
+  # run-shell executes synchronously inside the tmux server, so every key the
+  # action sends has been sent when it returns.  No sleep: the checks poll the
+  # panes for what arrives (pane_contains), and the one that asserts something
+  # did NOT arrive waits for a sentinel instead (arrived_after).
   tmux_cmd run-shell \
     "INTERDIMUX_TTY_IN='$input_file' INTERDIMUX_TTY_OUT=/dev/null bash '$SCRIPT' --action send '$spec'" \
     2>/dev/null || true
+}
 
-  # Give panes time to execute the sent command
-  sleep 0.5
+# Keys reach a pane in the order they were sent.  Type a sentinel of our own
+# into $1 and wait for it: once it is on screen, anything sent to that pane
+# before it would be on screen too.  $2 = the sentinel.
+arrived_after() {
+  tmux_cmd send-keys -t "$1" "$2" 2>/dev/null || true
+  pane_contains "$1" "$2"
 }
 
 report() {
@@ -97,13 +105,22 @@ setup() {
   cleanup
   mkdir -p "$TMPDIR_TEST"
 
-  tmux_cmd new-session -d -s "test-sess" -n "win0" -x 120 -y 30
-  tmux_cmd split-window -t "=test-sess:0" -h
-  tmux_cmd new-window -t "=test-sess" -n "win1"
-  tmux_cmd new-session -d -s "test-sess2" -n "single" -x 120 -y 30
+  # A pinned shell, not the user's login shell and its rc files: what the
+  # checks read is what that shell echoes and prints.
+  local sh='bash --norc --noprofile -i'
+  tmux_cmd new-session -d -s "test-sess" -n "win0" -x 120 -y 30 "$sh"
+  tmux_cmd split-window -t "=test-sess:0" -h "$sh"
+  tmux_cmd new-window -t "=test-sess" -n "win1" "$sh"
+  tmux_cmd new-session -d -s "test-sess2" -n "single" -x 120 -y 30 "$sh"
 
-  # Give shells time to initialize
-  sleep 1
+  # Every shell is at its prompt (rather than a fixed second for them to start).
+  local p i
+  for p in "=test-sess:0.0" "=test-sess:0.1" "=test-sess:1.0" "=test-sess2:0.0"; do
+    for i in $(seq 1 100); do
+      tmux_cmd capture-pane -t "$p" -p 2>/dev/null | grep -q '\$ *$' && break
+      sleep 0.1
+    done
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -187,8 +204,11 @@ test_send_no_leak() {
   local marker="NOLEAK_$$_$RANDOM"
   run_send_action "S:test-sess" "echo $marker"
 
-  # test-sess2 should NOT contain the marker (short timeout — 2s)
-  if pane_contains "=test-sess2:0.0" "$marker" 2; then
+  # test-sess2 must NOT contain the marker.  Not "wait 2 s and look": the
+  # sentinel below reaches that pane after anything the action sent it.
+  if ! arrived_after "=test-sess2:0.0" "SENTINEL_$$"; then
+    report "send to session does not leak to other sessions (the sentinel never arrived)" "fail"
+  elif [[ "$(tmux_cmd capture-pane -t "=test-sess2:0.0" -p 2>/dev/null)" == *"$marker"* ]]; then
     report "send to session does not leak to other sessions" "fail"
   else
     report "send to session does not leak to other sessions" "pass"

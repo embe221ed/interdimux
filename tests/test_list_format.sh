@@ -87,7 +87,14 @@ tmux_cmd split-window -t "=alpha:0" -h
 tmux_cmd new-session -d -s bravo -x 120 -y 30
 tmux_cmd new-session -d -s charlie -x 120 -y 30
 tmux_cmd new-session -d -s driver -x 120 -y 30 /bin/sh
-sleep 0.5
+# visit() types into the driver's /bin/sh: wait until it has exec'd, rather
+# than a fixed half second.
+for _i in $(seq 1 100); do
+  case "$(tmux_cmd display-message -p -t '=driver:0' '#{pane_current_command}' 2>/dev/null)" in
+    ''|tmux) sleep 0.1 ;;
+    *) break ;;
+  esac
+done
 
 # Attach (then detach) a real client to alpha, then bravo — this is the
 # only reliable way to advance #{session_last_attached} headlessly.
@@ -287,7 +294,8 @@ fi
 # declines to draw one there.  (The Rust core measures cells and has no such
 # limit; a wide-glyph name already renders differently between the two.)
 tmux_cmd new-session -d -s '日本語日本語日本語' -x 200 -y 50
-sleep 0.3
+# (new-session is synchronous: the row is listed the moment it returns, which
+# is all this case reads -- the `sleep 0.3` that stood here waited for nothing)
 cjk_out=$(run_list "INTERDIMUX_USE_RUST=off FZF_COLUMNS=120")
 if printf '%s\n' "$cjk_out" | grep $'\tS:日本語日本語日本語$' | grep -q '─'; then
   report "bash draws no rule after a name it cannot measure" fail
@@ -299,7 +307,6 @@ fi
 # after truncation instead of before dropped the rule from every long name, and
 # the parity suite is what noticed.
 tmux_cmd new-session -d -s 'a-very-long-ascii-session-name-that-gets-truncated' -x 200 -y 50
-sleep 0.3
 long_out=$(run_list "INTERDIMUX_USE_RUST=off FZF_COLUMNS=120")
 if printf '%s\n' "$long_out" | grep $'\tS:a-very-long-ascii-session-name-that-gets-truncated$' | grep -q '─'; then
   report "a long ASCII name keeps its rule (the ellipsis is not a wide glyph)" pass

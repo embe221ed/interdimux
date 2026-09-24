@@ -63,11 +63,43 @@ marker_in() { # $1 = session, returns the pane content
   tmux -L "$SOCK" capture-pane -t "=$1:" -p 2>/dev/null | tr -d '\r'
 }
 
+# No fixed sleeps (there were seven, at 1.5-2.5 s, and this suite failed about
+# one run in four on a busy box).  connect_dir sends the startup command before
+# it returns, so:
+#   * a case that expects output polls for it, bounded;
+#   * a case that expects NOTHING types a sentinel of its own afterwards and
+#     waits for the sentinel's OUTPUT: keys reach a pane in order, so anything
+#     hydration had sent would already be on screen above it.
+shows() { # $1 = session, rest = fixed strings that must all be on screen; 15 s
+  local sess="$1" i out w ok; shift
+  for i in $(seq 1 150); do
+    out=$(marker_in "$sess")
+    ok=1
+    for w in "$@"; do [[ "$out" == *"$w"* ]] || { ok=0; break; }; done
+    [ "$ok" = 1 ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+SENT_N=0
+settled() { # $1 = session: returns once everything typed into it before now has run
+  SENT_N=$((SENT_N + 1))
+  # the OUTPUT line, not the echoed command: '' splits the word as typed
+  tmux -L "$SOCK" send-keys -t "=$1:" "echo SETTLED''_$SENT_N" Enter 2>/dev/null || true
+  local i
+  for i in $(seq 1 150); do
+    marker_in "$1" | grep -qx "SETTLED_$SENT_N" && return 0
+    sleep 0.1
+  done
+  echo "  (the pane never ran the sentinel)" >&2
+  return 1
+}
+
 # --- 1. per-project .interdimux-startup --------------------------------------
 proj="$TMPD/projalpha"; mkdir -p "$proj"
 printf 'echo HYDRATED_ALPHA\n' > "$proj/.interdimux-startup"
 run_connect "$proj" >/dev/null 2>&1 || true
-sleep 2
+shows projalpha HYDRATED_ALPHA || true
 if marker_in projalpha | grep -q 'HYDRATED_ALPHA'; then
   report "per-project .interdimux-startup runs in the new session" pass
 else
@@ -80,7 +112,7 @@ proj2="$TMPD/projbeta"; mkdir -p "$proj2"
 printf 'echo FROM_PROJECT_FILE\n' > "$proj2/.interdimux-startup"
 printf '%s/projbeta\techo FROM_GLOB_CONF\n' "$TMPD" > "$XDG_CONFIG_HOME/interdimux/startup.conf"
 run_connect "$proj2" >/dev/null 2>&1 || true
-sleep 2
+shows projbeta FROM_GLOB_CONF || true
 out=$(marker_in projbeta)
 if printf '%s' "$out" | grep -q 'FROM_GLOB_CONF' && ! printf '%s' "$out" | grep -q 'FROM_PROJECT_FILE'; then
   report "startup.conf glob takes precedence over the project file" pass
@@ -93,7 +125,7 @@ fi
 : > "$XDG_CONFIG_HOME/interdimux/startup.conf"
 proj3="$TMPD/projgamma"; mkdir -p "$proj3"
 INTERDIMUX_STARTUP_COMMAND='echo FROM_GLOBAL_OPTION' run_connect "$proj3" >/dev/null 2>&1 || true
-sleep 2
+shows projgamma FROM_GLOBAL_OPTION || true
 if marker_in projgamma | grep -q 'FROM_GLOBAL_OPTION'; then
   report "@interdimux-startup-command is the fallback" pass
 else
@@ -103,7 +135,7 @@ fi
 # --- 4. no startup command configured => nothing sent -------------------------
 proj4="$TMPD/projdelta"; mkdir -p "$proj4"
 run_connect "$proj4" >/dev/null 2>&1 || true
-sleep 1.5
+settled projdelta || true
 if [ -z "$(marker_in projdelta | grep -c 'HYDRATED\|FROM_' || true)" ] || \
    ! marker_in projdelta | grep -q 'HYDRATED\|FROM_'; then
   report "no startup command configured leaves the session untouched" pass
@@ -115,7 +147,7 @@ fi
 proj5="$TMPD/projeps"; mkdir -p "$proj5"
 printf 'echo SHOULD_NOT_RUN\n' > "$proj5/.interdimux-startup"
 INTERDIMUX_HYDRATE=off run_connect "$proj5" >/dev/null 2>&1 || true
-sleep 1.5
+settled projeps || true
 if marker_in projeps | grep -q 'SHOULD_NOT_RUN'; then
   report "@interdimux-hydrate off disables hydration" fail
 else
@@ -137,7 +169,7 @@ if [ "$cleared" != 1 ]; then
   report "the pane could be cleared before re-connecting (precondition)" fail
 fi
 run_connect "$proj" >/dev/null 2>&1 || true
-sleep 1.5
+settled projalpha || true
 n=$(marker_in projalpha | grep -c 'HYDRATED_ALPHA' || true)
 if [ "$n" -eq 0 ]; then
   report "connecting to an existing session does not re-run startup" pass
@@ -149,7 +181,7 @@ fi
 proj7="$TMPD/projzeta"; mkdir -p "$proj7"
 printf 'echo LINE_ONE\necho LINE_TWO\n' > "$proj7/.interdimux-startup"
 run_connect "$proj7" >/dev/null 2>&1 || true
-sleep 2.5
+shows projzeta LINE_ONE LINE_TWO || true
 out=$(marker_in projzeta)
 if printf '%s' "$out" | grep -q 'LINE_ONE' && printf '%s' "$out" | grep -q 'LINE_TWO'; then
   report "a multi-line startup file sends every line" pass
