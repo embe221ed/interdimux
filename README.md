@@ -23,7 +23,8 @@ A portal gun for your tmux sessions.
   frames on tmux >= 3.3 and a red frame during kill prompts and kill
   mode on tmux >= 3.6 (only the colour is overridden — your border
   lines and background are kept; with `padded` lines, which have no line
-  to colour, the frame's background turns red instead)
+  to colour, the frame's background turns red instead). Kill mode's prompt
+  is red too, on any tmux and any border — with `none` there is no frame
 - Dashboard as a native tmux menu on tmux >= 3.4 (fzf menu fallback below)
 - Proper confirmation dialogs (centered boxes, `y`/`n`/`esc`) instead of raw
   prompts; rename pre-fills the current name with readline editing
