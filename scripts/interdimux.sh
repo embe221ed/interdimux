@@ -514,8 +514,20 @@ tmux_color() {
 
 # fzf --color chrome, rebuilt from the palette (fzf accepts hex/index/-1 as-is,
 # and the palette is normalised to exactly those above).
+#
+# The leading `dark` is a base scheme, not a colour: fzf REPLACES the whole
+# accumulated theme when it meets one, so every key $FZF_DEFAULT_OPTS set is
+# dropped in a single token, while @interdimux-fzf-opts (appended after this)
+# still wins key by key.  Without it the keys this string does not name -- fg,
+# bg, preview-fg/bg, preview-border, disabled -- came from the user's shell
+# theme, and the popup was a blend of two palettes (measured: the user's fg on
+# every row body, their preview border beside this border).  `dark` rather than
+# enumerating those keys because an unknown key is FATAL (below), and it is
+# safe on a light terminal too: every colour Dark256 and Light256 disagree on is
+# one this string sets, and the rest are the terminal's own fg/bg.  It parses on
+# every fzf this script supports.
 build_fzf_colors() {
-  FZF_COLORS="--color=hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
+  FZF_COLORS="--color=dark,hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
   # Every one of these names must exist in the running fzf: an unknown colour
   # key is FATAL ("invalid color specification"), not ignored, so a picker that
   # names `footer:` on fzf < 0.63 does not open at all.  Verified on 0.74.

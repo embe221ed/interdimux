@@ -11,9 +11,10 @@
 #                '#'-plus-six value with a non-hex digit reached $((16#..)),
 #                which killed every entry point under set -e -- --doctor too.
 #   isolation  - $FZF_DEFAULT_OPTS is parsed before the picker's own flags.  Its
-#                --tmux/--popup opened a second popup and left this one blank,
-#                and its --height/--border/--margin/--padding/--style moved
-#                fzf's window without moving FZF_COLUMNS.
+#                --tmux/--popup opened a second popup and left this one blank;
+#                its --height/--border/--margin/--padding/--style moved fzf's
+#                window without moving FZF_COLUMNS; and its colours blended into
+#                the plugin's palette.
 #
 # Every oracle is tmux's own screen (capture-pane, with -e for colour) or the
 # real fzf's exit status -- never the script's own expression.
@@ -365,6 +366,67 @@ if [ -n "$nt" ] && [ -n "$ut" ] && [ "$ut" -gt "$nt" ]; then
 else
   report "@interdimux-fzf-opts can still opt back in (no-tmux at ${nt:-?}, user at ${ut:-?})" fail
 fi
+
+# =============================================================================
+# 5. $FZF_DEFAULT_OPTS colours never reach a picker
+# =============================================================================
+wait_for_e() { # like wait_for, on the capture WITH escapes
+  local i s
+  for (( i = 0; i < ${2:-150}; i++ )); do
+    s=$(screen_e)
+    [[ "$s" == *"$1"* ]] && return 0
+    [[ "$s" == *NAV-EXITED* ]] && return 1
+    sleep 0.1
+  done
+  return 1
+}
+# A user's shell theme (here a light one) must not blend into the plugin's.  The
+# plugin's own border is set to a colour nobody else uses, and the capture is
+# taken once THAT is on screen, so "no leak" is never a capture of a half-drawn
+# frame.  Truecolour SGRs are what tmux redraws a #rrggbb as.
+USER_COLORS='--color=fg:#654735,bg:#fbf1c7,preview-fg:#654735,preview-border:#b85f3d'
+LEAK_FG='38;2;101;71;53' LEAK_BG='48;2;251;241;199' LEAK_PB='38;2;184;95;61'
+OWN_BORDER='38;2;1;2;3'
+launch 120 20 "FZF_DEFAULT_OPTS=$USER_COLORS" INTERDIMUX_SHOW_PREVIEW=on \
+  INTERDIMUX_COLOR_BORDER='#010203'
+if wait_for 'themeproj' && wait_for_e "$OWN_BORDER"; then
+  s=$(screen_e); leaked=""
+  [[ "$s" == *"$LEAK_FG"* ]] && leaked+=" fg"
+  [[ "$s" == *"$LEAK_BG"* ]] && leaked+=" bg"
+  [[ "$s" == *"$LEAK_PB"* ]] && leaked+=" preview-border"
+  if [ -z "$leaked" ]; then
+    report "no \$FZF_DEFAULT_OPTS colour reaches the picker" pass
+  else
+    report "no \$FZF_DEFAULT_OPTS colour reaches the picker (leaked:$leaked)" fail
+  fi
+else
+  report "the picker drew its own border colour under a user --color" fail; why_dead
+fi
+
+# ...while @interdimux-fzf-opts, the documented channel, still wins per key.
+launch 120 20 "FZF_DEFAULT_OPTS=$USER_COLORS" INTERDIMUX_SHOW_PREVIEW=on \
+  'INTERDIMUX_FZF_OPTS=--color=preview-border:#0a0b0c'
+if wait_for 'themeproj' && wait_for_e '38;2;10;11;12'; then
+  report "@interdimux-fzf-opts colours still apply on top of the theme" pass
+else
+  report "@interdimux-fzf-opts colours still apply on top of the theme" fail; why_dead
+fi
+tmux -L "$OUTER" kill-server 2>/dev/null || true
+
+# `dark` is a base scheme word: it has parsed since long before the 0.40 floor,
+# so every version gets it, and it must LEAD -- fzf replaces the whole theme
+# when it meets one, so anything named before it would be thrown away too.
+ok=1 why=""
+for m in 40 57 58 66 74; do
+  argv_at "$m"
+  lead=0
+  for x in "${A[@]}"; do
+    case "$x" in --color=dark,*) lead=1 ;; --color=*) [ "$lead" = 1 ] || { ok=0; why+=" 0.$m: '$x' comes first;"; } ;; esac
+  done
+  [ "$lead" = 1 ] || { ok=0; why+=" 0.$m: no --color=dark,…;"; }
+done
+[ "$ok" = 1 ] && report "every fzf version gets the palette led by the base scheme" pass \
+              || { report "every fzf version gets the palette led by the base scheme" fail; ERRORS+="    $why"$'\n'; }
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
