@@ -39,6 +39,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+BIN="$SCRIPT_DIR/rust/target/release/imux"
 SOCK="interdimux-pickorder-test-$$"
 OUTER="${SOCK}-outer"
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-po.XXXXXX")"
@@ -142,9 +143,14 @@ preceding_char() { # $1 = rows, $2 = spec, $3 = name
   [ "$before" = "$f1" ] && { printf '(name not in field 1)'; return; }
   printf '%s' "${before: -1}"
 }
+# Each pass pins its renderer.  The rust one used to reuse $LIST, which renders
+# with whatever the environment says -- the bash renderer under tests/run_all.sh's
+# bash leg (INTERDIMUX_USE_RUST=off), and whenever the core is not built -- so
+# "[rust]" checked bash twice.
 for renderer in rust bash; do
   if [ "$renderer" = bash ]; then rows=$(list_rows env INTERDIMUX_USE_RUST=off)
-  else rows="$LIST"; fi
+  elif [ -x "$BIN" ]; then rows=$(list_rows env INTERDIMUX_USE_RUST=on)
+  else echo "  (skipped [rust]: $BIN not built)"; continue; fi
   s_pre=$(preceding_char "$rows" "S:circle/sui-cctp" "circle/sui-cctp")
   d_pre=$(preceding_char "$rows" "D:$TMPD/dirs/Circle" "Circle")
   if [ "$s_pre" = " " ] && [ "$d_pre" = " " ]; then

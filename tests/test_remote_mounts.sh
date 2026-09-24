@@ -26,7 +26,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 BIN="$SCRIPT_DIR/rust/target/release/imux"
 SOCK="interdimux-remote-test-$$"
-TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-remote.XXXXXX")" && pwd -P)"
+# The long name is on purpose: see the premise check after row().
+TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-remote-a-directory-name-this-long-on-purpose-so-that-every-list-this-suite-reads-is-longer-than-one-4KiB-pipe-block-see-the-premise-check-after-row.XXXXXX")" && pwd -P)"
 PASS=0
 FAIL=0
 ERRORS=""
@@ -132,8 +133,27 @@ renderers="off"
 
 # The --list row whose spec is $2, ANSI stripped; $1 = on|off.  LIST_ENV holds
 # the extra environment (the seam, or nothing).
+#
+# awk reads to the END rather than `exit`ing at the match.  sed writes a pipe in
+# 4 KiB blocks, so once the list is longer than one, a reader that quits after
+# the first block leaves sed's next write with nobody to read it: SIGPIPE (141)
+# -- or, where SIGPIPE is ignored as in CI, EPIPE and exit 4 -- which pipefail
+# hands to `got=$(row ...)`, and set -e then ended the whole suite with no
+# Results line.  Every $TMPD path makes the list longer, so it bit only under
+# a long TMPDIR; the scratch directory's own long name makes it bite here
+# always, which the premise check below asserts.
 row() { env $LIST_ENV INTERDIMUX_USE_RUST="$1" bash "$SCRIPT" --list 2>/dev/null \
-          | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' -v s="$2" '$4 == s { print; exit }'; }
+          | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' -v s="$2" '!f && $4 == s { print; f = 1 }'; }
+
+# Premise: the list outgrows one pipe block, so row() above is read in the
+# regime where an early-exiting reader kills the suite.  If the fixture ever
+# shrinks below it, that guard would stop guarding: say so.
+for e in "" "INTERDIMUX_MOUNTINFO=$MI"; do
+  n=$(env $e bash "$SCRIPT" --list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | wc -c)
+  label=$([ -n "$e" ] && echo "the seam's table" || echo "the real table")
+  [ "$n" -gt 4096 ] && report "premise: the list outgrows one 4 KiB pipe block ($label: $n bytes)" pass \
+                    || report "premise: the list outgrows one 4 KiB pipe block ($label: $n bytes)" fail
+done
 
 # $1 = a row: does it carry the git badge ‹$2› AND the Rust type badge?
 badged() {
@@ -289,7 +309,8 @@ bash "$SCRIPT" --list > "$TMPD/cb-list" 2>&1
 exit 130
 FZF
 chmod +x "$TMPD/fzfbin/fzf"
-cb_row() { sed 's/\x1b\[[0-9;]*m//g' "$TMPD/$1" 2>/dev/null | awk -F'\t' -v c="$2" -v s="$3" '$c == s { print; exit }'; }
+# (read to the end, as row() does, for the same reason)
+cb_row() { sed 's/\x1b\[[0-9;]*m//g' "$TMPD/$1" 2>/dev/null | awk -F'\t' -v c="$2" -v s="$3" '!f && $c == s { print; f = 1 }'; }
 
 cp "$MI" "$TMPD/mi-live"; rm -f "$TMPD"/cb-*
 # (--dirs exits 1 on a cancel, which is what the stand-in reports)

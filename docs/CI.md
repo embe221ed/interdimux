@@ -20,27 +20,35 @@ failed**, which no container reproduced. Both failures had one cause, §10.
 ### Reading the totals
 
 Several different numbers are correct at once, so it is worth pinning down.
-The first three rows are the history this document records; the rest are
-current, measured after §11 on the development box — where
-`tests/test_old_fzf.sh` skips, since it has no `INTERDIMUX_OLD_FZF_DIR`.  CI
-fetches those fzf releases, so both of its legs read higher by that suite's
-count:
+The first three rows are the history this document records.  The rest are a
+snapshot, measured at `6f29bfd` on the development box: every suite added
+since reads higher, so re-measure rather than trust them.
+
+The box has neither `INTERDIMUX_OLD_FZF_DIR` nor `INTERDIMUX_OLD_BASH_DIR`, so
+there `tests/test_old_fzf.sh` skips (0) and `tests/test_bash_floor.sh` runs
+only its dash and current-bash cases (14).  CI fetches and builds those
+binaries (§5, §12), and with them the two suites count 10 and 43 — so each CI
+leg reads **39 higher** than the same leg run locally.  The CI rows below are
+the local measurement plus those 39, both suites measured against the binaries
+the CI steps produce:
 
 | where | shell | rust | printed |
 |---|---|---|---|
 | `tests/run_all.sh` locally, then | 443 | +80 | **523** |
 | the workflow's "Shell tests" step, then | 443 | — | **443** |
 | that step before §10 was fixed | 441 + 2 failed | — | **441** |
-| `tests/run_all.sh` locally, now | 941 | +115 | **1056** |
-| "Shell tests", `rust` leg | 941 | — | **941** |
-| "Shell tests", `bash` leg (`IMUX_RENDERER=bash`) | 873 | — | **873** |
+| `tests/run_all.sh` locally, at `6f29bfd` | 1251 | +131 | **1382** |
+| `IMUX_RENDERER=bash tests/run_all.sh` locally | 1183 | — | **1183** |
+| "Shell tests", `rust` leg | 1251 + 39 | — | **1290** |
+| "Shell tests", `bash` leg (`IMUX_RENDERER=bash`) | 1183 + 39 | — | **1222** |
 
-`run_all.sh` runs `cargo test` itself and folds those 115 into its own total; CI
-passes `IMUX_SKIP_RUST=1` because Rust already ran as its own step. So a CI total
-115 lower than a local one is the *expected* reading, not a coverage gap — every
-one of the 941 shell assertions runs in both places.  The `bash` leg reads
-68 lower again: `test_rust_parity.sh`, which compares the two renderers
-itself, is skipped there (§11).
+`run_all.sh` runs `cargo test` itself and folds those 131 into its own total; CI
+passes `IMUX_SKIP_RUST=1` because Rust already ran as its own step. So a CI
+total 131 lower than a local one (before the 39) is the *expected* reading, not
+a coverage gap — every one of the 1251 shell assertions runs in both places.
+The `bash` leg reads 68 lower again: `test_rust_parity.sh`, which compares the
+two renderers itself, is skipped there (§11); every other suite counts the
+same in both legs.
 
 ## 1. tmux 3.4 makes the picker empty — this is the big one
 
@@ -118,6 +126,15 @@ stderr log swallowed it and the popup stayed black. `tests/test_old_fzf.sh`
 runs the navigator on real 0.44.1 and 0.52.1 release binaries, which the
 workflow fetches into the directory named by `INTERDIMUX_OLD_FZF_DIR`; without
 them it skips, naming each version it could not find.
+
+The fetch itself failed the first time it was written, and took the whole job
+with it. fzf's release tags gained their `v` at 0.54.0 — `0.53.0` and older are
+bare — so `releases/download/v0.44.1/…` is a 404. Piped into `tar`, the empty
+download surfaced as gzip's `unexpected end of file`, the step exited 2, and
+every step after it, the Rust build and both test steps included, never ran.
+The step now picks the tag per version and downloads to a file first, so a
+failed fetch fails as `curl`, naming the URL; and "Versions under test" runs
+each old binary, so a missing one fails there rather than becoming a skip.
 
 ## 6. The Rust core was never built
 
@@ -246,9 +263,10 @@ that is coverage worth keeping — `ci.yml` says so at the "Shell tests" step.
 §6 built `rust/target/release/imux` so the parity suite would run.  But the
 script prefers a built binary everywhere, so from then on every suite that did
 not pin a renderer ran the Rust core — and the bash renderer, which is what
-every install WITHOUT cargo runs (the README's TPM route never builds
-`rust/`), was exercised only in the handful of places a suite forced it with
-`INTERDIMUX_USE_RUST=off`.
+every install WITHOUT cargo runs (nothing built `rust/` for a TPM install until
+`interdimux.tmux` learned to build it when cargo is present, and without cargo
+it still cannot), was exercised only in the handful of places a suite forced it
+with `INTERDIMUX_USE_RUST=off`.
 
 **Fix:** the `tests` job is a matrix over `renderer: [rust, bash]`.  The `bash`
 leg runs `IMUX_RENDERER=bash tests/run_all.sh`, which exports
@@ -278,10 +296,53 @@ bash-leg run failed 15 assertions in six suites:
   popup's `INTERDIMUX_*` variables that counted the override.
 * the two `‹main›` scope-highlight failures every non-`main` checkout had.
 
+The leg also needs the suites that compare the renderers to pin BOTH sides.
+`test_squeeze.sh`'s parity sweep pinned only its bash pass, so under
+`IMUX_RENDERER=bash` its "rust" pass inherited `INTERDIMUX_USE_RUST=off` and
+the sweep compared bash with bash — a check that could not fail, counted as a
+pass.  It now pins the core on, and runs it through a stand-in that logs each
+run, so the sweep fails unless the core really drew one side of every
+comparison (a refused or failing core falls back to bash just as quietly).
+
 `tests/test_corpus_parity.sh` closes the other half of the gap without a
 server: `INTERDIMUX_DUMP_IN=<file>` feeds a recorded dump to the bash renderer
 at the same fetch site tmux would, so every `rust/tests/corpus/*.dump` is
 rendered by both, and the bash output must equal the blessed golden.
+
+## 12. The bash floor was tested, but nowhere ran the test
+
+The script's floor is bash 4.3, and 3.2 (macOS's `/bin/bash`) and 4.2 (RHEL
+7's) must be refused in one line rather than dying somewhere inside.
+`tests/test_bash_floor.sh` checks both, but only with real old binaries in
+`INTERDIMUX_OLD_BASH_DIR` — and nothing set it, so on every run its old-bash
+cases printed "skipped" and the only bash under test was the runner's 5.2.
+
+5.2 is the version that hides the difference that mattered.  Up to 5.1,
+`[[ -v "assoc[$key]" ]]` expands the subscript a second time, so on 4.3–5.1 a
+`$` in a session name emptied the list (`work: unbound variable` for a
+session named `$work`, under `set -u`), and a `$(…)` in one ran; every suite passed on 5.2.  The CI-built
+4.3.30 and 5.1.16 both reproduce it, and 5.2 does not.  (The script now tests
+keys with `${assoc[$key]+x}`, which expands once on every version, and the
+suite's `$`-name cases hold it there.)
+
+**Fix:** the tests job builds bash 3.2.57, 4.2.53, 4.3.30 and 5.1.16 (5.1.16 is
+Ubuntu 22.04's) from the GNU tarballs, caches them by the version list, and
+exports `INTERDIMUX_OLD_BASH_DIR`, so `run_all.sh` runs the suite's real cases
+in both legs.  Two things the build needed, both found by running it:
+
+* `-std=gnu89` and the `-Wno-implicit-*`, `-Wno-int-conversion` and
+  `-Wno-incompatible-pointer-types` flags: these K&R-era sources lean on
+  exactly what gcc 14 turned from warnings into errors (the runner's gcc 13
+  still only warns, so the flags are for the image that replaces it);
+* NO `-O2` — which also means CFLAGS must be given, since configure's default
+  is `-g -O2`.  With it, 3.2's `configure` spun in its `mktime` probe (a
+  minute of CPU before it was killed): the probe's loop,
+  `for (time_t_max = 1; 0 < time_t_max; time_t_max *= 2)`, relies on signed
+  overflow wrapping, which the optimiser may assume never happens.
+
+A cold cache costs about two and a half minutes for all four (measured on 4
+cores).  "Versions under test" runs each one, so a build that went missing
+fails that step instead of turning the suite back into skips.
 
 ## What the developer's tmux does that no released tmux does
 
