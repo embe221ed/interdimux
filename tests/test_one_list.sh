@@ -252,8 +252,12 @@ fi
 mkdir -p "$TMPD/globtrap"
 : > "$TMPD/globtrap/floax-DECOY"
 
+# The loop pins each renderer in turn and then puts back what it INHERITED:
+# `unset` here flipped the rest of this suite to the Rust core under
+# IMUX_RENDERER=bash (tests/run_all.sh), silently.
+_use_rust_was="${INTERDIMUX_USE_RUST-<unset>}"
 for renderer in rust bash; do
-  [ "$renderer" = bash ] && export INTERDIMUX_USE_RUST=off || unset INTERDIMUX_USE_RUST
+  [ "$renderer" = bash ] && export INTERDIMUX_USE_RUST=off || export INTERDIMUX_USE_RUST=on
   trapped=$(cd "$TMPD/globtrap" && INTERDIMUX_HIDE='scratchpad floax-*' specs_of)
   if printf '%s\n' "$trapped" | grep -q 'scratchpad\|floax'; then
     report "[$renderer] a hide pattern is not expanded against the cwd" fail
@@ -282,7 +286,8 @@ for renderer in rust bash; do
     report "[$renderer] ...and nothing else is removed" fail
   fi
 done
-unset INTERDIMUX_USE_RUST
+if [ "$_use_rust_was" = '<unset>' ]; then unset INTERDIMUX_USE_RUST
+else export INTERDIMUX_USE_RUST="$_use_rust_was"; fi
 
 # The current session is never hidden: the row marker, the header and MRU's
 # move-to-end all key off it.

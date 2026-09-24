@@ -11,10 +11,29 @@
 #   tests/run_all.sh                 # everything, including the Rust tests
 #   tests/run_all.sh raw sched       # only suites whose name matches
 #   IMUX_SKIP_RUST=1 tests/run_all.sh
+#   IMUX_RENDERER=bash tests/run_all.sh
+#
+# IMUX_RENDERER=bash runs every suite against the BASH renderer: the one an
+# install without cargo gets, i.e. every TPM user who never built rust/.  With
+# the binary built, every suite that does not pin a renderer itself runs the
+# Rust core, so without this the fallback was exercised only in the handful of
+# places that force it.  It exports INTERDIMUX_USE_RUST=off, which the tmux
+# servers the suites start inherit into their global environment, and so do
+# the panes and popups inside them.  Suites that compare the renderers set the
+# variable per run and are unaffected.  Skipped in this mode: the Rust tests
+# and test_rust_parity (renderer-independent: they test the binary, or both
+# renderers side by side, whatever the default is).
 
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+case "${IMUX_RENDERER:-}" in
+  '') ;;
+  rust) export INTERDIMUX_USE_RUST=on ;;
+  bash) export INTERDIMUX_USE_RUST=off ;;
+  *) printf 'run_all.sh: IMUX_RENDERER must be rust or bash, not %s\n' "$IMUX_RENDERER" >&2; exit 2 ;;
+esac
 
 BOLD=$'\033[1m'; GREEN=$'\033[32m'; RED=$'\033[31m'; DIM=$'\033[2m'; RST=$'\033[0m'
 
@@ -23,7 +42,9 @@ started=$SECONDS
 
 # --- Rust first: it is fast, and if the binary is broken every shell suite
 # --- that exercises the picker will fail in a confusing way downstream.
-if [ "${IMUX_SKIP_RUST:-0}" != 1 ] && [ $# -eq 0 ] && command -v cargo >/dev/null 2>&1; then
+if [ "${IMUX_RENDERER:-}" = bash ]; then
+  printf '%srenderer: bash (INTERDIMUX_USE_RUST=off)%s\n\n' "$BOLD" "$RST"
+elif [ "${IMUX_SKIP_RUST:-0}" != 1 ] && [ $# -eq 0 ] && command -v cargo >/dev/null 2>&1; then
   printf '%s==> rust%s\n' "$BOLD" "$RST"
   if out=$(cd rust && cargo test --release 2>&1); then
     n=$(printf '%s' "$out" | awk '/^test result: ok\./ {s += $4} END {print s+0}')
@@ -43,6 +64,11 @@ for t in tests/test_*.sh; do
     match=0
     for pat in "$@"; do case "$name" in *"$pat"*) match=1 ;; esac; done
     [ "$match" = 1 ] || continue
+  fi
+  if [ "${IMUX_RENDERER:-}" = bash ] && [ "$name" = rust_parity ]; then
+    printf '%s==> %s%s\n  %s(skipped under IMUX_RENDERER=bash: it compares both renderers itself)%s\n\n' \
+      "$BOLD" "$name" "$RST" "$DIM" "$RST"
+    continue
   fi
 
   printf '%s==> %s%s\n' "$BOLD" "$name" "$RST"
