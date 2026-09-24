@@ -614,13 +614,27 @@ if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then
     *) report "a fresh one is not" pass ;;
   esac
 
-  # A binary from somewhere else is not this checkout's business.
+  # The helper judged is the one the POPUPS run, picked by the tmux server's
+  # environment.  This shell's INTERDIMUX_BIN names a fresh build elsewhere;
+  # the server's names none, so the popups run the checkout's own -- stale.
+  touch -d '1990-01-01' "$TMPD/fakerepo/rust/target/release/imux" 2>/dev/null \
+    || touch -t 199001010000 "$TMPD/fakerepo/rust/target/release/imux"
+  cp "$SCRIPT_DIR/rust/target/release/imux" "$TMPD/fresh-elsewhere"
+  case "$(INTERDIMUX_BIN="$TMPD/fresh-elsewhere" fake)" in
+    *"older than its sources"*) report "the popups' stale helper is reported, whatever this shell would run" pass ;;
+    *) report "the popups' stale helper is reported, whatever this shell would run" fail ;;
+  esac
+
+  # A binary from somewhere else is not this checkout's business.  Named where
+  # the popups read it, the server's environment.
   cp "$SCRIPT_DIR/rust/target/release/imux" "$TMPD/elsewhere"
   touch -d '1990-01-01' "$TMPD/elsewhere" 2>/dev/null || touch -t 199001010000 "$TMPD/elsewhere"
-  case "$(INTERDIMUX_BIN="$TMPD/elsewhere" doctor)" in
+  senv INTERDIMUX_BIN "$TMPD/elsewhere"
+  case "$(fake)" in
     *"older than its sources"*) report "a binary installed elsewhere is not called stale" fail ;;
     *) report "a binary installed elsewhere is not called stale" pass ;;
   esac
+  unsenv INTERDIMUX_BIN
 else
   echo "  (skipped the stale-binary check: no release binary built)"
 fi

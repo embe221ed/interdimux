@@ -404,18 +404,44 @@ out=$(doctor)
 has "@interdimux-binary is reported as unknown" "$out" "✗ unknown option @interdimux-binary"
 has "...and points at the variable that does work" "$out" "INTERDIMUX_BIN"
 unsetopt binary
-# Any executable passes the -x test; only imux answers `--version` with "imux".
+# INTERDIMUX_BIN is read from the tmux SERVER's environment, like everything
+# else a popup runs with: `tmux set-environment -g INTERDIMUX_BIN`, which is what
+# the README and the notes here tell you to do.  The check used to vet THIS
+# shell's pick -- the in-repo build -- while every popup ran the server's.
+# Premise: a job the server starts really gets the server's value.
 printf '#!/bin/sh\necho "hello from not-imux"\n' > "$TMPD/hello"; chmod +x "$TMPD/hello"
-has "a binary that is not imux is a problem" "$(INTERDIMUX_BIN="$TMPD/hello" doctor)" \
-  "✗ $TMPD/hello is not the interdimux helper"
+senv INTERDIMUX_BIN "$TMPD/hello"
+got=$(tmux -L "$SOCK" run-shell 'printf "%s\n" "$INTERDIMUX_BIN"')
+if [ "$got" = "$TMPD/hello" ]; then
+  out=$(doctor)
+  # Any executable passes the -x test; only imux answers `--version` with "imux".
+  has "the server's INTERDIMUX_BIN, when it is not imux, is a problem" "$out" \
+    "✗ $TMPD/hello is not the interdimux helper"
+  hasnt "...not a tick for the helper this shell would pick" "$out" "✓ imux "
+  has "...and it says this shell's pick differs" "$out" "this shell's environment picks"
+else
+  report "premise: a server job gets the server's INTERDIMUX_BIN (got '$got')" fail
+fi
+unsenv INTERDIMUX_BIN
+# ...and this shell's own is not the one judged.
+out=$(INTERDIMUX_BIN="$TMPD/hello" doctor)
+hasnt "this shell's INTERDIMUX_BIN is not the one judged" "$out" "$TMPD/hello is not the interdimux helper"
+has "...though it is named, as this shell's pick" "$out" "this shell's environment picks $TMPD/hello"
 if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then
-  has "...and the real one is still a tick" \
-    "$(INTERDIMUX_BIN="$SCRIPT_DIR/rust/target/release/imux" doctor)" "✓ imux "
+  senv INTERDIMUX_BIN "$SCRIPT_DIR/rust/target/release/imux"
+  has "...and the real one is still a tick" "$(doctor)" "✓ imux "
+  unsenv INTERDIMUX_BIN
 else
   echo "  (skipped the real-helper case: no release binary built)"
 fi
+senv INTERDIMUX_BIN "$TMPD/no-such-imux"
 has "an INTERDIMUX_BIN that is not executable is said to be ignored" \
-  "$(INTERDIMUX_BIN="$TMPD/no-such-imux" doctor)" "⚠ INTERDIMUX_BIN=$TMPD/no-such-imux is not an executable file"
+  "$(doctor)" "⚠ INTERDIMUX_BIN=$TMPD/no-such-imux is not an executable file"
+unsenv INTERDIMUX_BIN
+senv INTERDIMUX_USE_RUST off
+has "INTERDIMUX_USE_RUST=off on the server is what disables the helper" "$(doctor)" \
+  "⚠ rust helper disabled by INTERDIMUX_USE_RUST=off"
+unsenv INTERDIMUX_USE_RUST
 
 # --- the navigator's scratch dir -------------------------------------------------------
 # $TMPDIR as the server has it; with no runtime dir, that is where the resume

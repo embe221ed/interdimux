@@ -141,8 +141,8 @@ set-environment -g INTERDIMUX_BIN '/path/to/imux'
 ```
 
 That is an environment variable, not a tmux option, on purpose: it chooses the
-program every picker runs. `--doctor` says which binary is in use, whether it is
-older than its sources, and what to do when there is none. More in
+program every picker runs. `--doctor` says which binary the popups use, whether
+it is older than its sources, and what to do when there is none. More in
 [rust/README.md](rust/README.md).
 
 ## Usage
@@ -420,10 +420,12 @@ nothing to tell you why:
 
 Exits non-zero if anything is wrong, so it works in a health check.
 
-The environment it checks is the one the popups get: the tmux server's `PATH`,
-locale and `$FZF_DEFAULT_OPTS`, not your shell's. The two differ exactly when
-it matters — fzf on `PATH` only through a shell rc, a UTF-8 locale that is named
-but not installed — so run from a shell, it says which one it read.
+The environment it checks is the one the popups get: the tmux server's `PATH`
+(and the fzf and bash on it, versions included), locale, `$FZF_DEFAULT_OPTS`
+and `INTERDIMUX_BIN`, not your shell's. The two differ exactly when it matters —
+fzf on `PATH` only through a shell rc, a distro's old fzf ahead of the one you
+installed, a UTF-8 locale that is named but not installed — so run from a
+shell, it says which one it read.
 `interdimux.sh --help` lists the other command-line modes, and `--version` prints
 the version; an argument that is not a mode is refused with exit status 2
 rather than opening the navigator.

@@ -5809,34 +5809,51 @@ if [ "${1:-}" = "--doctor" ]; then
       case "$last" in "== failed"*) _note "the plugin's last build of it failed: $blog" ;; esac
     fi
   }
-  if [ -n "${IMUX_BIN:-}" ] && [ -x "$IMUX_BIN" ]; then
+  # The helper the POPUPS run, picked the way the top of this file picks it, but
+  # from the tmux server's environment: that is where INTERDIMUX_BIN belongs
+  # (`tmux set-environment -g`, as the notes here advise), and it is the one a
+  # popup starts from.  Judged from this process's own, a doctor run from a
+  # terminal vetted the in-repo build while every popup ran whatever the
+  # server's INTERDIMUX_BIN named.  Run from the Health popup the two agree.
+  _pur=on; _srv_env INTERDIMUX_USE_RUST && _pur="${REPLY:-on}"
+  _pib="";  _srv_env INTERDIMUX_BIN && _pib="$REPLY"
+  _pbin=""
+  if [ "$_pur" != off ]; then
+    for _c in "$_pib" "$_repo/rust/target/release/imux" "$_repo/bin/imux"; do
+      if [ -n "$_c" ] && [ -x "$_c" ]; then _pbin="$_c"; break; fi
+    done
+  fi
+  if [ -n "$_pbin" ]; then
     # Ask it what it is.  The helper is picked by an -x test, which any
     # executable passes, and this used to give a green tick to whatever printed
     # anything at all — `/bin/ls` got "✓ ls (GNU coreutils) 9.4".  The real one
     # answers "imux <version>".  </dev/null: something that reads stdin instead
     # must not hang the report.
-    if _v=$("$IMUX_BIN" --version 2>/dev/null </dev/null) && [ -n "$_v" ]; then
+    if _v=$("$_pbin" --version 2>/dev/null </dev/null) && [ -n "$_v" ]; then
       case "$_v" in
-        'imux '*) _ok "$_v at $IMUX_BIN" ;;
-        *) _bad "$IMUX_BIN is not the interdimux helper — its --version says: ${_v%%$'\n'*}"
+        'imux '*) _ok "$_v at $_pbin" ;;
+        *) _bad "$_pbin is not the interdimux helper — its --version says: ${_v%%$'\n'*}"
            _note "the list notices, and falls back to the slow bash renderer; point INTERDIMUX_BIN at an imux build" ;;
       esac
     else
-      _bad "rust helper at $IMUX_BIN is present but does not run"
+      _bad "rust helper at $_pbin is present but does not run"
       _build_hint rebuild
     fi
-  elif [ "${INTERDIMUX_USE_RUST:-on}" = off ]; then
+  elif [ "$_pur" = off ]; then
     _warn "rust helper disabled by INTERDIMUX_USE_RUST=off"
   else
     _warn "rust helper not found — falling back to the minimal bash renderer"
     _build_hint build
   fi
+  # The shell this was typed into is the obvious place to look, and the wrong
+  # one; say so when it would have picked differently.
+  [ "$_pbin" != "${IMUX_BIN:-}" ] \
+    && _note "that is the tmux server's pick, which the popups get — this shell's environment picks ${IMUX_BIN:-the bash renderer}"
   # An INTERDIMUX_BIN that is not executable is skipped in favour of the in-repo
   # build, silently — the line above then names a different binary than the one
   # asked for, with nothing to say why.
-  if [ -n "${INTERDIMUX_BIN:-}" ] && [ "${INTERDIMUX_USE_RUST:-on}" != off ] \
-     && [ "${IMUX_BIN:-}" != "$INTERDIMUX_BIN" ]; then
-    _warn "INTERDIMUX_BIN=$INTERDIMUX_BIN is not an executable file, so it is ignored"
+  if [ -n "$_pib" ] && [ "$_pur" != off ] && [ "$_pbin" != "$_pib" ]; then
+    _warn "INTERDIMUX_BIN=$_pib is not an executable file, so it is ignored"
   fi
 
   # The MRU order is stable only because the sort is: without `-s`, GNU sort
@@ -5934,10 +5951,10 @@ if [ "${1:-}" = "--doctor" ]; then
   # no relationship to these sources, and a fresh clone — which stamps every
   # source with the checkout time — would otherwise report it stale for ever.
   # -type f as well, or find returns the start directory and it takes one of the
-  # three slots below.
-  if [ -n "${IMUX_BIN:-}" ] && [ -x "$IMUX_BIN" ] && [ -d "$_repo/rust/src" ] \
-     && case "$IMUX_BIN" in "$_repo"/*) true ;; *) false ;; esac; then
-    _newer=$(find "$_repo/rust/src" "$_repo/rust/Cargo.toml" -type f -newer "$IMUX_BIN" 2>/dev/null | head -3)
+  # three slots below.  The popups' helper, as picked above.
+  if [ -n "$_pbin" ] && [ -d "$_repo/rust/src" ] \
+     && case "$_pbin" in "$_repo"/*) true ;; *) false ;; esac; then
+    _newer=$(find "$_repo/rust/src" "$_repo/rust/Cargo.toml" -type f -newer "$_pbin" 2>/dev/null | head -3)
     if [ -n "$_newer" ]; then
       _warn "the rust helper is older than its sources — it is rendering last build's layout"
       while IFS= read -r _nf; do [ -n "$_nf" ] && _note "newer: ${_nf#"$_repo/"}"; done <<< "$_newer"
