@@ -10,7 +10,9 @@
 #   * niced, with CARGO_TARGET_DIR pinned and --locked, logging to
 #     $XDG_STATE_HOME/interdimux/build.log, and a status-line message when it is
 #     done or has failed
-#   * once: a reload while it builds starts no second build
+#   * once: a reload while it builds starts no second build, and a lock left by a
+#     job that was killed does not stop every later one, even when its PID has
+#     since gone to another process -- or to the new job itself
 #   * a failed build is not run again on every load: only once the sources or
 #     the cargo change, or silently a day later; and said once, naming the log,
 #     @interdimux-autobuild, and what the picker uses meanwhile
@@ -34,8 +36,10 @@ PASS=0
 FAIL=0
 ERRORS=""
 
+OTHER=""
 cleanup() {
   rm -f "$TMPD/ctl/hold"   # let a held stand-in cargo go
+  [ -z "$OTHER" ] || kill "$OTHER" 2>/dev/null || true
   "$REAL_TMUX" -L "$OUTER" kill-server 2>/dev/null || true
   "$REAL_TMUX" -L "$SOCK" kill-server 2>/dev/null || true
   rm -rf "$TMPD"
@@ -431,6 +435,31 @@ sh -c 'exit 0' & dead=$!; wait "$dead" || true
 ln -s "$dead" "$LOCK"
 run_job "$CPATH" "$TMPD/no-cargo-home"
 check "a lock whose owner is gone is taken over (ran $(runs))" '[ "$(runs)" = 1 ] && fresh'
+check "...and released afterwards" '[ ! -L "$LOCK" ]'
+
+# Nor one whose PID is alive, but some other process's now.  A job killed before
+# its EXIT trap could run (SIGKILL, the OOM killer, a power cut) leaves its lock
+# in rust/target, which outlives it and a reboot, and PIDs are reused.
+reset
+mkdir -p "${LOCK%/*}"
+sleep 300 & OTHER=$!
+ln -s "$OTHER" "$LOCK"
+check "--doctor does not call a lock that names some other process a build under way" \
+  '! has "$(doctor "$CPATH" "$TMPD/no-cargo-home")" "building it in the background right now"'
+run_job "$CPATH" "$TMPD/no-cargo-home"
+check "a lock naming a live process that is no build job is taken over (ran $(runs))" \
+  '[ "$(runs)" = 1 ] && fresh'
+check "...and released afterwards" '[ ! -L "$LOCK" ]'
+kill "$OTHER" 2>/dev/null || true; wait "$OTHER" 2>/dev/null || true; OTHER=""
+
+# Or the new job's own PID: in a container restarted on the same disk, PIDs
+# come out the same.
+reset
+mkdir -p "${LOCK%/*}"
+env PATH="$CPATH" CARGO_HOME="$TMPD/no-cargo-home" XDG_STATE_HOME="$STATE" \
+    L="$LOCK" J="$PLUG/interdimux.tmux" \
+  timeout 10 bash -c 'ln -s "$$" "$L" && exec bash "$J" --autobuild' >/dev/null 2>&1 || true
+check "a lock naming the new job's own PID is taken over (ran $(runs))" '[ "$(runs)" = 1 ] && fresh'
 check "...and released afterwards" '[ ! -L "$LOCK" ]'
 
 # --- 7. --doctor's advice, and the option -----------------------------------------------

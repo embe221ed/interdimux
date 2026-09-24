@@ -86,6 +86,26 @@ imux_build_cargo() {
   printf '%s' "$c"
 }
 
+# Is the PID a lock names a build job that is still running?  A live PID is not
+# enough.  A job killed before its EXIT trap could run (SIGKILL, the OOM killer,
+# a power cut) leaves the lock in target/, which outlives it and a reboot, and
+# that PID is soon some other process's -- even this job's own, in a container
+# restarted on the same disk.  Then every later build was skipped, for as long
+# as that process lived.  scripts/interdimux.sh asks the same question
+# (imux_autobuild_running) for --doctor and the refused-binary notice.
+imux_build_running() { # $1 = the PID
+  local a args=""
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" != "$$" ] && kill -0 "$1" 2>/dev/null || return 1
+  if [ -r "/proc/$1/cmdline" ]; then
+    while IFS= read -r -d '' a; do args+="$a "; done 2>/dev/null < "/proc/$1/cmdline"
+  else
+    args=$(ps -ww -o args= -p "$1" 2>/dev/null)
+  fi
+  case "$args" in *interdimux.tmux*--autobuild*) return 0 ;; esac
+  return 1
+}
+
 # The job.  Runs under `run-shell -b`, from the tmux server's environment.
 if [ "${1:-}" = --autobuild ]; then
   state="${XDG_STATE_HOME:-$HOME/.local/state}/interdimux"
@@ -96,13 +116,11 @@ if [ "${1:-}" = --autobuild ]; then
   # and cargo would only queue the second build behind its own lock -- and then
   # announce it a second time.  A symlink is created atomically WITH its
   # content, so the lock names its owner from the first instant; an owner that
-  # is gone (a killed server took the job with it) leaves a lock to take over.
+  # is not a running build job (a killed server took the job with it) leaves a
+  # lock to take over.
   if ! ln -s "$$" "$LOCK" 2>/dev/null; then
     owner=$(readlink "$LOCK" 2>/dev/null) || owner=""
-    case "$owner" in
-      ''|*[!0-9]*) ;;
-      *) kill -0 "$owner" 2>/dev/null && exit 0 ;;
-    esac
+    imux_build_running "$owner" && exit 0
     rm -f "$LOCK"
     ln -s "$$" "$LOCK" 2>/dev/null || exit 0
   fi

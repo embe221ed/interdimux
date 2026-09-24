@@ -19,7 +19,8 @@
 #   * the user is told ONCE, on the status line and in errors.log (which --doctor
 #     reports), which binary it is and how to rebuild it; again only after a
 #     rebuild that is still the wrong version
-#   * not while interdimux.tmux's background build is replacing that binary
+#   * not while interdimux.tmux's background build is replacing that binary --
+#     but a lock whose PID now belongs to some other process is no build
 #   * never for a current binary
 # The binary's own side (it refuses `gather`) is rust/tests/protocol.rs.
 
@@ -180,9 +181,15 @@ ST="$TMPD/state2"
 LOG="$ST/interdimux/errors.log"
 SCRIPT_SAVED="$SCRIPT"; SCRIPT="$PLUG/scripts/interdimux.sh"
 
-# interdimux.tmux is rebuilding it right now (the lock names a live process):
-# that job announces its own result, so this says nothing
-sleep 600 & HOLDER=$!
+# interdimux.tmux is rebuilding it right now (the lock names a running build
+# job): that job announces its own result, so this says nothing.  The job is a
+# stand-in, run as the real one is -- this plugin's interdimux.tmux --autobuild.
+cat > "$PLUG/interdimux.tmux" <<'EOF'
+trap 'kill "$!" 2>/dev/null; exit 0' TERM
+sleep 600 & wait
+EOF
+bash "$PLUG/interdimux.tmux" --autobuild & HOLDER=$!
+wait_for "the stand-in build job" sh -c "ps -o args= -p '$HOLDER' | grep -q -- --autobuild"
 ln -s "$HOLDER" "$LOCK"
 list_in_pane "$ST" INTERDIMUX_USE_RUST=on
 check "during the background build: the list falls back" '[ "$GOT" = "$WANT" ]'
@@ -195,6 +202,18 @@ list_in_pane "$ST" INTERDIMUX_USE_RUST=on
 check "with no build under way: said once, with the command that rebuilds it" \
   '[ "$(entries "$LOG")" = 1 ] && grep -qF "(cd '"'"'$PLUG/rust'"'"' && cargo build --release)" "$LOG" 2>/dev/null'
 check "...on the status line too" '[ "$(notices "$PLUG/rust/target/release/imux")" = 1 ]'
+
+# The lock names a live process, but not a build job: one killed before it could
+# remove its lock (SIGKILL, the OOM killer, a power cut), and its PID reused.
+# Nothing is replacing the binary, so this is said as well.
+ST="$TMPD/state2b"
+LOG="$ST/interdimux/errors.log"
+sleep 600 & HOLDER=$!
+rm -f "$LOCK"; ln -s "$HOLDER" "$LOCK"
+list_in_pane "$ST" INTERDIMUX_USE_RUST=on
+check "a lock whose PID is some other process now: said all the same" \
+  '[ "$(entries "$LOG")" = 1 ] && [ "$(notices "$PLUG/rust/target/release/imux")" = 2 ]'
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true; HOLDER=""
 SCRIPT="$SCRIPT_SAVED"
 
 # --- 3. a current binary is not refused ----------------------------------------

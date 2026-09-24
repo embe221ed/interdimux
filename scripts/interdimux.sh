@@ -3069,6 +3069,23 @@ emit_dir_rows() {
   return 0
 }
 
+# Is interdimux.tmux's background build of the checkout $1 running right now?
+# Its lock names the job's PID, but a live PID is not enough: a job killed
+# before its EXIT trap could run (SIGKILL, the OOM killer, a power cut) leaves
+# the lock in rust/target, which outlives it and a reboot, and that PID is soon
+# some other process's.  Then --doctor said "building it right now" for as long
+# as that process lived, and imux_refused kept quiet about a binary nothing was
+# replacing.  So the PID must also be such a job.  interdimux.tmux's own
+# imux_build_running is the same test.
+imux_autobuild_running() { # $1 = the checkout
+  local owner args
+  owner=$(readlink "$1/rust/target/.interdimux-autobuild.lock" 2>/dev/null) || return 1
+  [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null || return 1
+  read_cmdline "$owner"; args="$REPLY"
+  [ -n "$args" ] || args=$(ps -ww -o args= -p "$owner" 2>/dev/null) || args=""
+  [[ "$args" == *interdimux.tmux*--autobuild* ]]
+}
+
 # The Rust core refused IMUX_PROTO (exit 2): it was built from other sources
 # than this script.  The list has already fallen back to the bash renderer --
 # correct, only slower -- so this is about telling the user, and ONCE: the list
@@ -3084,17 +3101,14 @@ emit_dir_rows() {
 # -- only a refused binary gets here -- and nothing in it can fail the list.
 imux_refused() {
   local dir="${SCHED_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/interdimux}"
-  local repo="${SCRIPT_PATH%/scripts/*}" stamp seen="" owner how msg
+  local repo="${SCRIPT_PATH%/scripts/*}" stamp seen="" how msg
   stamp="$dir/imux-refused"
   if [ -f "$stamp" ] && ! [ "$IMUX_BIN" -nt "$stamp" ]; then
     { IFS= read -r seen < "$stamp"; } 2>/dev/null || :
     [ "$seen" = "$IMUX_BIN" ] && return 0
   fi
   if [ "$IMUX_BIN" = "$repo/rust/target/release/imux" ]; then
-    if owner=$(readlink "$repo/rust/target/.interdimux-autobuild.lock" 2>/dev/null) \
-       && [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
-      return 0
-    fi
+    imux_autobuild_running "$repo" && return 0
     how="rebuild it: (cd '$repo/rust' && cargo build --release)"
   else
     how="rebuild it, or point INTERDIMUX_BIN at a build of this version"
@@ -6432,7 +6446,7 @@ if [ "${1:-}" = "--doctor" ]; then
   elif [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]; then _cargo="${CARGO_HOME:-$HOME/.cargo}/bin/cargo"
   fi
   _build_hint() { # $1 = build | rebuild
-    local owner first last blog="$SCHED_LOGDIR/build.log"
+    local first last blog="$SCHED_LOGDIR/build.log"
     if [ ! -f "$_repo/rust/Cargo.toml" ]; then
       _note "this install has no rust/ sources to build: point INTERDIMUX_BIN at a prebuilt imux"
       _note "for the popups: tmux set-environment -g INTERDIMUX_BIN <path>"
@@ -6443,8 +6457,7 @@ if [ "${1:-}" = "--doctor" ]; then
       _note "no cargo here: install Rust (https://rustup.rs) and $1 it, or point INTERDIMUX_BIN at a prebuilt imux"
       _note "for the popups: tmux set-environment -g INTERDIMUX_BIN <path>"
     fi
-    if owner=$(readlink "$_repo/rust/target/.interdimux-autobuild.lock" 2>/dev/null) \
-       && kill -0 "$owner" 2>/dev/null; then
+    if imux_autobuild_running "$_repo"; then
       _note "the plugin is building it in the background right now: $blog"
     elif [ -s "$blog" ] && IFS= read -r first < "$blog" \
          && case "$first" in "== building $_repo/rust "*) true ;; *) false ;; esac; then
