@@ -34,8 +34,9 @@ use std::fs;
 
 use crate::macproc;
 
-/// Does this look like a login/interactive shell?  Mirrors SHELLS_PATTERN:
-/// `^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$`
+/// Does this look like a login/interactive shell?  Mirrors bash SHELL_NAMES:
+/// sh bash zsh fish dash ash ksh tcsh csh or login, each with or without a
+/// login shell's leading '-', by basename.
 pub fn is_shell(cmd: &str) -> bool {
     let base = cmd.rsplit('/').next().unwrap_or(cmd);
     let s = base.strip_prefix('-').unwrap_or(base);

@@ -29,8 +29,9 @@ fn is_editor(base: &str) -> bool {
 }
 
 /// Interpreters whose first argument, when it is a path, is the script they
-/// run.  Mirrors bash INTERPRETERS_PATTERN
-/// `^(python[0-9.]*|lua[0-9.]*|node|nodejs|ruby|perl|php)$`, plus the shells.
+/// run: python and lua, each with an optional version of ASCII digits and
+/// dots, node nodejs ruby perl php, and the shells.  Mirrors the `case` in bash
+/// `format_command`.
 fn is_interpreter(base: &str) -> bool {
     let versioned = |stem: &str| {
         base.strip_prefix(stem)

@@ -193,6 +193,18 @@ fn control_bytes_and_stray_separators() {
     check("control", &[]);
 }
 
+/// How the COMMAND column classifies a command, with nothing but tmux's own
+/// #{pane_current_command} to go on: versioned interpreters and the names that
+/// only look like one (pythonw, python-config, luajit), shells idle and busy,
+/// the ssh and editor flags that take a value.  The bash renderer classifies
+/// these with `case` globs and the Rust core with match tables;
+/// tests/test_corpus_parity.sh renders this dump through bash too, so the
+/// expectation binds both (review #28).
+#[test]
+fn command_classification() {
+    check("commands", &[]);
+}
+
 /// Layout must hold at every width, not just the one the goldens pin.
 #[test]
 fn every_row_keeps_the_four_field_contract() {

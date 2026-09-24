@@ -1852,8 +1852,29 @@ read_cmdline() {
   return 0
 }
 
-# Known shells — used to decide whether to descend one level
-SHELLS_PATTERN='^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$'
+# The shells, by argv0 basename, each also with a login shell's leading '-'.
+# A name is tested as
+#
+#   [[ "$SHELL_NAMES" == *" ${name#-} "* ]]
+#
+# -- a glob over this string.  Not a `[[ =~ ]]`: bash compiles a regex afresh on
+# every test, and the bash renderer asks this of every row it draws (review
+# #28).  Not a function either: in bash the call costs more than the test.  A
+# name holds no blank, being argv0 cut at the first space.  rust/src/proc.rs
+# is_shell is the same list.
+SHELL_NAMES=' sh bash zsh fish dash ash ksh tcsh csh login '
+
+# Is every word of $1 an option?  $1 is what follows argv0: empty, or starting
+# with a blank.  The words are never split out -- unquoted they would glob --
+# so a word that is not an option is a blank followed by anything but a blank
+# or '-'.
+#
+# A shell and nothing but its options is an idle shell's argv: `-zsh`,
+# `/bin/bash`, `bash --norc -i`, not `bash build.sh` or `sh -c …`.
+# format_command dims such a row.
+only_options() {
+  [[ "$1" != *[$' \t\n'][!$' \t\n'-]* ]]
+}
 
 # /proc/<pid>/stat after its comm field: state ppid pgrp session tty_nr tpgid.
 STAT_IDS_RE='^[^ ]+ [^ ]+ (-?[0-9]+) [^ ]+ [^ ]+ (-?[0-9]+)'
@@ -1931,7 +1952,7 @@ full_command() {
   cmd_name="${cmd_name##*/}"
 
   # If the pane process is a shell, look one level down
-  if [[ "$cmd_name" =~ $SHELLS_PATTERN ]]; then
+  if [[ "$SHELL_NAMES" == *" ${cmd_name#-} "* ]]; then
     if [ "$PROC_CMDLINE_OK" = 1 ]; then
       children=""
       # The children file has NO trailing newline, so `read` assigns the value
@@ -2056,24 +2077,26 @@ get_git_branch() {
 # Smart command formatting (SSH host, editor context)
 # ---------------------------------------------------------------------------
 
-EDITORS_PATTERN='^(n?vim|vi|nano|emacs|code|hx|helix|micro|kate|gedit|subl)$'
-
-# SSH flags that consume the next argument (so we skip both flag and value)
-SSH_FLAGS_WITH_VALUE='^-(b|c|D|E|e|F|I|i|J|L|l|m|O|o|p|Q|R|S|W|w)$'
-
-# Editor flags that consume the next argument
-EDITOR_FLAGS_WITH_VALUE='^-[uUsSpc]$|^--cmd$|^--listen$'
-
-# Interpreters whose first argument, when it is a path, is the script they run.
-# Shells count too (SHELLS_PATTERN is checked alongside).
-INTERPRETERS_PATTERN='^(python[0-9.]*|lua[0-9.]*|node|nodejs|ruby|perl|php)$'
-
+# Every classification below is a `case` glob, never a `[[ =~ ]]`: bash
+# compiles a regex afresh on every test, about 20-25 us each, and the bash
+# renderer formats every window row and every pane row (review #28).  The Rust
+# core's format.rs holds the same tables.
+#
+#   editors                       vim nvim vi nano emacs code hx helix micro
+#                                 kate gedit subl
+#   ssh flags taking a value      -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p
+#                                 -Q -R -S -W -w
+#   editor flags taking a value   -u -U -s -S -p -c --cmd --listen
+#   interpreters (whose first     python and lua, each with an optional
+#   argument, when it is a path,  version of digits and dots; node nodejs ruby
+#   is the script they run)       perl php; and the shells (SHELL_NAMES)
 format_command() {
   local cmd_str="$1"
   REPLY=""                       # reset: callers read REPLY after a bare call
   [ -z "$cmd_str" ] && return
   local cmd_name="${cmd_str%% *}"
   local cmd_base="${cmd_name##*/}"
+  local rest="${cmd_str#"$cmd_name"}"
 
   # Disable globbing for word-splitting of arguments
   local old_set="$-"
@@ -2092,9 +2115,8 @@ format_command() {
           continue
         fi
         case "$word" in
-          -*)
-            [[ "$word" =~ $SSH_FLAGS_WITH_VALUE ]] && skip_next=1
-            ;;
+          -[bcDEeFIiJLlmOopQRSWw]) skip_next=1 ;;
+          -*) ;;
           *)  host="$word" ;;
         esac
       done
@@ -2107,7 +2129,9 @@ format_command() {
   esac
 
   # Editors: highlight the file being edited
-  if [[ "$cmd_base" =~ $EDITORS_PATTERN ]]; then
+  local is_ed=0
+  case "$cmd_base" in vim|nvim|vi|nano|emacs|code|hx|helix|micro|kate|gedit|subl) is_ed=1 ;; esac
+  if [ "$is_ed" = 1 ]; then
     local file="" skip_next=""
     local args="${cmd_str#* }"
     [ "$args" = "$cmd_str" ] && args=""
@@ -2118,9 +2142,8 @@ format_command() {
         continue
       fi
       case "$word" in
-        -*)
-          [[ "$word" =~ $EDITOR_FLAGS_WITH_VALUE ]] && skip_next=1
-          ;;
+        -[uUsSpc]|--cmd|--listen) skip_next=1 ;;
+        -*) ;;
         +*) ;;  # vim +line / +/pattern
         *)  file="$word" ;;
       esac
@@ -2133,27 +2156,20 @@ format_command() {
     fi
   fi
 
+  [[ "$old_set" != *f* ]] && set +f
+
+  # Asked once, answered for both rules below.
+  local is_sh=0
+  [[ "$SHELL_NAMES" == *" ${cmd_base#-} "* ]] && is_sh=1
+
   # An idle shell — the shell and nothing but its options: `-zsh`, `/bin/bash`,
   # `bash --norc -i`.  Its bare name, in the tree colour, so the rows doing real
   # work are the ones in the accent (IDEAS #10).  A shell running something
   # (`bash build.sh`, `sh -c …`) is real work and falls through.
-  if [[ "$cmd_base" =~ $SHELLS_PATTERN ]]; then
-    local args="${cmd_str#* }" word idle=1
-    [ "$args" = "$cmd_str" ] && args=""
-    for word in $args; do
-      case "$word" in
-        -*) ;;
-        *)  idle=0; break ;;
-      esac
-    done
-    if [ "$idle" = 1 ]; then
-      [[ "$old_set" != *f* ]] && set +f
-      printf -v REPLY '%s%s%s' "$DIM_TREE" "${cmd_base#-}" "$RST"
-      return
-    fi
+  if [ "$is_sh" = 1 ] && only_options "$rest"; then
+    printf -v REPLY '%s%s%s' "$DIM_TREE" "${cmd_base#-}" "$RST"
+    return
   fi
-
-  [[ "$old_set" != *f* ]] && set +f
 
   # Everything else, with argv0 by its basename: `/usr/bin/python3 -c …` spent
   # nine of the column's cells on `/usr/bin/`.  An argv0 that ends in '/' has
@@ -2161,8 +2177,15 @@ format_command() {
   # path shows the script's basename too — a `#!/usr/bin/python3` script reads
   # `python3 tool.py`, not `/usr/bin/python3 /home/…/bin/tool.py`.  Only the
   # word straight after argv0 is considered, never an option.
-  local rest="${cmd_str#"$cmd_name"}"
-  if [[ "$cmd_base" =~ $INTERPRETERS_PATTERN ]] || [[ "$cmd_base" =~ $SHELLS_PATTERN ]]; then
+  local is_int="$is_sh"
+  case "$cmd_base" in
+    # a version is digits and dots only: python3.12 is one, pythonw is not.
+    # The digits are listed, not ranged: a range follows the locale's collation.
+    python*) [[ "${cmd_base#python}" == *[!0123456789.]* ]] || is_int=1 ;;
+    lua*)    [[ "${cmd_base#lua}" == *[!0123456789.]* ]] || is_int=1 ;;
+    node|nodejs|ruby|perl|php) is_int=1 ;;
+  esac
+  if [ "$is_int" = 1 ]; then
     local r1="${rest# }" w1
     w1="${r1%% *}"
     if [[ "$w1" != -* && "$w1" == */* ]] && [ -n "${w1##*/}" ]; then
