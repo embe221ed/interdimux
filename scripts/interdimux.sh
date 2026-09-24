@@ -3081,7 +3081,9 @@ emit_dir_rows() {
 
     base="${d##*/}"
     [ -n "$base" ] || base="$d"
-    base="${base//$'\t'/ }"
+    # Sanitised as the context column is, and before the cut: an ESC in the name
+    # was drawn live in the identity column.  (No TAB gets here: see above.)
+    sanitize_args "$base"; base="$REPLY"
     [ "${#base}" -gt $(( IDENT_W - 4 )) ] && base="${base:0:IDENT_W-5}…"
 
     fld_reset
@@ -3993,7 +3995,13 @@ if [ "${1:-}" = "--dirs-list" ]; then
     case "$dir" in *$'\t'*) return ;; esac
     [[ ${seen[$dir]+x} ]] && return
     seen["$dir"]=1
+    # The display copy only: $dir itself, raw, is the spec Enter opens.
+    # Sanitised the way the navigator's rows are (build_ctx_field): an ESC in a
+    # directory's name reached the picker as a live escape sequence that hid
+    # the name and recoloured the row, and dpad counted the bytes the terminal
+    # swallowed, so the badge column moved left.
     local display_path="${dir/#$HOME/\~}"
+    sanitize_args "$display_path"; display_path="$REPLY"
     trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
 
     # Already open?  Say so, and say WHERE -- the badge column is outside fzf's

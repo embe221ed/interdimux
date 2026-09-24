@@ -235,9 +235,11 @@ pub fn pane_ident(
     pad_to(&body, plain, w.ident)
 }
 
-/// Directory row identity column (the one-list model).
+/// Directory row identity column (the one-list model).  The name is sanitized
+/// like the context column's path, and before the cut: an ESC in it was drawn
+/// live.  (A TAB never gets here: such a directory is not offered.)
 pub fn dir_ident(base: &str, w: &Widths, p: &Palette) -> String {
-    let mut b = base.replace('\t', " ");
+    let mut b = sanitize(base);
     if width(&b) > w.ident.saturating_sub(4) {
         b = truncate(&b, w.ident.saturating_sub(4));
     }
@@ -289,6 +291,11 @@ mod tests {
         let pane = pane_ident(&sdisp, "0", "1", "│", true, false, &w, &p);
         assert_eq!(width(&visible(&pane)), w.ident);
         let dir = dir_ident("someproject", &w, &p);
+        assert_eq!(width(&visible(&dir)), w.ident);
+        // control bytes in a directory's name: neutralised, and still padded
+        let dir = dir_ident("esc\x1b[31mred\rz", &w, &p);
+        assert!(!visible(&dir).contains(|c: char| c.is_control()), "{dir:?}");
+        assert!(visible(&dir).contains("esc?[31mred?z"), "{dir:?}");
         assert_eq!(width(&visible(&dir)), w.ident);
     }
 
