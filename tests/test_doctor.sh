@@ -286,8 +286,11 @@ if command -v fzf >/dev/null 2>&1; then
          INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
          INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_FZF_OPTS='--totally-bogus-flag' \
          bash '$SCRIPT'; sleep 5"
+  # Polled for the line the assertion wants, not for a non-empty file: the log
+  # gets its "== <date>" header first and the stderr after it, and under load
+  # the check landed in between.
   for _i in $(seq 1 80); do
-    [ -s "$ERRD/interdimux/errors.log" ] && break
+    grep -q 'totally-bogus-flag' "$ERRD/interdimux/errors.log" 2>/dev/null && break
     sleep 0.1
   done
   if grep -q 'totally-bogus-flag' "$ERRD/interdimux/errors.log" 2>/dev/null; then
