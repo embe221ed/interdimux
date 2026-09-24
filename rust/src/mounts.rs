@@ -18,7 +18,9 @@
 //! Classified once per run from /proc/self/mountinfo (INTERDIMUX_MOUNTINFO
 //! overrides the path, for tests); where there is no such file (macOS, BSD)
 //! nothing is classified and every path is probed as before.  bash's
-//! is_remote_path applies the same table.
+//! is_remote_path applies the same table.  (bash also hands its table to fzf's
+//! callbacks in INTERDIMUX_MOUNTS; this binary reads mountinfo itself, since
+//! the navigator only exports that when the bash renderer draws the list.)
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

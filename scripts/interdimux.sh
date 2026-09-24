@@ -1026,44 +1026,72 @@ fi
 # the filesystem $HOME is on are never skipped: the picker touches both anyway
 # (bash, the recent list), and an NFS home keeps its badges.  The same table as
 # rust/src/mounts.rs -- keep them in step.
+#
+# Read once per NAVIGATOR SESSION, not once per process: the navigator (when
+# bash draws the list) and the ctrl-o picker classify it up front and hand it to
+# every fzf callback in INTERDIMUX_MOUNTS (mounts_export), and a process that
+# inherits that never opens the mount table.  Each parse had been 2-25 ms of
+# bash on every --dirs-preview cursor move and every --list reload, twice per
+# --dirs-list.  A mount that comes or goes while one picker is open is picked
+# up by the next one.
 _MOUNTS_READ=0
-declare -A _MOUNT_BLOCKS=()   # mount point -> 1 (can block) | 0; the LAST mount at a point wins
+_MOUNT_BPS=()                 # the points that can block -- usually one to three
+declare -A _MOUNT_TBL=()      # point -> 1 (can block) | 0; the LAST mount at a point wins
+_MOUNT_UNDER=0                # is_remote_path's last path lies below a blocking point
 
 _mounts_read() {
   _MOUNTS_READ=1
-  local f="${INTERDIMUX_MOUNTINFO:-/proc/self/mountinfo}" line fstype point any=0 b so
+  _MOUNT_BPS=() _MOUNT_TBL=()
+  if [ -n "${INTERDIMUX_MOUNTS+set}" ]; then _mounts_import; return 0; fi
+  local f="${INTERDIMUX_MOUNTINFO:-/proc/self/mountinfo}"
   [ -r "$f" ] || return 0
-  while IFS= read -r line; do
-    fstype="${line#* - }"; fstype="${fstype%% *}"
-    case "$fstype" in
+  # One buffered read.  `while read` on a /proc file seeks back after every
+  # line, and the kernel regenerates the table up to the offset for each seek.
+  local -a _ml=() _mf=() _cand=()
+  mapfile -t _ml 2>/dev/null < "$f" || return 0
+  [ "${#_ml[@]}" -gt 0 ] || return 0
+  local line point b any=0 k s IFS=$' \t\n' _noglob=0
+  case $- in *f*) _noglob=1 ;; esac
+  set -f   # the fields are split by the shell: a mount point must not glob
+  for line in "${_ml[@]}"; do
+    # "<id> <parent> <maj:min> <root> <point> <opts> [optional...] - <fstype> <src> <superopts>"
+    # Split in C by word splitting, not by pattern expansions (a `${line#* - }`
+    # costs as much as the rest of the loop): mountinfo escapes every blank in
+    # a field, and the " - " is followed by exactly three fields.
+    # ([[ ]] and (( )) throughout: this body runs once per mount, and the
+    # table has hundreds of them where snaps or containers are about.)
+    _mf=($line); k=${#_mf[@]}; s=$((k - 4))
+    if ((s < 5)) || [[ ${_mf[s]} != - ]]; then
+      s=1; while ((s < k)) && [[ ${_mf[s]} != - ]]; do s=$((s + 1)); done
+      ((s >= 5 && s < k)) || continue
+    fi
+    case ${_mf[s+1]:-} in
       nfs|nfs4|cifs|smb3|smbfs|ncpfs|afs|ceph|coda|lustre|gpfs|orangefs|beegfs|autofs|fuse) b=1 ;;
       # 9p by its transport: over tcp or rdma a network share; over fd WSL2's
       # drvfs (/mnt/c), over virtio/unix/xen a VM's share of its host's disk
-      9p) so="${line#* - }"; so="${so#* * }"   # the superblock options
-          case ",$so," in *,trans=tcp,*|*,trans=rdma,*) b=1 ;; *) b=0 ;; esac ;;
+      9p) case ",${_mf[s+3]:-}," in *,trans=tcp,*|*,trans=rdma,*) b=1 ;; *) b=0 ;; esac ;;
       # FUSE backed by local storage keeps its badges; fuseblk is a local disk
       fuse.gocryptfs|fuse.encfs|fuse.cryfs|fuse.securefs|fuse.bindfs|fuse.mergerfs|fuse.unionfs|fuse.unionfs-fuse|fuse.fuse-overlayfs) b=0 ;;
       fuse.*) b=1 ;;
-      *) b=0 ;;
+      # A local mount only matters once it can shadow, or sit inside, a
+      # blocking one -- which, in mount order, is after the first of those.
+      *) ((any)) || continue; b=0 ;;
     esac
-    # A local mount only matters once it can shadow, or sit inside, a blocking
-    # one -- which, in mount order, is after the first of those.
-    [ "$b" = 0 ] && [ "$any" = 0 ] && continue
     any=1
-    point="${line#* * * * }"; point="${point%% *}"   # field 5
-    printf -v point '%b' "$point"                      # mountinfo escapes ' ' as \040
-    _MOUNT_BLOCKS["$point"]=$b
-  done < "$f"
+    point=${_mf[4]}
+    [[ $point == *\\* ]] && printf -v point '%b' "$point"   # mountinfo escapes ' ' as \040
+    _MOUNT_TBL[$point]=$b
+    ((b)) && _cand+=("$point")
+  done
+  [ "$_noglob" = 1 ] || set +f
   [ "$any" = 1 ] || return 0
   # never skip what the picker touches anyway (see above)
   local p
   for p in / "$HOME"; do
     [ -n "$p" ] || continue
-    _mount_of "$p" && _MOUNT_BLOCKS["$_MOUNT_AT"]=0
+    _mount_of "$p" && _MOUNT_TBL["$_MOUNT_AT"]=0
   done
-  # nothing left that blocks: empty the table, so the check is free
-  for b in "${_MOUNT_BLOCKS[@]}"; do [ "$b" = 1 ] && break; done
-  [ "$b" = 1 ] || { _MOUNT_BLOCKS=(); return 0; }
+  _mounts_bps ${_cand[@]+"${_cand[@]}"} || return 0
   # ... and the filesystem $HOME RESOLVES onto.  tmux reports a pane's cwd
   # resolved, so a HOME that is a symlink onto a network mount (/home/u ->
   # /gpfs/home/u, as on some clusters) is used through the mount's own path:
@@ -1075,13 +1103,72 @@ _mounts_read() {
   while [ -n "$p" ] && [ "$p" != / ]; do
     if [ -L "$p" ]; then
       p=$(cd -P -- "$HOME" 2>/dev/null && pwd) || return 0
-      [ -n "$p" ] && _mount_of "$p" && _MOUNT_BLOCKS["$_MOUNT_AT"]=0
-      for b in "${_MOUNT_BLOCKS[@]}"; do [ "$b" = 1 ] && return 0; done
-      _MOUNT_BLOCKS=()
+      [ -n "$p" ] && _mount_of "$p" && _MOUNT_TBL["$_MOUNT_AT"]=0
+      _mounts_bps ${_cand[@]+"${_cand[@]}"} || :
       return 0
     fi
     p="${p%/*}"
   done
+}
+
+# _MOUNT_BPS = those of $@ that still block after the exemptions.  With none
+# left the table is emptied, so every check is free, and the status is 1.
+_mounts_bps() {
+  _MOUNT_BPS=()
+  local p
+  local -A seen=()
+  for p in "$@"; do
+    [ "${_MOUNT_TBL[$p]:-0}" = 1 ] && ! [[ -v "seen[$p]" ]] || continue
+    seen["$p"]=1
+    _MOUNT_BPS+=("$p")
+  done
+  [ "${#_MOUNT_BPS[@]}" -gt 0 ] && return 0
+  _MOUNT_TBL=()
+  return 1
+}
+
+# Hand the table to every child of this process -- fzf's preview and reload
+# callbacks -- in INTERDIMUX_MOUNTS: one line per mount point that decides
+# anything, "1<point>" for one that blocks and "0<point>" for a local mount
+# inside one (a tmpfs on an NFS tree); no other local mount changes an answer.
+# Empty means "classified, and nothing blocks"; unset, "not classified".  '\'
+# and newline are escaped as mountinfo does, so a line is a line.
+mounts_export() {
+  [ "$_MOUNTS_READ" = 1 ] || _mounts_read
+  local out="" p e bp keep
+  if [ "${#_MOUNT_BPS[@]}" -gt 0 ]; then
+    for p in "${!_MOUNT_TBL[@]}"; do
+      if [ "${_MOUNT_TBL[$p]}" = 0 ]; then
+        keep=0
+        for bp in "${_MOUNT_BPS[@]}"; do
+          case "$p" in "$bp"/*) keep=1; break ;; esac
+        done
+        [ "$keep" = 1 ] || continue
+      fi
+      e="${p//\\/\\134}"; e="${e//$'\n'/\\012}"
+      out+="${_MOUNT_TBL[$p]}$e"$'\n'
+    done
+  fi
+  export INTERDIMUX_MOUNTS="$out"
+}
+
+_mounts_import() {
+  local -a _me=() _cand=()
+  local e p IFS=$'\n' _noglob=0
+  case $- in *f*) _noglob=1 ;; esac
+  set -f
+  _me=($INTERDIMUX_MOUNTS)
+  [ "$_noglob" = 1 ] || set +f
+  for e in ${_me[@]+"${_me[@]}"}; do
+    p="${e:1}"
+    case "$p" in /*) ;; *) continue ;; esac
+    case "$p" in *\\*) printf -v p '%b' "$p" ;; esac
+    case "$e" in
+      1*) _MOUNT_TBL["$p"]=1; _cand+=("$p") ;;
+      0*) _MOUNT_TBL["$p"]=0 ;;
+    esac
+  done
+  _mounts_bps ${_cand[@]+"${_cand[@]}"} || :
 }
 
 # _MOUNT_AT = the recorded mount point $1 is on (the longest one covering it).
@@ -1092,18 +1179,29 @@ _mount_of() {
   local p="$1"
   case "$p" in /*) ;; *) return 1 ;; esac   # relative: on no recorded mount
   while :; do
-    [[ -v "_MOUNT_BLOCKS[$p]" ]] && { _MOUNT_AT="$p"; return 0; }
+    [[ -v "_MOUNT_TBL[$p]" ]] && { _MOUNT_AT="$p"; return 0; }
     [ "$p" = / ] && return 1
     p="${p%/*}"; [ -n "$p" ] || p=/
   done
 }
 
-# Is $1 on a filesystem whose stat can block?
+# Is $1 on a filesystem whose stat can block?  Also sets _MOUNT_UNDER: 0 when
+# no blocking point is $1 or above it -- and then none is above any ancestor of
+# $1 either, which is how get_git_branch stops asking on its walk up.
 is_remote_path() {
   [ "$_MOUNTS_READ" = 1 ] || _mounts_read
-  [ "${#_MOUNT_BLOCKS[@]}" -gt 0 ] || return 1
+  _MOUNT_UNDER=0
+  [ "${#_MOUNT_BPS[@]}" -gt 0 ] || return 1
   case "$1" in /*) ;; *) return 1 ;; esac
-  _mount_of "$1" && [ "${_MOUNT_BLOCKS[$_MOUNT_AT]}" = 1 ]
+  # The blocking points are few: a path below none of them is answered by one
+  # prefix test each.  Only one below one pays for the walk that asks whether
+  # a local mount inside it (a tmpfs on an NFS tree) is what it is really on.
+  local bp
+  for bp in "${_MOUNT_BPS[@]}"; do
+    case "$1" in "$bp"|"$bp"/*) _MOUNT_UNDER=1; break ;; esac
+  done
+  [ "$_MOUNT_UNDER" = 1 ] || return 1
+  _mount_of "$1" && [ "${_MOUNT_TBL[$_MOUNT_AT]}" = 1 ]
 }
 
 is_project_root() {
@@ -2016,11 +2114,17 @@ get_git_branch() {
   # Up to and INCLUDING "/", as git's own discovery walks (and rust/src/git.rs):
   # a repository at the root is a repository.  $b is the directory with its
   # trailing slash dropped, so the root's marker is "/.git", not "//.git".
-  local d="$dir" b
+  local d="$dir" b _chk=1
   while [ -n "$d" ]; do
     # Never probe a filesystem whose stat can block (is_remote_path): the walk
-    # stops there, badge-less, rather than stall the first paint.
-    is_remote_path "$d" && break
+    # stops there, badge-less, rather than stall the first paint.  Once a level
+    # is below no blocking mount point at all, nothing above it is either, and
+    # the rest of the walk is not asked again.  (Not "ask once, at the start":
+    # a local mount inside an NFS tree is not blocking, but its parent is.)
+    if [ "$_chk" = 1 ]; then
+      is_remote_path "$d" && break
+      [ "$_MOUNT_UNDER" = 1 ] || _chk=0
+    fi
     b="${d%/}"
     local head_file=""
     # A .git DIRECTORY counts only with a HEAD in it, as git's own discovery
@@ -3525,6 +3629,12 @@ if [ "${1:-}" = "--dirs-list" ]; then
         ;;
     esac
   }
+
+  # Classified HERE, in the parent: the `< <(load_recent_dirs)` below runs in a
+  # subshell, which would parse the mount table for itself and then this
+  # process again for detect_project_type (a no-op when ctrl-o's picker has
+  # handed it down -- see mounts_export).
+  [ "$_MOUNTS_READ" = 1 ] || _mounts_read
 
   case "$mode" in
     default)
@@ -5257,6 +5367,10 @@ if [ "${1:-}" = "--dirs" ]; then
   HINT_PREVIEW_PCT=40
   hint_flag enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1
 
+  # Every --dirs-list reload and every --dirs-preview cursor move asks
+  # is_remote_path: classify the mount table once, here, for all of them.
+  mounts_export
+
   # pipefail off for THIS pipeline only, exactly as the navigator's
   # `gather_targets | fzf` needs it.  --dirs-list is a slow STREAMING producer --
   # a filesystem scan, measured at 76 ms with the default config and 4.85 s
@@ -6851,6 +6965,16 @@ QUERY_STATE_FILE="${RESUME_FILE}.query"
 export INTERDIMUX_QUERY_STATE="$QUERY_STATE_FILE"
 
 trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" "$QUERY_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"}' EXIT
+
+# When bash draws the list, every --list reload asks is_remote_path, and so do
+# the directory rows' previews and ctrl-o's picker: classify the mount table
+# once, here, for all of them (see mounts_export) -- the first list inherits it
+# too, so it costs nothing it did not already.  Not with the Rust core, which
+# reads the table itself: there this would be a parse on the way to the first
+# frame, to save one in an asynchronous preview.
+if [ -z "$IMUX_BIN" ] && { [ "$SHOW_GIT_BRANCH" = on ] || [ "$SHOW_DIRS" = on ]; }; then
+  mounts_export
+fi
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"
 ACTION_CMD="bash '$SCRIPT_PATH' --action"
