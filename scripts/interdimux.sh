@@ -1109,7 +1109,7 @@ resolve_session_name() {
 # ---------------------------------------------------------------------------
 #
 # Resolution order, first match wins:
-#   1. ~/.config/interdimux/startup.conf   "<glob><whitespace><command>"
+#   1. ~/.config/interdimux/startup.conf   "<glob><TAB or whitespace><command>"
 #   2. a .interdimux-startup file in the directory itself (contents = command)
 #   3. @interdimux-startup-command          (global fallback)
 #
@@ -1120,23 +1120,122 @@ resolve_session_name() {
 # and double-initialises the shell (breaking gitstatus/p10k).  send-keys keeps
 # the command an ordinary thing the user typed.
 
+# ---------------------------------------------------------------------------
+# Typing a line into a pane
+# ---------------------------------------------------------------------------
+#
+# Every place that types the user's text into a pane -- ctrl-t's send, startup
+# commands, and both scheduled paths -- goes through send_line / sh_send_line,
+# because a bare `send-keys -- "$text" Enter` got three things wrong (all
+# measured on tmux 3.7b):
+#
+#   * tmux's ARGV parser reads an argument ending in ';' as a command separator
+#     and turns a trailing '\;' into ';'.  `find . -exec rm {} \;` arrived as
+#     `... {} ;` (find: missing argument to -exec) while the dialog said
+#     "sent"; `echo x;` failed outright ("unknown command: Enter"); and in the
+#     scheduled paths, where the text was the last word, the ';' was silently
+#     dropped.  One backslash before a trailing ';' undoes exactly what tmux
+#     does to it: 'x;' is passed as 'x\;' and arrives as 'x;', and 'x\;' is
+#     passed as 'x\\;' and arrives as 'x\;'.
+#   * without -l every argument is first looked up as a KEY NAME, so a command
+#     that is just `Enter`, `Home` or `C-c` was pressed rather than typed.
+#   * a pane in copy-mode reads keys as copy-mode bindings: the command never
+#     ran, vi's `D` in "echo COPYMODE" copied into a NEW paste buffer on its way
+#     out of the mode, and the dialog said only "1 failed".  `copy-mode -q`
+#     leaves copy-mode and any other mode (a no-op for a pane in none), so the
+#     command runs as if you had pressed q and typed it -- which is what sending
+#     to that pane asked for, and what a scheduled command firing into a pane
+#     you happen to have scrolled back needs too.  Refusing instead would turn
+#     a W:/S: fan-out into a partial broadcast, and the mode was being left
+#     anyway, minus the command.
+#
+# Enter is a send-keys of its own, so it stays a key (-l would type "Enter").
+# The commands go in ONE tmux invocation, as a `\;` list: no extra fork per
+# pane, and tmux stops at the first one that fails, so a vanished pane still
+# reports failure.
+
+# The argv word that reaches tmux as TEXT.  Sets REPLY.
+tmux_text_arg() {
+  case "$1" in
+    *';') REPLY="${1%;}\\;" ;;
+    *)    REPLY="$1" ;;
+  esac
+}
+
+# send_line TARGET TEXT -- type TEXT into TARGET and press Enter.  Returns
+# tmux's status.  -- so a command starting with '-' is not read as a flag.
+send_line() {
+  local target="$1"
+  tmux_text_arg "$2"
+  tmux copy-mode -q -t "$target" \; \
+       send-keys -t "$target" -l -- "$REPLY" \; \
+       send-keys -t "$target" Enter
+}
+
+# sh_send_line TMUX TARGET TEXT -- send_line as a /bin/sh command line, for the
+# paths that run later under a POSIX shell (the at job body and the sub-minute
+# run-shell), where no bash function exists.  TMUX and TARGET are already sh
+# words (e.g. 'tmux -S "$sock"' and '"$pane"'); TEXT is raw and is quoted here,
+# with shq and never %q.  Sets REPLY.
+sh_send_line() {
+  local tm="$1" tg="$2"
+  tmux_text_arg "$3"; shq "$REPLY"
+  REPLY="$tm copy-mode -q -t $tg \\; send-keys -t $tg -l -- $REPLY \\; send-keys -t $tg Enter"
+}
+
 # The startup command for DIR, or empty.  Sets REPLY.
 resolve_startup_command() {
   local dir="$1" conf="${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/startup.conf"
   REPLY=""
 
   # 1. glob table.  Patterns are matched against the absolute path; the first
-  #    matching line wins, so put specific patterns above general ones.
+  #    matching line wins, so put specific patterns above general ones.  A case
+  #    glob's `*` also matches '/', so `~/code/*-cli` matches ~/code/a/b-cli.
   if [ -f "$conf" ]; then
-    local line pat cmd
+    local line pat cmd rest home_p="" home_p_done=0
     while IFS= read -r line || [ -n "$line" ]; do
+      line="${line#"${line%%[![:space:]]*}"}"   # an indented line still counts
       case "$line" in ''|'#'*) continue ;; esac
-      pat="${line%%[[:space:]]*}"
-      cmd="${line#"$pat"}"
+      # A TAB, when there is one, is THE separator, so a pattern can contain a
+      # space ("~/My Projects/*").  Otherwise the first run of whitespace.
+      if [[ "$line" == *$'\t'* ]]; then
+        pat="${line%%$'\t'*}"
+        pat="${pat%"${pat##*[![:space:]]}"}"
+        cmd="${line#*$'\t'}"
+      else
+        pat="${line%%[[:space:]]*}"
+        cmd="${line#"$pat"}"
+      fi
       cmd="${cmd#"${cmd%%[![:space:]]*}"}"
       [ -n "$pat" ] && [ -n "$cmd" ] || continue
-      # shellcheck disable=SC2254  # the pattern is a glob by design
-      case "$dir" in $pat) REPLY="$cmd"; return 0 ;; esac
+      case "$pat" in
+        '~'|'~/'*)
+          # bash never tilde-expands a variable's value, so `~/work/api*` --
+          # the only form the README showed -- matched nothing.  Expand a
+          # leading ~ (never ~user) by hand: the home part QUOTED so a glob
+          # character in it is literal, the rest left a pattern.  $dir is a
+          # physical path (pwd -P), so when $HOME is reached through a
+          # symlink, also try the physical home.
+          rest="${pat#\~}"
+          # shellcheck disable=SC2254  # the rest is a glob by design
+          case "$dir" in "${HOME%/}"$rest) REPLY="$cmd"; return 0 ;; esac
+          if [ "$home_p_done" = 0 ]; then
+            home_p_done=1
+            home_p=$(cd "$HOME" 2>/dev/null && pwd -P) || home_p=""
+            # an if, not `[ ] && home_p=`: that list's failure is the if's
+            # status, and connect_dir runs under the navigator's set -e
+            if [ "$home_p" = "$HOME" ]; then home_p=""; fi
+          fi
+          if [ -n "$home_p" ]; then
+            # shellcheck disable=SC2254
+            case "$dir" in "${home_p%/}"$rest) REPLY="$cmd"; return 0 ;; esac
+          fi
+          ;;
+        *)
+          # shellcheck disable=SC2254  # the pattern is a glob by design
+          case "$dir" in $pat) REPLY="$cmd"; return 0 ;; esac
+          ;;
+      esac
     done < "$conf"
   fi
 
@@ -1191,12 +1290,14 @@ hydrate_session() {
 
   local target="=$name:"
   wait_pane_ready "$target"
-  # One send-keys per line, so a multi-line .interdimux-startup behaves like
-  # typing each command in turn.
+  # One send per line, so a multi-line .interdimux-startup behaves like typing
+  # each command in turn.  A CR from a CRLF file (startup.conf or the project
+  # file) would be typed as a second Enter, so it goes.
   local line
   while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
     [ -n "$line" ] || continue
-    tmux send-keys -t "$target" -- "$line" Enter 2>/dev/null || true
+    send_line "$target" "$line" 2>/dev/null || true
   done <<< "$cmd"
   return 0
 }
@@ -3246,13 +3347,15 @@ sched_resolve() {
 sched_job_body() {
   local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
   # POSIX quoting, not %q: atd replays this body under /bin/sh.  See shq().
-  local q_logdir q_log q_sock q_want q_pane q_keys
+  local q_logdir q_log q_sock q_want q_pane q_send
   shq "$SCHED_LOGDIR"; q_logdir="$REPLY"
   shq "$SCHED_LOG";    q_log="$REPLY"
   shq "$sock";         q_sock="$REPLY"
   shq "$srvpid";       q_want="$REPLY"
   shq "$pane";         q_pane="$REPLY"
-  shq "$keys";         q_keys="$REPLY"
+  # the whole send, as send_line does it (see there): a trailing ';' survives
+  # tmux's argv parser, and a pane left in copy-mode still runs the command
+  sh_send_line 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
   # One field per line, each "rest of line".  The single-line form packed all
   # three into "pane=… target=… desc=…", which stops being parseable the moment
   # a session name contains a space or the literal "desc=" — and tmux allows
@@ -3281,8 +3384,7 @@ sched_job_body() {
     "  tmux -S \"\$sock\" display-message 'interdimux: scheduled keys skipped (tmux restarted)' 2>/dev/null" \
     "  exit 0" \
     "fi" \
-    "tmux -S \"\$sock\" send-keys -t \"\$pane\" -- ${q_keys} 2>/dev/null || exit 0" \
-    "tmux -S \"\$sock\" send-keys -t \"\$pane\" Enter 2>/dev/null"
+    "${q_send} 2>/dev/null"
 }
 
 # One line per queued interdimux job:  id US when US target US pane US desc
@@ -3360,11 +3462,11 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
     # '##' is tmux's escape for a literal '#'.
     _rs_keys="${_keys//\#/##}"
     # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
+    # sh_send_line quotes the keys itself, after protecting a trailing ';'.
     shq "$SCHED_SOCK"; _q_sock="$REPLY"
     shq "$SCHED_PANE"; _q_pane="$REPLY"
-    shq "$_rs_keys";   _q_keys="$REPLY"
-    tmux run-shell -b -d "$_when" \
-      "tmux -S $_q_sock send-keys -t $_q_pane -- $_q_keys && tmux -S $_q_sock send-keys -t $_q_pane Enter" \
+    sh_send_line "tmux -S $_q_sock" "$_q_pane" "$_rs_keys"
+    tmux run-shell -b -d "$_when" "$REPLY" \
       2>/dev/null \
       && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
       || { echo "interdimux: could not schedule" >&2; exit 1; }
@@ -4184,8 +4286,9 @@ if [ "${1:-}" = "--action" ]; then
 
         sent=0 failed=0
         for t in "${send_targets[@]}"; do
-          # -- so a command starting with '-' is not parsed as a flag
-          if tmux send-keys -t "$t" -- "$send_cmd" Enter 2>/dev/null; then
+          # send_line: literal text, a trailing ';' intact, and a pane in
+          # copy-mode taken out of it first so the command actually runs
+          if send_line "$t" "$send_cmd" 2>/dev/null; then
             sent=$((sent + 1))
           else
             failed=$((failed + 1))

@@ -209,19 +209,22 @@ if [ -n "$jid2" ]; then
   imux_body=$(printf '%s\n' "$body" | sed -n '/^# imux:v1 /,$p')
 
   shimdir="$TMPD_SCHED/shim"; mkdir -p "$shimdir"
+  # The send is ONE tmux invocation, a ';'-separated list whose text is the
+  # word after `send-keys ... -l --` (see send_line), so find that word
+  # rather than assume a position in the list.
   cat > "$shimdir/tmux" <<'SHIM'
 #!/bin/sh
-# invoked as: tmux -S <sock> <verb> ...
+# invoked as: tmux -S <sock> <command> [args] [; <command> [args]]...
 shift 2            # past -S <sock>
-verb=$1; shift
-case "$verb" in
-  display-message) cat "$IMUX_SHIM_PID" ;;
-  send-keys)
-    shift 2        # past -t <pane>
-    [ "$1" = "--" ] && shift
-    [ "$1" = "Enter" ] || printf '%s' "$1" > "$IMUX_SHIM_SENT"
-    ;;
+case "$1" in
+  display-message) cat "$IMUX_SHIM_PID"; exit 0 ;;
 esac
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-l" ] && [ "${2:-}" = "--" ]; then
+    printf '%s' "$3" > "$IMUX_SHIM_SENT"; exit 0
+  fi
+  shift
+done
 SHIM
   chmod +x "$shimdir/tmux"
   printf '%s' "$(tmux -L "$SOCK" display-message -p '#{pid}')" > "$TMPD_SCHED/pid"

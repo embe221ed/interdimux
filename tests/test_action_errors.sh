@@ -148,7 +148,8 @@ fi
 _dash_ok=1
 grep -q 'rename-session -t "$target" -- "$new_name"' "$SCRIPT" || _dash_ok=0
 grep -q 'rename-window  -t "$target" -- "$new_name"' "$SCRIPT" || _dash_ok=0
-grep -q 'send-keys -t "$t" -- "$send_cmd"' "$SCRIPT" || _dash_ok=0
+# (send's leading dash is checked by what the pane receives, in
+# tests/test_send_literal.sh -- send goes through send_line now)
 [ "$_dash_ok" = 1 ] && report "user text is passed after -- so a leading dash is not a flag" pass \
                     || report "user text is passed after -- so a leading dash is not a flag" fail
 
