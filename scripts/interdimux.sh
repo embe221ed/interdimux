@@ -5635,7 +5635,12 @@ while true; do
           # fzf has a SECOND gutter option that only applies in raw mode;
           # blanking just --gutter left a stray ▖ on every non-current row.
           --gutter-raw=' '
-          --bind="enter:transform:[ \"\${FZF_MATCH_COUNT:-0}\" -eq 0 ] && echo 'execute(bash \"$SQ_SCRIPT\" --create-from-query {q})+abort' || echo accept"
+          # "$FZF_QUERY", not {q}: {q} is single-quoted by fzf and lands INSIDE
+          # the echo's own single quotes, so the quoting cancels and `zzz shell`
+          # reached --create-from-query as two words — it created `zzz` while the
+          # bar promised `zzz-shell`.  fzf exports FZF_QUERY to execute's shell,
+          # so the query is never re-parsed.
+          --bind="enter:transform:[ \"\${FZF_MATCH_COUNT:-0}\" -eq 0 ] && echo 'execute(bash \"$SQ_SCRIPT\" --create-from-query \"\$FZF_QUERY\")+abort' || echo accept"
         )
       fi
 

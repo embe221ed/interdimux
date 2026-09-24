@@ -7,7 +7,9 @@
 #
 #   * fzf matches the identity column AS DISPLAYED, so once the prefix read
 #     `my-pr…` the query `my-project shell` matched nothing — on an 80-column
-#     popup, with a perfectly ordinary name (review BUG-02).
+#     popup, with a perfectly ordinary name (review BUG-02).  In raw mode, Enter
+#     on that empty result then ran find-or-create with the query split into
+#     words, creating `zzz` while the bar promised `zzz-shell`.
 #   * one 39-cell path anywhere in the tree zeroed the badge, and the flags with
 #     it, on EVERY row of a 96-column popup, without the path giving up a single
 #     cell first (review BUG-24).
@@ -264,6 +266,69 @@ if [ -x "$BIN" ]; then
   fi
 else
   echo "  (skipped the parity sweep: $BIN not built)"
+fi
+
+# --- 6. Enter on a zero-match query creates what the bar announced ------------
+# Raw mode (fzf >= 0.74) performs find-or-create inside fzf, from the enter bind.
+# Runs LAST: it creates sessions on the bench.
+fzf_minor=$(fzf --version 2>/dev/null | awk '{print $1}' | cut -d. -f2)
+if [ "${fzf_minor:-0}" -lt 74 ]; then
+  echo "  (skipped the raw-mode Enter cases: fzf >= 0.74 needed, found 0.${fzf_minor:-?})"
+else
+  known=$(tmux -L "$SOCK" list-sessions -F '#S' | sort)
+  bar_name() { plain | sed -n 's/^ *create \(.*\) in .*/\1/p' | head -1; }
+  enter_query() { # $1 = query, $2 = the name the bar must announce first
+    # sets BAR (what the bar last announced) and MADE (the sessions created)
+    tmux -L "$SOCK" kill-session -t '=drv' 2>/dev/null || true
+    tmux -L "$SOCK" new-session -d -s drv -x 140 -y 24 -c "$H" \
+      "env HOME='$H' XDG_DATA_HOME='$TMPD/data' TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' \
+           INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
+           INTERDIMUX_SHOW_DIRS=off INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_PREVIEW=off \
+           FZF_DEFAULT_OPTS= bash '$SCRIPT'; sleep 60"
+    known=$(printf '%s\ndrv\n' "$known" | sort -u)
+    until_ok 150 eval "tmux -L '$SOCK' capture-pane -t '=drv:' -p 2>/dev/null | grep -q '▸'" || true
+    tmux -L "$SOCK" send-keys -t '=drv:' -l "$1"
+    # Wait for the announcement of the WHOLE query: keys arrive one by one, and
+    # the bar says `create z …` the moment the first one matches nothing.
+    # Pressing Enter before it settles would test a different query.
+    BAR=""
+    local i
+    for i in $(seq 1 150); do
+      BAR=$(tmux -L "$SOCK" capture-pane -t '=drv:' -p 2>/dev/null | bar_name)
+      [ "$BAR" = "$2" ] && break
+      sleep 0.1
+    done
+    tmux -L "$SOCK" send-keys -t '=drv:' Enter
+    MADE=""
+    for i in $(seq 1 100); do
+      MADE=$(comm -13 <(printf '%s\n' "$known") <(tmux -L "$SOCK" list-sessions -F '#S' | sort))
+      [ -n "$MADE" ] && break
+      sleep 0.1
+    done
+    known=$(printf '%s\n%s\n' "$known" "$MADE" | grep -v '^$' | sort -u)
+  }
+
+  enter_query 'zzz shell' 'zzz-shell'
+  if [ "$BAR" = "zzz-shell" ] && [ "$MADE" = "zzz-shell" ]; then
+    report "Enter on 'zzz shell' creates zzz-shell, as the bar said" pass
+  else
+    report "Enter on 'zzz shell' creates zzz-shell, as the bar said" fail
+    ERRORS+="     bar announced '${BAR}', created '$(printf '%s' "$MADE" | tr '\n' ' ')'"$'\n'
+  fi
+
+  # Shell metacharacters: the query must reach find-or-create as ONE argument,
+  # never re-parsed on the way.  The name to expect is whatever the bar
+  # announces for it (--describe-create is what draws the bar); the claim under
+  # test is that Enter does what the bar said.
+  q="it's (a) \$HOME \"x\""
+  want=$(bash "$SCRIPT" --describe-create "$q" 2>/dev/null | bar_name) || true
+  enter_query "$q" "$want"
+  if [ -n "$want" ] && [ "$BAR" = "$want" ] && [ "$MADE" = "$want" ]; then
+    report "a query with quotes, parens and \$ creates exactly the announced session" pass
+  else
+    report "a query with quotes, parens and \$ creates exactly the announced session" fail
+    ERRORS+="     want '$want', bar announced '${BAR}', created '$(printf '%s' "$MADE" | tr '\n' ' ')'"$'\n'
+  fi
 fi
 
 echo
