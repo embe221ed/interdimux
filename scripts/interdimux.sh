@@ -4702,7 +4702,8 @@ popup_accent() {
 #   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
 #   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
 #   combining marks (Latin, symbol, kana), ZWJ,   0
-#     U+FE00-FE0E
+#     U+FE00-FE0E, medial and final Hangul
+#     jamo, the Hangul filler U+3164
 #   everything else                               1
 #
 # so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
@@ -4713,7 +4714,12 @@ popup_accent() {
 #
 # "Wide" and "0" are what tmux draws (measured on 3.7b, every code point of
 # U+1100-11FF, U+2000-30FF, U+FE00-FE0F and U+1F000-1FAFF, against
-# #{cursor_x}).  Below
+# #{cursor_x}).  The medial and final jamo -- U+1160-11FF, and the assigned
+# parts of U+D7B0-D7FF (the unassigned D7C7-D7CA and D7FC-D7FF draw one) --
+# are 0 on any cell: tmux joins them to the cell before, the way it joins a
+# mark, and one it cannot join is dropped.  That is how macOS stores a Korean
+# name (NFD, 한 as U+1112 U+1161 U+11AB), one wide cell a syllable; counted one
+# each, the field's cursor drifted two cells right per syllable.  Below
 # U+2E80 that is a scattering of emoji -- ✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ and ~60 more -- which
 # counted 1 for the 2 tmux draws, so three of them typed into Send keys left
 # the cursor three cells short, and a long command with a few in it ran
@@ -4743,7 +4749,8 @@ dlg_width() {
       n=$(( n + 1 ))
     elif (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || (cp >= 0xfe00 && cp <= 0xfe0e) \
          || (cp >= 0x20d0 && cp <= 0x20f0) || (cp >= 0x302a && cp <= 0x302d) \
-         || cp == 0x3099 || cp == 0x309a )); then
+         || cp == 0x3099 || cp == 0x309a || (cp >= 0x1160 && cp <= 0x11ff) \
+         || (cp >= 0xd7b0 && cp <= 0xd7c6) || (cp >= 0xd7cb && cp <= 0xd7fb) || cp == 0x3164 )); then
       :
     elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
          || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
@@ -4977,7 +4984,16 @@ _dlg_cells() {
 # widens, so a 0 always means "drawn into the cell before": the view must never
 # start on one, where it would join the prompt's cell.  Measured one character
 # at a time, 👍🏽 came to 4, 👨‍👩‍👧 to 6, and ⚙️ to 1+1, so a view could open on
-# its U+FE0F.  (A regional indicator is 1 either way -- see dlg_width.)
+# its U+FE0F.  (A regional indicator is 1 either way -- see dlg_width, which
+# also has the medial and final Hangul jamo at 0.)
+#
+# One rule of that tmux function is left out on purpose: it also joins a
+# modifier BASE to a skin tone standing alone before it -- 🏽👍 is two cells,
+# counted four here.  Whether a tone stands alone depends on every character
+# before it (🏽👍🏽👍 is 2+2 in tmux, 🏽👍🏽 is 2+2 too), so no fixed-size
+# re-measure keeps it right, and leaving it out only ever errs WIDE: at every
+# point of such a run the count here is at least tmux's, so the cursor may sit
+# right of the text but the text never reaches the border.
 _DLG_VS16=$'\xef\xb8\x8f'                 # U+FE0F, as bytes: no locale needed
 _dlg_cw() {
   local cp pp

@@ -519,6 +519,51 @@ check "the cursor follows decomposed kana (が as か + U+3099)" \
       "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
 keys Escape
 
+# Hangul decomposed the same way -- 한 as ᄒ + ᅡ + ᆫ, U+1112 U+1161 U+11AB --
+# is one wide cell a syllable: tmux draws a medial or final jamo into the cell
+# before it, like a mark.  Counted one cell each, they left the cursor two
+# cells right of the text per syllable, and a view could open on one and draw
+# it onto the prompt's blank, where they piled up.
+open_send "decomposed Hangul"
+HAN=$'한' GUK=$'국'
+typed "${HAN}${GUK}"
+wait_vis "${HAN}${GUK}" || true
+run cursor_after "${HAN}${GUK}"
+check "the cursor follows decomposed Hangul (한국 as six jamo)" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+open_send "decomposed Hangul at the left edge"
+snap
+field_geometry
+hanline=""
+for (( _k = 0; _k < FIELD_W / 2 + 4; _k++ )); do hanline+="$HAN"; done
+typed "${hanline}z"
+wait_vis "${HAN}z" tail || true
+run cursor_after "$VIS"
+check "the cursor follows a scrolled line of decomposed Hangul" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+_lefts=()
+for (( _k = 0; _k < ${#hanline} + 1; _k++ )); do _lefts+=(Left); done
+keys "${_lefts[@]}"
+run cursor_after ""
+check "Left through decomposed Hangul brings the cursor to the field's start" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+case "${VIS:0:1}" in "${HAN:1:1}"|"${HAN:2:1}") RC=1 ;; *) RC=0 ;; esac
+check "Left through decomposed Hangul never draws a jamo onto the prompt" \
+      "field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# U+3164, the Hangul filler, is ignored by tmux outright: no cell at all.
+open_send "the Hangul filler"
+FILLER=$'ㅤ'
+typed "a${FILLER}b"
+wait_vis "ab" || true
+run cursor_after "a${FILLER}b"
+check "the cursor follows text with a Hangul filler (U+3164) in it" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
 # ---------------------------------------------------------------------------
 # 6. Emoji that tmux draws two cells wide
 # ---------------------------------------------------------------------------
