@@ -3471,7 +3471,12 @@ IMUX_SECTIONS
   set -f
   IFS=$'\n'; _glines=($all_windows_raw); unset IFS
   for _gl in ${_glines[@]+"${_glines[@]}"}; do
-    IFS="$US"; _gf=($_gl); unset IFS
+    # The US appended is the one a split drops: word splitting ends the last
+    # field at a terminating separator instead of giving the EMPTY field after
+    # it, as Rust's split(US) does.  With one more US, a line tmux cut (it ends
+    # in US) keeps that empty last field -- and so is counted exactly as the
+    # Rust core counts it.
+    IFS="$US"; _gf=($_gl$US); unset IFS
     # MORE than nine fields: a US inside pane_current_path (a directory may be
     # named anything but '/' and NUL).  Every field after the path was then the
     # one to its left -- the pane count read "part2", the flags "1<US>000", and
@@ -3479,6 +3484,8 @@ IMUX_SECTIONS
     # bell it did not have and stderr got "integer expression expected".  There
     # is no telling which US is the path's, so the row is dropped, as the Rust
     # core drops it (main.rs, `f.len() > 9`); its session header still renders.
+    # Cut as well, before its flags, such a line used to count as nine and pass
+    # as whole, and the same shift drew PID 1's command again.
     [ "${#_gf[@]}" -gt 9 ] && continue
     _w1=${_gf[0]-} _w2=${_gf[1]-} _w3=${_gf[2]-} _w4=${_gf[3]-} _w5=${_gf[4]-}
     _w6=${_gf[5]-} _w7=${_gf[6]-} _w8=${_gf[7]-} _w9=${_gf[8]-}
@@ -3514,7 +3521,7 @@ IMUX_SECTIONS
   set -f
   IFS=$'\n'; _glines=($all_panes_raw); unset IFS
   for _gl in ${_glines[@]+"${_glines[@]}"}; do
-    IFS="$US"; _gf=($_gl); unset IFS
+    IFS="$US"; _gf=($_gl$US); unset IFS   # the appended US: see above
     [ "${#_gf[@]}" -gt 8 ] && continue   # a US in its cwd: see above
     sn=${_gf[0]-} widx=${_gf[1]-} _p3=${_gf[2]-} _p4=${_gf[3]-}
     _p5=${_gf[4]-} _p6=${_gf[5]-} _p7=${_gf[6]-} _p8=${_gf[7]-}
