@@ -4950,9 +4950,13 @@ if [ "${1:-}" = "--doctor" ]; then
         case "$v" in *%) case "${v%\%}" in ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
                      ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
       color-*)
+        # Exactly: '#' and six hex digits, 0-255, -1, or default.  The length
+        # alone let '#zzzzzz' through.  [[:xdigit:]] rather than a range: under
+        # bash < 5 a range follows the locale's collation.
         case "$v" in
           default|-1) ;;
-          '#'*) [ "${#v}" -eq 7 ] || printf 'a hex colour must be #rrggbb' ;;
+          '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) ;;
+          '#'*) printf 'a hex colour must be #rrggbb' ;;
           ''|*[!0-9]*) printf 'expected #rrggbb, a 0-255 index, or default' ;;
           # Length first: `[ "$v" -le 255 ]` on a 26-digit number is not false,
           # it is "integer expression expected" ON STDERR — which used to land

@@ -239,6 +239,17 @@ setopt key 'ff'
 has "a key tmux does not know is still a problem" "$(doctor)" "✗ @interdimux-key = 'ff'"
 unsetopt key
 
+# --- colours: exactly #rrggbb, 0-255, -1, default --------------------------------------
+# color-border feeds only fzf's --color, so a bad value there cannot stop the
+# script before the report.
+setopt color-border '#zzzzzz'
+has "a '#' and six non-hex characters is not a colour" "$(doctor)" "✗ @interdimux-color-border = '#zzzzzz'"
+for good in '#E78A4E' '-1' 'default' '255'; do
+  setopt color-border "$good"
+  hasnt "color-border '$good' is accepted" "$(doctor)" "✗ @interdimux-color-border"
+done
+unsetopt color-border
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi
