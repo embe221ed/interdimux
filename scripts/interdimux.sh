@@ -1825,7 +1825,7 @@ resolve_startup_command() {
       cmd="${cmd#"${cmd%%[![:space:]]*}"}"
       [ -n "$pat" ] && [ -n "$cmd" ] || continue
       case "$pat" in
-        '~'|'~/'*)
+        \~|\~/*)
           # bash never tilde-expands a variable's value, so `~/work/api*` --
           # the only form the README showed -- matched nothing.  Expand a
           # leading ~ (never ~user) by hand: the home part QUOTED so a glob
@@ -3265,11 +3265,11 @@ imux_autobuild_running() { # $1 = the checkout
 # -- only a refused binary gets here -- and nothing in it can fail the list.
 imux_refused() {
   local dir="${SCHED_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/interdimux}"
-  local repo="${SCRIPT_PATH%/scripts/*}" stamp seen="" how msg
+  local repo="${SCRIPT_PATH%/scripts/*}" stamp seen_bin="" how msg
   stamp="$dir/imux-refused"
   if [ -f "$stamp" ] && ! [ "$IMUX_BIN" -nt "$stamp" ]; then
-    { IFS= read -r seen < "$stamp"; } 2>/dev/null || :
-    [ "$seen" = "$IMUX_BIN" ] && return 0
+    { IFS= read -r seen_bin < "$stamp"; } 2>/dev/null || :
+    [ "$seen_bin" = "$IMUX_BIN" ] && return 0
   fi
   if [ "$IMUX_BIN" = "$repo/rust/target/release/imux" ]; then
     imux_autobuild_running "$repo" && return 0
@@ -5459,7 +5459,7 @@ input_dialog() {
           if (( pos == len && k >= 0x20 && k < 0x7f )); then
             # ASCII at the end -- typing, and every character of a paste:
             # nothing either side changes width, so append, and slice nothing
-            buf+="$c" cw+=1
+            buf+="$c" cw+="1"   # cw is a string of per-character widths
           else
             buf="${buf:0:pos}$c${buf:pos}" cw="${cw:0:pos}0${cw:pos}"
             _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; _dlg_remeasure $(( pos + 1 ))

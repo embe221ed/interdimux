@@ -94,6 +94,7 @@ expect() {
 }
 
 # --- the README's own forms ---------------------------------------------------
+# shellcheck disable=SC2088  # literal ~ is the point: the plugin expands it itself
 {
   printf '%s\n' '# the README examples, verbatim in shape'
   printf '%s\n' '~/work/api*        echo FROM_TILDE_GLOB'

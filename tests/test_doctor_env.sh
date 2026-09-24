@@ -203,8 +203,10 @@ tdir="imux-tilde-$$"
 mkdir -p "$TMPD/home/$tdir"
 ln -s "$(command -v fzf)" "$TMPD/home/$tdir/fzf"
 senv HOME "$TMPD/home"
+# shellcheck disable=SC2088  # a literal ~ in PATH is the case under test
 senv PATH "~/$tdir:$TMPD/nofzf"
 # bash's own search is the authority: it finds fzf there, and a literal one does not.
+# shellcheck disable=SC2088  # likewise: bash expands it in PATH, [ -x ] does not
 if [ -n "$(env HOME="$TMPD/home" PATH="~/$tdir:$TMPD/nofzf" bash -c 'type -P fzf')" ] \
    && ! [ -x "~/$tdir/fzf" ]; then
   out=$(doctor)
