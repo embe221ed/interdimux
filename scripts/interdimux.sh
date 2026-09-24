@@ -1970,31 +1970,50 @@ get_git_branch() {
     return
   fi
 
-  local d="$dir"
-  while [ "$d" != "/" ] && [ -n "$d" ]; do
+  # Up to and INCLUDING "/", as git's own discovery walks (and rust/src/git.rs):
+  # a repository at the root is a repository.  $b is the directory with its
+  # trailing slash dropped, so the root's marker is "/.git", not "//.git".
+  local d="$dir" b
+  while [ -n "$d" ]; do
     # Never probe a filesystem whose stat can block (is_remote_path): the walk
     # stops there, badge-less, rather than stall the first paint.
     is_remote_path "$d" && break
+    b="${d%/}"
     local head_file=""
-    if [ -d "$d/.git" ]; then
-      head_file="$d/.git/HEAD"
-    elif [ -f "$d/.git" ]; then
-      # Worktrees/submodules: .git is a file containing "gitdir: <path>"
-      local gitdir_line
-      read -r gitdir_line < "$d/.git" 2>/dev/null || { d="${d%/*}"; continue; }
-      local gitdir="${gitdir_line#gitdir: }"
-      # Resolve relative paths
-      case "$gitdir" in
-        /*) ;;
-        *)  gitdir="$d/$gitdir" ;;
-      esac
-      is_remote_path "$gitdir" && break   # a worktree whose repository is on one
-      [ -f "$gitdir/HEAD" ] && head_file="$gitdir/HEAD"
+    # A .git DIRECTORY counts only with a HEAD in it, as git's own discovery
+    # has it: an empty one (a half-made clone, a stray `mkdir .git` inside a
+    # repo) is skipped and the walk goes on to the enclosing repository.
+    if [ -d "$b/.git" ]; then
+      [ -f "$b/.git/HEAD" ] && head_file="$b/.git/HEAD"
+    elif [ -f "$b/.git" ]; then
+      # Worktrees/submodules: .git is a file containing "gitdir: <path>".
+      # `read` reports EOF on a last line with no newline AFTER assigning it --
+      # the trap live_preview_state documents -- so the status is ignored and
+      # the VALUE decides.  `|| continue` here threw away a newline-less
+      # gitdir file that the Rust core (and git) read.  A CRLF file keeps its
+      # CR through `read`; git and the Rust core strip it.
+      local gitdir_line=""
+      { read -r gitdir_line < "$b/.git"; } 2>/dev/null || :
+      gitdir_line="${gitdir_line%$'\r'}"
+      if [ -n "$gitdir_line" ]; then
+        local gitdir="${gitdir_line#gitdir: }"
+        # Resolve relative paths
+        case "$gitdir" in
+          /*) ;;
+          *)  gitdir="$b/$gitdir" ;;
+        esac
+        is_remote_path "$gitdir" && break   # a worktree whose repository is on one
+        [ -f "$gitdir/HEAD" ] && head_file="$gitdir/HEAD"
+      fi
     fi
 
-    if [ -n "$head_file" ] && [ -f "$head_file" ]; then
-      local head_content
-      read -r head_content < "$head_file" 2>/dev/null || break
+    if [ -n "$head_file" ]; then
+      # The same EOF trap: a HEAD written without a trailing newline (by a
+      # tool, or by hand) is a valid HEAD to git, and `read || break` dropped it.
+      local head_content=""
+      { read -r head_content < "$head_file"; } 2>/dev/null || :
+      head_content="${head_content%$'\r'}"
+      [ -n "$head_content" ] || break
       local branch=""
       case "$head_content" in
         "ref: refs/heads/"*) branch="${head_content#ref: refs/heads/}" ;;
@@ -2004,7 +2023,10 @@ get_git_branch() {
       REPLY="$branch"
       return
     fi
-    d="${d%/*}"
+    [ "$d" = "/" ] && break
+    case "$b" in */*) ;; *) break ;; esac   # relative: nothing above it to walk to
+    d="${b%/*}"
+    [ -n "$d" ] || d="/"
   done
 
   GIT_BRANCH_CACHE["$_cache_key"]=""
