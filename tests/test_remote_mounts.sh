@@ -73,9 +73,26 @@ mkproj "$TMPD/local/work"   localwork
 mkproj "$TMPD/vault/proj"   vaultbranch
 mkproj "$TMPD/home/proj"    homebranch
 mkproj "$TMPD/local/zdir"   zoxidebranch
-mkdir -p "$TMPD/data/interdimux" "$TMPD/bin"
+# A $HOME that is a symlink onto an NFS mount (/home/u -> /gpfs/home/u, as on
+# some clusters): tmux reports a pane's cwd resolved, so the pane "in ~/proj"
+# is in gpfs/u/proj.
+mkproj "$TMPD/gpfs/u/proj"  gpfsproj
+mkproj "$TMPD/gpfs/u/other" gpfsother
+ln -s "$TMPD/gpfs/u" "$TMPD/linkhome"
+# 9p: WSL2's Windows drives (drvfs, over fd) and a real network share (over tcp)
+mkproj "$TMPD/wsl/c/work"   drvfswork
+mkproj "$TMPD/wsl/c/proj"   drvfsproj
+mkproj "$TMPD/net9p/proj"   net9pproj
+# A repository whose root is on NFS, with a local tmpfs mounted inside it: the
+# git walk from inside the tmpfs must stop at the NFS level, and one that finds
+# its own repository first keeps its badge.
+mkproj "$TMPD/nfsrepo"      nfsrepobranch
+mkdir -p "$TMPD/nfsrepo/scratch/work"
+mkproj "$TMPD/nfsrepo/scratch/own" ownbranch
+mkdir -p "$TMPD/data/interdimux" "$TMPD/bin" "$TMPD/fzfbin" "$TMPD/run"
+chmod 700 "$TMPD/run"
 printf '%s\n' "$TMPD/nas/proj" "$TMPD/nas/gone" "$TMPD/local/proj" "$TMPD/vault/proj" "$TMPD/home/proj" \
-  > "$TMPD/data/interdimux/recent_dirs"
+  "$TMPD/gpfs/u/other" "$TMPD/wsl/c/proj" "$TMPD/net9p/proj" > "$TMPD/data/interdimux/recent_dirs"
 
 MI="$TMPD/mountinfo"
 {
@@ -83,11 +100,21 @@ MI="$TMPD/mountinfo"
   echo "900 1 0:900 / $TMPD/nas rw,relatime shared:900 - nfs4 srv:/nas rw"
   echo "901 1 0:901 / $TMPD/vault rw,nosuid shared:901 - fuse.gocryptfs $TMPD/.vault rw"
   echo "902 1 0:902 / $TMPD/home rw,relatime shared:902 - nfs4 srv:/home rw"
+  echo "903 1 0:903 / $TMPD/gpfs rw,relatime shared:903 - nfs4 srv:/gpfs rw"
+  # verbatim from a WSL2 host, but for the path
+  echo "904 1 0:904 / $TMPD/wsl/c rw,noatime - 9p drvfs rw,dirsync,aname=drvfs;path=C:\;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client,msize=65536,trans=fd,rfd=5,wfd=5"
+  echo "905 1 0:905 / $TMPD/net9p rw,relatime - 9p 10.0.0.1 rw,access=user,trans=tcp,port=564"
+  echo "906 1 0:906 / $TMPD/nfsrepo rw,relatime shared:906 - nfs4 srv:/repo rw"
+  echo "907 906 0:907 / $TMPD/nfsrepo/scratch rw shared:907 - tmpfs tmpfs rw"
 } > "$MI"
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s bench -x 200 -y 50 -c "$TMPD/home" 'sleep 99999'
 tmux -L "$SOCK" new-session -d -s naspane -x 200 -y 50 -c "$TMPD/nas/work" 'sleep 99999'
 tmux -L "$SOCK" new-session -d -s locpane -x 200 -y 50 -c "$TMPD/local/work" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s gpane -x 200 -y 50 -c "$TMPD/gpfs/u/proj" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s wslpane -x 200 -y 50 -c "$TMPD/wsl/c/work" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s nestpane -x 200 -y 50 -c "$TMPD/nfsrepo/scratch/work" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s ownpane -x 200 -y 50 -c "$TMPD/nfsrepo/scratch/own" 'sleep 99999'
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=bench:0' -F '#{pane_id}' | head -1)"
 export HOME="$TMPD/home" XDG_DATA_HOME="$TMPD/data"
@@ -96,7 +123,9 @@ export INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_GIT_BRA
 export INTERDIMUX_DIRS_LIMIT=20 INTERDIMUX_PROJECT_DIRS="$TMPD/nowhere"
 # wide enough that the git-badge column is on (it is off at 80 columns)
 export FZF_COLUMNS=200 INTERDIMUX_NOW="$(date +%s)"
-wait_for "the panes' cwds" sh -c "tmux -L '$SOCK' list-panes -a -F '#{pane_current_path}' | grep -qx '$TMPD/nas/work'"
+for _d in nas/work gpfs/u/proj wsl/c/work nfsrepo/scratch/work nfsrepo/scratch/own; do
+  wait_for "the panes' cwds ($_d)" sh -c "tmux -L '$SOCK' list-panes -a -F '#{pane_current_path}' | grep -qx '$TMPD/$_d'"
+done
 
 renderers="off"
 [ -x "$BIN" ] && renderers="on off"
@@ -171,6 +200,124 @@ if [ -n "$nas" ] && [ "$(printf '%s' "$nas" | cut -f2)" = "" ] && [ "$(printf '%
 else
   report "--dirs-list: no type probe on the NFS row, the local one is typed (nas: $nas / local: $loc)" fail
 fi
+
+# $HOME is a symlink onto an NFS mount (review #25).  The exemption went to the
+# mount covering the literal $HOME string -- the local root here -- so the NFS
+# mount the panes are really on stayed skipped and every pane in the home lost
+# its badge.
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  LIST_ENV="INTERDIMUX_MOUNTINFO=$MI HOME=$TMPD/linkhome"
+  got=$(row "$r" "W:gpane:0")
+  case "$got" in *"‹gpfsproj›"*) report "$label: a pane in a \$HOME that is a symlink onto NFS keeps its git badge" pass ;;
+                 *) report "$label: a pane in a \$HOME that is a symlink onto NFS keeps its git badge (got: $got)" fail ;; esac
+  got=$(row "$r" "D:$TMPD/gpfs/u/other")
+  badged "$got" gpfsother && report "$label: a recent dir there keeps its git and type badges" pass \
+                          || report "$label: a recent dir there keeps its git and type badges (got: $got)" fail
+  got=$(row "$r" "D:$TMPD/nas/proj")
+  if [ -n "$got" ] && ! printf '%s' "$got" | grep -q -e '‹' -e 'Rust'; then
+    report "$label: ... and another NFS mount is still skipped" pass
+  else
+    report "$label: ... and another NFS mount is still skipped (got: $got)" fail
+  fi
+done
+dl=$(HOME="$TMPD/linkhome" INTERDIMUX_MOUNTINFO="$MI" bash "$SCRIPT" --dirs-list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+got=$(printf '%s\n' "$dl" | awk -F'\t' -v d="$TMPD/gpfs/u/other" '$3 == d { print $2 }')
+[ "$got" = Rust ] && report "--dirs-list: a dir in a symlinked NFS \$HOME is typed" pass \
+                 || report "--dirs-list: a dir in a symlinked NFS \$HOME is typed (got: '$got')" fail
+
+# 9p by its transport (review #27).  WSL2's Windows drives are 9p over fd
+# (drvfs): the local disk, slow per stat but never a hung server -- every
+# project on /mnt/c had lost its badges.  9p over tcp is a network share.
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  LIST_ENV="INTERDIMUX_MOUNTINFO=$MI"
+  got=$(row "$r" "W:wslpane:0")
+  case "$got" in *"‹drvfswork›"*) report "$label: a pane on WSL2's drvfs (9p over fd) keeps its git badge" pass ;;
+                 *) report "$label: a pane on WSL2's drvfs (9p over fd) keeps its git badge (got: $got)" fail ;; esac
+  got=$(row "$r" "D:$TMPD/wsl/c/proj")
+  badged "$got" drvfsproj && report "$label: a dir row on drvfs keeps its git and type badges" pass \
+                          || report "$label: a dir row on drvfs keeps its git and type badges (got: $got)" fail
+  got=$(row "$r" "D:$TMPD/net9p/proj")
+  if [ -n "$got" ] && ! printf '%s' "$got" | grep -q -e '‹' -e 'Rust'; then
+    report "$label: a dir row on 9p over tcp is not probed" pass
+  else
+    report "$label: a dir row on 9p over tcp is not probed (got: $got)" fail
+  fi
+done
+
+# The git walk from inside a local mount that sits in an NFS tree stops at the
+# NFS level.  (The walk asks at each level only while it is below some
+# blocking mount point; "is the START on one" alone would answer no here, and
+# the walk would go on to probe the NFS repository above.)
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  LIST_ENV=""   # control: on the real table the walk does reach the repository
+  got=$(row "$r" "W:nestpane:0")
+  case "$got" in *"‹nfsrepobranch›"*) report "$label control: the walk from the nested dir reaches the repository above" pass ;;
+                 *) report "$label control: the walk from the nested dir reaches the repository above (got: $got)" fail ;; esac
+  LIST_ENV="INTERDIMUX_MOUNTINFO=$MI"
+  got=$(row "$r" "W:nestpane:0")
+  if [ -n "$got" ] && ! printf '%s' "$got" | grep -q '‹'; then
+    report "$label: from a local mount inside NFS, the git walk stops at the NFS level" pass
+  else
+    report "$label: from a local mount inside NFS, the git walk stops at the NFS level (got: $got)" fail
+  fi
+  got=$(row "$r" "W:ownpane:0")
+  case "$got" in *"‹ownbranch›"*) report "$label: ... and a repository inside the local mount keeps its badge" pass ;;
+                 *) report "$label: ... and a repository inside the local mount keeps its badge (got: $got)" fail ;; esac
+done
+
+# Classified once per picker, not once per callback (review #30): the ctrl-o
+# picker, and the navigator when bash draws the list, read the mount table
+# before fzf starts, and every callback fzf runs inherits their answer.  Each
+# parse had been 2-25 ms on every preview cursor move and every reload.
+#
+# The oracle is behavioural: a stand-in fzf REWRITES the table on disk -- the
+# NFS line gone -- and then runs the callbacks the way fzf would, as its own
+# children.  One that re-read the table would now probe the "NFS" directory
+# and badge it; one that inherited the picker's answer does not.  The control
+# runs the same callback outside any picker, after the rewrite.
+cat /proc/self/mountinfo > "$TMPD/mi-plain"
+cat > "$TMPD/fzfbin/fzf" <<FZF
+#!/bin/sh
+cat > /dev/null
+cp "$TMPD/mi-plain" "$TMPD/mi-live"
+bash "$SCRIPT" --dirs-preview "$TMPD/nas/proj" > "$TMPD/cb-preview" 2>&1
+bash "$SCRIPT" --dirs-list > "$TMPD/cb-dirs" 2>&1
+bash "$SCRIPT" --list > "$TMPD/cb-list" 2>&1
+exit 130
+FZF
+chmod +x "$TMPD/fzfbin/fzf"
+cb_row() { sed 's/\x1b\[[0-9;]*m//g' "$TMPD/$1" 2>/dev/null | awk -F'\t' -v c="$2" -v s="$3" '$c == s { print; exit }'; }
+
+cp "$MI" "$TMPD/mi-live"; rm -f "$TMPD"/cb-*
+# (--dirs exits 1 on a cancel, which is what the stand-in reports)
+PATH="$TMPD/fzfbin:$PATH" INTERDIMUX_MOUNTINFO="$TMPD/mi-live" XDG_RUNTIME_DIR="$TMPD/run" \
+  bash "$SCRIPT" --dirs </dev/null >/dev/null 2>&1 || :
+[ -s "$TMPD/cb-preview" ] && ! grep -q 'Type:' "$TMPD/cb-preview" \
+  && report "ctrl-o picker: a preview classifies with the table the picker read" pass \
+  || report "ctrl-o picker: a preview classifies with the table the picker read (got: $(head -5 "$TMPD/cb-preview" 2>/dev/null | tr '\n' ' '))" fail
+got=$(cb_row cb-dirs 3 "$TMPD/nas/proj")
+[ -n "$got" ] && [ "$(printf '%s' "$got" | cut -f2)" = "" ] \
+  && report "ctrl-o picker: a reload classifies with the table the picker read" pass \
+  || report "ctrl-o picker: a reload classifies with the table the picker read (got: $got)" fail
+ctl=$(INTERDIMUX_MOUNTINFO="$TMPD/mi-live" bash "$SCRIPT" --dirs-preview "$TMPD/nas/proj" 2>&1)
+case "$ctl" in *"Type:"*) report "control: outside a picker, the rewritten table is what counts" pass ;;
+               *) report "control: outside a picker, the rewritten table is what counts (got: $ctl)" fail ;; esac
+
+cp "$MI" "$TMPD/mi-live"; rm -f "$TMPD"/cb-*
+PATH="$TMPD/fzfbin:$PATH" INTERDIMUX_MOUNTINFO="$TMPD/mi-live" XDG_RUNTIME_DIR="$TMPD/run" \
+  INTERDIMUX_USE_RUST=off bash "$SCRIPT" </dev/null >/dev/null 2>&1 || :
+got=$(cb_row cb-list 4 "D:$TMPD/nas/proj")
+if [ -n "$got" ] && ! printf '%s' "$got" | grep -q -e '‹' -e 'Rust'; then
+  report "navigator (bash renderer): a --list reload classifies with the table the navigator read" pass
+else
+  report "navigator (bash renderer): a --list reload classifies with the table the navigator read (got: $got)" fail
+fi
+[ -s "$TMPD/cb-preview" ] && ! grep -q 'Type:' "$TMPD/cb-preview" \
+  && report "navigator (bash renderer): so does a directory row's preview" pass \
+  || report "navigator (bash renderer): so does a directory row's preview (got: $(head -5 "$TMPD/cb-preview" 2>/dev/null | tr '\n' ' '))" fail
 
 # zoxide stats every entry of its database unless told --all; a zoxide that
 # does not know the flag still gets asked the plain way.
