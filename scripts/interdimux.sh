@@ -5306,7 +5306,15 @@ _report_stderr() {
   fi
 }
 
-trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"}' EXIT
+# The query (and match scope) the raw-mode `result` bind last answered, so it
+# can tell a new query from a reload of the same one -- see _best_guard below.
+# Named off RESUME_FILE for the same reason the preview state is: private, and
+# no mktemp fork on the way to the first frame.  Exported rather than spliced
+# into the bind, so no path character can reach the snippet's quoting.
+QUERY_STATE_FILE="${RESUME_FILE}.query"
+export INTERDIMUX_QUERY_STATE="$QUERY_STATE_FILE"
+
+trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" "$QUERY_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"}' EXIT
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"
 ACTION_CMD="bash '$SCRIPT_PATH' --action"
@@ -5356,16 +5364,22 @@ while true; do
   )
 
 
-  # Cursor stability across the execute+reload cycle every action performs.
-  # --id-nth keys rows by their SPEC (field 4), so after a reload the cursor
-  # stays on the same TARGET rather than the same row number — which in kill
-  # mode is the difference between confirming what you meant and confirming
-  # whatever slid into that position.
+  # Row identity by SPEC (field 4) for fzf's cross-reload operations.
   #
-  # Deliberately WITHOUT --track: --track arms trackBlocked, which DISCARDS
-  # every keystroke except abort while a reload is in flight
+  # What it does NOT do, whatever it looks like: keep the CURSOR on the same
+  # target across a plain `reload`.  fzf consults --id-nth for the cursor only
+  # while tracking is on (--track, or a track-current action); otherwise it
+  # keeps the same row NUMBER.  Measured on 0.74.3: rows a b c d, cursor on c,
+  # reloaded as a x y b c d -- the cursor lands on y with --id-nth=1, exactly
+  # as with no flag, and stays on c only with --id-nth=1 --track.  So after a
+  # kill the cursor is on whatever slid into the row, and that row-number rule
+  # is what the raw-mode `result` bind below has to leave alone.
+  #
+  # Deliberately still WITHOUT --track: --track arms trackBlocked, which
+  # DISCARDS every keystroke except abort while a reload is in flight
   # (fzf src/terminal.go:6821-6827), and that window is widest right after the
-  # popup opens.  --id-nth alone never blocks.
+  # popup opens.  The flag costs nothing and never blocks, and a reload-sync
+  # carrying a multi-selection across by SPEC would need it (IDEAS #16).
   fzf_ge 71 && fzf_opts+=(--id-nth=4)
 
   # Keep the row's identity while a long command hscrolls.  The command is the
@@ -5623,8 +5637,53 @@ while true; do
       # at the top.  Verified: with --raw, typing "delta" left the cursor on
       # "alpha" under change:first AND under change:best (which fires before
       # the search completes); result:best lands on "delta".
+      #
+      # But `result` does not only follow a query change.  fzf fires it after
+      # EVERY reload too, and ^r, ^/, a resize, ^z and every ^x/^e/^d/^s/^t
+      # (execute+reload, confirmed or cancelled) end in one.  An unconditional
+      # `best` answered each of those as if the query had just been typed: with
+      # an empty query that is row 1, so cancel a ^x on gamma and the next ^x
+      # offered to kill whatever sat at the top.  Left alone, fzf keeps the
+      # cursor on the same row NUMBER across a reload, which is the same row
+      # whenever the list did not change -- and ^r, ^/ and a resize never
+      # change it.  (--id-nth does not help here: without --track it keys
+      # nothing about the cursor.)
+      #
+      # So `best` fires when the query or the ^] scope differs from the last one
+      # answered, remembered in a file (a `wait` in `change` would need no
+      # process, but fzf DROPS every keystroke while a wait blocks).  Also:
+      #   * when rows arrive that were never there before and a query is typed
+      #     -- the list still loading under a query typed ahead (the directory
+      #     rows are printed after the sessions and can land in a second
+      #     snapshot).  "Never there" is the largest total seen, so a reload,
+      #     which may pass through a partial snapshot, does not qualify;
+      #   * when a reload left the cursor on a row that no longer matches -- a
+      #     kill slid a dimmed one under it -- the one reload after which the
+      #     match set, not the row number, is what the user was on.
+      # Synchronous by necessity: a cursor move that lands late would undo the
+      # user's own.  Degrades to the old unconditional `best` if the file cannot
+      # be made.  No commas, no single quotes, no parentheses and no `${x}` that
+      # fzf would read as a placeholder: it rides inside transform(...), and on
+      # the fallback path inside `sh -c '...'` too.
       _res_pre=""
-      [ "$_raw_on" = 1 ] && _res_pre="best+"
+      if [ "$_raw_on" = 1 ]; then
+        _best_guard='f=$INTERDIMUX_QUERY_STATE; k="$FZF_NTH $FZF_QUERY"; t=${FZF_TOTAL_COUNT:-0}; b=;'
+        _best_guard+=' { read -r n; IFS= read -r p; } 2>/dev/null < "$f";'
+        _best_guard+=' [ "$n" -ge 0 ] 2>/dev/null || n=0;'
+        _best_guard+=' [ "$p" = "$k" ] || b=1;'
+        _best_guard+=' if [ "$t" -gt "$n" ]; then n=$t; [ -z "$FZF_QUERY" ] || b=1; fi;'
+        _best_guard+=' [ "${FZF_RAW:-1}" = 0 ] && [ "${FZF_MATCH_COUNT:-0}" -gt 0 ] && b=1;'
+        _best_guard+=' { printf "%s\n%s" "$n" "$k" > "$f"; } 2>/dev/null;'
+        _best_guard+=' [ -z "$b" ] || echo best'
+        if ! : > "$QUERY_STATE_FILE" 2>/dev/null; then
+          _res_pre="best+"
+        elif [ "$INLINE_CALLBACKS" = 1 ]; then
+          _res_pre="transform($_best_guard)+"
+        else
+          # A user-supplied --with-shell may not speak POSIX (fish)
+          _res_pre="transform(sh -c '$_best_guard')+"
+        fi
+      fi
 
       # Announce find-or-create in the zero-match state (IDEAS #1).  Without it
       # the feature is invisible and a typo silently creates a junk session; now
