@@ -614,8 +614,19 @@ tmux_color() {
 # safe on a light terminal too: every colour Dark256 and Light256 disagree on is
 # one this string sets, and the rest are the terminal's own fg/bg.  It parses on
 # every fzf this script supports.
+#
+# Except under NO_COLOR, where the base is `bw`.  From 0.53 fzf honours a
+# non-empty NO_COLOR by starting from its colourless theme, which also drops the
+# colours of --ansi rows (their bold/dim stay), and `dark` threw that choice out
+# along with $FZF_DEFAULT_OPTS: every tree glyph, path and command came back
+# coloured.  `bw` is a base scheme too, so it still discards the shell theme, and
+# it restores exactly the base fzf would have chosen; the keys below still colour
+# the chrome, as they always did.  The test is fzf's own (non-empty), and below
+# 0.53 fzf ignores NO_COLOR, so `dark` stays.
 build_fzf_colors() {
-  FZF_COLORS="--color=dark,hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
+  local base=dark
+  [ -n "${NO_COLOR:-}" ] && fzf_ge 53 && base=bw
+  FZF_COLORS="--color=${base},hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
   # Every one of these names must exist in the running fzf: an unknown colour
   # key is FATAL ("invalid color specification"), not ignored, so a picker that
   # names `footer:` on fzf < 0.63 does not open at all.  Verified on 0.74.
@@ -7220,28 +7231,74 @@ while true; do
       #   * when a reload left the cursor on a row that no longer matches -- a
       #     kill slid a dimmed one under it -- the one reload after which the
       #     match set, not the row number, is what the user was on.
+      #     FZF_RAW=0 also means "past the end", though: a kill that removes
+      #     the LAST rows leaves the cursor one beyond the shorter list (fzf
+      #     clamps it only when it next draws), and read as a dimmed row that
+      #     sent it to row 1 -- kill your bottom pane, and the next ^x offered
+      #     the first session.  fzf exports FZF_CURRENT_ITEM only when the
+      #     cursor is ON a row (0.73+; raw needs 0.74), which tells the two
+      #     apart.  Past the end with no query every row matches, so fzf's own
+      #     clamp lands on the new last row, as it does with raw off; with a
+      #     query that row may be dimmed, so `best` still fires.  An inherited
+      #     FZF_CURRENT_ITEM (interdimux run from an fzf child) is dropped below.
       # Synchronous by necessity: a cursor move that lands late would undo the
       # user's own.  Degrades to the old unconditional `best` if the file cannot
       # be made.  No commas, no single quotes, no parentheses and no `${x}` that
       # fzf would read as a placeholder: it rides inside transform(...), and on
-      # the fallback path inside `sh -c '...'` too.
-      _res_pre=""
+      # the fallback path inside `sh -c '...'` too.  The file's third line, the
+      # last match count, is for the fallback path below.
+      _res_pre="" _res_bind=""
       if [ "$_raw_on" = 1 ]; then
-        _best_guard='f=$INTERDIMUX_QUERY_STATE; k="$FZF_NTH $FZF_QUERY"; t=${FZF_TOTAL_COUNT:-0}; b=;'
-        _best_guard+=' { read -r n; IFS= read -r p; } 2>/dev/null < "$f";'
+        unset FZF_CURRENT_ITEM
+        _best_guard='f=$INTERDIMUX_QUERY_STATE; k="$FZF_NTH $FZF_QUERY"; t=${FZF_TOTAL_COUNT:-0}; b=; n=; p=; m=;'
+        _best_guard+=' { read -r n; IFS= read -r p; read -r m; } 2>/dev/null < "$f";'
         _best_guard+=' [ "$n" -ge 0 ] 2>/dev/null || n=0;'
         _best_guard+=' [ "$p" = "$k" ] || b=1;'
         _best_guard+=' if [ "$t" -gt "$n" ]; then n=$t; [ -z "$FZF_QUERY" ] || b=1; fi;'
-        _best_guard+=' [ "${FZF_RAW:-1}" = 0 ] && [ "${FZF_MATCH_COUNT:-0}" -gt 0 ] && b=1;'
-        _best_guard+=' { printf "%s\n%s" "$n" "$k" > "$f"; } 2>/dev/null;'
-        _best_guard+=' [ -z "$b" ] || echo best'
+        _best_guard+=' [ "${FZF_RAW:-1}" = 0 ] && [ "${FZF_MATCH_COUNT:-0}" -gt 0 ]'
+        _best_guard+=' && { [ -n "$FZF_CURRENT_ITEM" ] || [ -n "$FZF_QUERY" ]; } && b=1;'
+        _best_guard+=' { printf "%s\n%s\n%s\n" "$n" "$k" "$FZF_MATCH_COUNT" > "$f"; } 2>/dev/null;'
         if ! : > "$QUERY_STATE_FILE" 2>/dev/null; then
           _res_pre="best+"
         elif [ "$INLINE_CALLBACKS" = 1 ]; then
-          _res_pre="transform($_best_guard)+"
+          _res_pre="transform($_best_guard [ -z \"\$b\" ] || echo best)+"
         else
-          # A user-supplied --with-shell may not speak POSIX (fish)
-          _res_pre="transform(sh -c '$_best_guard')+"
+          # The fallback path (a user --with-shell).  Its bar is written by a
+          # re-exec of this whole script (--footer-for, ~20 ms), and `focus`
+          # already does that whenever the row changes -- the `result` bind
+          # used to do it AGAIN on every keystroke.  It is only needed where
+          # focus is blind: at zero matches, where raw mode leaves the cursor
+          # on a dimmed row, and on the keystroke that leaves them with the
+          # cursor unmoved.  The guard already runs on every result, so it
+          # decides that too and prints the bar update with (or instead of)
+          # `best`; with matches on both sides of a keystroke it prints
+          # nothing and the bar stays as focus left it.  The action text comes
+          # in through the environment, so neither its quotes nor its {-1}
+          # pass through the guard's own quoting (fzf expands the {-1} when it
+          # runs the printed action).
+          export INTERDIMUX_BAR_ACTION="bg-cancel+bg-transform-$HINT_BAR($_footer_for)"
+          _best_guard+=' o=; [ -z "$b" ] || o=best;'
+          _best_guard+=' if [ "$FZF_MATCH_COUNT" = 0 ] || [ "$m" = 0 ]; then o="$o+$INTERDIMUX_BAR_ACTION"; fi;'
+          _best_guard+=' o=${o#+}; [ -z "$o" ] || printf "%s\n" "$o"'
+          # The guard is POSIX, and wrapping it in `sh -c` inside the user's
+          # shell cost a second shell per keystroke (measured: 5.3 ms under
+          # bash, 9.1 ms under zsh, against 2.4 ms for sh alone).  So it runs
+          # in the user's shell directly when that shell is a known POSIX-
+          # family one, and keeps the wrapper only for anything else (fish
+          # cannot parse it).  The shell is the LAST --with-shell fzf is
+          # handed: the user's, appended after the theme's own `sh -c`.
+          _wsh=""
+          for (( _i = 0; _i < ${#FZF_THEME[@]}; _i++ )); do
+            case "${FZF_THEME[_i]}" in
+              --with-shell=*) _wsh="${FZF_THEME[_i]#--with-shell=}" ;;
+              --with-shell)   _wsh="${FZF_THEME[_i+1]:-}" ;;
+            esac
+          done
+          read -r _wsh _ <<< "$_wsh" || :
+          case "${_wsh##*/}" in
+            sh|ash|dash|bash|ksh|mksh|zsh) _res_bind="transform:$_best_guard" ;;
+            *) _res_bind="transform:sh -c '$_best_guard'" ;;
+          esac
         fi
       fi
 
@@ -7274,8 +7331,14 @@ while true; do
         # Fallback path in raw mode (a user --with-shell on fzf >= 0.74).  Rows
         # stay displayed, so the cursor sits on a dimmed row at zero matches and
         # `focus` does not fire there, nor when a keystroke brings the match
-        # back under an unmoved cursor: only `result` sees every change.
-        fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+        # back under an unmoved cursor: only `result` sees every change.  The
+        # guard decides when that needs the bar rewritten (above); without the
+        # state file there is no guard, and every result rewrites it.
+        if [ -n "$_res_bind" ]; then
+          fzf_opts+=(--bind="result:$_res_bind")
+        else
+          fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+        fi
       elif fzf_ge 46; then
         # Fallback path, plain filtering: `focus` covers the way into and out
         # of zero matches (the current item becomes none and back), `zero` the
