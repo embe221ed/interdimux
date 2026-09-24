@@ -20,7 +20,11 @@ older than `src/` or `Cargo.toml`, `interdimux.tmux` starts it as a tmux job
 `--locked` so the checkout's `Cargo.lock` is never rewritten, and has
 `CARGO_TARGET_DIR` pinned to `rust/target`. One build at a time (a lock in
 `target/`), output in `$XDG_STATE_HOME/interdimux/build.log`, and a status-line
-message at the end. `set -g @interdimux-autobuild off` turns it off; it is not
+message at the end. A failed build is remembered in `target/` with the cargo it
+failed on (path and `--version`) and not repeated on every load: it runs again
+once `src/`, `Cargo.toml` or `Cargo.lock` is newer than that failure or cargo
+reports another version, and otherwise a day later, without a second message.
+`set -g @interdimux-autobuild off` turns it off; it is not
 done at all when `INTERDIMUX_BIN` names a binary or `INTERDIMUX_USE_RUST=off`,
 since the in-repo build would not be used.
 

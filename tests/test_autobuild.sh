@@ -11,6 +11,9 @@
 #     $XDG_STATE_HOME/interdimux/build.log, and a status-line message when it is
 #     done or has failed
 #   * once: a reload while it builds starts no second build
+#   * a failed build is not run again on every load: only once the sources or
+#     the cargo change, or silently a day later; and said once, naming the log,
+#     @interdimux-autobuild, and what the picker uses meanwhile
 #   * never with @interdimux-autobuild off, without a cargo, or when the in-repo
 #     build would not be used (INTERDIMUX_BIN, INTERDIMUX_USE_RUST=off)
 #
@@ -64,6 +67,8 @@ cp "$REPO/scripts/interdimux.sh" "$PLUG/scripts/"
 cp -R "$REPO/rust/src" "$REPO/rust/Cargo.toml" "$REPO/rust/Cargo.lock" "$PLUG/rust/"
 BIN="$PLUG/rust/target/release/imux"
 LOCK="$PLUG/rust/target/.interdimux-autobuild.lock"
+NOTE="$PLUG/rust/target/.interdimux-autobuild.failed"   # what a failed build leaves
+SOURCES=("$PLUG/rust/src" "$PLUG/rust/Cargo.toml" "$PLUG/rust/Cargo.lock")
 STATE="$TMPD/state"
 BLOG="$STATE/interdimux/build.log"
 CTL="$TMPD/ctl"
@@ -73,11 +78,14 @@ mkdir -p "$CTL" "$STATE"
 # One line per run in cargo.log: argv0 | cwd | args | CARGO_TARGET_DIR | niceness.
 # $CTL/hold makes it wait (bounded) until the file is removed, $CTL/fail makes it
 # fail like a compile error, $CTL/noop makes it succeed without touching the
-# binary (what cargo does when it decides nothing changed).
+# binary (what cargo does when it decides nothing changed), $CTL/edit makes it
+# change a source while it builds.  `cargo --version` is answered, not logged:
+# $CTL/version, or a default.
 make_cargo() { # $1 = the path to install it at
   mkdir -p "${1%/*}"
   cat > "$1" <<EOF
 #!/bin/sh
+if [ "\$1" = --version ]; then cat '$CTL/version' 2>/dev/null || echo 'cargo 1.99.0 (stub)'; exit 0; fi
 printf '%s|%s|%s|%s|%s\n' "\$0" "\$PWD" "\$*" "\${CARGO_TARGET_DIR:-}" "\$(nice)" >> '$CTL/cargo.log'
 echo "stub cargo: compiling imux"
 if [ -e '$CTL/hold' ]; then
@@ -85,6 +93,7 @@ if [ -e '$CTL/hold' ]; then
   n=0
   while [ -e '$CTL/hold' ] && [ \$n -lt 1200 ]; do sleep 0.05; n=\$((n + 1)); done
 fi
+[ -e '$CTL/edit' ] && touch src/main.rs
 if [ -e '$CTL/fail' ]; then echo "error[E0999]: the stub was told to fail" >&2; exit 101; fi
 [ -e '$CTL/noop' ] && exit 0
 t="\${CARGO_TARGET_DIR:-\$PWD/target}"
@@ -101,12 +110,17 @@ make_cargo "$TMPD/cargo-home/bin/cargo"      # where rustup puts it
 mkdir -p "$TMPD/no-cargo-home"
 
 # A tmux on PATH that notes every background job interdimux.tmux asks for, and
-# is otherwise the real one.
+# every interdimux message a job asks it to show (msgs.log -- tmux's own
+# show-messages leaves out what a client with no terminal asked for), and is
+# otherwise the real one.
 SHIM="$TMPD/shim"
 mkdir -p "$SHIM"
 cat > "$SHIM/tmux" <<EOF
 #!/bin/sh
-case "\$*" in *run-shell*--autobuild*) printf '%s\n' "\$*" >> '$CTL/jobs.log' ;; esac
+case "\$*" in
+  *run-shell*--autobuild*) printf '%s\n' "\$*" >> '$CTL/jobs.log' ;;
+  *display-message*interdimux:*) printf '%s\n' "\$*" >> '$CTL/msgs.log' ;;
+esac
 exec '$REAL_TMUX' "\$@"
 EOF
 chmod +x "$SHIM/tmux"
@@ -154,7 +168,7 @@ reset() {
   # a job a previous case started must not reach into this one
   for _ in $(seq 1 100); do [ -L "$LOCK" ] || break; sleep 0.1; done
   rm -rf "$PLUG/rust/target" "$STATE/interdimux"
-  rm -f "$CTL"/*.log "$CTL/hold" "$CTL/holding" "$CTL/fail" "$CTL/noop"
+  rm -f "$CTL"/*.log "$CTL/hold" "$CTL/holding" "$CTL/fail" "$CTL/noop" "$CTL/version" "$CTL/edit"
   "$REAL_TMUX" -L "$SOCK" set -gu @interdimux-autobuild
   server_env "$CPATH" "$TMPD/no-cargo-home"
 }
@@ -175,6 +189,8 @@ run_job() {
     timeout 10 bash "$PLUG/interdimux.tmux" --autobuild >/dev/null 2>&1 || JRC=$?
 }
 runs() { [ -s "$CTL/cargo.log" ] && grep -c . "$CTL/cargo.log" || echo 0; }
+# How many of the messages the jobs asked for say $1.
+said() { local n; n=$(grep -cF -- "$1" "$CTL/msgs.log" 2>/dev/null) || :; echo "${n:-0}"; }
 field() { awk -F'|' -v n="$1" 'NR == 1 { print $n }' "$CTL/cargo.log"; }
 # The job has finished: its log has a verdict, and the lock is gone.
 wait_done() {
@@ -302,7 +318,7 @@ check "no rust/Cargo.toml (an install without the sources): no build (ran $(runs
 
 # --- 5. a failed build ---------------------------------------------------------------
 echo
-echo "a failed build says so"
+echo "a failed build says so, once, and is not run again for nothing"
 reset
 : > "$CTL/fail"
 load_plugin
@@ -310,11 +326,80 @@ check "the job finishes" wait_done
 check "build.log holds the compiler's error" 'grep -q "E0999" "$BLOG"'
 check "...and ends in the verdict" 'has "$(tail -n 1 "$BLOG")" "== failed"'
 check "the status line says it failed" 'status_says "building the Rust core failed"'
-check "...and where the log is" 'status_says "$BLOG"'
+check "...that the bash renderer is used meanwhile" 'status_says "failed (the bash renderer is used)"'
+check "...where the log is" 'status_says "$BLOG"'
+check "...and how to stop these builds" 'status_says "set @interdimux-autobuild off"'
 check "no binary was left behind" '[ ! -e "$BIN" ]'
 out=$(doctor "$CPATH" "$TMPD/no-cargo-home")
 check "--doctor names the failed build and its log" \
   'has "$out" "the plugin'"'"'s last build of it failed: $BLOG"'
+
+# The same sources with the same cargo would only fail again.  This cost a whole
+# compile (a missing linker fails only after it) and the same message on every
+# tmux start and every source-file.
+rm -f "$CTL/jobs.log" "$CTL/msgs.log"
+load_plugin
+check "loading the plugin again starts no build job" '[ "$RC" = 0 ] && [ ! -s "$CTL/jobs.log" ]'
+check "...and the key bindings are installed" bound
+run_job "$CPATH" "$TMPD/no-cargo-home"
+check "the job, run anyway, runs no cargo either (ran $(runs))" '[ "$JRC" = 0 ] && [ "$(runs)" = 1 ]'
+check "...and nothing more is said" '[ "$(said interdimux:)" = 0 ]'
+check "--doctor still names the failed build" \
+  'has "$(doctor "$CPATH" "$TMPD/no-cargo-home")" "last build of it failed: $BLOG"'
+
+# Changed sources are another build: tried at once, and news again.
+rm -f "$CTL/msgs.log" "$BLOG"
+touch "$PLUG/rust/src/main.rs"
+load_plugin
+wait_done || :
+check "a changed source: the next load builds again (ran $(runs))" '[ "$(runs)" = 2 ]'
+check "...and says it failed" '[ "$(said "building the Rust core failed")" = 1 ]'
+# So is a source changed WHILE it compiled: the note is dated when it started.
+touch "$PLUG/rust/src/main.rs"
+: > "$CTL/edit"
+run_job "$CPATH" "$TMPD/no-cargo-home"
+rm -f "$CTL/edit"
+check "a build that fails while a source is edited (ran $(runs))..." '[ "$(runs)" = 3 ]'
+run_job "$CPATH" "$TMPD/no-cargo-home"
+check "...is followed by one of the edited sources (ran $(runs))" '[ "$(runs)" = 4 ]'
+run_job "$CPATH" "$TMPD/no-cargo-home"
+check "...and then by none (ran $(runs))" '[ "$(runs)" = 4 ]'
+
+# Another cargo -- a rustup update, a newer distro package -- may succeed.
+rm -f "$CTL/msgs.log" "$BLOG"
+echo 'cargo 1.99.1 (stub)' > "$CTL/version"
+load_plugin
+wait_done || :
+check "another cargo version: the next load builds again (ran $(runs))" '[ "$(runs)" = 5 ]'
+check "...and says it failed" '[ "$(said "building the Rust core failed")" = 1 ]'
+
+# A day later with nothing changed it is tried once more -- the linker or the
+# network may be back -- but failing again is not news.
+rm -f "$CTL/jobs.log" "$CTL/msgs.log" "$BLOG"
+find "${SOURCES[@]}" -type f -exec touch -d '3 days ago' {} +
+touch -d '2 days ago' "$NOTE"
+load_plugin
+wait_done || :
+check "a day later, the same build is tried again (ran $(runs))" '[ "$(runs)" = 6 ]'
+check "...without a word" '[ "$(said interdimux:)" = 0 ]'
+check "...though build.log has it" 'has "$(tail -n 1 "$BLOG")" "== failed"'
+rm -f "$CTL/jobs.log"
+load_plugin
+check "...and the load after that waits another day" '[ "$RC" = 0 ] && [ ! -s "$CTL/jobs.log" ]'
+find "${SOURCES[@]}" -type f -exec touch {} +
+
+# A failed REbuild leaves the binary from before, which the list goes on using.
+reset
+run_job "$CPATH" "$TMPD/no-cargo-home"
+check "control: a binary is built" fresh
+touch -d '2 minutes ago' "$BIN"
+: > "$CTL/fail"
+rm -f "$CTL/msgs.log" "$BLOG"
+load_plugin
+check "a failed rebuild finishes" wait_done
+check "...and leaves the previous binary" '[ -x "$BIN" ] && [ "$(runs)" = 2 ]'
+check "...which the status line says is kept" 'status_says "failed (the previous build is kept)"'
+check "...not that the bash renderer is used" '[ "$(said "bash renderer")" = 0 ]'
 rm -f "$CTL/fail"
 
 # --- 6. in the background, and only once ------------------------------------------------

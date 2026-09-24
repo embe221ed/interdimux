@@ -4,6 +4,10 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$CURRENT_DIR/scripts/interdimux.sh"
 RUST_DIR="$CURRENT_DIR/rust"
 IMUX="$RUST_DIR/target/release/imux"
+# The build job's lock, and the note a failed build leaves.  In target/, so each
+# checkout has its own, and `cargo clean` forgets a failure along with the rest.
+LOCK="$RUST_DIR/target/.interdimux-autobuild.lock"
+FAILED="$RUST_DIR/target/.interdimux-autobuild.failed"
 
 # ---------------------------------------------------------------------------
 # The Rust core, built in the background
@@ -18,6 +22,35 @@ IMUX="$RUST_DIR/target/release/imux"
 # niced, because it competes with whatever the user is actually doing.  The
 # output goes to $XDG_STATE_HOME/interdimux/build.log, and the status line says
 # when it is done or has failed.  `set -g @interdimux-autobuild off` opts out.
+#
+# A build that fails is remembered, with the toolchain it failed on.  Without
+# that, a build that cannot succeed -- a cargo older than the crate's
+# rust-version, rustup with no C linker, a machine that cannot download the one
+# dependency -- ran again on every tmux start and every source-file, each time
+# with the same five-second message, and when the linker is what is missing,
+# after a whole LTO compile.  Now the same sources with the same cargo are tried
+# again only a day later, and a second failure is not announced; new sources or
+# another cargo are tried at once.  --doctor names the failed build meanwhile.
+
+# What a failed build is remembered with: the cargo, and the version it reports
+# from rust/, where the build runs -- rustup's cargo is a proxy that stays the
+# same file while `rustup update` replaces the toolchain behind it.
+imux_toolchain() { # $1 = cargo
+  local v
+  v=$(cd "$RUST_DIR" 2>/dev/null && "$1" --version 2>/dev/null </dev/null) || v=""
+  printf '%s %s' "$1" "${v%%$'\n'*}"
+}
+
+# Has exactly this build failed before?  The note names the same toolchain, and
+# no source is newer than the note, which is dated when that build STARTED: an
+# edit made while it compiled counts as new.
+imux_failed_before() { # $1 = what imux_toolchain says
+  local was=""
+  [ -f "$FAILED" ] || return 1
+  { IFS= read -r was < "$FAILED"; } 2>/dev/null
+  [ "$was" = "$1" ] || return 1
+  [ -z "$(find "$RUST_DIR/src" "$RUST_DIR/Cargo.toml" "$RUST_DIR/Cargo.lock" -type f -newer "$FAILED" 2>/dev/null)" ]
+}
 
 # Prints the cargo to build with, or fails when there is nothing to build (or
 # the user said not to).  Asked again by the job itself, under its lock: another
@@ -42,8 +75,14 @@ imux_build_cargo() {
     c="${CARGO_HOME:-$HOME/.cargo}/bin/cargo"
     [ -x "$c" ] || return 1
   fi
-  # Last, because it is the one check that costs a tmux round-trip.
+  # Late, because it is the one check that costs a tmux round-trip.
   [ "$(tmux show-option -gqv @interdimux-autobuild 2>/dev/null)" != off ] || return 1
+  # This very build failed less than a day ago: it would fail again.  Last,
+  # because it asks cargo -- but only once there is a failure to compare with.
+  if [ -f "$FAILED" ] && [ -z "$(find "$FAILED" -mmin +1440 2>/dev/null)" ] \
+     && imux_failed_before "$(imux_toolchain "$c")"; then
+    return 1
+  fi
   printf '%s' "$c"
 }
 
@@ -58,19 +97,25 @@ if [ "${1:-}" = --autobuild ]; then
   # announce it a second time.  A symlink is created atomically WITH its
   # content, so the lock names its owner from the first instant; an owner that
   # is gone (a killed server took the job with it) leaves a lock to take over.
-  lock="$RUST_DIR/target/.interdimux-autobuild.lock"
-  if ! ln -s "$$" "$lock" 2>/dev/null; then
-    owner=$(readlink "$lock" 2>/dev/null) || owner=""
+  if ! ln -s "$$" "$LOCK" 2>/dev/null; then
+    owner=$(readlink "$LOCK" 2>/dev/null) || owner=""
     case "$owner" in
       ''|*[!0-9]*) ;;
       *) kill -0 "$owner" 2>/dev/null && exit 0 ;;
     esac
-    rm -f "$lock"
-    ln -s "$$" "$lock" 2>/dev/null || exit 0
+    rm -f "$LOCK"
+    ln -s "$$" "$LOCK" 2>/dev/null || exit 0
   fi
-  trap 'rm -f "$lock"' EXIT
+  # $FAILED.new too: a build that was stopped did not fail.
+  trap 'rm -f "$LOCK" "$FAILED.new"' EXIT
 
   cargo=$(imux_build_cargo) || exit 0
+  # The note this build leaves if it fails, dated now.  And whether this very
+  # build failed before: then this is the retry a day later, and failing again
+  # is not news.
+  toolchain=$(imux_toolchain "$cargo")
+  again=""; imux_failed_before "$toolchain" && again=1
+  printf '%s\n' "$toolchain" > "$FAILED.new" 2>/dev/null
 
   # --locked: this is TPM's git checkout, and a build that rewrote the tracked
   # Cargo.lock would leave it dirty, which can make the next `git pull` (TPM's
@@ -89,11 +134,20 @@ if [ "${1:-}" = --autobuild ]; then
     # test above would then build again on every load.  cargo just said it is
     # current; make the timestamp say so too.
     touch "$IMUX" 2>/dev/null
+    rm -f "$FAILED"
     echo "== ok" >> "$log"
     msg="interdimux: the Rust core is built; the picker uses it from the next open"
   else
+    mv -f "$FAILED.new" "$FAILED" 2>/dev/null
     echo "== failed (exit $rc)" >> "$log"
-    msg="interdimux: building the Rust core failed (the bash renderer is used); see $log"
+    [ -z "$again" ] || exit 0
+    # A build from before is still there after a failed rebuild, and the list
+    # still uses it (unless it speaks another protocol -- the list says so
+    # itself when it refuses one).
+    if [ -x "$IMUX" ]; then kept="the previous build is kept"
+    else kept="the bash renderer is used"
+    fi
+    msg="interdimux: building the Rust core failed ($kept); see $log, or set @interdimux-autobuild off to stop building it"
   fi
   # display-message format-expands its text: '##' is a literal '#'.  -d for
   # long enough to read; tmux < 3.2 has no -d, and gets the default instead.
