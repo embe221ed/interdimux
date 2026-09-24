@@ -2684,7 +2684,33 @@ gather_targets() {
   # it cannot swallow the bulk data.
   local _batched=0 _all RS=$'\x1e'
   local -a _parts=()
-  if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+  if [ -n "${INTERDIMUX_DUMP_IN:-}" ]; then
+    # Test seam: the four sections from a FILE instead of from tmux, framed
+    # exactly as the batched query below returns them -- which is also the
+    # framing `imux gather` reads on stdin.  It is what lets the golden corpus
+    # (rust/tests/corpus/*.dump) reach THIS renderer, the one every install
+    # without cargo runs, with no server and no timing:
+    # tests/test_corpus_parity.sh.  Same family as INTERDIMUX_NO_BATCH and
+    # INTERDIMUX_NOW.
+    #
+    # A dump IS the batch, so it serves both fetch paths and neither one
+    # queries tmux: a seam that fell through to a live server whenever the
+    # file was unreadable or mis-framed would render some other list and pass.
+    # So a bad dump renders nothing, loudly -- the Rust core exits 3 on the
+    # same framing.  The trailing RS keeps an EMPTY last section a section:
+    # word splitting drops a trailing empty field, and the corpus has an
+    # empty server.
+    if ! { _all=$(<"$INTERDIMUX_DUMP_IN"); } 2>/dev/null; then
+      printf 'interdimux: INTERDIMUX_DUMP_IN: cannot read %s\n' "$INTERDIMUX_DUMP_IN" >&2
+      return 1
+    fi
+    set -f; IFS="$RS"; _parts=($_all$RS); set +f; unset IFS
+    if [ "${#_parts[@]}" -ne 4 ]; then
+      printf 'interdimux: INTERDIMUX_DUMP_IN: expected 4 sections, got %d\n' "${#_parts[@]}" >&2
+      return 1
+    fi
+    _batched=1
+  elif [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
     _all=$(tmux \
       list-sessions -F "$_sfmt" \; \
       display-message -p "$RS" \; \
