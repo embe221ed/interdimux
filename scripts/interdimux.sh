@@ -1468,14 +1468,31 @@ collect_dir() {
 # in tmux's (name) order -- and SESS_BYNAME a name to its row.
 #
 # A path holding a US or a newline would break the line apart; tmux blanks it
-# instead (#{m/r:}), and a blank path matches no directory.  tmux escapes control
-# characters in names, so neither can occur in one.
+# instead (#{m/r:}), and a blank path matches no directory.  tmux refuses control
+# characters in names, so neither can occur in one: a line is at most four
+# fields.
+#
+# Captured once and split in-process -- lines, then each line's fields, by word
+# splitting under set -f -- not `while read ... <<< "$(tmux ...)"`: a here-string
+# that small is a pipe, and read takes a pipe one byte per syscall, two paths a
+# line.  It sat before ctrl-o's first row (review B07).  Word splitting on US
+# gives the fields `read` gave: a missing or trailing-empty one is unset, which
+# reads as empty.
 SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=()
 declare -A SESS_AT=() SESS_BYNAME=()
 load_session_table() {
-  local id name spath cwd i=0 nl=$'\n' j
+  local id name spath cwd i=0 nl=$'\n' j l out _noglob=0
+  local -a _sl=() _sf=()
   SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=() SESS_AT=() SESS_BYNAME=()
-  while IFS="$US" read -r id name spath cwd; do
+  out=$(tmux list-sessions -F "#{session_id}${US}#{session_name}${US}#{?#{m/r:[${US}${nl}],#{session_path}},,#{session_path}}${US}#{?#{m/r:[${US}${nl}],#{pane_current_path}},,#{pane_current_path}}" 2>/dev/null)
+  case $- in *f*) _noglob=1 ;; esac
+  set -f
+  local IFS=$'\n'
+  _sl=($out)
+  IFS=$US   # nothing below splits but the one line
+  for l in ${_sl[@]+"${_sl[@]}"}; do
+    _sf=($l)
+    id=${_sf[0]-} name=${_sf[1]-} spath=${_sf[2]-} cwd=${_sf[3]-}
     [ -n "$id" ] && [ -n "$name" ] || continue
     SESS_ID[i]="$id" SESS_NAME[i]="$name" SESS_SPATH[i]="$spath" SESS_CWD[i]="$cwd"
     SESS_BYNAME["$name"]=$i
@@ -1489,7 +1506,8 @@ load_session_table() {
       fi
     fi
     i=$((i + 1))
-  done <<< "$(tmux list-sessions -F "#{session_id}${US}#{session_name}${US}#{?#{m/r:[${US}${nl}],#{session_path}},,#{session_path}}${US}#{?#{m/r:[${US}${nl}],#{pane_current_path}},,#{pane_current_path}}" 2>/dev/null)"
+  done
+  [ "$_noglob" = 1 ] || set +f
   return 0
 }
 

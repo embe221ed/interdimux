@@ -142,6 +142,26 @@ if [ -x "$BIN" ]; then
     || report "both renderers draw the same directory rows, byte for byte" fail
 fi
 
+# --- the session table, which names a directory's session -----------------------
+# ctrl-o badges a directory that already has a session ("→ name") from ONE
+# list-sessions, split in-process into fields (review B07: it used to be read
+# a byte at a time from a here-string).  A start directory is any bytes but a US
+# or a newline: a glob character must stay literal -- `[x]` is not `x` -- and
+# runs of blanks, and a trailing one, are part of the name.
+G="$TMPD/g"; SP="$TMPD/two  sp "
+mkdir -p "$G/[x]" "$G/x" "$SP"
+tmux -L "$SOCK" new-session -d -s globsess -c "$G/[x]" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s spsess -c "$SP" 'sleep 99999'
+printf '%s\n' "$G/[x]" "$G/x" "$SP" > "$TMPD/data/interdimux/recent_dirs"
+dl=$(bash "$SCRIPT" --dirs-list 2>/dev/null | sgr_strip)
+badge() { printf '%s\n' "$dl" | awk -F'\t' -v s="$1" '$3 == s { print $2; exit }'; }
+[ "$(badge "$G/[x]")" = "→ globsess" ] && [ "$(badge "$G/x")" = "" ] \
+  && report "ctrl-o: a session started in \`[x]\` badges \`[x]\`, not \`x\`" pass \
+  || report "ctrl-o: a session started in \`[x]\` badges \`[x]\`, not \`x\` (got '$(badge "$G/[x]")' / '$(badge "$G/x")')" fail
+[ "$(badge "$SP")" = "→ spsess" ] \
+  && report "ctrl-o: ...and one in a directory named with doubled and trailing blanks" pass \
+  || report "ctrl-o: ...and one in a directory named with doubled and trailing blanks (got '$(badge "$SP")')" fail
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
