@@ -304,7 +304,8 @@ Creates (or switches to) a session from a directory. The list has three tiers:
 
 A directory that already has a session is marked `▸` and shows which one, so
 `Enter` there is visibly a switch rather than a create. A session belongs to the
-directory it was started in, even after you `cd` somewhere else inside it:
+directory it was started in, whatever it is called and even after you `cd`
+somewhere else inside it:
 
 ```
   ▸  ~/code/api          → api
