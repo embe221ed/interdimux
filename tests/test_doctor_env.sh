@@ -184,6 +184,37 @@ senv FZF_DEFAULT_OPTS $'--cycle\n--tmux'
 has "a --tmux on the second line of a multi-line value is found" "$(doctor)" '⚠ $FZF_DEFAULT_OPTS sets --tmux'
 unsenv FZF_DEFAULT_OPTS
 
+# An option fzf does not know kills every picker.  fzf's own verdict is the premise.
+senv FZF_DEFAULT_OPTS '--no-such-fzf-flag'
+if FZF_DEFAULT_OPTS='--no-such-fzf-flag' fzf --version >/dev/null 2>&1; then
+  report "premise: fzf rejects --no-such-fzf-flag" fail
+else
+  has "default options fzf rejects are a problem" "$(doctor)" "✗ fzf rejects its default options"
+fi
+unsenv FZF_DEFAULT_OPTS
+
+# --- @interdimux-fzf-opts --------------------------------------------------------------
+# fzf's own parse is the oracle for what is valid.
+setopt fzf-opts '--bogus-flag'
+has "an option fzf rejects is a problem" "$(doctor)" "✗ @interdimux-fzf-opts = '--bogus-flag' — fzf rejects it"
+setopt fzf-opts "--color=fg:'red"
+has "an unbalanced quote is a problem (the whole value is dropped)" "$(doctor)" \
+  "✗ @interdimux-fzf-opts = '--color=fg:'red' — does not parse"
+setopt fzf-opts '--tmux 80%'
+has "--tmux here is a problem: these words come last, nothing cancels them" "$(doctor)" \
+  "✗ @interdimux-fzf-opts = '--tmux 80%'"
+# Values fzf accepts, including two that show-options prints escaped (\" and
+# \$).  The premise is fzf's verdict on the same shell words the pickers pass.
+for good in '--color=bg+:237' '--bind "ctrl-x:execute(echo hi)"' "--prompt='\$ '" '--tmux --no-tmux'; do
+  if eval "fzf --version $good" >/dev/null 2>&1; then
+    setopt fzf-opts "$good"
+    hasnt "fzf-opts [$good], which fzf accepts, is not flagged" "$(doctor)" "✗ @interdimux-fzf-opts"
+  else
+    report "premise: fzf accepts [$good]" fail
+  fi
+done
+unsetopt fzf-opts
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

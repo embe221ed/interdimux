@@ -4558,7 +4558,7 @@ if [ "${1:-}" = "--doctor" ]; then
   if command -v fzf >/dev/null 2>&1; then
     # The version with the user's defaults kept out of it: fzf parses those
     # before it looks at --version, so a bad $FZF_DEFAULT_OPTS made this line
-    # print no version at all.
+    # print no version at all.  Whether fzf accepts them is its own check below.
     _fzv=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' fzf --version 2>/dev/null </dev/null)
     _fzv="${_fzv%% *}"
     # Below 0.40 the preflight refuses to start a picker at all (--doctor alone
@@ -4728,7 +4728,17 @@ if [ "${1:-}" = "--doctor" ]; then
   _srv_env FZF_DEFAULT_OPTS exact && _fdo="$REPLY"
   _srv_env FZF_DEFAULT_OPTS_FILE && _fdof="$REPLY"
 
-  # The flags that are not a matter of taste:
+  # First, whether fzf takes them at all.  It parses its defaults before any
+  # flag, so one option it does not know — a typo, a flag from a newer fzf —
+  # makes EVERY picker exit before it draws, and --version is enough to find out.
+  if { [ -n "$_fdo" ] || [ -n "$_fdof" ]; } && command -v fzf >/dev/null 2>&1; then
+    if ! _fe=$(FZF_DEFAULT_OPTS="$_fdo" FZF_DEFAULT_OPTS_FILE="$_fdof" fzf --version 2>&1 >/dev/null </dev/null); then
+      _bad "fzf rejects its default options — every picker exits before it draws"
+      _note "${_fe%%$'\n'*}"
+    fi
+  fi
+
+  # Then the flags that are not a matter of taste:
   #   --border/--margin/--padding shrink fzf's window WITHOUT shrinking
   #     FZF_COLUMNS, which is what the column widths and the hint bar are sized
   #     from, so every row comes out too wide and gets clipped;
@@ -4778,8 +4788,9 @@ if [ "${1:-}" = "--doctor" ]; then
   # Its own statement, not a note under the line above: fzf reads this file even
   # when $FZF_DEFAULT_OPTS is empty, and claiming "none of it changes fzf's
   # geometry" while an unread file sets the geometry is worse than saying nothing.
+  # (Whether fzf ACCEPTS it is the check above.)
   if [ -n "$_fdof" ]; then
-    _warn "\$FZF_DEFAULT_OPTS_FILE is set — fzf reads it, and its contents are not checked here"
+    _warn "\$FZF_DEFAULT_OPTS_FILE is set — fzf reads it, and its flags are not checked here"
     _note "$_fdof"
   fi
 
@@ -4951,6 +4962,42 @@ if [ "${1:-}" = "--doctor" ]; then
         esac ;;
       key|dashboard-key)
         [ "${#v}" -eq 1 ] || printf 'expected a single key' ;;
+      fzf-opts)
+        # Two ways this option silently does nothing, both checked the way the
+        # pickers meet the value.  build_fzf_theme evals it into words and, when
+        # that fails, drops the WHOLE set — on purpose, so a stray quote cannot
+        # kill every picker — without a word.  And the words reach fzf last, so
+        # one it does not know makes every picker exit before it draws.  fzf
+        # parses every flag before it honours --version, so that finds it; its
+        # own defaults are kept out, so they are not blamed on this.  (The eval
+        # is the one the navigator runs on every open, so it risks nothing new.)
+        # The parse is tried in a subshell of its own first: this runs inside
+        # $(…), and there a syntax error in eval ends the whole subshell instead
+        # of failing the command — which printed nothing, i.e. "✓".
+        local -a _u=()
+        if ! ( eval "_u=($v)" ) 2>/dev/null; then
+          printf 'does not parse as shell words (an unbalanced quote?), so none of it applies'
+          return 0
+        fi
+        eval "_u=($v)" 2>/dev/null
+        # --tmux/--popup here is worse than in $FZF_DEFAULT_OPTS: these words
+        # come last, so nothing overrides them.
+        local _w _pop=""
+        for _w in ${_u[@]+"${_u[@]}"}; do
+          case "$_w" in
+            --tmux|--tmux=*|--popup|--popup=*) _pop="${_w%%=*}" ;;
+            --no-tmux|--no-popup)              _pop="" ;;
+          esac
+        done
+        if [ -n "$_pop" ]; then
+          printf '%s makes fzf open a popup of its own, underneath the one the picker is in, which stays blank' "$_pop"
+          return 0
+        fi
+        local _e
+        if command -v fzf >/dev/null 2>&1 \
+           && ! _e=$(FZF_DEFAULT_OPTS='' FZF_DEFAULT_OPTS_FILE='' fzf --version ${_u[@]+"${_u[@]}"} 2>&1 >/dev/null </dev/null); then
+          printf 'fzf rejects it, so every picker exits before it draws: %s' "${_e%%$'\n'*}"
+        fi ;;
       jump-keys)
         # space-separated tmux key specs; the count is what maps to #1, #2, …
         case "$v" in *[!A-Za-z0-9\ ^\-]*) printf 'expected space-separated tmux keys, e.g. "M-1 M-2 M-3"' ;; esac ;;
@@ -4959,11 +5006,25 @@ if [ "${1:-}" = "--doctor" ]; then
     esac
   }
 
-  # Every @interdimux-* actually set, global and session scope.
+  # Every @interdimux-* actually set, global and session scope.  Each line comes
+  # tagged with its scope (g/s), so a value can be re-read from the right one.
   _seen=0
   while IFS= read -r _line; do
+    _scope="${_line%% *}"; _line="${_line#* }"
     _name="${_line%% *}"; _name="${_name#@interdimux-}"
     _val="${_line#* }"; [ "$_val" = "$_line" ] && _val=""
+    # show-options prints a value the way tmux's own parser would need it: in
+    # quotes, with \" \$ and \\ escaped, so `--bind "x:y"` comes out as
+    # "--bind \"x:y\"".  That is fine to show, but it is not the value the code
+    # reads — checked in that form, a perfectly good @interdimux-fzf-opts would be
+    # "rejected by fzf".  So a quoted or escaped one is read back raw to be checked.
+    _raw="$_val"
+    case "$_val" in
+      \"*|\'*|*\\*)
+        if [ "$_scope" = g ]; then _raw=$(tmux show-option -gqv "@interdimux-$_name" 2>/dev/null)
+        else _raw=$(tmux show-option -qv "@interdimux-$_name" 2>/dev/null)
+        fi ;;
+    esac
     _val="${_val%\"}"; _val="${_val#\"}"
     _seen=$((_seen + 1))
     if ! _is_known "$_name"; then
@@ -4975,14 +5036,15 @@ if [ "${1:-}" = "--doctor" ]; then
       fi
       continue
     fi
-    _why=$(_check_value "$_name" "$_val")
+    _why=$(_check_value "$_name" "$_raw")
     if [ -n "$_why" ]; then
       _bad "@interdimux-$_name = '$_val' — $_why"
     else
       _ok "@interdimux-$_name = '$_val'"
     fi
-  done < <( { tmux show-options -g 2>/dev/null; tmux show-options 2>/dev/null; } \
-            | grep '^@interdimux-' | sort -u )
+  done < <( { tmux show-options -g 2>/dev/null; echo '#session'; tmux show-options 2>/dev/null; } \
+            | awk '$0 == "#session" { sc = "s"; next }
+                   /^@interdimux-/ && !seen[$0]++ { print (sc == "" ? "g" : sc) " " $0 }' )
   [ "$_seen" = 0 ] && _note 'nothing set — every option is at its default'
 
   # A hide pattern that matches no session is indistinguishable from a working
