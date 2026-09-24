@@ -90,6 +90,12 @@ mkproj "$TMPD/net9p/proj"   net9pproj
 mkproj "$TMPD/nfsrepo"      nfsrepobranch
 mkdir -p "$TMPD/nfsrepo/scratch/work"
 mkproj "$TMPD/nfsrepo/scratch/own" ownbranch
+# Mount points with a blank, a tab and a newline in them, each FOLLOWED BY A
+# DIGIT: mountinfo writes them \040, \011, \012 -- see the cases below.
+mkproj "$TMPD/nas 1/proj"          nas1branch
+mkproj "$TMPD/nas 1/work"          nas1work
+mkproj "$TMPD/tab"$'\t'"5/proj"      tab5branch
+mkproj "$TMPD/nl"$'\n'"1/proj"       nl1branch
 mkdir -p "$TMPD/data/interdimux" "$TMPD/bin" "$TMPD/fzfbin" "$TMPD/run"
 chmod 700 "$TMPD/run"
 printf '%s\n' "$TMPD/nas/proj" "$TMPD/nas/gone" "$TMPD/local/proj" "$TMPD/vault/proj" "$TMPD/home/proj" \
@@ -107,6 +113,9 @@ MI="$TMPD/mountinfo"
   echo "905 1 0:905 / $TMPD/net9p rw,relatime - 9p 10.0.0.1 rw,access=user,trans=tcp,port=564"
   echo "906 1 0:906 / $TMPD/nfsrepo rw,relatime shared:906 - nfs4 srv:/repo rw"
   echo "907 906 0:907 / $TMPD/nfsrepo/scratch rw shared:907 - tmpfs tmpfs rw"
+  echo "908 1 0:908 / $TMPD/nas\\0401 rw,relatime shared:908 - nfs4 srv:/nas1 rw"
+  echo "909 1 0:909 / $TMPD/tab\\0115 rw,relatime shared:909 - cifs //srv/tab rw"
+  echo "910 1 0:910 / $TMPD/nl\\0121 rw,relatime shared:910 - nfs4 srv:/nl1 rw"
 } > "$MI"
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s bench -x 200 -y 50 -c "$TMPD/home" 'sleep 99999'
@@ -288,6 +297,50 @@ for r in $renderers; do
                  *) report "$label: ... and a repository inside the local mount keeps its badge (got: $got)" fail ;; esac
 done
 
+# A mount point's blank, tab or newline is escaped in mountinfo as \040, \011
+# or \012: a backslash and EXACTLY three octal digits.  bash decoded them with
+# printf %b, whose \0 takes up to three MORE, so `nas\0401` (`nas 1`) became
+# `nas` and the byte 0x01, `tab\0115` became `tabM` -- mount points no path is
+# ever on.  Everything under such an NFS/CIFS mount was then probed, by the bash
+# renderer and by ctrl-o whatever drew the navigator; the Rust core took three
+# digits and skipped it (review A05).  The fixture's escapes are the kernel's.
+mkdir -p "$TMPD/data1/interdimux"
+printf '%s\n' "$TMPD/nas 1/work" "$TMPD/nas 1/gone" > "$TMPD/data1/interdimux/recent_dirs"
+tmux -L "$SOCK" new-session -d -s nas1pane -x 200 -y 50 -c "$TMPD/nas 1/proj" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s tabpane -x 200 -y 50 -c "$TMPD/tab"$'\t'"5/proj" 'sleep 99999'
+for _s in nas1pane tabpane; do
+  wait_for "the $_s pane's cwd" sh -c "tmux -L '$SOCK' list-panes -t '=$_s:' -F '#{pane_current_path}' | grep -q proj"
+done
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  LIST_ENV="XDG_DATA_HOME=$TMPD/data1"   # control: every one of them is probed on the real table
+  got=$(row "$r" "W:nas1pane:0")
+  case "$got" in *"‹nas1branch›"*) report "$label control: a pane in 'nas 1' is probed on a local disk" pass ;;
+                 *) report "$label control: a pane in 'nas 1' is probed on a local disk (got: $got)" fail ;; esac
+  LIST_ENV="INTERDIMUX_MOUNTINFO=$MI XDG_DATA_HOME=$TMPD/data1"
+  for _s in nas1pane tabpane; do
+    got=$(row "$r" "W:$_s:0")
+    if [ -n "$got" ] && ! printf '%s' "$got" | grep -q '‹'; then
+      report "$label: a pane on a network mount escaped as \\ooo plus a digit ($_s) gets no git walk" pass
+    else
+      report "$label: a pane on a network mount escaped as \\ooo plus a digit ($_s) gets no git walk (got: $got)" fail
+    fi
+  done
+  got=$(row "$r" "D:$TMPD/nas 1/gone")
+  [ -n "$got" ] && report "$label: ...a recent dir there is offered without an existence check" pass \
+                || report "$label: ...a recent dir there is offered without an existence check" fail
+  got=$(row "$r" "D:$TMPD/nas 1/work")
+  if [ -n "$got" ] && ! printf '%s' "$got" | grep -q -e '‹' -e 'Rust'; then
+    report "$label: ...and a dir row there is not probed" pass
+  else
+    report "$label: ...and a dir row there is not probed (got: $got)" fail
+  fi
+done
+dl=$(XDG_DATA_HOME="$TMPD/data1" INTERDIMUX_MOUNTINFO="$MI" bash "$SCRIPT" --dirs-list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+got=$(printf '%s\n' "$dl" | awk -F'\t' -v a="$TMPD/nas 1/work" -v b="$TMPD/nas 1/gone" '$3 == a || $3 == b { printf "[%s]", $2 }')
+[ "$got" = "[][]" ] && report "--dirs-list: under 'nas 1', nothing is type-probed or stat'ed" pass \
+                   || report "--dirs-list: under 'nas 1', nothing is type-probed or stat'ed (got: $got)" fail
+
 # Classified once per picker, not once per callback (review #30): the ctrl-o
 # picker, and the navigator when bash draws the list, read the mount table
 # before fzf starts, and every callback fzf runs inherits their answer.  Each
@@ -304,6 +357,8 @@ cat > "$TMPD/fzfbin/fzf" <<FZF
 cat > /dev/null
 cp "$TMPD/mi-plain" "$TMPD/mi-live"
 bash "$SCRIPT" --dirs-preview "$TMPD/nas/proj" > "$TMPD/cb-preview" 2>&1
+bash "$SCRIPT" --dirs-preview "$TMPD/nl
+1/proj" > "$TMPD/cb-preview-nl" 2>&1
 bash "$SCRIPT" --dirs-list > "$TMPD/cb-dirs" 2>&1
 bash "$SCRIPT" --list > "$TMPD/cb-list" 2>&1
 exit 130
@@ -323,6 +378,11 @@ got=$(cb_row cb-dirs 3 "$TMPD/nas/proj")
 [ -n "$got" ] && [ "$(printf '%s' "$got" | cut -f2)" = "" ] \
   && report "ctrl-o picker: a reload classifies with the table the picker read" pass \
   || report "ctrl-o picker: a reload classifies with the table the picker read (got: $got)" fail
+# a newline in a mount point crosses the hand-off as \012, and was decoded there
+# with the same %b: `nl\0121` came back `nlQ`
+[ -s "$TMPD/cb-preview-nl" ] && ! grep -q 'Type:' "$TMPD/cb-preview-nl" \
+  && report "ctrl-o picker: ...a mount point with a newline and a digit in it too" pass \
+  || report "ctrl-o picker: ...a mount point with a newline and a digit in it too (got: $(head -5 "$TMPD/cb-preview-nl" 2>/dev/null | tr '\n' ' '))" fail
 ctl=$(INTERDIMUX_MOUNTINFO="$TMPD/mi-live" bash "$SCRIPT" --dirs-preview "$TMPD/nas/proj" 2>&1)
 case "$ctl" in *"Type:"*) report "control: outside a picker, the rewritten table is what counts" pass ;;
                *) report "control: outside a picker, the rewritten table is what counts (got: $ctl)" fail ;; esac
@@ -339,6 +399,59 @@ fi
 [ -s "$TMPD/cb-preview" ] && ! grep -q 'Type:' "$TMPD/cb-preview" \
   && report "navigator (bash renderer): so does a directory row's preview" pass \
   || report "navigator (bash renderer): so does a directory row's preview (got: $(head -5 "$TMPD/cb-preview" 2>/dev/null | tr '\n' ' '))" fail
+
+# ...and when the Rust core draws the navigator's list (review B08).  bash does
+# not classify up front there -- it would put a parse before the first frame --
+# so a directory row's preview, and Enter on a directory row, each parsed the
+# table again.  The core, which reads it anyway, now leaves its answer in a file
+# the navigator names.  Same oracle: the table on disk loses its NFS line once
+# the list is drawn.  The preview must not probe the "NFS" directory, and
+# Enter's rewrite of the recent list must keep the entry there that does not
+# exist -- a stat it skipped, where one that re-read the table prunes it.
+if [ -x "$BIN" ]; then
+  mkdir -p "$TMPD/fzfnav"
+  cat > "$TMPD/fzfnav/fzf" <<FZF
+#!/bin/sh
+cat > /dev/null
+if [ -n "\${INTERDIMUX_MOUNTS_FILE:-}" ]; then cp "\$INTERDIMUX_MOUNTS_FILE" "$TMPD/cb-handoff"
+else printf '%s' "\${INTERDIMUX_MOUNTS-unset}" > "$TMPD/cb-handoff"; fi
+cp "$TMPD/mi-plain" "$TMPD/mi-live"
+bash "$SCRIPT" --preview "D:$TMPD/nas/proj" > "$TMPD/cb-navpreview" 2>&1
+printf '\n%s\n' "x	x	x	D:$TMPD/local/work"
+exit 0
+FZF
+  chmod +x "$TMPD/fzfnav/fzf"
+  cp "$TMPD/data/interdimux/recent_dirs" "$TMPD/recent.saved"
+  for r in on off; do
+    cp "$MI" "$TMPD/mi-live"; rm -f "$TMPD"/cb-*
+    cp "$TMPD/recent.saved" "$TMPD/data/interdimux/recent_dirs"
+    PATH="$TMPD/fzfnav:$PATH" INTERDIMUX_MOUNTINFO="$TMPD/mi-live" XDG_RUNTIME_DIR="$TMPD/run" \
+      INTERDIMUX_USE_RUST="$r" bash "$SCRIPT" </dev/null >/dev/null 2>&1 || :
+    label=$([ "$r" = on ] && echo "Rust core" || echo "bash renderer")
+    grep -v '^$' "$TMPD/cb-handoff" 2>/dev/null | LC_ALL=C sort > "$TMPD/handoff.$r" || :
+    [ -s "$TMPD/cb-navpreview" ] && ! grep -q 'Type:' "$TMPD/cb-navpreview" \
+      && report "navigator ($label): a directory row's preview classifies with the table the list was drawn with" pass \
+      || report "navigator ($label): a directory row's preview classifies with the table the list was drawn with (got: $(head -5 "$TMPD/cb-navpreview" 2>/dev/null | tr '\n' ' '))" fail
+    if head -1 "$TMPD/data/interdimux/recent_dirs" | grep -qxF "$TMPD/local/work" \
+       && grep -qxF "$TMPD/nas/gone" "$TMPD/data/interdimux/recent_dirs"; then
+      report "navigator ($label): Enter on a directory row stats nothing on the mount the list skipped" pass
+    else
+      report "navigator ($label): Enter on a directory row stats nothing on the mount the list skipped (recent: $(tr '\n' ' ' < "$TMPD/data/interdimux/recent_dirs"))" fail
+    fi
+  done
+  # the core's classification is bash's own, line for line (as sets: each is
+  # written in its map's order): the blocking points, and a local mount in one
+  if [ -s "$TMPD/handoff.on" ] && cmp -s "$TMPD/handoff.on" "$TMPD/handoff.off"; then
+    report "the core hands over the same classification bash exports ($(wc -l < "$TMPD/handoff.on") mount points)" pass
+  else
+    report "the core hands over the same classification bash exports" fail
+    ERRORS+="$(diff "$TMPD/handoff.off" "$TMPD/handoff.on" | head -6 || true)"$'\n'
+  fi
+  ls "$TMPD/run"/interdimux-resume.* >/dev/null 2>&1 \
+    && report "the navigator leaves no scratch file behind (the mounts file included)" fail \
+    || report "the navigator leaves no scratch file behind (the mounts file included)" pass
+  cp "$TMPD/recent.saved" "$TMPD/data/interdimux/recent_dirs"
+fi
 
 # zoxide stats every entry of its database unless told --all; a zoxide that
 # does not know the flag still gets asked the plain way.

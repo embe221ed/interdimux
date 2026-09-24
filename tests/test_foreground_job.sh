@@ -18,7 +18,9 @@
 #                  parenthesised but may hold ") " and blanks itself.  The
 #                  bash reader was rewritten for speed (review #29); a process
 #                  named `x) S 1 2 3 4 5` is one whose fields a careless parse
-#                  takes from inside its name.
+#                  takes from inside its name, and one named ` a b c d e f g `
+#                  (15 bytes, the most comm holds) is nine words of the stat
+#                  line, its '(' a word of its own (review A07).
 #
 # Assertions are on the exact bytes of the COMMAND field against escapes written
 # out here from the SGR spec, for two palette values used nowhere else in a row.
@@ -65,10 +67,14 @@ HAVE_ZSH=0; command -v zsh >/dev/null 2>&1 && HAVE_ZSH=1
 # comm is the basename the kernel was asked to exec, so a symlink names it.
 HOSTILE='x) S 1 2 3 4 5'
 ln -s "$SLEEP_BIN" "$TMPD/$HOSTILE"
+# ...and one whose comm is as many words as comm can be: a leading blank makes
+# `(` a word, so `( a b c d e f g )` ends at the NINTH word of the stat line
+HOSTILE9=' a b c d e f g '
+ln -s "$SLEEP_BIN" "$TMPD/$HOSTILE9"
 printf 'sleep 643\n' > "$TMPD/job.sh"
 
 tmux_cmd new-session -d -s t -x 200 -y 40 -n base -c "$TMPD" "exec $SH -i"
-for w in nested idle deep stopped script hostile; do
+for w in nested idle deep stopped script hostile hostile9; do
   tmux_cmd new-window -d -t '=t:' -n "$w" -c "$TMPD" "exec $SH -i"
 done
 [ "$HAVE_ZSH" = 1 ] && tmux_cmd new-window -d -t '=t:' -n zsh -c "$TMPD" "exec $SH -i"
@@ -129,6 +135,7 @@ tmux_cmd send-keys -t '=t:script' 'bash job.sh &' Enter
 # hostile: a background job, then a pipeline whose leader exits at once, so the
 # foreground group names no live child and each child's stat is read
 tmux_cmd send-keys -t '=t:hostile' "sleep 645 & true | './$HOSTILE' 646" Enter
+tmux_cmd send-keys -t '=t:hostile9' "sleep 647 & true | './$HOSTILE9' 648" Enter
 # zsh: bash -> zsh -f -> sleep 642
 if [ "$HAVE_ZSH" = 1 ]; then
   nest zsh "$(pane_pid zsh)" 'zsh -f'; z1="$NESTED"
@@ -146,6 +153,9 @@ settled() {
     && is_fg "$(pane_pid script)" || return 1
   [ "$(kids "$(pane_pid hostile)" | cut -d' ' -f2- | sort | tr '\n' ,)" \
     = "./$HOSTILE 646,sleep 645," ] || return 1
+  # (kids' awk rejoins the words with single blanks)
+  [ "$(kids "$(pane_pid hostile9)" | cut -d' ' -f2- | LC_ALL=C sort | tr '\n' ,)" \
+    = "./ a b c d e f g 648,sleep 647," ] || return 1
   if [ "$HAVE_ZSH" = 1 ]; then
     [ "$(kids "$z1" | cut -d' ' -f2-)" = 'sleep 642' ] && [ "$(cur_cmd zsh)" = sleep ] || return 1
   fi
@@ -197,6 +207,9 @@ for cfg in "$first, default backend:" \
     "$(cmd_in "$out" script)" "${ACCENT}bash job.sh${RST}"
   expect "$label: a foreground job whose name mimics a stat line is found" \
     "$(cmd_in "$out" hostile)" "${ACCENT}x) S 1 2 3 4 5 646${RST}"
+  # argv0 './ a b c d e f g ' has no basename (it is cut at its first blank)
+  expect "$label: ...and one whose name is nine words of the stat line" \
+    "$(cmd_in "$out" hostile9)" "${ACCENT}./ a b c d e f g  648${RST}"
 done
 [ "$HAVE_ZSH" = 1 ] || echo "  (skipped the nested-zsh cases: zsh is not installed)"
 

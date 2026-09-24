@@ -18,9 +18,15 @@
 //! Classified once per run from /proc/self/mountinfo (INTERDIMUX_MOUNTINFO
 //! overrides the path, for tests); where there is no such file (macOS, BSD)
 //! nothing is classified and every path is probed as before.  bash's
-//! is_remote_path applies the same table.  (bash also hands its table to fzf's
-//! callbacks in INTERDIMUX_MOUNTS; this binary reads mountinfo itself, since
-//! the navigator only exports that when the bash renderer draws the list.)
+//! is_remote_path applies the same table.
+//!
+//! The navigator's callbacks -- a directory row's preview, Enter on one, ctrl-o
+//! -- are bash, and each would parse the table again.  When bash draws the list
+//! it classifies once and hands the answer down in INTERDIMUX_MOUNTS.  With this
+//! binary drawing it, the navigator names a file in INTERDIMUX_MOUNTS_FILE
+//! instead, and every list this binary renders writes its classification there
+//! ([`Table::export`]), in the same form: nothing is added to the first frame's
+//! path but a small write, and bash reads the file rather than the table.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -143,6 +149,60 @@ impl Table {
         }
         self.covering(path).map_or(false, |i| self.points[i].1)
     }
+
+    /// The classification as bash's mounts_export hands it to fzf's callbacks
+    /// (INTERDIMUX_MOUNTS), and as its _mounts_import reads it back: one line
+    /// per mount point that decides anything -- `1<point>` for one that blocks,
+    /// `0<point>` for a local mount inside one (a tmpfs on an NFS tree) -- with
+    /// '\' and newline escaped as mountinfo does, so a line is a line.  Empty:
+    /// classified, and nothing blocks.  No other local mount changes an answer.
+    pub fn export(&self) -> String {
+        let bps: Vec<&str> =
+            self.points.iter().filter(|(_, b)| *b).map(|(p, _)| p.as_str()).collect();
+        let mut out = String::new();
+        if bps.is_empty() {
+            return out;
+        }
+        for (pt, blocks) in &self.points {
+            let inside = |bp: &&str| {
+                pt.len() > bp.len() && pt.starts_with(*bp) && pt.as_bytes()[bp.len()] == b'/'
+            };
+            if !*blocks && !bps.iter().any(inside) {
+                continue;
+            }
+            out.push(if *blocks { '1' } else { '0' });
+            out.push_str(&pt.replace('\\', "\\134").replace('\n', "\\012"));
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// Write `text` to `path` whole or not at all: a sibling temporary file,
+/// created exclusively (never through a link someone left there), then renamed
+/// over `path`, so a reader sees the old file or the new one.  Best-effort: on
+/// any failure nothing is written, and bash parses the table itself.
+fn write_atomically(path: &str, text: &str) {
+    use std::io::Write;
+    let tmp = format!("{}.{}.tmp", path, std::process::id());
+    let create = || std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp);
+    let mut f = match create() {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // a leftover of this pid's: ours to remove (the sticky /tmp says so)
+            let _ = std::fs::remove_file(&tmp);
+            match create() {
+                Ok(f) => f,
+                Err(_) => return,
+            }
+        }
+        Err(_) => return,
+    };
+    let ok = f.write_all(text.as_bytes()).is_ok();
+    drop(f);
+    if !ok || std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 static TABLE: OnceLock<Table> = OnceLock::new();
@@ -156,19 +216,30 @@ pub fn is_remote(path: &str) -> bool {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "/proc/self/mountinfo".to_string());
             let home = std::env::var("HOME").unwrap_or_default();
-            match std::fs::read(&src) {
+            let (t, lossless) = match std::fs::read(&src) {
                 Ok(b) => {
-                    let mut t = Table::parse(&String::from_utf8_lossy(&b), &[&home]);
+                    let text = String::from_utf8_lossy(&b);
+                    let lossless = matches!(text, std::borrow::Cow::Borrowed(_));
+                    let mut t = Table::parse(&text, &[&home]);
                     // Only stat'ed while something still blocks.
                     if t.any_blocking() {
                         if let Some(r) = resolved_home(&home) {
                             t.exempt(&r);
                         }
                     }
-                    t
+                    (t, lossless)
                 }
-                Err(_) => Table { points: Vec::new() },
+                Err(_) => (Table { points: Vec::new() }, true),
+            };
+            // The navigator's hand-off to its bash callbacks (see the top of this
+            // file).  Not when a mount point was not UTF-8: this table holds it
+            // with U+FFFD, bash's own parse holds its bytes, so bash parses.
+            if let Some(f) = std::env::var("INTERDIMUX_MOUNTS_FILE").ok().filter(|f| !f.is_empty()) {
+                if lossless {
+                    write_atomically(&f, &t.export());
+                }
             }
+            t
         })
         .is_blocking(path)
 }
@@ -289,6 +360,55 @@ mod tests {
         assert_eq!(resolved_home(&format!("{r}/gpfs/u")), None);
         assert_eq!(resolved_home("relative/home"), None);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_escape_is_exactly_three_octal_digits() {
+        // a digit after the escape is part of the name: `nas 1`, not `nas` + 0x01
+        // (bash's printf %b read \0 plus three MORE digits; see _mount_unescape)
+        assert_eq!(unescape("/mnt/nas\\0401"), "/mnt/nas 1");
+        assert_eq!(unescape("/mnt/tab\\0115"), "/mnt/tab\t5");
+        assert_eq!(unescape("/mnt/nl\\0121x"), "/mnt/nl\n1x");
+        // the kernel escapes every backslash, so \134040 is a literal "\040"
+        assert_eq!(unescape("/mnt/a\\134040"), "/mnt/a\\040");
+        assert_eq!(unescape("/mnt/a\\134\\0407"), "/mnt/a\\ 7");
+        let t = Table::parse("1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 0:2 / /mnt/nas\\0401 rw - nfs4 srv:/x rw\n", &["/home/u"]);
+        assert!(t.is_blocking("/mnt/nas 1/proj"));
+        assert!(!t.is_blocking("/mnt/nas/proj"));
+    }
+
+    #[test]
+    fn the_export_is_what_bash_hands_its_callbacks() {
+        // what bash's mounts_export would write for INFO: the blocking points,
+        // and the one local mount inside one; order is the hash's, so as a set
+        let t = Table::parse(INFO, &["/home/u"]);
+        let mut got: Vec<&str> = Vec::new();
+        let out = t.export();
+        got.extend(out.lines());
+        got.sort_unstable();
+        assert_eq!(got, ["0/mnt/nas/scratch", "1/mnt/nas", "1/mnt/ssh box", "1/net"]);
+        assert!(out.ends_with('\n'));
+        // '\' and newline escaped, so each point is one line
+        let info = "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 0:2 / /mnt/a\\134b\\012c rw - nfs4 s:/ rw\n";
+        assert_eq!(Table::parse(info, &["/home/u"]).export(), "1/mnt/a\\134b\\012c\n");
+        // nothing blocks: empty, which bash reads as "classified, nothing blocks"
+        assert_eq!(Table::parse("1 0 8:1 / / rw - ext4 /dev/sda1 rw\n", &["/home/u"]).export(), "");
+    }
+
+    #[test]
+    fn the_export_file_is_replaced_whole() {
+        let dir = std::env::temp_dir().join(format!("imux-mounts-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("m");
+        let fs = f.to_str().unwrap();
+        write_atomically(fs, "1/a\n");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "1/a\n");
+        write_atomically(fs, "");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "");
+        // no temporary file is left behind
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

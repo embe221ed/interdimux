@@ -11,18 +11,21 @@
 #   * 4.3 itself works: the list, and the paths where an empty array is
 #     "unbound" to bash < 4.4 under `set -u` -- the directory picker's deep
 #     search with no match, and a doubled ':' in @interdimux-project-markers.
+#   * A '$' in a session name or a directory works on every bash from 4.3 to
+#     5.1 -- the ones that expand an array subscript twice -- and runs nothing.
 #
 # Old bashes are real binaries: point INTERDIMUX_OLD_BASH_DIR at a directory
-# holding <version>/bash for 3.2, 4.2 and 4.3, e.g.
+# holding <version>/bash for 3.2, 4.2, 4.3 and 5.1 (4.4 and 5.0 are used too
+# when there), e.g.
 #
-#   for v in 3.2.57 4.2 4.3; do curl -fsSL https://ftp.gnu.org/gnu/bash/bash-$v.tar.gz | tar -xz
+#   for v in 3.2.57 4.2 4.3 5.1; do curl -fsSL https://ftp.gnu.org/gnu/bash/bash-$v.tar.gz | tar -xz
 #     (cd bash-$v && ./configure --without-bash-malloc && make) && mkdir -p "$d/${v%.57}"
 #     cp bash-$v/bash "$d/${v%.57}/"; done
 #
 # (a modern gcc needs CFLAGS="-std=gnu89 -Wno-implicit-function-declaration
-# -Wno-implicit-int -Wno-incompatible-pointer-types" for these).  A version
-# that is not there is reported as skipped, by name.  The not-bash case needs
-# only dash.
+# -Wno-implicit-int -Wno-incompatible-pointer-types" for the three oldest).  A
+# version that is not there is reported as skipped, by name.  The not-bash case
+# needs only dash.
 
 set -euo pipefail
 
@@ -167,6 +170,76 @@ if old_bash 4.3; then
 else
   echo "  (skipped bash 4.3: not in \$INTERDIMUX_OLD_BASH_DIR)"
 fi
+
+# --- a '$' in a name, on every bash up to 5.1 -----------------------------------
+# `[[ -v "arr[$key]" ]]` expands the subscript a SECOND time on every bash before
+# 5.2, so a '$' in a key was read as a parameter: under set -u a session named
+# `$work` killed the whole list with "work: unbound variable", one named `$(…)`
+# RAN its name, and a recent directory like `$RECYCLE.BIN` cut ctrl-o's list off
+# there -- without the Rust core on the list, and in ctrl-o (which bash always
+# draws) with it.  Each key that reaches such a test is here: a session and its
+# window and pane lines, a pane's cwd (the git cache), a recent directory (the
+# recent list, the navigator's directory rows, ctrl-o's), a zoxide entry, and a
+# network mount point with the directory below it.  4.3 is the floor and 5.1
+# the last bash with the double expansion; 4.4 and 5.0 run too when present.
+echo
+echo "a '\$' in a session name or directory, on bash < 5.2"
+DL="$TMPD/dl"
+mkdir -p "$DL/\$pane" "$DL/before" "$DL/\$RECYCLE.BIN" "$DL/after" "$DL/\$zox" "$DL/\$nfs" \
+  "$TMPD/zbin" "$TMPD/data/interdimux"
+mkdir -p "$DL/\$pane/.git" && printf 'ref: refs/heads/dollarbranch\n' > "$DL/\$pane/.git/HEAD"
+printf '%s\n' "$DL/before" "$DL/\$RECYCLE.BIN" "$DL/\$nfs/gone" "$DL/after" \
+  > "$TMPD/data/interdimux/recent_dirs"
+printf "#!/bin/sh\nprintf '%%s\\\\n' '%s'\n" "$DL/\$zox" > "$TMPD/zbin/zoxide"
+chmod +x "$TMPD/zbin/zoxide"
+{ cat /proc/self/mountinfo 2>/dev/null || :
+  echo "900 1 0:900 / $DL/\$nfs rw,relatime shared:900 - nfs4 srv:/nas rw"; } > "$TMPD/mountinfo"
+MARKER="$TMPD/marker"
+# (by window ID: tmux reads any target starting with '$', even '=$work', as a session ID)
+wid=$(tmux -L "$SOCK" new-session -d -P -F '#{window_id}' -s '$work' -c "$DL/\$pane" 'sleep 900')
+tmux -L "$SOCK" split-window -d -t "$wid" -c "$DL/\$pane" 'sleep 900'
+tmux -L "$SOCK" new-session -d -s "\$(touch $MARKER)" 'sleep 900'
+for _ in $(seq 1 100); do
+  [ "$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}' 2>/dev/null | grep -cxF "$DL/\$pane")" = 2 ] && break
+  sleep 0.1
+done
+DENV=(PATH="$TMPD/zbin:$PATH" INTERDIMUX_USE_RUST=off INTERDIMUX_SHOW_DIRS=on INTERDIMUX_DIRS_LIMIT=20
+      INTERDIMUX_USE_ZOXIDE=on INTERDIMUX_SHOW_GIT_BRANCH=on FZF_COLUMNS=200
+      INTERDIMUX_MOUNTINFO="$TMPD/mountinfo" INTERDIMUX_PROJECT_DIRS="$TMPD/nowhere")
+specs() { printf '%s\n' "$OUT" | awk -F'\t' '{ print $NF }' | tr '\n' ' '; }
+has_rows() { # $@ = specs that must all be in $rows
+  local s
+  for s in "$@"; do case " $rows" in *" $s "*) ;; *) return 1 ;; esac; done
+}
+dollar_ok=0
+for v in 4.3 4.4 5.0 5.1; do
+  if ! old_bash "$v"; then
+    echo "  (skipped bash $v: not in \$INTERDIMUX_OLD_BASH_DIR)"
+    continue
+  fi
+  dollar_ok=1
+  b="$REPLY"; rm -f "$MARKER"
+  RC=0
+  OUT=$(env "${DENV[@]}" timeout 30 "$b" "$SCRIPT" --list </dev/null 2>"$TMPD/err") || RC=$?
+  ERR=$(cat "$TMPD/err")
+  rows=$(specs)
+  check "$v: the bash renderer lists '\$' names (rc $RC, stderr: ${ERR%%$'\n'*})" '[ "$RC" = 0 ] && [ -z "$ERR" ]'
+  check "$v: ...every session, window and pane of them" \
+    'has_rows "S:\$work" "W:\$work:0" "P:\$work:0:0" "P:\$work:0:1" "S:\$(touch $MARKER)" "W:\$(touch $MARKER):0"'
+  check "$v: ...and every directory row: recent, zoxide, and one on a network mount" \
+    'has_rows "D:$DL/before" "D:$DL/\$RECYCLE.BIN" "D:$DL/\$nfs/gone" "D:$DL/after" "D:$DL/\$zox"'
+  # the badge is read through the git cache, keyed on the pane's '$' cwd
+  badge=$(printf '%s\n' "$OUT" | awk -F'\t' -v s="W:\$work:0" '$4 == s { print $2 }')
+  check "$v: ...and the git badge of the pane in a '\$' directory" '[[ "$badge" == *"‹dollarbranch›"* ]]'
+  RC=0
+  OUT=$(env "${DENV[@]}" timeout 30 "$b" "$SCRIPT" --dirs-list </dev/null 2>"$TMPD/err") || RC=$?
+  ERR=$(cat "$TMPD/err")
+  rows=$(specs)
+  check "$v: ctrl-o's list keeps a '\$' directory and every one after it (rc $RC, stderr: ${ERR%%$'\n'*})" \
+    '[ "$RC" = 0 ] && [ -z "$ERR" ] && [ "$rows" = "$DL/before $DL/\$RECYCLE.BIN $DL/\$nfs/gone $DL/after $DL/\$zox " ]'
+  check "$v: a session named \$(touch …) never ran its name" '[ ! -e "$MARKER" ]'
+done
+[ "$dollar_ok" = 1 ] || echo "  (no bash from 4.3 to 5.1 to run these on)"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

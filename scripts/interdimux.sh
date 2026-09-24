@@ -7,12 +7,16 @@
 # new-session-from-directory actions via fzf keybindings.
 
 # bash >= 4.3, checked before anything can need it.  Every option read goes
-# through a nameref (`local -n`), and namerefs, `[[ -v arr[k] ]]` and the rules
-# this file writes its array expansions to are all 4.3; macOS's own /bin/bash is
-# 3.2.  Unchecked, 3.2 died at the first `declare -A` and 4.2 at the first
-# `local -n`, each naming a builtin rather than the problem -- and behind a key
-# binding or in a popup nobody saw even that.  So it is said here: on stderr,
-# and from inside tmux on the status line, which outlives a popup.
+# through a nameref (`local -n`), and namerefs and the rules this file writes its
+# array expansions to are 4.3; macOS's own /bin/bash is 3.2.  (An assoc key is
+# tested as `[[ ${arr[$k]+x} ]]`, never `[[ -v "arr[$k]" ]]`: every bash before
+# 5.2 expands that subscript a second time, so a '$' in a session name or a
+# directory was read as a parameter -- "unbound variable" under set -u, and a
+# name like `$(cmd)` ran.)  Unchecked, 3.2 died at the first `declare -A` and
+# 4.2 at the first `local -n`, each naming a builtin rather than the problem --
+# and behind a key binding or in a popup nobody saw even that.  So it is said
+# here: on stderr, and from inside tmux on the status line, which outlives a
+# popup.
 #
 # POSIX sh, and BASH_VERSION rather than BASH_VERSINFO, because this has to run
 # in whatever shell the file is handed to.  bash reads a script one command at a
@@ -1055,6 +1059,13 @@ fi
 # bash on every --dirs-preview cursor move and every --list reload, twice per
 # --dirs-list.  A mount that comes or goes while one picker is open is picked
 # up by the next one.
+#
+# When the Rust core draws the navigator's list, bash classifies nothing up
+# front -- that would be a parse on the way to the first frame -- and the core,
+# which classifies anyway, writes its answer in the same form to the file
+# INTERDIMUX_MOUNTS_FILE names, on every list it renders (rust/src/mounts.rs).
+# A directory row's preview, Enter on one and ctrl-o read that file, and parse
+# the table themselves only while it is not there yet (review B08).
 _MOUNTS_READ=0
 _MOUNT_BPS=()                 # the points that can block -- usually one to three
 declare -A _MOUNT_TBL=()      # point -> 1 (can block) | 0; the LAST mount at a point wins
@@ -1063,7 +1074,22 @@ _MOUNT_UNDER=0                # is_remote_path's last path lies below a blocking
 _mounts_read() {
   _MOUNTS_READ=1
   _MOUNT_BPS=() _MOUNT_TBL=()
-  if [ -n "${INTERDIMUX_MOUNTS+set}" ]; then _mounts_import; return 0; fi
+  local -a _me=()
+  if [ -n "${INTERDIMUX_MOUNTS+set}" ]; then
+    local IFS=$'\n' _noglob=0
+    case $- in *f*) _noglob=1 ;; esac
+    set -f
+    _me=($INTERDIMUX_MOUNTS)
+    [ "$_noglob" = 1 ] || set +f
+    _mounts_import ${_me[@]+"${_me[@]}"}
+    return 0
+  fi
+  # Only a file of our own: in a shared /tmp, anyone could have put one there.
+  if [ -n "${INTERDIMUX_MOUNTS_FILE:-}" ] && [ -f "$INTERDIMUX_MOUNTS_FILE" ] \
+     && [ -O "$INTERDIMUX_MOUNTS_FILE" ] && mapfile -t _me 2>/dev/null < "$INTERDIMUX_MOUNTS_FILE"; then
+    _mounts_import ${_me[@]+"${_me[@]}"}
+    return 0
+  fi
   local f="${INTERDIMUX_MOUNTINFO:-/proc/self/mountinfo}"
   [ -r "$f" ] || return 0
   # One buffered read.  `while read` on a /proc file seeks back after every
@@ -1100,7 +1126,7 @@ _mounts_read() {
     esac
     any=1
     point=${_mf[4]}
-    [[ $point == *\\* ]] && printf -v point '%b' "$point"   # mountinfo escapes ' ' as \040
+    [[ $point == *\\* ]] && { _mount_unescape "$point"; point=$_MOUNT_DEC; }
     _MOUNT_TBL[$point]=$b
     ((b)) && _cand+=("$point")
   done
@@ -1132,6 +1158,24 @@ _mounts_read() {
   done
 }
 
+# A mount point as mountinfo writes it, decoded, in _MOUNT_DEC -- not REPLY,
+# for the reason _MOUNT_AT gives below.  The kernel escapes exactly four bytes,
+# each as a backslash and THREE octal digits: blank \040, tab \011, newline
+# \012 and the backslash itself \134, so every backslash left in a field starts
+# one of these.  Not printf %b: its \0 takes up to three digits MORE, so
+# `nas\0401` -- the mount point `nas 1` -- came out as `nas` and the byte 0x01,
+# which no path is on, and every path under that NFS mount was probed.  The
+# backslash goes last, so `\134040` stays the literal `\040`.  rust/src/mounts.rs
+# unescape() decodes the same.  (mounts_export writes the same escapes for a
+# newline and a backslash, so its import decodes with this too.)
+_mount_unescape() {
+  local p="$1" bs='\' nl=$'\n' tab=$'\t'
+  p=${p//\\040/ }
+  p=${p//\\011/"$tab"}
+  p=${p//\\012/"$nl"}
+  _MOUNT_DEC=${p//\\134/"$bs"}
+}
+
 # _MOUNT_BPS = those of $@ that still block after the exemptions.  With none
 # left the table is emptied, so every check is free, and the status is 1.
 _mounts_bps() {
@@ -1139,7 +1183,7 @@ _mounts_bps() {
   local p
   local -A seen=()
   for p in "$@"; do
-    [ "${_MOUNT_TBL[$p]:-0}" = 1 ] && ! [[ -v "seen[$p]" ]] || continue
+    [ "${_MOUNT_TBL[$p]:-0}" = 1 ] && ! [[ ${seen[$p]+x} ]] || continue
     seen["$p"]=1
     _MOUNT_BPS+=("$p")
   done
@@ -1173,17 +1217,14 @@ mounts_export() {
   export INTERDIMUX_MOUNTS="$out"
 }
 
+# $@ = the lines of such a hand-off (INTERDIMUX_MOUNTS, or the Rust core's file).
 _mounts_import() {
-  local -a _me=() _cand=()
-  local e p IFS=$'\n' _noglob=0
-  case $- in *f*) _noglob=1 ;; esac
-  set -f
-  _me=($INTERDIMUX_MOUNTS)
-  [ "$_noglob" = 1 ] || set +f
-  for e in ${_me[@]+"${_me[@]}"}; do
+  local -a _cand=()
+  local e p
+  for e in "$@"; do
     p="${e:1}"
     case "$p" in /*) ;; *) continue ;; esac
-    case "$p" in *\\*) printf -v p '%b' "$p" ;; esac
+    case "$p" in *\\*) _mount_unescape "$p"; p=$_MOUNT_DEC ;; esac
     case "$e" in
       1*) _MOUNT_TBL["$p"]=1; _cand+=("$p") ;;
       0*) _MOUNT_TBL["$p"]=0 ;;
@@ -1200,7 +1241,7 @@ _mount_of() {
   local p="$1"
   case "$p" in /*) ;; *) return 1 ;; esac   # relative: on no recorded mount
   while :; do
-    [[ -v "_MOUNT_TBL[$p]" ]] && { _MOUNT_AT="$p"; return 0; }
+    [[ ${_MOUNT_TBL[$p]+x} ]] && { _MOUNT_AT="$p"; return 0; }
     [ "$p" = / ] && return 1
     p="${p%/*}"; [ -n "$p" ] || p=/
   done
@@ -1280,7 +1321,7 @@ load_recent_dirs() {
     while IFS= read -r d; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
-      [[ -v "_recent_seen[$d]" ]] && continue
+      [[ ${_recent_seen[$d]+x} ]] && continue
       _recent_seen["$d"]=1
       echo "$d"
       count=$((count + 1))
@@ -1294,7 +1335,7 @@ load_recent_dirs() {
     while IFS= read -r d; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
-      [[ -v "_recent_seen[$d]" ]] && continue
+      [[ ${_recent_seen[$d]+x} ]] && continue
       _recent_seen["$d"]=1
       echo "$d"
       zcount=$((zcount + 1))
@@ -1454,16 +1495,33 @@ collect_dir() {
 # in tmux's (name) order -- and SESS_BYNAME a name to its row.
 #
 # A path holding a US or a newline would break the line apart; tmux blanks it
-# instead (#{m/r:}), and a blank path matches no directory.  tmux escapes control
-# characters in names, so neither can occur in one.  The start directory is kept
-# in its canon_dir form, the one dir_session looks a directory up by; the pane's
-# cwd already is one (tmux reads it from the kernel).
+# instead (#{m/r:}), and a blank path matches no directory.  tmux refuses control
+# characters in names, so neither can occur in one: a line is at most four
+# fields.  The start directory is kept in its canon_dir form, the one
+# dir_session looks a directory up by; the pane's cwd already is one (tmux reads
+# it from the kernel).
+#
+# Captured once and split in-process -- lines, then each line's fields, by word
+# splitting under set -f -- not `while read ... <<< "$(tmux ...)"`: a here-string
+# that small is a pipe, and read takes a pipe one byte per syscall, two paths a
+# line.  It sat before ctrl-o's first row (review B07).  Word splitting on US
+# gives the fields `read` gave: a missing or trailing-empty one is unset, which
+# reads as empty.
 SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=()
 declare -A SESS_AT=() SESS_BYNAME=()
 load_session_table() {
-  local id name spath cwd i=0 nl=$'\n' j
+  local id name spath cwd i=0 nl=$'\n' j l out _noglob=0
+  local -a _sl=() _sf=()
   SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=() SESS_AT=() SESS_BYNAME=()
-  while IFS="$US" read -r id name spath cwd; do
+  out=$(tmux list-sessions -F "#{session_id}${US}#{session_name}${US}#{?#{m/r:[${US}${nl}],#{session_path}},,#{session_path}}${US}#{?#{m/r:[${US}${nl}],#{pane_current_path}},,#{pane_current_path}}" 2>/dev/null)
+  case $- in *f*) _noglob=1 ;; esac
+  set -f
+  local IFS=$'\n'
+  _sl=($out)
+  IFS=$US   # nothing below splits but the one line
+  for l in ${_sl[@]+"${_sl[@]}"}; do
+    _sf=($l)
+    id=${_sf[0]-} name=${_sf[1]-} spath=${_sf[2]-} cwd=${_sf[3]-}
     [ -n "$id" ] && [ -n "$name" ] || continue
     if [ -n "$spath" ]; then canon_dir "$spath"; spath="$REPLY"; fi
     SESS_ID[i]="$id" SESS_NAME[i]="$name" SESS_SPATH[i]="$spath" SESS_CWD[i]="$cwd"
@@ -1478,7 +1536,8 @@ load_session_table() {
       fi
     fi
     i=$((i + 1))
-  done <<< "$(tmux list-sessions -F "#{session_id}${US}#{session_name}${US}#{?#{m/r:[${US}${nl}],#{session_path}},,#{session_path}}${US}#{?#{m/r:[${US}${nl}],#{pane_current_path}},,#{pane_current_path}}" 2>/dev/null)"
+  done
+  [ "$_noglob" = 1 ] || set +f
   return 0
 }
 
@@ -2213,14 +2272,25 @@ build_process_table() {
 # '?'.  This is not cosmetic.  ps was implicitly protecting the row contract —
 # a raw newline in argv would split the row in two, detaching its trailing SPEC
 # field, and a raw \x1f would reach an fzf-visible field.  The scan is guarded,
-# so the common (clean) case costs one pattern test.
+# so the common (clean) case costs one pattern test per class below.
+#
+# U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR become '?' as well, by
+# name.  glibc's [[:cntrl:]] holds them, but that is the locale's say: the Rust
+# core's rule was Cc only, so a cwd or a branch holding one rendered differently
+# in the two renderers, and on a libc whose class leaves them out bash would
+# pass them through too.  Both renderers now list them explicitly (rust/src/
+# proc.rs sanitize), as bytes, so the test is the same in any locale.
+_LSEP=$'\xe2\x80\xa8' _PSEP=$'\xe2\x80\xa9'
 sanitize_args() {
   REPLY="$1"
   case "$REPLY" in
-    *[[:cntrl:]]*) ;;
+    *[[:cntrl:]]*|*"$_LSEP"*|*"$_PSEP"*) ;;
     *) return 0 ;;
   esac
   REPLY="${REPLY//$'\n'/ }"
+  REPLY="${REPLY//"$_LSEP"/?}"
+  REPLY="${REPLY//"$_PSEP"/?}"
+  case "$REPLY" in *[[:cntrl:]]*) ;; *) return 0 ;; esac
   local out="" i ch
   for (( i = 0; i < ${#REPLY}; i++ )); do
     ch="${REPLY:i:1}"
@@ -2284,9 +2354,13 @@ only_options() {
 # /proc/<pid>/stat is `pid (comm) state ppid pgrp session tty_nr tpgid ...`,
 # read straight into words.  comm may itself hold blanks, ')' and even a
 # newline, so it ends at the LAST word with a ')' in it: every field after comm
-# is a number or a state letter.  comm is at most 15 bytes (TASK_COMM_LEN), so
-# at most 7 blanks, and that word is one of f[1]..f[8].  The usual comm (no
-# blank, so f[1] is all of it) is one test.
+# is a number or a state letter.  comm is at most 15 bytes (TASK_COMM_LEN), and
+# "(" + 15 bytes + ")" splits into at most NINE words -- ` a b c d e f g `
+# gives `( a b c d e f g )`, its '(' a word of its own -- so that word is one
+# of f[1]..f[9].  (Bounded at f[8], such a name came back unknown, or with its
+# ppid and tty read as the ids.)  f[9] is otherwise a number or the state, so
+# looking one word further never matches wrongly.  The usual comm (no blank,
+# so f[1] is all of it) is one test.
 #
 # No regex and no whole-line pattern strip.  `${line##*) }` over the ~300-byte
 # line is quadratic in its length, and with the regex after it cost ~0.3 ms a
@@ -2301,7 +2375,7 @@ proc_group_ids() {
     if [[ "${f[1]-}" == *')' && "${f[*]:2:7}" != *')'* ]]; then
       last=1
     else
-      for (( i = 1; i <= 8 && i < ${#f[@]}; i++ )); do
+      for (( i = 1; i <= 9 && i < ${#f[@]}; i++ )); do
         case "${f[i]}" in *')'*) last=$i ;; esac
       done
       [ "$last" -gt 0 ] || return 0
@@ -2445,7 +2519,7 @@ get_git_branch() {
   [ -z "$dir" ] && return
 
   local _cache_key="$dir"
-  if [[ -v "GIT_BRANCH_CACHE[$_cache_key]" ]]; then
+  if [[ ${GIT_BRANCH_CACHE[$_cache_key]+x} ]]; then
     REPLY="${GIT_BRANCH_CACHE[$_cache_key]}"
     return
   fi
@@ -3127,12 +3201,14 @@ emit_dir_rows() {
     [ -n "$d" ] || continue
     # A tab would break the 4-field row contract; a session already covers it
     case "$d" in *$'\t'*) continue ;; esac
-    [[ -v "SESSION_DIRS[$d]" ]] && continue
+    [[ ${SESSION_DIRS[$d]+x} ]] && continue
 
     canon_dir "$d"; [ -n "${_taken[$REPLY]-}" ] && continue
     base="${d##*/}"
     [ -n "$base" ] || base="$d"
-    base="${base//$'\t'/ }"
+    # Sanitised as the context column is, and before the cut: an ESC in the name
+    # was drawn live in the identity column.  (No TAB gets here: see above.)
+    sanitize_args "$base"; base="$REPLY"
     [ "${#base}" -gt $(( IDENT_W - 4 )) ] && base="${base:0:IDENT_W-5}…"
 
     fld_reset
@@ -3551,7 +3627,12 @@ IMUX_SECTIONS
   set -f
   IFS=$'\n'; _glines=($all_windows_raw); unset IFS
   for _gl in ${_glines[@]+"${_glines[@]}"}; do
-    IFS="$US"; _gf=($_gl); unset IFS
+    # The US appended is the one a split drops: word splitting ends the last
+    # field at a terminating separator instead of giving the EMPTY field after
+    # it, as Rust's split(US) does.  With one more US, a line tmux cut (it ends
+    # in US) keeps that empty last field -- and so is counted exactly as the
+    # Rust core counts it.
+    IFS="$US"; _gf=($_gl$US); unset IFS
     # MORE than nine fields: a US inside pane_current_path (a directory may be
     # named anything but '/' and NUL).  Every field after the path was then the
     # one to its left -- the pane count read "part2", the flags "1<US>000", and
@@ -3559,6 +3640,8 @@ IMUX_SECTIONS
     # bell it did not have and stderr got "integer expression expected".  There
     # is no telling which US is the path's, so the row is dropped, as the Rust
     # core drops it (main.rs, `f.len() > 9`); its session header still renders.
+    # Cut as well, before its flags, such a line used to count as nine and pass
+    # as whole, and the same shift drew PID 1's command again.
     [ "${#_gf[@]}" -gt 9 ] && continue
     _w1=${_gf[0]-} _w2=${_gf[1]-} _w3=${_gf[2]-} _w4=${_gf[3]-} _w5=${_gf[4]-}
     _w6=${_gf[5]-} _w7=${_gf[6]-} _w8=${_gf[7]-} _w9=${_gf[8]-}
@@ -3573,7 +3656,7 @@ IMUX_SECTIONS
     fi
     line="$_w1$US$_w2$US$_w3$US$_w4$US$_w5$US$_w6$US$_w7$US$_w8$US$_w9"
     _kept+="$line"$'\n'
-    if [[ -v "windows_by_session[$_w1]" ]]; then
+    if [[ ${windows_by_session[$_w1]+x} ]]; then
       windows_by_session["$_w1"]+=$'\n'"$line"
     else
       windows_by_session["$_w1"]="$line"
@@ -3594,7 +3677,7 @@ IMUX_SECTIONS
   set -f
   IFS=$'\n'; _glines=($all_panes_raw); unset IFS
   for _gl in ${_glines[@]+"${_glines[@]}"}; do
-    IFS="$US"; _gf=($_gl); unset IFS
+    IFS="$US"; _gf=($_gl$US); unset IFS   # the appended US: see above
     [ "${#_gf[@]}" -gt 8 ] && continue   # a US in its cwd: see above
     sn=${_gf[0]-} widx=${_gf[1]-} _p3=${_gf[2]-} _p4=${_gf[3]-}
     _p5=${_gf[4]-} _p6=${_gf[5]-} _p7=${_gf[6]-} _p8=${_gf[7]-}
@@ -3610,7 +3693,7 @@ IMUX_SECTIONS
     fi
     local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8"
     _kept+="$key$US$rest"$'\n'
-    if [[ -v "panes_by_window[$key]" ]]; then
+    if [[ ${panes_by_window[$key]+x} ]]; then
       panes_by_window["$key"]+=$'\n'"$rest"
     else
       panes_by_window["$key"]="$rest"
@@ -4054,9 +4137,15 @@ if [ "${1:-}" = "--dirs-list" ]; then
     # A tab in the path can't be represented in the tab-delimited row
     # (the selection would resolve to the post-tab fragment) — skip it
     case "$dir" in *$'\t'*) return ;; esac
-    [[ -v "seen[$dir]" ]] && return
+    [[ ${seen[$dir]+x} ]] && return
     seen["$dir"]=1
+    # The display copy only: $dir itself, raw, is the spec Enter opens.
+    # Sanitised the way the navigator's rows are (build_ctx_field): an ESC in a
+    # directory's name reached the picker as a live escape sequence that hid
+    # the name and recoloured the row, and dpad counted the bytes the terminal
+    # swallowed, so the badge column moved left.
     local display_path="${dir/#$HOME/\~}"
+    sanitize_args "$display_path"; display_path="$REPLY"
     trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
 
     # Already open?  Say so, and say WHERE -- the badge column is outside fzf's
@@ -7671,16 +7760,23 @@ _report_stderr() {
 QUERY_STATE_FILE="${RESUME_FILE}.query"
 export INTERDIMUX_QUERY_STATE="$QUERY_STATE_FILE"
 
-trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" "$QUERY_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"}' EXIT
+trap '_report_stderr; rm -f "$RESUME_FILE" "$PREVIEW_STATE_FILE" "$QUERY_STATE_FILE" ${ERR_FILE:+"$ERR_FILE"} ${MOUNTS_FILE:+"$MOUNTS_FILE"}' EXIT
 
 # When bash draws the list, every --list reload asks is_remote_path, and so do
 # the directory rows' previews and ctrl-o's picker: classify the mount table
 # once, here, for all of them (see mounts_export) -- the first list inherits it
 # too, so it costs nothing it did not already.  Not with the Rust core, which
 # reads the table itself: there this would be a parse on the way to the first
-# frame, to save one in an asynchronous preview.
+# frame, to save one in an asynchronous preview.  Instead the core writes what
+# it read to MOUNTS_FILE (named like the preview state: private, no mktemp) on
+# every list, for those same callbacks and for this process's Enter on a
+# directory row -- each of which parsed the table again (review B08).
 if [ -z "$IMUX_BIN" ] && { [ "$SHOW_GIT_BRANCH" = on ] || [ "$SHOW_DIRS" = on ]; }; then
   mounts_export
+elif [ -n "$IMUX_BIN" ]; then
+  MOUNTS_FILE="${RESUME_FILE}.mounts"
+  rm -f "$MOUNTS_FILE" 2>/dev/null || :
+  export INTERDIMUX_MOUNTS_FILE="$MOUNTS_FILE"
 fi
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"
