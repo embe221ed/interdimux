@@ -548,7 +548,8 @@ bind-key C-a run-shell -b "bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh
 ### Colors
 
 Every color is a tmux option. A value is a hex `#rrggbb`, a 256-color
-index, or `-1` / `default` (inherit the terminal). The defaults reproduce
+index (0-255), or `-1` / `default` (inherit the terminal); anything else is
+treated as `-1`, so a typo costs a color, not the picker. The defaults reproduce
 the built-in warm palette, so you only set what you want to change. Hex
 values render as truecolor and need an RGB-capable terminal (`$COLORTERM`
 = `truecolor`); the index defaults work everywhere.

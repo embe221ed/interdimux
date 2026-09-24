@@ -422,8 +422,9 @@ case "$ORDER" in mru|index) ;; *) ORDER=mru ;; esac
 # ---------------------------------------------------------------------------
 #
 # Every colour is a tmux option (env INTERDIMUX_COLOR_* → @interdimux-color-*
-# → built-in default).  A value is a hex "#rrggbb", a 256-colour index, or
-# "-1"/"default" (inherit the terminal).  The built-in defaults reproduce the
+# → built-in default).  A value is a hex "#rrggbb", a 256-colour index 0-255,
+# or "-1"/"default" (inherit the terminal); anything else inherits too, and
+# --doctor names it.  The built-in defaults reproduce the
 # original warm palette; a generator (e.g. interdotensional) can feed theme
 # hexes over them to re-colour interdimux with the rest of the environment.
 
@@ -447,14 +448,50 @@ get_opt COLOR_HEADER        "${INTERDIMUX_COLOR_HEADER:-}"        @interdimux-co
 get_opt COLOR_BORDER        "${INTERDIMUX_COLOR_BORDER:-}"        @interdimux-color-border        238
 get_opt COLOR_MENU_SEL_FG   "${INTERDIMUX_COLOR_MENU_SEL_FG:-}"   @interdimux-color-menu-sel-fg   235
 
+# One spelling per colour: "#rrggbb", an index 0-255, or -1.  Everything else --
+# `default`, a typo, a name -- becomes -1, i.e. inherit the terminal.
+#
+# The three sinks disagree about what they accept, and each disagreement was a
+# dead key.  fzf rejects `default` (only -1) and any value it cannot parse, and
+# an invalid --color is FATAL: exit 2, nothing drawn, so every picker died on a
+# spelling the README and --doctor both call valid.  tmux is the mirror image:
+# its style parser rejects -1 (only `default`), and it drops the WHOLE style
+# when one item fails.  And sgr_of fed '#12345g' to $((16#..)), which under
+# set -e killed the script at top level, before any mode ran -- --doctor
+# included, the one tool meant to explain the typo.  Normalised here, once,
+# every sink downstream sees a value it accepts: fzf takes all three forms as
+# they are, and tmux_color maps -1 back to tmux's `default`.
+#
+# Inherit rather than the built-in default because the Rust renderer already
+# treats an unusable value that way (palette.rs), and because the built-in
+# defaults are a DARK palette -- on a light terminal they would be the wrong
+# fallback.  --doctor is where a typo is reported.
+#
+# Classes, not ranges: under a non-C locale a bracket RANGE is collation order
+# on bash < 5.0, and [[:xdigit:]]/[[:digit:]] are ASCII-only either way.
+for _c in COLOR_ACCENT COLOR_PATH COLOR_GIT COLOR_SSH COLOR_EDITOR COLOR_SUCCESS \
+          COLOR_DANGER COLOR_TREE COLOR_SEPARATOR COLOR_QUERY COLOR_MATCH_CURRENT \
+          COLOR_CURRENT_BG COLOR_HEADER COLOR_BORDER COLOR_MENU_SEL_FG; do
+  case "${!_c}" in
+    '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) ;;
+    [[:digit:]]|[[:digit:]][[:digit:]]|[01][[:digit:]][[:digit:]]|2[01234][[:digit:]]|25[012345]) ;;
+    *) printf -v "$_c" '%s' -1 ;;
+  esac
+done
+unset _c
+
 # Render a configured colour into the escape/style each sink needs.  These set
 # REPLY instead of printing: set_palette runs on every script invocation (each
 # fzf callback re-execs the script), so a $(…) subshell per colour is pure
 # overhead — ~30 forks that cost ~1s under load.
 #   sgr_of  "#rrggbb" -> "38;2;r;g;b"   "NNN" -> "38;5;NNN"   -1/empty -> ""
+# The hex arm names its digits even though the palette is normalised above: a
+# bare '#'?????? let '#12345g' reach $((16#..)), which is fatal under set -e.
+# Anything else starting with '#' falls to inherit, as it does in palette.rs.
 sgr_of() {
   case "$1" in
-    '#'??????) REPLY="38;2;$((16#${1:1:2}));$((16#${1:3:2}));$((16#${1:5:2}))" ;;
+    '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]])
+      REPLY="38;2;$((16#${1:1:2}));$((16#${1:3:2}));$((16#${1:5:2}))" ;;
     ''|-1|default|*[!0-9]*) REPLY="" ;;
     *) REPLY="38;5;$1" ;;
   esac
@@ -463,15 +500,20 @@ sgr_of() {
 # yields status 0 so they are safe as bare calls under set -e.
 esc()  { sgr_of "$1"; [ -z "$REPLY" ] || REPLY=$'\033['"$REPLY"'m'; }  # coloured
 escb() { sgr_of "$1"; REPLY=$'\033[1'"${REPLY:+;$REPLY}"'m'; }         # bold+coloured
-# tmux style value (-S/-H): hex and -1 pass through; a bare index needs "colour"
+# tmux style value (-S/-H, #[fg=]): a hex passes through, a bare index needs
+# "colour", and inherit is spelled `default` -- tmux rejects `-1` ("invalid
+# style"), and display-popup -S / display-menu -H then drop the WHOLE style
+# without a word, so the palette's -1 has to be translated here.
 tmux_color() {
   case "$1" in
-    '#'*|-1|default|*[!0-9]*) REPLY="$1" ;;
+    '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) REPLY="$1" ;;
+    ''|-1|default|*[!0-9]*) REPLY=default ;;
     *) REPLY="colour$1" ;;
   esac
 }
 
-# fzf --color chrome, rebuilt from the palette (fzf accepts hex/index/-1 as-is)
+# fzf --color chrome, rebuilt from the palette (fzf accepts hex/index/-1 as-is,
+# and the palette is normalised to exactly those above).
 build_fzf_colors() {
   FZF_COLORS="--color=hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
   # Every one of these names must exist in the running fzf: an unknown colour
