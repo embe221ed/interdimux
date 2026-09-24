@@ -10,6 +10,10 @@
 #                but rejects -1 (and silently drops the WHOLE style); and a
 #                '#'-plus-six value with a non-hex digit reached $((16#..)),
 #                which killed every entry point under set -e -- --doctor too.
+#   isolation  - $FZF_DEFAULT_OPTS is parsed before the picker's own flags.  Its
+#                --tmux/--popup opened a second popup and left this one blank,
+#                and its --height/--border/--margin/--padding/--style moved
+#                fzf's window without moving FZF_COLUMNS.
 #
 # Every oracle is tmux's own screen (capture-pane, with -e for colour) or the
 # real fzf's exit status -- never the script's own expression.
@@ -244,6 +248,123 @@ for acc in -1 default; do
     report "accent '$acc': the menu's selection style survives (got $(printf '%s' "$row" | cat -v | head -c 60))" fail
   fi
 done
+
+# =============================================================================
+# 4. $FZF_DEFAULT_OPTS layout never reaches a picker
+# =============================================================================
+# --tmux is set globally because fzf ignores it outside tmux -- but the picker
+# runs inside tmux, so fzf opened a second popup and never drew in this one.
+panes_before=$(tmux -L "$SOCK" list-panes -a -F x | wc -l)
+for opt in '--tmux 80%' '--popup'; do
+  need=53; [ "$opt" = --popup ] && need=71
+  if [ "$FZF_REAL" -lt "$need" ]; then
+    skip "FZF_DEFAULT_OPTS='$opt'" "fzf 0.$FZF_REAL predates it"; continue
+  fi
+  launch 120 20 "FZF_DEFAULT_OPTS=$opt"
+  if wait_for 'themeproj'; then
+    report "FZF_DEFAULT_OPTS='$opt' still draws the picker in its own pane" pass
+  else
+    report "FZF_DEFAULT_OPTS='$opt' still draws the picker in its own pane" fail; why_dead
+  fi
+  panes_now=$(tmux -L "$SOCK" list-panes -a -F x | wc -l)
+  if [ "$panes_now" = "$panes_before" ]; then
+    report "FZF_DEFAULT_OPTS='$opt' opens no second fzf elsewhere" pass
+  else
+    report "FZF_DEFAULT_OPTS='$opt' opens no second fzf elsewhere ($panes_before -> $panes_now panes)" fail
+    # clean up whatever fzf left behind so the next case starts level
+    for p in $(tmux -L "$SOCK" list-panes -a -F '#{pane_id}:#{pane_floating_flag}' 2>/dev/null || true); do
+      [ "${p#*:}" = 1 ] && { tmux -L "$SOCK" kill-pane -t "${p%%:*}" 2>/dev/null || true; }
+    done
+  fi
+done
+
+# Layout flags: the prompt must sit at the pane's top-left cell and the hint bar
+# on its last row -- i.e. fzf owns the whole popup, with nothing inset.
+geo='--height 40% --border --margin 2 --padding 1'
+[ "$FZF_REAL" -ge 58 ] && geo+=' --style full'
+launch 120 20 "FZF_DEFAULT_OPTS=$geo"
+if wait_for 'themeproj' && wait_for 'kill'; then
+  scr=$(screen)
+  first="${scr%%$'\n'*}"
+  last=$(sed -n '20p' <<< "$scr")
+  case "$first" in
+    '❯'*) report "FZF_DEFAULT_OPTS='$geo': the prompt is at the top-left cell" pass ;;
+    *)    report "FZF_DEFAULT_OPTS='$geo': the prompt is at the top-left cell (got '${first:0:30}')" fail ;;
+  esac
+  case "$last" in
+    *kill*) report "FZF_DEFAULT_OPTS='$geo': the hint bar is on the pane's last row" pass ;;
+    *)      report "FZF_DEFAULT_OPTS='$geo': the hint bar is on the pane's last row (row 20: '${last:0:30}')" fail ;;
+  esac
+else
+  report "FZF_DEFAULT_OPTS='$geo' draws the picker" fail; why_dead
+fi
+
+
+# Every reset above is FATAL on an fzf that does not know it, and only the argv
+# shows which ones a given version is handed.  The versions are fzf's own:
+# --tmux/--no-tmux arrived in 0.53 and --style in 0.58 (both checked against
+# the release binaries); --no-height, --no-border, --margin and --padding
+# parse on every fzf from the 0.40 floor up.
+mkdir -p "$TMPD/shim"
+cat > "$TMPD/shim/fzf" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$IMUX_ARGV_LOG"
+cat >/dev/null 2>&1
+exit 130
+STUB
+chmod +x "$TMPD/shim/fzf"
+export IMUX_ARGV_LOG="$TMPD/argv.log"
+argv_at() { # $1 = fzf minor, rest = env -> the navigator's argv in A[]
+  local m="$1"; shift
+  : > "$IMUX_ARGV_LOG"
+  env PATH="$TMPD/shim:$PATH" FZF_COLUMNS=120 INTERDIMUX_OPTS_PRIMED=1 \
+      INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_SHOW_DIRS=off INTERDIMUX_FZF_MINOR="$m" "$@" \
+      timeout 30 bash "$SCRIPT" >/dev/null 2>&1 || true
+  mapfile -t A < "$IMUX_ARGV_LOG"
+}
+argv_pos() { # $1 = exact arg -> 1-based position in A[], or empty
+  local i
+  for (( i = 0; i < ${#A[@]}; i++ )); do
+    [ "${A[i]}" = "$1" ] && { REPLY=$(( i + 1 )); return 0; }
+  done
+  REPLY=""
+}
+A=()
+ok=1 why=""
+for spec in "40:no-tmux:no-style" "52:no-tmux:no-style" "53:tmux:no-style" \
+            "57:tmux:no-style" "58:tmux:style" "74:tmux:style"; do
+  IFS=: read -r m want_t want_s <<< "$spec"
+  argv_at "$m"
+  [ "${#A[@]}" -gt 0 ] || { ok=0; why+=" 0.$m: no argv captured;"; continue; }
+  first="${A[0]}"
+  argv_pos --no-tmux; has_t=0; [ -n "$REPLY" ] && has_t=1
+  has_s=0
+  for x in "${A[@]}"; do
+    case "$x" in --style*) has_s=1 ;; esac
+  done
+  case "$want_t" in
+    tmux)    [ "$has_t" = 1 ] || { ok=0; why+=" 0.$m: no --no-tmux;"; } ;;
+    no-tmux) [ "$has_t" = 0 ] || { ok=0; why+=" 0.$m: --no-tmux before 0.53;"; } ;;
+  esac
+  case "$want_s" in
+    # FIRST, because the preset resets --info, the gutter and --highlight-line
+    style)    [ "$first" = "--style=default" ] || { ok=0; why+=" 0.$m: --style=default is not argv[1] ('$first');"; } ;;
+    no-style) [ "$has_s" = 0 ] || { ok=0; why+=" 0.$m: --style before 0.58;"; } ;;
+  esac
+done
+[ "$ok" = 1 ] && report "each fzf version is handed only the resets it knows" pass \
+              || { report "each fzf version is handed only the resets it knows" fail; ERRORS+="    $why"$'\n'; }
+
+# A deliberate choice in @interdimux-fzf-opts still beats the reset: it comes
+# after it, and fzf's last flag wins.
+argv_at 74 'INTERDIMUX_FZF_OPTS=--tmux=center,90%'
+argv_pos --no-tmux;           nt="$REPLY"
+argv_pos '--tmux=center,90%'; ut="$REPLY"
+if [ -n "$nt" ] && [ -n "$ut" ] && [ "$ut" -gt "$nt" ]; then
+  report "@interdimux-fzf-opts can still opt back in (it follows the reset)" pass
+else
+  report "@interdimux-fzf-opts can still opt back in (no-tmux at ${nt:-?}, user at ${ut:-?})" fail
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

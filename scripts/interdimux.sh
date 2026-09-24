@@ -785,7 +785,31 @@ FZF_THEME=()
 build_fzf_theme() {
   local info=inline
   fzf_ge 42 && info=inline-right
-  FZF_THEME=(
+  # $FZF_DEFAULT_OPTS (and _FILE) is parsed before these flags, and some of what
+  # people put there is layout a picker inside an already-sized popup can never
+  # want, so it is cancelled here rather than merely warned about:
+  #   --tmux/--popup  fzf ignores it outside tmux, which is why it gets set
+  #     globally -- but in here $TMUX is set, so fzf opened a SECOND popup (a
+  #     floating pane on tmux 3.7) and left this one blank, keys echoing into it.
+  #     Every picker was dead.  --no-tmux arrived with --tmux in 0.53 and also
+  #     cancels the 0.71 `--popup` spelling (one option, two names).
+  #   --height        not full-screen inside a popup that is already sized.
+  #   --border/--margin/--padding, and 0.58's --style presets and per-section
+  #     borders: they shrink fzf's window without shrinking FZF_COLUMNS, which
+  #     is what compute_widths and the hint bar are sized from, so every row
+  #     came out too wide and was clipped.  `--style=default` goes FIRST
+  #     because the preset also resets --info, the gutter colour, the separator
+  #     and --highlight-line, all of which are set below.
+  # Each reset is fzf's own default, so without $FZF_DEFAULT_OPTS the screen is
+  # unchanged.  @interdimux-fzf-opts is appended last and can still ask for any
+  # of them -- that is the channel for a deliberate choice.
+  FZF_THEME=()
+  fzf_ge 58 && FZF_THEME+=(--style=default)
+  FZF_THEME+=(
+    --no-height
+    --no-border
+    --margin=0
+    --padding=0
     --ansi
     --reverse
     --cycle
@@ -796,6 +820,7 @@ build_fzf_theme() {
     "$FZF_COLORS"
   )
   fzf_ge 52 && FZF_THEME+=(--highlight-line)
+  fzf_ge 53 && FZF_THEME+=(--no-tmux)
   # The footer's DEFAULT border draws a separator line and costs a second row.
   # Borderless, the hint bar costs exactly the one row the header was already
   # spending, so moving it down is free.  Harmless with no --footer set

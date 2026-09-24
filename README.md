@@ -396,6 +396,10 @@ set -g @interdimux-order 'mru'
 # Extra fzf flags appended to every picker (advanced; applied after the
 # built-in theme so your colors win).
 #
+# This is also the place for fzf layout: the pickers ignore the --tmux/--popup,
+# --height, --border, --margin, --padding and --style in $FZF_DEFAULT_OPTS
+# (they already run in a sized popup).
+#
 # Two notes now the hints live at the bottom: your own `--header` no longer
 # replaces them, it draws as well — so the picker spends a second chrome row.
 # And a `--with-shell` of your own turns off the inline callbacks, which costs
