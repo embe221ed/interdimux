@@ -1104,7 +1104,7 @@ _mounts_read() {
     esac
     any=1
     point=${_mf[4]}
-    [[ $point == *\\* ]] && printf -v point '%b' "$point"   # mountinfo escapes ' ' as \040
+    [[ $point == *\\* ]] && { _mount_unescape "$point"; point=$_MOUNT_DEC; }
     _MOUNT_TBL[$point]=$b
     ((b)) && _cand+=("$point")
   done
@@ -1134,6 +1134,24 @@ _mounts_read() {
     fi
     p="${p%/*}"
   done
+}
+
+# A mount point as mountinfo writes it, decoded, in _MOUNT_DEC -- not REPLY,
+# for the reason _MOUNT_AT gives below.  The kernel escapes exactly four bytes,
+# each as a backslash and THREE octal digits: blank \040, tab \011, newline
+# \012 and the backslash itself \134, so every backslash left in a field starts
+# one of these.  Not printf %b: its \0 takes up to three digits MORE, so
+# `nas\0401` -- the mount point `nas 1` -- came out as `nas` and the byte 0x01,
+# which no path is on, and every path under that NFS mount was probed.  The
+# backslash goes last, so `\134040` stays the literal `\040`.  rust/src/mounts.rs
+# unescape() decodes the same.  (mounts_export writes the same escapes for a
+# newline and a backslash, so its import decodes with this too.)
+_mount_unescape() {
+  local p="$1" bs='\' nl=$'\n' tab=$'\t'
+  p=${p//\\040/ }
+  p=${p//\\011/"$tab"}
+  p=${p//\\012/"$nl"}
+  _MOUNT_DEC=${p//\\134/"$bs"}
 }
 
 # _MOUNT_BPS = those of $@ that still block after the exemptions.  With none
@@ -1187,7 +1205,7 @@ _mounts_import() {
   for e in ${_me[@]+"${_me[@]}"}; do
     p="${e:1}"
     case "$p" in /*) ;; *) continue ;; esac
-    case "$p" in *\\*) printf -v p '%b' "$p" ;; esac
+    case "$p" in *\\*) _mount_unescape "$p"; p=$_MOUNT_DEC ;; esac
     case "$e" in
       1*) _MOUNT_TBL["$p"]=1; _cand+=("$p") ;;
       0*) _MOUNT_TBL["$p"]=0 ;;

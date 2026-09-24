@@ -292,6 +292,21 @@ mod tests {
     }
 
     #[test]
+    fn an_escape_is_exactly_three_octal_digits() {
+        // a digit after the escape is part of the name: `nas 1`, not `nas` + 0x01
+        // (bash's printf %b read \0 plus three MORE digits; see _mount_unescape)
+        assert_eq!(unescape("/mnt/nas\\0401"), "/mnt/nas 1");
+        assert_eq!(unescape("/mnt/tab\\0115"), "/mnt/tab\t5");
+        assert_eq!(unescape("/mnt/nl\\0121x"), "/mnt/nl\n1x");
+        // the kernel escapes every backslash, so \134040 is a literal "\040"
+        assert_eq!(unescape("/mnt/a\\134040"), "/mnt/a\\040");
+        assert_eq!(unescape("/mnt/a\\134\\0407"), "/mnt/a\\ 7");
+        let t = Table::parse("1 0 8:1 / / rw - ext4 /dev/sda1 rw\n2 1 0:2 / /mnt/nas\\0401 rw - nfs4 srv:/x rw\n", &["/home/u"]);
+        assert!(t.is_blocking("/mnt/nas 1/proj"));
+        assert!(!t.is_blocking("/mnt/nas/proj"));
+    }
+
+    #[test]
     fn no_mount_table_means_nothing_is_skipped() {
         let t = Table::parse("", &["/home/u"]);
         assert!(!t.is_blocking("/mnt/nas/proj"));
