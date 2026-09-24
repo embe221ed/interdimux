@@ -1634,17 +1634,19 @@ MENU_ROWS=17
 # Column widths for the navigator tree.  Sized to the ACTUAL content
 # (longest session name / window name / path) so the important window
 # names are never starved by a long, redundant session prefix, then
-# squeezed to fit the popup width — the dim session prefix shrinks first,
-# the window name is protected last.  Measurement is fork-free (pure
-# parameter ops over the strings tmux already handed us), so this adds no
-# processes to the hot path.
+# squeezed to fit the popup width — the display-only columns (path, git
+# badge) give way first, the session prefix and window name, which fzf
+# matches, last (see compute_widths).  Measurement is fork-free (pure
+# parameter ops over the strings tmux already handed us, and the git
+# reader's own cached file reads), so this adds no processes to the hot path.
 #
 #   IDENT_W = IDENT_OV + PFX_W + WIN_W
+#   ctx     = "│ " + PATH_W + FLAG_W + (" " + BADGE_W, when BADGE_W > 0)
 #
 # where IDENT_OV covers the marker + tree-glyph columns, PFX_W is the
-# (redundant) session-name prefix carried on child rows, and WIN_W is the
-# protected window-name budget.
-IDENT_W=24 PATH_W=24 BADGE_W=16 PFX_W=14 WIN_W=12
+# session-name prefix carried on child rows, WIN_W is the window-name
+# budget, and FLAG_W is the Z/!/# slot (0 when no window has a flag).
+IDENT_W=24 PATH_W=24 BADGE_W=16 PFX_W=14 WIN_W=12 FLAG_W=0
 # Width a session header row's identity field is padded to when the group rule
 # is drawn: IDENT_W + the TAB + the context column, so the session meta lands in
 # the same column as the command on child rows.
@@ -1655,33 +1657,54 @@ WIDTH_GUTTER=8        # fzf pointer/marker/scrollbar overhead
 PFX_FLOOR=6  PFX_CEIL=16
 WIN_FLOOR=8  WIN_CEIL=40
 PATH_FLOOR=12 PATH_CEIL=44
-MAX_SESS=0 MAX_WIN=0 MAX_PATH=0
+PATH_KEEP=24          # how far the path may shrink to keep the git badge
+MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0 HAS_BRANCH=0
 
 # Longest session name, window identity ("index:name") and displayed
-# (~-substituted) path across every target.  Fork-free; reads the raw
-# tmux dumps gather_targets already fetched (visible via dynamic scope)
-# and sets the MAX_* globals.  Every (( … )) test sits on the LEFT of &&
-# (set-e-exempt); the explicit `return 0` keeps the function's own status
-# 0 — the trailing loop would otherwise propagate a false (( … )) and
-# abort a set -e caller of the bare call in gather_targets.
+# (~-substituted) path across every target, the most Z/!/# flags on any
+# one window, and whether any window or pane has a git branch to show.
+# Fork-free; reads the raw tmux dumps gather_targets already fetched
+# (visible via dynamic scope) and sets the MAX_* / HAS_BRANCH globals.
+# The branch lookups fill get_git_branch's cache, so build_ctx_field's
+# lookups for the same paths cost nothing — the same file reads as before,
+# just earlier.  Every (( … )) test sits on the LEFT of && (set-e-exempt);
+# the explicit `return 0` keeps the function's own status 0 — the trailing
+# loop would otherwise propagate a false (( … )) and abort a set -e caller
+# of the bare call in gather_targets.
 measure_widths() {
-  MAX_SESS=0 MAX_WIN=0 MAX_PATH=0
-  local _sla sname _sw _sa _sn widx wname _wa _wc wpath _rest _pi _pa _pc ppath _pr il dp
+  MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0 HAS_BRANCH=0
+  local _sla sname _sw _sa _sn widx wname _wa _wc wpath _wp _wpid wflags _pi _pa _pc ppath _pr il dp nf
   while IFS="$US" read -r _sla sname _sw _sa; do
     [ -z "$sname" ] && continue
     (( ${#sname} > MAX_SESS )) && MAX_SESS=${#sname}
   done <<< "$sessions_raw"
-  while IFS="$US" read -r _sn widx wname _wa _wc wpath _rest; do
+  while IFS="$US" read -r _sn widx wname _wa _wc wpath _wp _wpid wflags; do
     [ -z "$_sn" ] && continue
     il=$(( ${#widx} + 1 + ${#wname} ))
     (( il > MAX_WIN )) && MAX_WIN=$il
     dp="${wpath/#$HOME/\~}"
     (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
+    # Same three positions build_ctx_field reads.  nf=$(( … )), never
+    # (( nf++ )): a post-increment from 0 is a false (( … )), and as the last
+    # command of an && list it would abort a set -e caller.
+    nf=0
+    [ "${wflags:0:1}" = "1" ] && nf=$(( nf + 1 ))
+    [ "${wflags:1:1}" = "1" ] && nf=$(( nf + 1 ))
+    [ "${wflags:2:1}" = "1" ] && nf=$(( nf + 1 ))
+    (( nf > MAX_FLAGS )) && MAX_FLAGS=$nf
+    if [ "$HAS_BRANCH" = 0 ]; then
+      get_git_branch "$wpath"
+      [ -n "$REPLY" ] && HAS_BRANCH=1
+    fi
   done <<< "$all_windows_raw"
   while IFS="$US" read -r _sn widx _pi _pa _pc ppath _pr; do
     [ -z "$_sn" ] && continue
     dp="${ppath/#$HOME/\~}"
     (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
+    if [ "$HAS_BRANCH" = 0 ]; then
+      get_git_branch "$ppath"
+      [ -n "$REPLY" ] && HAS_BRANCH=1
+    fi
   done <<< "$all_panes_raw"
   return 0
 }
@@ -1741,6 +1764,9 @@ compute_widths() {
   (( PATH_W < PATH_FLOOR )) && PATH_W=$PATH_FLOOR
   (( PATH_W > PATH_CEIL ))  && PATH_W=$PATH_CEIL
 
+  FLAG_W=0
+  (( MAX_FLAGS > 0 )) && FLAG_W=$(( 1 + (MAX_FLAGS > 3 ? 3 : MAX_FLAGS) ))
+
   if   (( avail >= 72 )); then BADGE_W=16
   elif (( avail >= 52 )); then BADGE_W=14
   elif (( avail >= 40 )); then BADGE_W=10
@@ -1749,36 +1775,62 @@ compute_widths() {
 
   IDENT_W=$(( IDENT_OV + PFX_W + WIN_W ))
 
-  # Squeeze to fit.  The dim session prefix is redundant (the full name is
-  # on the session header row), so it shrinks first; then the git badge —
-  # snapped straight to 0 in one step, never left at 1..3 which would make
-  # build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate; then the
-  # path; the window name is protected and shrinks last.  Any leftover
-  # deficit lands on the flowing COMMAND column, which fzf clips anyway.
-  local ctx_w need guard=0
-  while :; do
-    if (( BADGE_W > 0 )); then ctx_w=$(( PATH_W + 3 + BADGE_W ))
-    else                       ctx_w=$(( PATH_W + 2 )); fi
-    need=$(( IDENT_W + ctx_w + 2 + CMD_MIN ))
-    (( need <= avail )) && break
-    (( guard++ > 400 )) && break
-    if   (( PFX_W  > PFX_FLOOR  )); then PFX_W=$(( PFX_W - 1 ));  IDENT_W=$(( IDENT_W - 1 ))
-    elif (( BADGE_W > 0 ));         then BADGE_W=0
-    elif (( PATH_W > PATH_FLOOR )); then PATH_W=$(( PATH_W - 1 ))
-    elif (( WIN_W  > WIN_FLOOR  )); then WIN_W=$(( WIN_W - 1 ));  IDENT_W=$(( IDENT_W - 1 ))
-    else break
+  # Squeeze to fit.  The order is the point: what you TYPE outlasts what
+  # you only READ.  fzf matches the identity column as displayed, so a
+  # session prefix cut to "my-pr…" makes `my-project shell` match nothing;
+  # the path and the branch are display-only.  So:
+  #
+  #   1. the path gives up cells down to PATH_KEEP to keep the git badge —
+  #      all or nothing: if that is not enough, the badge goes (snapped
+  #      straight to 0 — never left at 1..3, which would make
+  #      build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate) and the
+  #      path keeps its cells.  Only while some row actually HAS a branch; a
+  #      badge column that would be blank on every tree row goes first.
+  #   2. the path, down to PATH_FLOOR
+  #   3. the session prefix, down to PFX_FLOOR
+  #   4. the window name, down to WIN_FLOOR
+  #
+  # The Z/!/# flags are never squeezed: their own slot, at most 4 cells.
+  # Any deficit left after the floors lands on the flowing COMMAND column,
+  # which fzf clips anyway.  rust/src/widths.rs is the same ladder.
+  local over give keep
+  _squeeze_over; over=$REPLY
+  if (( BADGE_W > 0 && over > 0 )); then
+    keep=$PATH_W
+    (( HAS_BRANCH )) && keep=$PATH_KEEP
+    if (( PATH_W - keep >= over )); then PATH_W=$(( PATH_W - over ))
+    else                                 BADGE_W=0
     fi
-  done
+  fi
+  _squeeze_over; give=$(( PATH_W - PATH_FLOOR ))
+  (( REPLY < give )) && give=$REPLY
+  PATH_W=$(( PATH_W - give ))
+  _squeeze_over; give=$(( PFX_W - PFX_FLOOR ))
+  (( REPLY < give )) && give=$REPLY
+  PFX_W=$(( PFX_W - give )) IDENT_W=$(( IDENT_W - give ))
+  _squeeze_over; give=$(( WIN_W - WIN_FLOOR ))
+  (( REPLY < give )) && give=$REPLY
+  WIN_W=$(( WIN_W - give )) IDENT_W=$(( IDENT_W - give ))
 
-  # ctx_w is whatever the loop last computed, which always matches the widths it
-  # exits with (it recomputes at the top of every iteration, and every break is
-  # taken after that recompute).  The rule only draws when the squeeze actually
-  # FIT — see rust/src/widths.rs, which this mirrors.
-  if (( IDENT_W + ctx_w + 2 + CMD_MIN <= avail )); then
-    SESS_RULE_W=$(( IDENT_W + 1 + ctx_w ))
+  # The rule only draws when the squeeze actually FIT — see
+  # rust/src/widths.rs, which this mirrors.
+  _squeeze_over
+  if (( REPLY == 0 )); then
+    SESS_RULE_W=$(( IDENT_W + 1 + CTX_W ))
   else
     SESS_RULE_W=0
   fi
+}
+
+# How many cells a row is over the popup at the current widths (0 when it
+# fits), in REPLY; the context column's width in CTX_W.  Reads compute_widths'
+# `avail` through dynamic scope.
+_squeeze_over() {
+  CTX_W=$(( PATH_W + 2 + FLAG_W ))
+  (( BADGE_W > 0 )) && CTX_W=$(( CTX_W + 1 + BADGE_W ))
+  REPLY=$(( IDENT_W + CTX_W + 2 + CMD_MIN - avail ))
+  (( REPLY < 0 )) && REPLY=0
+  return 0
 }
 
 # Trim a path to fit within max_width display columns.  Sets REPLY (no
@@ -1851,11 +1903,15 @@ trim_path() {
 #   W:session_name:window_index
 #   P:session_name:window_index:pane_index
 
-# Path + git badge + window flag glyphs, padded into the CONTEXT column.
+# Path, then the Z/!/# flag slot, then the git badge, padded into the
+# CONTEXT column.  The flags are a column of their own (FLAG_W cells, sized
+# to the most flags any window carries): they used to trail the branch
+# inside the badge, so their x moved with the branch's length and the
+# squeeze that dropped the badge dropped them too.
 # Args: path zoomed bell activity
 build_ctx_field() {
   local path="$1" zoomed="$2" bell="$3" activity="$4"
-  local disp gbranch badge blen
+  local disp gbranch fl fn
   fld_reset
   disp="${path/#$HOME/\~}"
   disp="${disp//$'\t'/ }"   # tabs are the field delimiter
@@ -1863,19 +1919,24 @@ build_ctx_field() {
   fld_add "${SEP} " 2
   fld_add "${DIM_PATH}${disp}${RST}" "${#disp}"
   fld_pad $(( PATH_W + 2 ))
+  if [ "$FLAG_W" -gt 0 ]; then
+    # Packed ("Z!#"), in a fixed order, so each flag reads as a column.
+    fl="" fn=0
+    [ "$zoomed" = "1" ]   && { fl+="${BOLD_AMBER}Z${RST}"; fn=$(( fn + 1 )); }
+    [ "$bell" = "1" ]     && { fl+="${BOLD_RED}!${RST}";   fn=$(( fn + 1 )); }
+    [ "$activity" = "1" ] && { fl+="${DIM_SSH}#${RST}";    fn=$(( fn + 1 )); }
+    [ "$fn" -gt 0 ] && fld_add " $fl" $(( fn + 1 ))
+    fld_pad $(( PATH_W + 2 + FLAG_W ))
+  fi
   if [ "$BADGE_W" -gt 0 ]; then
-    badge="" blen=0
     get_git_branch "$path"; gbranch="$REPLY"
     if [ -n "$gbranch" ]; then
+      # " ‹" + branch + "›" in BADGE_W + 1 cells: the same budget on every
+      # row, whatever flags the row carries.
       [ "${#gbranch}" -gt $(( BADGE_W - 2 )) ] && gbranch="${gbranch:0:BADGE_W-3}…"
-      badge=" ${DIM_GIT}‹${gbranch}›${RST}"
-      blen=$(( ${#gbranch} + 3 ))
+      fld_add " ${DIM_GIT}‹${gbranch}›${RST}" $(( ${#gbranch} + 3 ))
     fi
-    [ "$zoomed" = "1" ]   && { badge+=" ${BOLD_AMBER}Z${RST}"; blen=$((blen + 2)); }
-    [ "$bell" = "1" ]     && { badge+=" ${BOLD_RED}!${RST}";   blen=$((blen + 2)); }
-    [ "$activity" = "1" ] && { badge+=" ${DIM_SSH}#${RST}";    blen=$((blen + 2)); }
-    fld_add "$badge" "$blen"
-    fld_pad $(( PATH_W + 3 + BADGE_W ))
+    fld_pad $(( PATH_W + 2 + FLAG_W + 1 + BADGE_W ))
   fi
 }
 

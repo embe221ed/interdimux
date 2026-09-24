@@ -126,6 +126,12 @@ preview on :  └─ long-… 0:zsh            │ /…/interdimux
 Touches `rust/src/widths.rs`, the bash fallback's `compute_widths`, the golden
 corpus and `test_rust_parity.sh` — the two renderers must stay byte-identical.
 
+**Landed** (with §8, review BUG-24 and BUG-02): the path now gives up cells down
+to 24 to keep the badge, all or nothing; then the badge goes; then the path to
+its floor; then the session prefix, which fzf matches as displayed and so
+outlasts every display-only column; the window name last. A badge column no tree
+row could fill costs no path at all. `tests/test_squeeze.sh`.
+
 ### 3. `--info-command` to name the active ordering — S, medium
 
 Already in `IDEAS.md`; confirmed available and rendered:
@@ -409,6 +415,11 @@ position moves with branch length and they cannot be scanned as a column; and
 the branch budget depends on the flag count, so the same branch truncates
 differently on different rows. Fixed slot for flags, branch budget independent
 of them, and one squeeze rung for the path before the badge is zeroed.
+
+**Landed**: the flags are their own slot right after the path, packed (`Z!#`)
+and sized to the most flags any window carries (none: no slot), so they sit at
+one x on every row and no squeeze can drop them; the branch budget is the same on
+every row. The rung is §2's.
 
 ### The rest, in brief
 
