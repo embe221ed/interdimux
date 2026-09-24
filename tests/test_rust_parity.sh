@@ -47,6 +47,11 @@ fi
 # --- bench: mixed shapes, plus names and paths that have broken things before -
 PANECMD='bash --norc --noprofile -c "sleep 99999 & wait"'
 tmux -f /dev/null -L "$SOCK" new-session -d -s q01 -x 200 -y 50 -c "$SCRIPT_DIR" "$PANECMD"
+# The two windows below start the DEFAULT command; without this that is the
+# user's login shell, rc files and all.  And names are frozen at creation: see
+# bench_settled for why a name cannot be waited for.
+tmux -L "$SOCK" set -g default-command 'bash --norc --noprofile -i'
+tmux -L "$SOCK" set -g automatic-rename off
 for i in 02 03 04 05 06 07 08; do
   tmux -L "$SOCK" new-session -d -s "q$i" -x 200 -y 50 -c "$SCRIPT_DIR" "$PANECMD"
 done
@@ -77,13 +82,83 @@ mkdir -p "$TMPD/gitproj/.git" && printf 'ref: refs/heads/parity-branch\n' > "$TM
 # hand the selection back with U+FFFD in place of the byte, naming nothing)
 mkdir -p "$TMPD/nonutf8-"$'\377'
 printf '%s\n%s\n%s\n' "$TMPD/rustproj" "$TMPD/nonutf8-"$'\377' "$TMPD/gitproj" > "$XDG_DATA_HOME/interdimux/recent_dirs"
-sleep 4
+
+# --- the shapes where the two renderers used to DISAGREE ----------------------
+# A bench of well-behaved ASCII passes byte-for-byte while the fallback renderer
+# is wrong (review TEST-04).  Every fixture below is a case the two once rendered
+# differently; each is also asserted on its own further down, against what the
+# row must say -- not just against the other renderer.  Named windows (-n), so
+# automatic-rename cannot churn them between two renders.
+H="$TMPD/h"
+mkdir -p "$H"
+# a branch longer than the badge, on a ZOOMED window: the Z flag and the cut
+# branch once shared the badge's budget and came out two cells apart
+mkdir -p "$H/longrepo/.git" && printf 'ref: refs/heads/feature/a-really-long-branch\n' > "$H/longrepo/.git/HEAD"
+# a HEAD written without its trailing newline (bash's `read` reports EOF on it)
+mkdir -p "$H/nonl/.git" && printf 'ref: refs/heads/no-newline' > "$H/nonl/.git/HEAD"
+# an EMPTY .git inside a repository: not a repository, so the outer one's branch
+mkdir -p "$H/outer/.git" "$H/outer/inner/.git" && printf 'ref: refs/heads/outer-main\n' > "$H/outer/.git/HEAD"
+# a worktree-style .git FILE without a newline, whose HEAD is CRLF
+mkdir -p "$H/realgit" "$H/wt" && printf 'ref: refs/heads/wt-branch\r\n' > "$H/realgit/HEAD"
+printf 'gitdir: %s' "$H/realgit" > "$H/wt/.git"
+# a TAB in a ref name: once a FIVE-field row
+mkdir -p "$H/tabhead/.git" && printf 'ref: refs/heads/a\tb\n' > "$H/tabhead/.git/HEAD"
+# control bytes in a cwd: ESC (a live escape in the popup), CR, TAB, and US --
+# the tmux field delimiter, which shifted every later field of a bash row
+ESCD="$H/esc"$'\e'"[31mred"; CRD="$H/cr"$'\r'"z"; TABD="$H/tab"$'\t'"dir"; USD="$H/us"$'\x1f'"part2"
+mkdir -p "$ESCD" "$CRD" "$TABD" "$USD"
+tmux -L "$SOCK" new-session -d -s longbr  -n zoomed -x 200 -y 50 -c "$H/longrepo" "$PANECMD"
+tmux -L "$SOCK" split-window -d -t '=longbr:0' -c "$H/longrepo" "$PANECMD"
+tmux -L "$SOCK" resize-pane -Z -t '=longbr:0.0'
+tmux -L "$SOCK" new-session -d -s nonl    -n w -x 200 -y 50 -c "$H/nonl"        "$PANECMD"
+tmux -L "$SOCK" new-session -d -s inner   -n w -x 200 -y 50 -c "$H/outer/inner" "$PANECMD"
+tmux -L "$SOCK" new-session -d -s wt      -n w -x 200 -y 50 -c "$H/wt"          "$PANECMD"
+tmux -L "$SOCK" new-session -d -s tabhead -n w -x 200 -y 50 -c "$H/tabhead"     "$PANECMD"
+tmux -L "$SOCK" new-session -d -s escsess -n w -x 200 -y 50 -c "$ESCD" "$PANECMD"
+tmux -L "$SOCK" new-session -d -s crsess  -n w -x 200 -y 50 -c "$CRD"  "$PANECMD"
+tmux -L "$SOCK" new-session -d -s tabsess -n w -x 200 -y 50 -c "$TABD" "$PANECMD"
+tmux -L "$SOCK" new-session -d -s ussess  -n w -x 200 -y 50 -c "$USD"  "$PANECMD"
+# ...and a US in ONE pane of a split window: that pane's row goes, not its sibling's
+tmux -L "$SOCK" new-session -d -s uspane  -n w -x 200 -y 50 -c "$H"    "$PANECMD"
+tmux -L "$SOCK" split-window -d -t '=uspane:0' -c "$USD" "$PANECMD"
+
+# Settled, rather than a fixed sleep (which this was: `sleep 4`).  What a row
+# shows that is still moving just after the bench is built:
+#   * a pane's cwd -- tmux lists the pane before /proc has its cwd
+#   * a pane's command -- "tmux" until the forked child has exec'd
+#   * the full command -- `bash -c "sleep … & wait"` until bash has forked
+#   * q01:fg's foreground command, typed into an interactive shell
+# Window NAMES are frozen instead (automatic-rename off, above): a name follows
+# its pane's output a timer tick behind, and these panes print nothing, so
+# there is no condition to wait for -- only a race to remove.  The bash-vs-bash
+# control in run_case still catches any churn, but as a FAILURE.
+bench_settled() {
+  local line pid start
+  while IFS='|' read -r line pid start; do
+    case "$line" in nocwd*|*' '|*' tmux') return 1 ;; esac
+    case "$start" in
+      *'sleep 99999 & wait'*) pgrep -P "$pid" >/dev/null 2>&1 || return 1 ;;
+    esac
+  done < <(tmux -L "$SOCK" list-panes -a \
+             -F '#{?pane_current_path,cwd,nocwd} #{pane_current_command}|#{pane_pid}|#{pane_start_command}' 2>/dev/null)
+  [ "$(tmux -L "$SOCK" display-message -p -t '=q01:fg' '#{pane_current_command}' 2>/dev/null)" = sleep ]
+}
+settled=0
+for _i in $(seq 1 150); do
+  if bench_settled; then settled=1; break; fi
+  sleep 0.1
+done
+if [ "$settled" = 1 ]; then
+  report "bench settled: every pane has its cwd and its command" pass
+else
+  report "bench settled: every pane has its cwd and its command (timed out)" fail
+fi
 
 rows=$(INTERDIMUX_USE_RUST=off bash "$SCRIPT" --list 2>/dev/null | wc -l)
-if [ "$rows" -ge 30 ]; then
+if [ "$rows" -ge 45 ]; then
   report "bench built ($rows rows)" pass
 else
-  report "bench built ($rows rows, expected >= 30)" fail
+  report "bench built ($rows rows, expected >= 45)" fail
 fi
 
 # --- the sweep ----------------------------------------------------------------
@@ -136,6 +211,78 @@ done
 for cols in 80 120 200; do
   run_case "width ${cols} cols + preview" INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_PREVIEW=on FZF_COLUMNS="$cols"
 done
+run_case "hostile fixtures, git badges, 200 cols" INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_GIT_BRANCH=on FZF_COLUMNS=200
+
+# --- the hostile fixtures, row by row, in EACH renderer ------------------------
+# Byte parity says the two agree; it cannot say they are right -- both could
+# drop a row, or both leak an ESC.  So each renderer is also held to what the
+# fixture itself says the row must show.
+kinds() { awk -F'\t' '{ n[substr($4, 1, 1)]++ } END { printf "S=%d W=%d P=%d D=%d", n["S"], n["W"], n["P"], n["D"] }' "$1"; }
+ctx_of() { awk -F'\t' -v s="$2" '$4 == s { print $2 }' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+has_spec() { awk -F'\t' -v s="$2" '$4 == s { f = 1 } END { exit !f }' "$1"; }
+for r in rust bash; do
+  out="$TMPD/hostile.$r"
+  if [ "$r" = bash ]; then u=off; else u=on; fi
+  INTERDIMUX_USE_RUST=$u INTERDIMUX_SHOW_DIRS=off INTERDIMUX_SHOW_GIT_BRANCH=on FZF_COLUMNS=200 \
+    bash "$SCRIPT" --list > "$out" 2> "$TMPD/hostile.$r.err" || true
+
+  if [ -s "$TMPD/hostile.$r.err" ]; then
+    report "[$r] the hostile bench renders with nothing on stderr" fail
+    ERRORS+="    $(head -2 "$TMPD/hostile.$r.err")"$'\n'
+  else
+    report "[$r] the hostile bench renders with nothing on stderr" pass
+  fi
+  if awk -F'\t' 'NF != 4 { bad = 1 } END { exit bad }' "$out"; then
+    report "[$r] every row has exactly four fields (a TAB in a ref name or a cwd included)" pass
+  else
+    report "[$r] every row has exactly four fields (a TAB in a ref name or a cwd included)" fail
+  fi
+  # With the palette's own SGR sequences removed, and the tab delimiters and
+  # newlines, nothing may be left that is not printable: every control byte a
+  # cwd or a HEAD carried has to have been neutralised on the way.
+  ctl=$(sed 's/\x1b\[[0-9;]*m//g' "$out" | tr -d '\t\n' | LC_ALL=C tr -d '\040-\176\200-\377' | wc -c)
+  if [ "$ctl" -eq 0 ]; then
+    report "[$r] no raw control byte reaches a row (ESC, CR, TAB in cwds and HEAD)" pass
+  else
+    report "[$r] no raw control byte reaches a row ($ctl found)" fail
+  fi
+  for want in "W:escsess:0:esc?[31mred" "W:crsess:0:cr?z" "W:tabsess:0:tab?dir" \
+              "W:nonl:0:‹no-newline›" "W:inner:0:‹outer-main›" "W:wt:0:‹wt-branch›" \
+              "W:tabhead:0:‹a?b›"; do
+    spec="${want%:*}"; frag="${want##*:}"
+    got=$(ctx_of "$out" "$spec")
+    case "$got" in
+      *"$frag"*) report "[$r] $spec shows $frag" pass ;;
+      *) report "[$r] $spec shows $frag (got: $(printf '%s' "$got" | cat -v | tr -s ' '))" fail ;;
+    esac
+  done
+  got=$(ctx_of "$out" "W:longbr:0")
+  case "$got" in
+    *"‹feature/"*"…›"*) ;;
+    *) got="NO-BADGE $got" ;;
+  esac
+  case "$got" in
+    *" Z "*"‹feature/"*) report "[$r] a zoomed window keeps its Z and a cut long branch" pass ;;
+    *) report "[$r] a zoomed window keeps its Z and a cut long branch (got: $(printf '%s' "$got" | tr -s ' '))" fail ;;
+  esac
+  # A US in a cwd leaves no telling which separator is the path's: the row goes
+  # (and only that row), never rendered from shifted fields.
+  if has_spec "$out" "S:ussess" && ! has_spec "$out" "W:ussess:0"; then
+    report "[$r] a window whose cwd holds a US is dropped, its session kept" pass
+  else
+    report "[$r] a window whose cwd holds a US is dropped, its session kept" fail
+  fi
+  if has_spec "$out" "P:uspane:0:0" && ! has_spec "$out" "P:uspane:0:1"; then
+    report "[$r] ...and a pane whose cwd holds one, not its sibling" pass
+  else
+    report "[$r] ...and a pane whose cwd holds one, not its sibling" fail
+  fi
+done
+if [ "$(kinds "$TMPD/hostile.rust")" = "$(kinds "$TMPD/hostile.bash")" ]; then
+  report "both renderers emit the same S:/W:/P:/D: row counts ($(kinds "$TMPD/hostile.bash"))" pass
+else
+  report "both renderers emit the same S:/W:/P:/D: row counts (rust $(kinds "$TMPD/hostile.rust"), bash $(kinds "$TMPD/hostile.bash"))" fail
+fi
 
 # --- locale: neither renderer may depend on it ---------------------------------
 #
@@ -253,6 +400,55 @@ bad=$(printf 'a\x1fb\x1f1\x1f\n\x1e\n\x1e\n\x1e\n' | "$BIN" gather 2>/dev/null |
 badu=$(printf 'a\x1fb\x1f1\x1f\xff\xfe\n\x1e\n\x1e\n\x1e\n' | "$BIN" gather 2>/dev/null | wc -l)
 [ "$badu" = "$bad" ] && report "invalid UTF-8 input still renders its row" pass \
                      || report "invalid UTF-8 input still renders its row (got $badu, want $bad)" fail
+
+# --- known divergences: the rows must still be the same rows -------------------
+# Byte parity is NOT asserted for these, and only these.  Row-count and target
+# parity is: the same S:/W:/P:/D: rows, in the same order, naming the same
+# targets, four fields each -- so a dropped or extra row cannot hide here.
+#
+#   wide glyphs  bash pads by CHARACTERS (${#var}); a CJK character is two
+#                cells, so bash's columns shift on such a row and it draws no
+#                session rule for a non-ASCII name.  The documented intentional
+#                divergence (rust/README.md, "Intentional divergences") and
+#                docs/UI-EXPLORATION.md's "gap to close": the bash width model is
+#                frozen rather than given a width table.  Added LAST, because a
+#                wide path widens the path column of EVERY row, which would turn
+#                each byte-parity case above into a failure.
+#
+# Not listed because not reachable here: the two display-only divergences of the
+# macOS libproc backend that docs/PERFORMANCE.md accepts (child selection among
+# setsid'd siblings, invalid-UTF-8 argv).
+WIDE_S='日本語セッション'
+mkdir -p "$TMPD/日本語パス" "$TMPD/日本語ディレクトリ"
+tmux -L "$SOCK" new-session -d -s "$WIDE_S" -n '編集' -x 200 -y 50 -c "$TMPD/日本語パス" "$PANECMD"
+tmux -L "$SOCK" split-window -d -t "=$WIDE_S:0" -c "$TMPD/日本語パス" "$PANECMD"
+printf '%s\n' "$TMPD/日本語ディレクトリ" >> "$XDG_DATA_HOME/interdimux/recent_dirs"
+for _i in $(seq 1 150); do
+  case "$(tmux -L "$SOCK" list-panes -t "=$WIDE_S:0" -F '#{?pane_current_path,,nocwd}' 2>/dev/null)" in
+    *nocwd*|'') sleep 0.1 ;;
+    *) break ;;
+  esac
+done
+for cols in 80 200; do
+  env INTERDIMUX_USE_RUST=off INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_GIT_BRANCH=on \
+      FZF_COLUMNS="$cols" bash "$SCRIPT" --list > "$TMPD/wide.bash" 2>/dev/null || true
+  env INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_GIT_BRANCH=on \
+      FZF_COLUMNS="$cols" bash "$SCRIPT" --list > "$TMPD/wide.rust" 2>/dev/null || true
+  why=""
+  has_spec "$TMPD/wide.bash" "W:$WIDE_S:0" && has_spec "$TMPD/wide.bash" "P:$WIDE_S:0:1" \
+    && has_spec "$TMPD/wide.bash" "D:$TMPD/日本語ディレクトリ" || why+=" the wide rows are missing;"
+  [ "$(kinds "$TMPD/wide.bash")" = "$(kinds "$TMPD/wide.rust")" ] \
+    || why+=" counts rust $(kinds "$TMPD/wide.rust") vs bash $(kinds "$TMPD/wide.bash");"
+  cmp -s <(cut -f4 "$TMPD/wide.bash") <(cut -f4 "$TMPD/wide.rust") || why+=" the spec columns differ;"
+  for f in "$TMPD/wide.bash" "$TMPD/wide.rust"; do
+    awk -F'\t' 'NF != 4 { bad = 1 } END { exit bad }' "$f" || why+=" a row without four fields in ${f##*.};"
+  done
+  if [ -z "$why" ]; then
+    report "known divergence, wide glyphs at $cols cols: the same rows, targets and counts ($(kinds "$TMPD/wide.rust"))" pass
+  else
+    report "known divergence, wide glyphs at $cols cols:$why" fail
+  fi
+done
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
