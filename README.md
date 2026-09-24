@@ -162,7 +162,7 @@ menu on tmux >= 3.4 (one keypress per action: `s`, `n`, `r`, `i`, `w`,
 - **Swap** (`w`) — Swap windows or panes
 - **Zoom** (`z`) — Toggle pane zoom
 - **Detach** (`d`) — Detach clients from session
-- **Send keys** (`t`) — Send a command to a pane
+- **Send keys** (`t`) — Send a command, or a key such as `C-c`, to a pane
 - **Schedule** (`a`) — Run a command later, via `at`
 - **Jobs** (`o`) — See and cancel scheduled commands
 - **Health** (`h`) — Check the setup, like nvim's `:checkhealth`
@@ -187,7 +187,7 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 | `Ctrl-z` | Toggle zoom on the selected pane |
 | `Ctrl-s` | Swap the selected window or pane |
 | `Ctrl-d` | Detach clients from the selected session |
-| `Ctrl-t` | Send a command to the selected pane — typed as text, then Enter; a pane scrolled back in copy-mode is taken out of it first, so the command runs |
+| `Ctrl-t` | Send a command to the selected pane — typed as text, then Enter. A text that is exactly one key name in tmux's spelling (`C-c`, `M-x`, `C-M-x`, `^x`, `Escape`, `Up`/`Down`/`Left`/`Right`, `PPage`/`NPage`, `BTab`, `F1`–`F12`) is pressed instead, with no Enter: `C-c` interrupts the program, in every pane of a window or session row. A pane scrolled back in copy-mode is taken out of it first, so the command runs |
 | `Ctrl-]` | Cycle the match scope: name / path / cmd / all / name+cmd (fzf >= 0.58). The prompt names the active scope |
 | `Ctrl-/` | Toggle preview pane |
 | `Ctrl-r` | Reload the list |
@@ -552,7 +552,12 @@ set -g @interdimux-autobuild 'on'
 
 ### Scheduled keys
 
-Send a command to a pane at a future time.
+Send a command to a pane at a future time. As with `Ctrl-t`, the command is
+typed and then Enter is pressed, unless it is exactly one key name in tmux's
+spelling (`C-c`, `M-x`, `Escape`, `Up`, `F5`, …): that key is pressed, with no
+Enter, so `--send-in 600 %5 C-c` interrupts whatever still runs there in ten
+minutes. Words that only look like keys (`Enter`, `Home`, `c-c`, `C-c C-c`)
+are typed.
 
 **From the dashboard:** `prefix + g`, then `a`. Pick the target in the usual
 picker, type when, type the command. A window or session row narrows to that
@@ -655,7 +660,9 @@ The first match wins:
 3. **`@interdimux-startup-command`** — the global fallback above.
 
 The command is delivered with `send-keys`, so it appears at the prompt and
-lands in your shell history exactly as if you had typed it. interdimux waits
+lands in your shell history exactly as if you had typed it. Every line is
+typed: unlike `Ctrl-t`, a startup line that happens to be a key name such as
+`C-c` is not pressed. interdimux waits
 for the new shell to finish initialising first, so nothing is echoed before
 your prompt appears. Set `@interdimux-hydrate off` to disable.
 

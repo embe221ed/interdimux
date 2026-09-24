@@ -150,6 +150,7 @@ opens one (the plugin binds it), and so does `--launch switch`.
   --session-name-for DIR     print the session name DIR would get
   --send-at WHEN TARGET CMD  type CMD into TARGET at WHEN (an at(1) time)
   --send-in SECS TARGET CMD  the same, SECS seconds from now
+                             (a CMD that is one key name, e.g. C-c, is pressed)
   --sched-list               list what --send-at / --send-in have queued
   --sched-cancel ID          cancel one of those
   --launch MODE              open a picker in a popup: switch kill rename zoom
@@ -1352,9 +1353,9 @@ resolve_session_name() {
 # ---------------------------------------------------------------------------
 #
 # Every place that types the user's text into a pane -- ctrl-t's send, startup
-# commands, and both scheduled paths -- goes through send_line / sh_send_line,
-# because a bare `send-keys -- "$text" Enter` got three things wrong (all
-# measured on tmux 3.7b):
+# commands, and both scheduled paths -- goes through send_line (directly, or via
+# send_input / sh_send_input), because a bare `send-keys -- "$text" Enter` got
+# three things wrong (all measured on tmux 3.7b):
 #
 #   * tmux's ARGV parser reads an argument ending in ';' as a command separator
 #     and turns a trailing '\;' into ';'.  `find . -exec rm {} \;` arrived as
@@ -1365,7 +1366,8 @@ resolve_session_name() {
 #     does to it: 'x;' is passed as 'x\;' and arrives as 'x;', and 'x\;' is
 #     passed as 'x\\;' and arrives as 'x\;'.
 #   * without -l every argument is first looked up as a KEY NAME, so a command
-#     that is just `Enter`, `Home` or `C-c` was pressed rather than typed.
+#     that is just `Enter` or `Home` was pressed rather than typed.  (Pressing
+#     a key is kept, on purpose and in a narrower form: see send_input.)
 #   * a pane in copy-mode reads keys as copy-mode bindings: the command never
 #     ran, vi's `D` in "echo COPYMODE" copied into a NEW paste buffer on its way
 #     out of the mode, and the dialog said only "1 failed".  `copy-mode -q`
@@ -1399,16 +1401,61 @@ send_line() {
        send-keys -t "$target" Enter
 }
 
-# sh_send_line TMUX TARGET TEXT -- send_line as a /bin/sh command line, for the
-# paths that run later under a POSIX shell (the at job body and the sub-minute
-# run-shell), where no bash function exists.  TMUX and TARGET are already sh
-# words (e.g. 'tmux -S "$sock"' and '"$pane"'); TEXT is raw and is quoted here,
-# with shq and never %q.  Sets REPLY.
-sh_send_line() {
+# ctrl-t's send is titled "Send keys", and the one key worth sending on its own
+# is C-c: interrupting what runs in a pane -- or, through a W:/S: fan-out, in
+# every pane of a window or session.  So the interactive send and the scheduled
+# sends (not startup commands, which are a list of commands to type) PRESS a
+# text that is, as a whole, exactly one control or navigation key name in
+# tmux's spelling -- C-x, M-x, C-M-x, ^x, Escape, the arrows, PPage/NPage,
+# BTab, F1-F12 -- with no Enter after it.  Anything else, including `Enter`,
+# `Home`, `c-c` and `C-c C-c`, is typed and then Enter is pressed: no command
+# is spelled like one of these keys, while the keys a command might be (Enter,
+# Home, End, Tab, Space) are left out.  Case-sensitive, like the rest of it.
+send_key_name() {
+  local ch cp
+  case "$1" in
+    Escape|Up|Down|Left|Right|PPage|NPage|BTab|F[1-9]|F1[0-2]) return 0 ;;
+    C-M-?|M-C-?|C-?|M-?|^?) ch="${1: -1}" ;;
+    *) return 1 ;;
+  esac
+  # A modifier takes one printable ASCII character.  tmux has no name for,
+  # say, C-é, and would type it as text -- without the Enter.
+  printf -v cp '%d' "'$ch" 2>/dev/null || return 1
+  (( cp > 32 && cp < 127 ))
+}
+
+# send_input TARGET TEXT -- ctrl-t's send: press TEXT if it is a key name (see
+# send_key_name), otherwise send_line it.  A pane in copy-mode leaves it first
+# either way, so a C-c reaches the program rather than copy-mode's bindings.
+send_input() {
+  local target="$1"
+  if send_key_name "$2"; then
+    tmux_text_arg "$2"            # C-; would otherwise lose its ';' to tmux
+    tmux copy-mode -q -t "$target" \; send-keys -t "$target" -- "$REPLY"
+  else
+    send_line "$target" "$2"
+  fi
+}
+
+# sh_send_input TMUX TARGET TEXT -- send_input as a /bin/sh command line, for
+# the paths that run later under a POSIX shell (the at job body and the
+# sub-minute run-shell), where no bash function exists.  TMUX and TARGET are
+# already sh words (e.g. 'tmux -S "$sock"' and '"$pane"'); TEXT is raw and is
+# quoted here, with shq and never %q.  Sets REPLY.
+sh_send_input() {
   local tm="$1" tg="$2"
+  if send_key_name "$3"; then
+    tmux_text_arg "$3"; shq "$REPLY"
+    REPLY="$tm copy-mode -q -t $tg \\; send-keys -t $tg -- $REPLY"
+    return 0
+  fi
   tmux_text_arg "$3"; shq "$REPLY"
   REPLY="$tm copy-mode -q -t $tg \\; send-keys -t $tg -l -- $REPLY \\; send-keys -t $tg Enter"
 }
+
+# The note under the Send keys and Schedule fields: the key rule above is not
+# something anyone would guess from a text field.
+SEND_NOTE="${DIM}typed + Enter · a lone key name (C-c, Escape, Up) is pressed${RST}"
 
 # The startup command for DIR, or empty.  Sets REPLY.
 resolve_startup_command() {
@@ -3884,9 +3931,10 @@ sched_job_body() {
   shq "$sock";         q_sock="$REPLY"
   shq "$srvpid";       q_want="$REPLY"
   shq "$pane";         q_pane="$REPLY"
-  # the whole send, as send_line does it (see there): a trailing ';' survives
-  # tmux's argv parser, and a pane left in copy-mode still runs the command
-  sh_send_line 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
+  # the whole send, as send_input does it (see there): a lone key name is
+  # pressed, any other text survives tmux's argv parser with a trailing ';'
+  # intact, and a pane left in copy-mode still runs the command
+  sh_send_input 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
   # One field per line, each "rest of line".  The single-line form packed all
   # three into "pane=… target=… desc=…", which stops being parseable the moment
   # a session name contains a space or the literal "desc=" — and tmux allows
@@ -3986,18 +4034,19 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
   # but tmux can.  Caveat, verified: a pending run-shell -d does NOT keep the
   # server alive — if the last session closes, the job is lost silently.
   if [ "$_mode" = "--send-in" ] && [[ "$_when" =~ ^[0-9]+$ ]] && [ "$_when" -lt 60 ]; then
+    # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
+    # sh_send_input quotes the keys itself, after protecting a trailing ';', and
+    # decides from the text AS TYPED whether it is a key to press (C-#, say).
+    shq "$SCHED_SOCK"; _q_sock="$REPLY"
+    shq "$SCHED_PANE"; _q_pane="$REPLY"
+    sh_send_input "tmux -S $_q_sock" "$_q_pane" "$_keys"
     # run-shell FORMAT-EXPANDS its argument before /bin/sh ever sees it, so a
     # '#H' or '#{...}' in the user's command is substituted by tmux — verified:
     # "echo host-is-#H" arrived as "echo host-is-krootabulon".  Worse, the
     # substituted text is not re-quoted, so a pane title could inject shell.
-    # '##' is tmux's escape for a literal '#'.
-    _rs_keys="${_keys//\#/##}"
-    # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
-    # sh_send_line quotes the keys itself, after protecting a trailing ';'.
-    shq "$SCHED_SOCK"; _q_sock="$REPLY"
-    shq "$SCHED_PANE"; _q_pane="$REPLY"
-    sh_send_line "tmux -S $_q_sock" "$_q_pane" "$_rs_keys"
-    tmux run-shell -b -d "$_when" "$REPLY" \
+    # '##' is tmux's escape for a literal '#'; applied to the whole command, so
+    # a '#' in the socket path is not expanded either.
+    tmux run-shell -b -d "$_when" "${REPLY//\#/##}" \
       2>/dev/null \
       && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
       || { echo "interdimux: could not schedule" >&2; exit 1; }
@@ -4921,7 +4970,7 @@ if [ "${1:-}" = "--action" ]; then
       ;;
 
     send)
-      input_dialog "$BOLD_AMBER" "Send keys to ${label}" "❯ " ""
+      input_dialog "$BOLD_AMBER" "Send keys to ${label}" "❯ " "" "$SEND_NOTE"
       send_cmd="$REPLY"
       if [ -n "$send_cmd" ]; then
         # Build list of pane targets to send to
@@ -4946,9 +4995,10 @@ if [ "${1:-}" = "--action" ]; then
 
         sent=0 failed=0
         for t in "${send_targets[@]}"; do
-          # send_line: literal text, a trailing ';' intact, and a pane in
-          # copy-mode taken out of it first so the command actually runs
-          if send_line "$t" "$send_cmd" 2>/dev/null; then
+          # send_input: a lone key name pressed, any other text typed
+          # literally with a trailing ';' intact, and a pane in copy-mode
+          # taken out of it first so the command actually runs
+          if send_input "$t" "$send_cmd" 2>/dev/null; then
             sent=$((sent + 1))
           else
             failed=$((failed + 1))
@@ -4996,7 +5046,7 @@ if [ "${1:-}" = "--action" ]; then
         # user the command they already typed.
         if [ -z "$sched_cmd" ]; then
           input_dialog "$BOLD_AMBER" "Schedule ${sched_when} → ${SCHED_LABEL}" "❯ " "" \
-            "${DIM}sent as keys, then Enter${RST}"
+            "$SEND_NOTE"
           sched_cmd="$REPLY"
           [ -n "$sched_cmd" ] || { dialog_close; exit 0; }
         fi

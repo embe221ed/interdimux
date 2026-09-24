@@ -326,9 +326,10 @@ check "after three CJK characters the cursor follows them, not the middle" \
 run frame_intact
 check "three CJK characters leave the border where it was" "$FRAME_WHY" "$RC"
 
-LONG='日本語のコマンドをここに入力しますとてもながいものです'   # 28 chars, 56 cells
+# 40 chars, 80 cells: wider than any field an 80-column pane can hold
+LONG='日本語のコマンドをここに入力しますとてもながいものですもっと長くしてみます本当に'
 typed "${LONG:3}"
-wait_vis "ものです" tail || true
+wait_vis "本当に" tail || true
 run frame_intact
 check "a CJK line wider than the field scrolls inside the frame" "$FRAME_WHY" "$RC"
 run cursor_after "$VIS"
