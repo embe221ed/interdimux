@@ -183,10 +183,20 @@ fn sessions_without_windows() {
     check("sessions-only", &[]);
 }
 
+/// Control bytes in a cwd (ESC, CR, TAB) are shown sanitised, and a US inside
+/// one -- a window's, and one pane's of a split -- drops that row rather than
+/// reading its later fields from the wrong positions.  The bash renderer once
+/// got every one of these wrong; tests/test_corpus_parity.sh renders this dump
+/// through it too, so the expectation below binds both.
+#[test]
+fn control_bytes_and_stray_separators() {
+    check("control", &[]);
+}
+
 /// Layout must hold at every width, not just the one the goldens pin.
 #[test]
 fn every_row_keeps_the_four_field_contract() {
-    let dumps = ["basic", "cjk", "hostile", "emoji", "bigindex", "sessions-only"];
+    let dumps = ["basic", "cjk", "hostile", "emoji", "bigindex", "sessions-only", "control"];
     for case in dumps {
         let dump = std::fs::read_to_string(corpus_dir().join(format!("{}.dump", case))).unwrap();
         for cols in [40, 60, 80, 100, 120, 160, 200, 300] {
@@ -212,7 +222,7 @@ fn every_row_keeps_the_four_field_contract() {
 /// \x1f is the internal tmux field delimiter and must never reach fzf.
 #[test]
 fn the_unit_separator_never_reaches_a_rendered_row() {
-    for case in ["basic", "cjk", "hostile", "emoji"] {
+    for case in ["basic", "cjk", "hostile", "emoji", "control"] {
         let dump = std::fs::read_to_string(corpus_dir().join(format!("{}.dump", case))).unwrap();
         let out = render(&dump, &[]);
         assert!(!out.contains('\u{1f}'), "{}: US leaked into the output", case);
@@ -334,7 +344,7 @@ fn identity_columns_all_have_equal_display_width() {
         assert!(!has_rule(&tight), "the rule still drew at 40 cols, where the meta gets clipped");
     }
 
-    for case in ["basic", "cjk", "hostile", "emoji", "bigindex"] {
+    for case in ["basic", "cjk", "hostile", "emoji", "bigindex", "control"] {
         let dump = std::fs::read_to_string(corpus_dir().join(format!("{}.dump", case))).unwrap();
         // 52 is not decoration: the pane-id clamp only engages once the squeeze
         // loop has driven the identity column to its floor, which happens below

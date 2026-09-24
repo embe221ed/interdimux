@@ -116,10 +116,10 @@ strip() { sed 's/\x1b\[[0-9;]*m//g' "$1"; }
 
 dumps=()
 for d in "$CORPUS"/*.dump; do dumps+=("$d"); done
-if [ "${#dumps[@]}" -ge 7 ]; then
+if [ "${#dumps[@]}" -ge 8 ]; then
   report "the corpus is there (${#dumps[@]} dumps)" pass
 else
-  report "the corpus is there (${#dumps[@]} dumps, expected >= 7)" fail
+  report "the corpus is there (${#dumps[@]} dumps, expected >= 8)" fail
 fi
 
 # --- 1. the bash renderer against the checked-in goldens ----------------------
