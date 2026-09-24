@@ -239,34 +239,66 @@ has "the server's UTF-8 locale passes even from a C shell" "$out" "✓ character
 has "...and says this shell's differs" "$out" "this shell's is 'C'"
 
 # --- $FZF_DEFAULT_OPTS, as the server has it -----------------------------------------
-# The shell's own copy is not the one judged: the pickers never see it.
-out=$(FZF_DEFAULT_OPTS='--tmux --border' doctor)
-hasnt "this shell's \$FZF_DEFAULT_OPTS is not the one judged" "$out" 'FZF_DEFAULT_OPTS sets'
-
-# --tmux (--popup since 0.74) opens fzf's own popup underneath the picker's.
-# Server and doctor both set, as in the Health popup.
-senv FZF_DEFAULT_OPTS '--tmux 80%'
-out=$(FZF_DEFAULT_OPTS='--tmux 80%' doctor)
-has "--tmux in the server's \$FZF_DEFAULT_OPTS is warned about" "$out" '⚠ $FZF_DEFAULT_OPTS sets --tmux'
-hasnt "...instead of being called harmless" "$out" "none of it changes fzf's geometry"
-senv FZF_DEFAULT_OPTS '--popup=center'
-has "...and so is its 0.74 spelling, --popup" "$(doctor)" '⚠ $FZF_DEFAULT_OPTS sets --popup'
-# fzf honours the LAST of --tmux / --no-tmux.
-senv FZF_DEFAULT_OPTS '--tmux 80% --no-tmux'
-hasnt "a --tmux cancelled by a later --no-tmux is not" "$(doctor)" 'sets --tmux'
-# A value that spans lines — the dump shows only its first line.
-senv FZF_DEFAULT_OPTS $'--cycle\n--tmux'
-has "a --tmux on the second line of a multi-line value is found" "$(doctor)" '⚠ $FZF_DEFAULT_OPTS sets --tmux'
-unsenv FZF_DEFAULT_OPTS
-
-# An option fzf does not know kills every picker.  fzf's own verdict is the premise.
-senv FZF_DEFAULT_OPTS '--no-such-fzf-flag'
+# An option fzf does not know kills every picker: fzf parses its defaults before
+# any flag.  That is the one thing in there that can.  fzf's own verdict is the
+# premise.
 if FZF_DEFAULT_OPTS='--no-such-fzf-flag' fzf --version >/dev/null 2>&1; then
   report "premise: fzf rejects --no-such-fzf-flag" fail
 else
-  has "default options fzf rejects are a problem" "$(doctor)" "✗ fzf rejects its default options"
+  # The shell's own copy is not the one judged: the pickers never see it.
+  hasnt "this shell's \$FZF_DEFAULT_OPTS is not the one judged" \
+    "$(FZF_DEFAULT_OPTS='--no-such-fzf-flag' doctor)" "fzf rejects its default options"
+  senv FZF_DEFAULT_OPTS '--no-such-fzf-flag'
+  out=$(doctor)
+  has "default options fzf rejects are a problem" "$out" "✗ fzf rejects its default options"
+  has "...said to be the server's copy, since this shell has none" "$out" "that is the tmux server's \$FZF_DEFAULT_OPTS"
+  # A value that spans lines -- the dump shows only its first line, and a
+  # long one is usually written that way.
+  senv FZF_DEFAULT_OPTS $'--cycle\n--no-such-fzf-flag'
+  has "a rejected flag on the second line of a multi-line value is found" "$(doctor)" \
+    "✗ fzf rejects its default options"
+  unsenv FZF_DEFAULT_OPTS
 fi
+
+# Its layout flags are not a problem.  build_fzf_theme resets --tmux/--popup,
+# --height, --border, --margin, --padding and --style after it, on every fzf
+# that parses them (tests/test_theme.sh draws the picker full-pane with each of
+# these set).  --doctor used to warn about them -- "fzf's own popup opens
+# underneath" -- and advise moving them to @interdimux-fzf-opts: the one place
+# they DO take effect.  So: accepted by fzf -> a tick and a clean report.  An
+# fzf too old to parse one rejects it, which is the problem to name instead.
+# Server and doctor both set, as in the Health popup.
+for opt in '--tmux 80%' '--popup=center' '--border --height 40%' \
+           '--height 40% --border --margin 1 --padding 1 --style full' $'--cycle\n--tmux'; do
+  lbl="${opt//$'\n'/\\n}"
+  senv FZF_DEFAULT_OPTS "$opt"
+  out=$(FZF_DEFAULT_OPTS="$opt" doctor)
+  if FZF_DEFAULT_OPTS="$opt" fzf --version >/dev/null 2>&1; then
+    has "[$lbl] in \$FZF_DEFAULT_OPTS, which fzf accepts, gets a tick" "$out" \
+      '✓ $FZF_DEFAULT_OPTS is set, and fzf accepts it'
+    has "...and no warning: everything checks out" "$out" "everything checks out"
+    case "$out" in *"everything checks out"*) ;;
+      *) ERRORS+="$(printf '%s\n' "$out" | grep -A2 '[✗⚠]' | sed 's/^/      /' || true)"$'\n' ;; esac
+  else
+    has "[$lbl], which this fzf rejects, is reported as that" "$out" "✗ fzf rejects its default options"
+  fi
+done
 unsenv FZF_DEFAULT_OPTS
+# $FZF_DEFAULT_OPTS_FILE is read the same way and reset the same way, so it is
+# judged the same way: it used to be a warning whatever it held.
+printf -- '--border --height 40%%\n' > "$TMPD/fzfopts"
+senv FZF_DEFAULT_OPTS_FILE "$TMPD/fzfopts"
+if FZF_DEFAULT_OPTS_FILE="$TMPD/fzfopts" fzf --version >/dev/null 2>&1; then
+  out=$(doctor)
+  has "layout flags in \$FZF_DEFAULT_OPTS_FILE, which fzf accepts, get a tick" "$out" \
+    '✓ $FZF_DEFAULT_OPTS_FILE is set, and fzf accepts it'
+  has "...and no warning" "$out" "everything checks out"
+else
+  report "premise: fzf accepts '--border --height 40%' from its options file" fail
+fi
+printf -- '--no-such-fzf-flag\n' > "$TMPD/fzfopts"
+has "a flag fzf rejects in \$FZF_DEFAULT_OPTS_FILE is a problem" "$(doctor)" "✗ fzf rejects its default options"
+unsenv FZF_DEFAULT_OPTS_FILE
 
 # --- @interdimux-fzf-opts --------------------------------------------------------------
 # fzf's own parse is the oracle for what is valid.

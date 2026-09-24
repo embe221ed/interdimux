@@ -5888,77 +5888,44 @@ if [ "${1:-}" = "--doctor" ]; then
   [ "$_lc_self" != "$_lc_name" ] \
     && _note "that is the tmux server's locale, which the popups get — this shell's is '${_lc_self:-unset}'"
 
-  # $FZF_DEFAULT_OPTS is applied to every picker before this tool's own flags and
-  # is invisible to the option validator below, which only reads
+  # $FZF_DEFAULT_OPTS (and _FILE) is applied to every picker before this tool's
+  # own flags and is invisible to the option validator below, which only reads
   # @interdimux-fzf-opts.  The server's copy, again: it is the one the pickers get.
   _fdo="" _fdof=""
   _srv_env FZF_DEFAULT_OPTS exact && _fdo="$REPLY"
   _srv_env FZF_DEFAULT_OPTS_FILE && _fdof="$REPLY"
 
-  # First, whether fzf takes them at all.  It parses its defaults before any
-  # flag, so one option it does not know — a typo, a flag from a newer fzf —
-  # makes EVERY picker exit before it draws, and --version is enough to find out.
-  if { [ -n "$_fdo" ] || [ -n "$_fdof" ]; } && command -v fzf >/dev/null 2>&1; then
-    if ! _fe=$(FZF_DEFAULT_OPTS="$_fdo" FZF_DEFAULT_OPTS_FILE="$_fdof" fzf --version 2>&1 >/dev/null </dev/null); then
+  # Whether fzf takes them at all is the one thing here that can break a picker.
+  # fzf parses its defaults before any flag, so one option it does not know — a
+  # typo, a flag from a newer fzf — makes EVERY picker exit before it draws, and
+  # --version is enough to find out.  Asked of the fzf the popups run.
+  #
+  # Nothing else in them can.  build_fzf_theme resets what people usually put
+  # there — --tmux/--popup, --height, --border, --margin, --padding, --style,
+  # --with-shell, and every colour — on each fzf that parses the flag, and an
+  # fzf too old to parse one rejects it here.  This used to warn about those
+  # very flags, and to advise moving them to @interdimux-fzf-opts: the one place
+  # they DO take effect, since it comes after the resets.  Following it turned a
+  # harmless global setting into the nested frame and shrunk list the resets
+  # exist to prevent.  (Whether the flags there are sensible is the option
+  # check's business, and a deliberate choice's.)
+  if { [ -n "$_fdo" ] || [ -n "$_fdof" ]; } && [ -n "$_jfzf" ]; then
+    if ! _fe=$(FZF_DEFAULT_OPTS="$_fdo" FZF_DEFAULT_OPTS_FILE="$_fdof" "$_jfzf" --version 2>&1 >/dev/null </dev/null); then
       _bad "fzf rejects its default options — every picker exits before it draws"
       _note "${_fe%%$'\n'*}"
+      [ "$_fdo" != "${FZF_DEFAULT_OPTS:-}" ] \
+        && _note "that is the tmux server's \$FZF_DEFAULT_OPTS, which the pickers get — this shell's differs"
+    else
+      if [ -n "$_fdo" ] && [ -n "$_fdof" ]; then
+        _ok "\$FZF_DEFAULT_OPTS and \$FZF_DEFAULT_OPTS_FILE are set, and fzf accepts them — the pickers reset their layout and colours"
+      elif [ -n "$_fdo" ]; then
+        _ok "\$FZF_DEFAULT_OPTS is set, and fzf accepts it — the pickers reset its layout and colours"
+      else
+        _ok "\$FZF_DEFAULT_OPTS_FILE is set, and fzf accepts it — the pickers reset its layout and colours"
+      fi
+      _note "--tmux/--popup, --height, --border, --margin, --padding, --style and --with-shell are all overridden;"
+      _note "@interdimux-fzf-opts is where a deliberate one goes"
     fi
-  fi
-
-  # Then the flags that are not a matter of taste:
-  #   --border/--margin/--padding shrink fzf's window WITHOUT shrinking
-  #     FZF_COLUMNS, which is what the column widths and the hint bar are sized
-  #     from, so every row comes out too wide and gets clipped;
-  #   --with-shell replaces the shell that runs the inline callbacks, and unlike
-  #     the same flag in @interdimux-fzf-opts it does NOT switch this tool to its
-  #     re-exec fallback — so a fish there gets POSIX snippets it cannot parse;
-  #   --height turns off full-screen mode inside a popup that is already sized;
-  #   --tmux (--popup since fzf 0.74) is ignored outside tmux, which is exactly
-  #     why it ends up in a global $FZF_DEFAULT_OPTS — but the pickers ARE inside
-  #     tmux, in a popup already, and there fzf opens a second popup underneath
-  #     the first.  The list draws in the one you cannot see; the one you can
-  #     stays blank, and even Esc is typed into it.
-  if [ -n "$_fdo" ]; then
-    # Normalise the whitespace first.  fzf splits these on ANY of it, and a long
-    # one is usually written across several LINES — matched against spaces only,
-    # every flag in the multi-line form reported clean.
-    _fzfopts=" ${_fdo//[$'\n\t']/ } "
-    _fzfhaz=""
-    for _f in --border --margin --padding --height --with-shell --style; do
-      case "$_fzfopts" in *" $_f"*) _fzfhaz+=" $_f" ;; esac
-    done
-    # Word by word, because the last of --tmux / --no-tmux wins, as in fzf.
-    _fzftmux=""
-    set -f
-    for _f in $_fzfopts; do
-      case "$_f" in
-        --tmux|--tmux=*|--popup|--popup=*) _fzftmux="${_f%%=*}" ;;
-        --no-tmux|--no-popup)              _fzftmux="" ;;
-      esac
-    done
-    set +f
-    if [ -n "$_fzftmux" ]; then
-      _warn "\$FZF_DEFAULT_OPTS sets $_fzftmux — the pickers already run in a tmux popup, and fzf's own opens underneath it"
-      _note "keep it out of the global opts, or cancel it for this tool: @interdimux-fzf-opts '--no-tmux'"
-    fi
-    if [ -n "$_fzfhaz" ]; then
-      _warn "\$FZF_DEFAULT_OPTS sets${_fzfhaz} — those change fzf's geometry or its shell"
-      _note "this tool sizes its columns from FZF_COLUMNS, which those flags do not move"
-      _note "keep them out of the global opts, or move them to @interdimux-fzf-opts"
-    elif [ -z "$_fzftmux" ]; then
-      _ok "\$FZF_DEFAULT_OPTS is set, and none of it changes fzf's geometry"
-    fi
-    if { [ -n "$_fzftmux" ] || [ -n "$_fzfhaz" ]; } && [ "$_fdo" != "${FZF_DEFAULT_OPTS:-}" ]; then
-      _note "that is the tmux server's copy, which the pickers get — this shell's differs"
-    fi
-  fi
-  # Its own statement, not a note under the line above: fzf reads this file even
-  # when $FZF_DEFAULT_OPTS is empty, and claiming "none of it changes fzf's
-  # geometry" while an unread file sets the geometry is worse than saying nothing.
-  # (Whether fzf ACCEPTS it is the check above.)
-  if [ -n "$_fdof" ]; then
-    _warn "\$FZF_DEFAULT_OPTS_FILE is set — fzf reads it, and its flags are not checked here"
-    _note "$_fdof"
   fi
 
   # A binary older than the sources it was built from renders differently from
@@ -6187,8 +6154,8 @@ if [ "${1:-}" = "--doctor" ]; then
           return 0
         fi
         eval "_u=($v)" 2>/dev/null
-        # --tmux/--popup here is worse than in $FZF_DEFAULT_OPTS: these words
-        # come last, so nothing overrides them.
+        # --tmux/--popup here is not what it is in $FZF_DEFAULT_OPTS, which the
+        # theme cancels: these words come last, so nothing overrides them.
         local _w _pop=""
         for _w in ${_u[@]+"${_u[@]}"}; do
           case "$_w" in

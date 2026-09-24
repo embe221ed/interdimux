@@ -501,21 +501,32 @@ esac
   || report "...as a warning, not a failure" fail
 senv LC_ALL C.UTF-8; senv LANG C.UTF-8
 
-# $FZF_DEFAULT_OPTS is invisible to the option validator, and three of its flags
-# move fzf's geometry WITHOUT moving FZF_COLUMNS — which is what the column
-# widths and the hint bar are sized from.
+# $FZF_DEFAULT_OPTS is invisible to the option validator.  Its geometry flags
+# used to be reported here, because they move fzf's window WITHOUT moving
+# FZF_COLUMNS -- but build_fzf_theme now resets them after it (tests/test_theme.sh
+# draws the picker full-pane with them set), so they cannot reach a picker, and
+# the old advice to move them to @interdimux-fzf-opts was the one way to bring
+# the broken layout back.  Accepted by fzf, they are fine: a tick, no warning.
 # In the server's environment too, for the same reason as the locale.
-senv FZF_DEFAULT_OPTS '--border --margin=2'
-case "$(doctor)" in
-  *'$FZF_DEFAULT_OPTS sets'*--border*) report "a geometry flag in \$FZF_DEFAULT_OPTS is reported" pass ;;
-  *) report "a geometry flag in \$FZF_DEFAULT_OPTS is reported" fail
-     ERRORS+="      $(doctor | grep -i fzf_default | head -2 || true)"$'\n' ;;
-esac
-senv FZF_DEFAULT_OPTS '--color=fg:blue --cycle'
-case "$(doctor)" in
-  *"none of it changes fzf's geometry"*) report "a harmless \$FZF_DEFAULT_OPTS is not nagged about" pass ;;
-  *) report "a harmless \$FZF_DEFAULT_OPTS is not nagged about" fail ;;
-esac
+for fdo in '--border --margin=2' '--height 40% --padding 1' '--color=fg:blue --cycle'; do
+  if ! FZF_DEFAULT_OPTS="$fdo" fzf --version >/dev/null 2>&1; then
+    report "premise: fzf accepts [$fdo]" fail; continue
+  fi
+  senv FZF_DEFAULT_OPTS "$fdo"
+  out=$(doctor)
+  case "$out" in
+    *'✓ $FZF_DEFAULT_OPTS is set, and fzf accepts it'*) report "[$fdo] in \$FZF_DEFAULT_OPTS gets a tick" pass ;;
+    *) report "[$fdo] in \$FZF_DEFAULT_OPTS gets a tick" fail
+       ERRORS+="      $(printf '%s\n' "$out" | grep -i -A2 fzf_default | head -3 || true)"$'\n' ;;
+  esac
+  case "$out" in
+    *"everything checks out"*) report "...and is not nagged about" pass ;;
+    *) report "...and is not nagged about" fail
+       ERRORS+="      $(printf '%s\n' "$out" | grep '⚠\|✗' | head -3 || true)"$'\n' ;;
+  esac
+done
+[ "$(doctor_rc)" = 0 ] && report "...nor does it fail the run" pass \
+                       || report "...nor does it fail the run" fail
 unsenv FZF_DEFAULT_OPTS
 
 # A hide pattern that matches nothing looks exactly like one that works.

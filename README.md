@@ -402,10 +402,11 @@ not, the command that builds it — or, with no cargo, where to get one), whethe
 the key bindings are actually installed, whether the state directories are
 writable, whether your locale is UTF-8 (the tree glyphs and every column width
 assume it), whether `sort -s` works (the session order is stable and locale-free
-only because of it), whether `$FZF_DEFAULT_OPTS` contains a flag that moves fzf's
-geometry without moving `FZF_COLUMNS` — which is what the columns are sized from
-— and which of the two dashboards your client is tall enough for. Plus every
-`@interdimux-*` option you have set, with its value checked.
+only because of it), whether fzf accepts your `$FZF_DEFAULT_OPTS` — one flag it
+does not know stops every picker, while its layout flags are harmless, because
+the pickers reset them — and which of the two dashboards your client is tall
+enough for. Plus every `@interdimux-*` option you have set, with its value
+checked.
 
 That last part is the one worth running. tmux user options are free-form, so a
 mistyped name is not an error to tmux — the setting simply never applies, with
