@@ -1504,6 +1504,10 @@ SSH_FLAGS_WITH_VALUE='^-(b|c|D|E|e|F|I|i|J|L|l|m|O|o|p|Q|R|S|W|w)$'
 # Editor flags that consume the next argument
 EDITOR_FLAGS_WITH_VALUE='^-[uUsSpc]$|^--cmd$|^--listen$'
 
+# Interpreters whose first argument, when it is a path, is the script they run.
+# Shells count too (SHELLS_PATTERN is checked alongside).
+INTERPRETERS_PATTERN='^(python[0-9.]*|lua[0-9.]*|node|nodejs|ruby|perl|php)$'
+
 format_command() {
   local cmd_str="$1"
   REPLY=""                       # reset: callers read REPLY after a bare call
@@ -1570,7 +1574,22 @@ format_command() {
   fi
 
   [[ "$old_set" != *f* ]] && set +f
-  printf -v REPLY '%s%s%s' "$DIM_CMD" "$cmd_str" "$RST"
+
+  # Everything else, with argv0 by its basename: `/usr/bin/python3 -c …` spent
+  # nine of the column's cells on `/usr/bin/`.  An argv0 that ends in '/' has
+  # no basename and keeps the whole word.  An interpreter running a script by
+  # path shows the script's basename too — a `#!/usr/bin/python3` script reads
+  # `python3 tool.py`, not `/usr/bin/python3 /home/…/bin/tool.py`.  Only the
+  # word straight after argv0 is considered, never an option.
+  local rest="${cmd_str#"$cmd_name"}"
+  if [[ "$cmd_base" =~ $INTERPRETERS_PATTERN ]] || [[ "$cmd_base" =~ $SHELLS_PATTERN ]]; then
+    local r1="${rest# }" w1
+    w1="${r1%% *}"
+    if [[ "$w1" != -* && "$w1" == */* ]] && [ -n "${w1##*/}" ]; then
+      rest=" ${w1##*/}${r1#"$w1"}"
+    fi
+  fi
+  printf -v REPLY '%s%s%s%s' "$DIM_CMD" "${cmd_base:-$cmd_name}" "$rest" "$RST"
 }
 
 # ---------------------------------------------------------------------------

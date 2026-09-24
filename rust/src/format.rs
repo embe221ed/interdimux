@@ -1,8 +1,10 @@
 //! Smart command formatting: highlight the ssh host, or the file an editor has
-//! open.  A faithful port of bash `format_command`, including its flag-skipping
-//! tables and its "last positional wins" behaviour.
+//! open; show argv0 (and an interpreter's script) by its basename.  A faithful
+//! port of bash `format_command`, including its flag-skipping tables and its
+//! "last positional wins" behaviour.
 
 use crate::palette::{Palette, RST};
+use crate::proc::is_shell;
 
 /// ssh/mosh flags that consume the following argument.
 fn ssh_flag_takes_value(w: &str) -> bool {
@@ -24,6 +26,20 @@ fn is_editor(base: &str) -> bool {
         "vim" | "nvim" | "vi" | "nano" | "emacs" | "code" | "hx" | "helix" | "micro"
             | "kate" | "gedit" | "subl"
     )
+}
+
+/// Interpreters whose first argument, when it is a path, is the script they
+/// run.  Mirrors bash INTERPRETERS_PATTERN
+/// `^(python[0-9.]*|lua[0-9.]*|node|nodejs|ruby|perl|php)$`, plus the shells.
+fn is_interpreter(base: &str) -> bool {
+    let versioned = |stem: &str| {
+        base.strip_prefix(stem)
+            .is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    };
+    versioned("python")
+        || versioned("lua")
+        || matches!(base, "node" | "nodejs" | "ruby" | "perl" | "php")
+        || is_shell(base)
 }
 
 /// Returns (rendered, plain_text) — plain is what the width maths must use.
@@ -86,7 +102,24 @@ pub fn format_command(cmd: &str, p: &Palette) -> (String, String) {
         }
     }
 
-    (format!("{}{}{}", p.dim_cmd, cmd, RST), cmd.to_string())
+    // Everything else, with argv0 by its basename: `/usr/bin/python3 -c …`
+    // spent nine of the column's cells on `/usr/bin/`.  An argv0 ending in '/'
+    // has no basename and keeps the whole word.  An interpreter running a
+    // script by path shows the script's basename too (`#!/usr/bin/python3` ->
+    // `python3 tool.py`).  Only the word straight after argv0, never an option.
+    let shown = if base.is_empty() { name } else { base };
+    let mut rest = cmd[name.len()..].to_string();
+    if is_interpreter(base) {
+        if let Some(r1) = rest.strip_prefix(' ') {
+            let w1 = r1.split(' ').next().unwrap_or("");
+            let w1_base = w1.rsplit('/').next().unwrap_or(w1);
+            if !w1.starts_with('-') && w1.contains('/') && !w1_base.is_empty() {
+                rest = format!(" {}{}", w1_base, &r1[w1.len()..]);
+            }
+        }
+    }
+    let plain = format!("{}{}", shown, rest);
+    (format!("{}{}{}", p.dim_cmd, plain, RST), plain)
 }
 
 #[cfg(test)]
@@ -133,6 +166,43 @@ mod tests {
         assert_eq!(plain("cargo watch -x run"), "cargo watch -x run");
         assert_eq!(plain("-zsh"), "-zsh");
         assert_eq!(plain(""), "");
+        // spacing after argv0 is the command's own, and kept
+        assert_eq!(plain("a  b"), "a  b");
+    }
+
+    // --- argv0 and scripts by their basename -------------------------------
+
+    #[test]
+    fn argv0_is_shown_by_its_basename() {
+        assert_eq!(plain("/usr/bin/python3 -c x"), "python3 -c x");
+        assert_eq!(plain("/bin/sleep 999"), "sleep 999");
+        assert_eq!(plain("/usr/bin/htop"), "htop");
+        assert_eq!(plain("./configure --prefix=/usr"), "configure --prefix=/usr");
+        // editors and ssh with nothing to highlight still lose the path
+        assert_eq!(plain("/usr/bin/nvim"), "nvim");
+        // no basename: the whole word stays
+        assert_eq!(plain("a/ b"), "a/ b");
+        // a '/' in a later argument is not argv0's
+        assert_eq!(plain("git log origin/main"), "git log origin/main");
+    }
+
+    #[test]
+    fn an_interpreters_script_is_shown_by_its_basename() {
+        assert_eq!(plain("/usr/bin/python3 /home/u/bin/tool.py -v"), "python3 tool.py -v");
+        assert_eq!(plain("python3.12 ./manage.py runserver"), "python3.12 manage.py runserver");
+        assert_eq!(plain("node /usr/lib/node_modules/npm/bin/npm-cli.js i"), "node npm-cli.js i");
+        assert_eq!(plain("/bin/bash /opt/app/build.sh a/b"), "bash build.sh a/b");
+        assert_eq!(plain("perl /x/y.pl"), "perl y.pl");
+        assert_eq!(plain("lua5.4 a/b.lua"), "lua5.4 b.lua");
+        // only the word right after argv0, and never an option
+        assert_eq!(plain("python3 -u /x/tool.py"), "python3 -u /x/tool.py");
+        assert_eq!(plain("python3 -m http.server"), "python3 -m http.server");
+        assert_eq!(plain("perl -I/x/lib y.pl"), "perl -I/x/lib y.pl");
+        // a script word with no basename stays whole
+        assert_eq!(plain("bash /x/"), "bash /x/");
+        // not an interpreter: its arguments are left alone
+        assert_eq!(plain("cp /a/b /c/d"), "cp /a/b /c/d");
+        assert_eq!(plain("pythonx /a/b"), "pythonx /a/b");
     }
 
     #[test]
