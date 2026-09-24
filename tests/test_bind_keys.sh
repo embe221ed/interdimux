@@ -139,11 +139,13 @@ tmux_vnum() {
 }
 ck "TMUX_VNUM baked numerically"                    "$(get INTERDIMUX_TMUX_VNUM)" "$(tmux_vnum)"
 
-# (INTERDIMUX_USE_RUST is not counted: the binding never forwards it, but
-# tests/run_all.sh's IMUX_RENDERER=bash exports it, the server under test
-# inherits it into its global environment, and every popup gets it from there.)
+# (INTERDIMUX_USE_RUST and the INTERDIMUX_OLD_* test seams are not counted.
+# The binding forwards none of them, but tests/run_all.sh's IMUX_RENDERER=bash
+# exports the first and CI exports INTERDIMUX_OLD_FZF_DIR for every step; the
+# server under test inherits them into its global environment, and every popup
+# gets them from there.)
 ck "every option in OPT_MAP is forwarded" \
-   "$(grep '^INTERDIMUX_' "$OUT" | grep -vc '^INTERDIMUX_USE_RUST=')" \
+   "$(grep '^INTERDIMUX_' "$OUT" | grep -vEc '^INTERDIMUX_(USE_RUST|OLD_[A-Z_]+)=')" \
    "$(( $(grep -c '"' <<< "$(sed -n '/^OPT_MAP=(/,/^)/p' "$REPO/scripts/interdimux.sh" | grep -o '"[a-z-]*:[A-Z_]*"')" ) + 5 ))"
 
 # --- an install path containing '#' ---------------------------------------------
