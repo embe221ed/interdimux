@@ -3028,28 +3028,47 @@ IMUX_SECTIONS
   # A line tmux cut short (see _sfmt) still names its window, so it is KEPT --
   # dropping it lost the window and every pane under it -- but only while what
   # is left is plausibly a window: session, a numeric index, and window_active
-  # as 0 or 1.  That is what tells a cut line from the other short line there
-  # is, the second half of a line split by a newline in a pane's cwd
-  # (`<path tail>^_<panes>^_<pid>^_<flags>`), whose 4th field is the 3-digit
-  # flags.  Filtered HERE rather than in the render loop, which needs the final
-  # count up front to draw the last branch as └─.  The same rules as
-  # rust/src/main.rs; a full line (flags present) is not second-guessed.
+  # as 0 or 1, or ABSENT when the cut came before it.  What tells a cut line
+  # from the other short line there is, the second half of a line split by a
+  # newline in a pane's cwd (`<path tail>^_<panes>^_<pid>^_<flags>`, whose 4th
+  # field is the 3-digit flags), is the mark every cut line carries: tmux stops
+  # at a '#{', after the separator in front of it, so a cut line ENDS in US and
+  # a fragment never does.  Filtered HERE rather than in the render loop, which
+  # needs the final count up front to draw the last branch as └─.  The same
+  # rules as rust/src/main.rs (short_active); a full line (flags present) is
+  # not second-guessed.
+  #
+  # So the loop needs each raw LINE, not only its fields: `read` drops a
+  # trailing separator.  The section is split into lines once and each line
+  # into fields by word splitting -- no here-string per line, and cheaper than
+  # the `read` loop it replaces (which read its input a byte at a time).  set -f,
+  # or a cwd like `/tmp/*` would be glob-expanded into the fields; IFS goes back
+  # to the default before anything else in the body runs.
   declare -A windows_by_session=()
-  local _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9 _kept=""
-  while IFS="$US" read -r _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9; do
-    [ -n "$_w1" ] || continue
+  local _w1 _w2 _w3 _w4 _w5 _w6 _w7 _w8 _w9 _kept="" _gl _gf
+  local -a _glines=()
+  set -f
+  IFS=$'\n'; _glines=($all_windows_raw); unset IFS
+  for _gl in ${_glines[@]+"${_glines[@]}"}; do
+    IFS="$US"; _gf=($_gl); unset IFS
     # MORE than nine fields: a US inside pane_current_path (a directory may be
-    # named anything but '/' and NUL).  `read` hands the surplus to its last
-    # name, so every field after the path was the one to its left -- the pane
-    # count read "part2", the flags "1<US>000", and the PID the pane count, so
-    # the row showed PID 1's command (`init`) with a bell it did not have and
-    # stderr got "integer expression expected".  There is no telling which US
-    # is the path's, so the row is dropped, as the Rust core drops it
-    # (main.rs, `f.len() > 9`); its session header still renders.
-    case "$_w9" in *"$US"*) continue ;; esac
+    # named anything but '/' and NUL).  Every field after the path was then the
+    # one to its left -- the pane count read "part2", the flags "1<US>000", and
+    # the PID the pane count, so the row showed PID 1's command (`init`) with a
+    # bell it did not have and stderr got "integer expression expected".  There
+    # is no telling which US is the path's, so the row is dropped, as the Rust
+    # core drops it (main.rs, `f.len() > 9`); its session header still renders.
+    [ "${#_gf[@]}" -gt 9 ] && continue
+    _w1=${_gf[0]-} _w2=${_gf[1]-} _w3=${_gf[2]-} _w4=${_gf[3]-} _w5=${_gf[4]-}
+    _w6=${_gf[5]-} _w7=${_gf[6]-} _w8=${_gf[7]-} _w9=${_gf[8]-}
+    [ -n "$_w1" ] || continue
     if [ -z "$_w9" ]; then
       case "$_w2" in ''|*[!0-9]*) continue ;; esac
-      case "$_w4" in 0|1) ;; *) continue ;; esac
+      case "$_w4" in
+        0|1) ;;
+        '') [[ "$_gl" == *"$US" ]] || continue ;;   # cut before #{window_active}
+        *) continue ;;
+      esac
     fi
     line="$_w1$US$_w2$US$_w3$US$_w4$US$_w5$US$_w6$US$_w7$US$_w8$US$_w9"
     _kept+="$line"$'\n'
@@ -3058,22 +3077,35 @@ IMUX_SECTIONS
     else
       windows_by_session["$_w1"]="$line"
     fi
-  done <<< "$all_windows_raw"
+  done
+  set +f
   all_windows_raw="${_kept%$'\n'}"   # what measure_widths sizes: only what renders
 
   # Build lookup: panes grouped by "session\x1fwindow_index".  A cut pane line
   # is kept on the same terms as a window line: numeric window AND pane index,
-  # pane_active 0 or 1 (a newline in a cwd leaves `<tail>^_<pid>^_<panes>`).
+  # pane_active 0 or 1, or absent on a line that ends in US.  Here the mark is
+  # the ONLY difference: a newline in a cwd leaves `<tail>^_<pid>^_<panes>`,
+  # three fields with nothing in the fourth, exactly like `s^_0^_1^_`, a line
+  # cut before #{pane_active}.
   declare -A panes_by_window=()
   local sn _p3 _p4 _p5 _p6 _p7 _p8
   _kept=""
-  while IFS="$US" read -r sn widx _p3 _p4 _p5 _p6 _p7 _p8; do
+  set -f
+  IFS=$'\n'; _glines=($all_panes_raw); unset IFS
+  for _gl in ${_glines[@]+"${_glines[@]}"}; do
+    IFS="$US"; _gf=($_gl); unset IFS
+    [ "${#_gf[@]}" -gt 8 ] && continue   # a US in its cwd: see above
+    sn=${_gf[0]-} widx=${_gf[1]-} _p3=${_gf[2]-} _p4=${_gf[3]-}
+    _p5=${_gf[4]-} _p6=${_gf[5]-} _p7=${_gf[6]-} _p8=${_gf[7]-}
     [ -n "$sn" ] || continue
-    case "$_p8" in *"$US"*) continue ;; esac   # a US in its cwd: see above
     if [ -z "$_p8" ]; then
       case "$widx" in ''|*[!0-9]*) continue ;; esac
       case "$_p3" in ''|*[!0-9]*) continue ;; esac
-      case "$_p4" in 0|1) ;; *) continue ;; esac
+      case "$_p4" in
+        0|1) ;;
+        '') [[ "$_gl" == *"$US" ]] || continue ;;   # cut before #{pane_active}
+        *) continue ;;
+      esac
     fi
     local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8"
     _kept+="$key$US$rest"$'\n'
@@ -3082,7 +3114,8 @@ IMUX_SECTIONS
     else
       panes_by_window["$key"]="$rest"
     fi
-  done <<< "$all_panes_raw"
+  done
+  set +f
   all_panes_raw="${_kept%$'\n'}"
 
   # Size the columns to the content we just fetched (fork-free) -- AFTER the

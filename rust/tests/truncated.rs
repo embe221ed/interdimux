@@ -231,3 +231,57 @@ fn the_tail_of_a_newline_split_line_is_not_a_window() {
     assert_eq!(specs(&out), vec!["S:s", "W:s:0", "S:b", "W:b:0"], "{}", out);
     assert!(!out.contains("4242"), "a fragment's field was rendered: {}", out);
 }
+
+/// Cut before #{window_active} (3 fields kept) or before #{window_name} (2):
+/// the line ends in the separator, and that mark -- not a 0/1 in the active
+/// field, which a cut this early never reached -- is what makes it a window.
+#[test]
+fn a_window_line_cut_before_its_active_flag_still_renders_the_window() {
+    for kept in [vec!["s", "0", "editor"], vec!["s", "0"]] {
+        let d = dump(
+            &[sess("s", "1700000000")],
+            &[
+                format!("{}{US}", line(&kept)),
+                win("s", "1", "shell", "0", "zsh", "/home/u", "1", "0"),
+            ],
+            &[],
+        );
+        let out = render(&d, &[]);
+        assert_eq!(specs(&out), vec!["S:s", "W:s:0", "W:s:1"], "cut after {:?}: {}", kept, out);
+    }
+}
+
+#[test]
+fn a_pane_line_cut_before_its_active_flag_still_renders_the_pane() {
+    let d = dump(
+        &[sess("s", "1700000000")],
+        &[win("s", "0", "split", "1", "zsh", "/home/u", "2", "0")],
+        &[
+            format!("{}{US}", line(&["s", "0", "0"])),
+            line(&["s", "0", "1", "0", "zsh", "/home/u", "0", "2"]),
+        ],
+    );
+    let out = render(&d, &[]);
+    assert_eq!(specs(&out), vec!["S:s", "W:s:0", "P:s:0:0", "P:s:0:1"], "{}", out);
+}
+
+/// The tail a newline in a PANE cwd leaves, `<tail>^_<pid>^_<window_panes>`,
+/// is three fields, numeric in the second and third, with no fourth -- the
+/// shape of a pane line cut before #{pane_active}, minus the trailing
+/// separator.  Accepting any empty pane_active would file it as pane 2 of the
+/// window whose index equals that pid; here that window exists and has two
+/// panes, so the phantom would be drawn.
+#[test]
+fn the_tail_of_a_newline_split_pane_line_is_not_a_pane() {
+    let d = dump(
+        &[sess("b", "1700000000")],
+        &[win("b", "4242", "real", "1", "zsh", "/home/u", "2", "0")],
+        &[
+            line(&["b", "4242", "2"]),
+            line(&["b", "4242", "0", "1", "zsh", "/home/u", "0", "2"]),
+            format!("{}{US}", line(&["b", "4242", "1"])), // a genuine cut
+        ],
+    );
+    let out = render(&d, &[]);
+    assert_eq!(specs(&out), vec!["S:b", "W:b:4242", "P:b:4242:0", "P:b:4242:1"], "{}", out);
+}
