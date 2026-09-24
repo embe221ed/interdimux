@@ -1031,12 +1031,16 @@ declare -A _MOUNT_BLOCKS=()   # mount point -> 1 (can block) | 0; the LAST mount
 
 _mounts_read() {
   _MOUNTS_READ=1
-  local f="${INTERDIMUX_MOUNTINFO:-/proc/self/mountinfo}" line fstype point any=0 b
+  local f="${INTERDIMUX_MOUNTINFO:-/proc/self/mountinfo}" line fstype point any=0 b so
   [ -r "$f" ] || return 0
   while IFS= read -r line; do
     fstype="${line#* - }"; fstype="${fstype%% *}"
     case "$fstype" in
-      nfs|nfs4|cifs|smb3|smbfs|ncpfs|afs|ceph|coda|lustre|gpfs|9p|orangefs|beegfs|autofs|fuse) b=1 ;;
+      nfs|nfs4|cifs|smb3|smbfs|ncpfs|afs|ceph|coda|lustre|gpfs|orangefs|beegfs|autofs|fuse) b=1 ;;
+      # 9p by its transport: over tcp or rdma a network share; over fd WSL2's
+      # drvfs (/mnt/c), over virtio/unix/xen a VM's share of its host's disk
+      9p) so="${line#* - }"; so="${so#* * }"   # the superblock options
+          case ",$so," in *,trans=tcp,*|*,trans=rdma,*) b=1 ;; *) b=0 ;; esac ;;
       # FUSE backed by local storage keeps its badges; fuseblk is a local disk
       fuse.gocryptfs|fuse.encfs|fuse.cryfs|fuse.securefs|fuse.bindfs|fuse.mergerfs|fuse.unionfs|fuse.unionfs-fuse|fuse.fuse-overlayfs) b=0 ;;
       fuse.*) b=1 ;;

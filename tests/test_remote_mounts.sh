@@ -73,9 +73,13 @@ mkproj "$TMPD/local/work"   localwork
 mkproj "$TMPD/vault/proj"   vaultbranch
 mkproj "$TMPD/home/proj"    homebranch
 mkproj "$TMPD/local/zdir"   zoxidebranch
+# 9p: WSL2's Windows drives (drvfs, over fd) and a real network share (over tcp)
+mkproj "$TMPD/wsl/c/work"   drvfswork
+mkproj "$TMPD/wsl/c/proj"   drvfsproj
+mkproj "$TMPD/net9p/proj"   net9pproj
 mkdir -p "$TMPD/data/interdimux" "$TMPD/bin"
 printf '%s\n' "$TMPD/nas/proj" "$TMPD/nas/gone" "$TMPD/local/proj" "$TMPD/vault/proj" "$TMPD/home/proj" \
-  > "$TMPD/data/interdimux/recent_dirs"
+  "$TMPD/wsl/c/proj" "$TMPD/net9p/proj" > "$TMPD/data/interdimux/recent_dirs"
 
 MI="$TMPD/mountinfo"
 {
@@ -83,11 +87,15 @@ MI="$TMPD/mountinfo"
   echo "900 1 0:900 / $TMPD/nas rw,relatime shared:900 - nfs4 srv:/nas rw"
   echo "901 1 0:901 / $TMPD/vault rw,nosuid shared:901 - fuse.gocryptfs $TMPD/.vault rw"
   echo "902 1 0:902 / $TMPD/home rw,relatime shared:902 - nfs4 srv:/home rw"
+  # verbatim from a WSL2 host, but for the path
+  echo "904 1 0:904 / $TMPD/wsl/c rw,noatime - 9p drvfs rw,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client,msize=65536,trans=fd,rfd=5,wfd=5"
+  echo "905 1 0:905 / $TMPD/net9p rw,relatime - 9p 10.0.0.1 rw,access=user,trans=tcp,port=564"
 } > "$MI"
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s bench -x 200 -y 50 -c "$TMPD/home" 'sleep 99999'
 tmux -L "$SOCK" new-session -d -s naspane -x 200 -y 50 -c "$TMPD/nas/work" 'sleep 99999'
 tmux -L "$SOCK" new-session -d -s locpane -x 200 -y 50 -c "$TMPD/local/work" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s wslpane -x 200 -y 50 -c "$TMPD/wsl/c/work" 'sleep 99999'
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=bench:0' -F '#{pane_id}' | head -1)"
 export HOME="$TMPD/home" XDG_DATA_HOME="$TMPD/data"
@@ -96,7 +104,9 @@ export INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_GIT_BRA
 export INTERDIMUX_DIRS_LIMIT=20 INTERDIMUX_PROJECT_DIRS="$TMPD/nowhere"
 # wide enough that the git-badge column is on (it is off at 80 columns)
 export FZF_COLUMNS=200 INTERDIMUX_NOW="$(date +%s)"
-wait_for "the panes' cwds" sh -c "tmux -L '$SOCK' list-panes -a -F '#{pane_current_path}' | grep -qx '$TMPD/nas/work'"
+for _d in nas/work wsl/c/work; do
+  wait_for "the panes' cwds ($_d)" sh -c "tmux -L '$SOCK' list-panes -a -F '#{pane_current_path}' | grep -qx '$TMPD/$_d'"
+done
 
 renderers="off"
 [ -x "$BIN" ] && renderers="on off"
@@ -171,6 +181,26 @@ if [ -n "$nas" ] && [ "$(printf '%s' "$nas" | cut -f2)" = "" ] && [ "$(printf '%
 else
   report "--dirs-list: no type probe on the NFS row, the local one is typed (nas: $nas / local: $loc)" fail
 fi
+
+# 9p by its transport (review #27).  WSL2's Windows drives are 9p over fd
+# (drvfs): the local disk, slow per stat but never a hung server -- every
+# project on /mnt/c had lost its badges.  9p over tcp is a network share.
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  LIST_ENV="INTERDIMUX_MOUNTINFO=$MI"
+  got=$(row "$r" "W:wslpane:0")
+  case "$got" in *"‹drvfswork›"*) report "$label: a pane on WSL2's drvfs (9p over fd) keeps its git badge" pass ;;
+                 *) report "$label: a pane on WSL2's drvfs (9p over fd) keeps its git badge (got: $got)" fail ;; esac
+  got=$(row "$r" "D:$TMPD/wsl/c/proj")
+  badged "$got" drvfsproj && report "$label: a dir row on drvfs keeps its git and type badges" pass \
+                          || report "$label: a dir row on drvfs keeps its git and type badges (got: $got)" fail
+  got=$(row "$r" "D:$TMPD/net9p/proj")
+  if [ -n "$got" ] && ! printf '%s' "$got" | grep -q -e '‹' -e 'Rust'; then
+    report "$label: a dir row on 9p over tcp is not probed" pass
+  else
+    report "$label: a dir row on 9p over tcp is not probed (got: $got)" fail
+  fi
+done
 
 # zoxide stats every entry of its database unless told --all; a zoxide that
 # does not know the flag still gets asked the plain way.

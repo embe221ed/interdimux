@@ -25,10 +25,17 @@ use std::sync::OnceLock;
 
 /// Filesystem types that are network or user-space (FUSE) filesystems, or an
 /// automount trigger: a stat on them can wait on something other than a disk.
-fn blocking_fs(fstype: &str) -> bool {
+/// `superopts` is the line's last field, the superblock options.
+fn blocking_fs(fstype: &str, superopts: &str) -> bool {
     match fstype {
         "nfs" | "nfs4" | "cifs" | "smb3" | "smbfs" | "ncpfs" | "afs" | "ceph" | "coda"
-        | "lustre" | "gpfs" | "9p" | "orangefs" | "beegfs" | "autofs" | "fuse" => true,
+        | "lustre" | "gpfs" | "orangefs" | "beegfs" | "autofs" | "fuse" => true,
+        // 9p is classified by its transport.  Over tcp or rdma it is a network
+        // share.  Over fd it is WSL2's drvfs (/mnt/c, the Windows drives), and
+        // over virtio, unix or xen it is a VM's share of its host's own disk
+        // (QEMU virtfs, Lima): slow per stat, never the hung-server case, so
+        // those keep their badges.
+        "9p" => superopts.split(',').any(|o| o == "trans=tcp" || o == "trans=rdma"),
         // FUSE filesystems known to be backed by local storage (encrypted or
         // union views of a local directory) keep their badges.  `fuseblk` --
         // ntfs-3g, exfat -- is a local block device and never matched "fuse.".
@@ -77,7 +84,9 @@ impl Table {
             // "<id> <parent> <maj:min> <root> <point> <opts> [optional...] - <fstype> <src> <superopts>"
             let Some((left, right)) = line.split_once(" - ") else { continue };
             let Some(point) = left.split(' ').nth(4) else { continue };
-            let blocks = blocking_fs(right.split(' ').next().unwrap_or(""));
+            let mut rf = right.split(' ');
+            let fstype = rf.next().unwrap_or("");
+            let blocks = blocking_fs(fstype, rf.nth(1).unwrap_or(""));
             // A local mount only matters once it can shadow, or sit inside, a
             // blocking one -- which, in mount order, is after the first of
             // those.  (It also makes a blocking mount laid OVER an older local
@@ -194,6 +203,23 @@ mod tests {
 3 1 0:3 / /mnt/x rw - nfs4 srv:/x rw
 ";
         assert!(Table::parse(info, "/home/u").is_blocking("/mnt/x/y/z"));
+    }
+
+    #[test]
+    fn nine_p_blocks_only_over_a_network_transport() {
+        // WSL2's Windows drives, a QEMU/Lima share, and the same over tcp/rdma
+        let info = "\
+1 0 8:1 / / rw - ext4 /dev/sda1 rw
+95 70 0:61 / /mnt/c rw,noatime - 9p drvfs rw,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client,msize=65536,trans=fd,rfd=5,wfd=5
+96 70 0:62 / /mnt/share rw,relatime - 9p hostshare rw,access=client,msize=512000,trans=virtio
+97 70 0:63 / /mnt/net9p rw,relatime - 9p 10.0.0.1 rw,access=user,trans=tcp,port=564
+98 70 0:64 / /mnt/ib9p rw,relatime - 9p 10.0.0.2 rw,trans=rdma,port=5640
+";
+        let t = Table::parse(info, "/home/u");
+        assert!(!t.is_blocking("/mnt/c/Users/me/proj"), "WSL2 drvfs (trans=fd) is the local disk");
+        assert!(!t.is_blocking("/mnt/share/proj"), "a virtio share is the host's disk");
+        assert!(t.is_blocking("/mnt/net9p/proj"), "9p over tcp is a network share");
+        assert!(t.is_blocking("/mnt/ib9p/proj"), "9p over rdma is a network share");
     }
 
     #[test]

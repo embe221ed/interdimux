@@ -356,11 +356,12 @@ still exists, so one stalled mount cannot hold up the list.
   identifiable while filtering and compound queries work
 - `*` marks the current target
 - `‹branch›` git branch badge (purple) for directories inside a git repo.
-  Not on a network or FUSE mount (NFS, SMB, sshfs, 9p, an automount point)
-  other than the one your `$HOME` is on: nothing there is probed before the
-  list paints, because one stalled mount would otherwise freeze the popup for
-  its timeout. Directory rows there also go without their type badge, and are
-  offered without checking that they still exist
+  Not on a network or FUSE mount (NFS, SMB, sshfs, 9p over the network, an
+  automount point) other than the one your `$HOME` is on: nothing there is
+  probed before the list paints, because one stalled mount would otherwise
+  freeze the popup for its timeout. Directory rows there also go without their
+  type badge, and are offered without checking that they still exist. WSL2's
+  `/mnt/c` is 9p to the local disk, not the network, and keeps its badges
 - `Z` / `!` / `#` flags mark zoomed, bell, and activity windows, in a column
   of their own right after the path: a narrow popup can drop the branch badge,
   never the flags
