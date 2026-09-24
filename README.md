@@ -64,7 +64,7 @@ A portal gun for your tmux sessions.
   identity column, 0.74 raw filter mode) — but 0.74 is the only version the
   test suite exercises in full; `tests/test_old_fzf.sh` checks just that 0.44
   and 0.52 open and draw.
-- `bash` >= 4.0
+- `bash` >= 4.3, on the tmux server's PATH (macOS's own `/bin/bash` is 3.2)
 - A UTF-8 locale. The tree glyphs are multibyte and every column width is
   counted in cells; under `LC_ALL=C` the columns misalign. `--doctor` says so.
 - `fd` or `find` (for directory picker)
@@ -344,6 +344,12 @@ nothing to tell you why:
 ```
 
 Exits non-zero if anything is wrong, so it works in a health check.
+
+The environment it checks is the one the popups get: the tmux server's `PATH`,
+locale and `$FZF_DEFAULT_OPTS`, not your shell's. The two differ exactly when
+it matters — fzf on `PATH` only through a shell rc, a UTF-8 locale that is named
+but not installed — so run from a shell, it says which one it read.
+`interdimux.sh --help` lists the other command-line modes.
 
 It is also where past failures surface. The navigator sends its stderr to the
 status line and to `$XDG_STATE_HOME/interdimux/errors.log` rather than to the
