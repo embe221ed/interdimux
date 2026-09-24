@@ -477,6 +477,20 @@ check "a combining mark whose base scrolled out of view is not drawn onto the pr
 run cursor_after "$VIS"
 check "the cursor follows text with combining marks" \
       "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+
+# ...and on the way back.  Left one character at a time moves the view's start
+# onto every character in turn, marks included, whenever the cursor passes it.
+# A view opened on a mark drew it onto the prompt's blank -- which is never
+# repainted, so each step stacked one more accent there (observed: seven).
+_lefts=()
+for (( _k = 0; _k < ${#decomposed} + 1; _k++ )); do _lefts+=(Left); done
+keys "${_lefts[@]}"
+run cursor_after ""
+check "Left through combining marks brings the cursor to the field's start" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run test "${VIS:0:1}" != "$MARK"
+check "Left through combining marks never draws a mark onto the prompt" \
+      "field: '$FIELD_ROW'" "$RC"
 keys Escape
 
 echo

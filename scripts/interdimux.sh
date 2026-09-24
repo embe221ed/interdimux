@@ -4566,7 +4566,16 @@ input_dialog() {
   printf -v blank '%*s' "$field_w" ''
   while true; do
     len=${#buf}
-    (( pos < scroll )) && scroll=$pos
+    if (( pos < scroll )); then
+      # The cursor moved left of the view: start the view at the cursor -- or,
+      # when that character is drawn into the cell before it (width 0: a
+      # combining mark, say), at the character that cell belongs to.  Started
+      # on the mark, the view drew it onto the prompt's blank, which is never
+      # repainted, so every step Left through decomposed text stacked one more
+      # accent there.
+      scroll=$pos
+      while (( scroll > 0 )) && [ "${cw:scroll:1}" = 0 ]; do scroll=$(( scroll - 1 )); done
+    fi
     # The cursor needs the cells of the character under it — or the one blank
     # cell after the text — inside the field too.
     cur=1
