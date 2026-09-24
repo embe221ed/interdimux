@@ -396,6 +396,11 @@ set -g @interdimux-order 'mru'
 # Extra fzf flags appended to every picker (advanced; applied after the
 # built-in theme so your colors win).
 #
+# This is also the place for fzf colors and layout: the pickers ignore the
+# colors in $FZF_DEFAULT_OPTS (so your shell's fzf theme does not blend into
+# this palette) and its --tmux/--popup, --height, --border, --margin,
+# --padding and --style (they already run in a sized popup).
+#
 # Two notes now the hints live at the bottom: your own `--header` no longer
 # replaces them, it draws as well — so the picker spends a second chrome row.
 # And a `--with-shell` of your own turns off the inline callbacks, which costs
@@ -548,7 +553,8 @@ bind-key C-a run-shell -b "bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh
 ### Colors
 
 Every color is a tmux option. A value is a hex `#rrggbb`, a 256-color
-index, or `-1` / `default` (inherit the terminal). The defaults reproduce
+index (0-255), or `-1` / `default` (inherit the terminal); anything else is
+treated as `-1`, so a typo costs a color, not the picker. The defaults reproduce
 the built-in warm palette, so you only set what you want to change. Hex
 values render as truecolor and need an RGB-capable terminal (`$COLORTERM`
 = `truecolor`); the index defaults work everywhere.

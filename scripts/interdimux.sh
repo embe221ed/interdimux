@@ -422,8 +422,9 @@ case "$ORDER" in mru|index) ;; *) ORDER=mru ;; esac
 # ---------------------------------------------------------------------------
 #
 # Every colour is a tmux option (env INTERDIMUX_COLOR_* → @interdimux-color-*
-# → built-in default).  A value is a hex "#rrggbb", a 256-colour index, or
-# "-1"/"default" (inherit the terminal).  The built-in defaults reproduce the
+# → built-in default).  A value is a hex "#rrggbb", a 256-colour index 0-255,
+# or "-1"/"default" (inherit the terminal); anything else inherits too, and
+# --doctor names it.  The built-in defaults reproduce the
 # original warm palette; a generator (e.g. interdotensional) can feed theme
 # hexes over them to re-colour interdimux with the rest of the environment.
 
@@ -447,14 +448,50 @@ get_opt COLOR_HEADER        "${INTERDIMUX_COLOR_HEADER:-}"        @interdimux-co
 get_opt COLOR_BORDER        "${INTERDIMUX_COLOR_BORDER:-}"        @interdimux-color-border        238
 get_opt COLOR_MENU_SEL_FG   "${INTERDIMUX_COLOR_MENU_SEL_FG:-}"   @interdimux-color-menu-sel-fg   235
 
+# One spelling per colour: "#rrggbb", an index 0-255, or -1.  Everything else --
+# `default`, a typo, a name -- becomes -1, i.e. inherit the terminal.
+#
+# The three sinks disagree about what they accept, and each disagreement was a
+# dead key.  fzf rejects `default` (only -1) and any value it cannot parse, and
+# an invalid --color is FATAL: exit 2, nothing drawn, so every picker died on a
+# spelling the README and --doctor both call valid.  tmux is the mirror image:
+# its style parser rejects -1 (only `default`), and it drops the WHOLE style
+# when one item fails.  And sgr_of fed '#12345g' to $((16#..)), which under
+# set -e killed the script at top level, before any mode ran -- --doctor
+# included, the one tool meant to explain the typo.  Normalised here, once,
+# every sink downstream sees a value it accepts: fzf takes all three forms as
+# they are, and tmux_color maps -1 back to tmux's `default`.
+#
+# Inherit rather than the built-in default because the Rust renderer already
+# treats an unusable value that way (palette.rs), and because the built-in
+# defaults are a DARK palette -- on a light terminal they would be the wrong
+# fallback.  --doctor is where a typo is reported.
+#
+# Classes, not ranges: under a non-C locale a bracket RANGE is collation order
+# on bash < 5.0, and [[:xdigit:]]/[[:digit:]] are ASCII-only either way.
+for _c in COLOR_ACCENT COLOR_PATH COLOR_GIT COLOR_SSH COLOR_EDITOR COLOR_SUCCESS \
+          COLOR_DANGER COLOR_TREE COLOR_SEPARATOR COLOR_QUERY COLOR_MATCH_CURRENT \
+          COLOR_CURRENT_BG COLOR_HEADER COLOR_BORDER COLOR_MENU_SEL_FG; do
+  case "${!_c}" in
+    '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) ;;
+    [[:digit:]]|[[:digit:]][[:digit:]]|[01][[:digit:]][[:digit:]]|2[01234][[:digit:]]|25[012345]) ;;
+    *) printf -v "$_c" '%s' -1 ;;
+  esac
+done
+unset _c
+
 # Render a configured colour into the escape/style each sink needs.  These set
 # REPLY instead of printing: set_palette runs on every script invocation (each
 # fzf callback re-execs the script), so a $(…) subshell per colour is pure
 # overhead — ~30 forks that cost ~1s under load.
 #   sgr_of  "#rrggbb" -> "38;2;r;g;b"   "NNN" -> "38;5;NNN"   -1/empty -> ""
+# The hex arm names its digits even though the palette is normalised above: a
+# bare '#'?????? let '#12345g' reach $((16#..)), which is fatal under set -e.
+# Anything else starting with '#' falls to inherit, as it does in palette.rs.
 sgr_of() {
   case "$1" in
-    '#'??????) REPLY="38;2;$((16#${1:1:2}));$((16#${1:3:2}));$((16#${1:5:2}))" ;;
+    '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]])
+      REPLY="38;2;$((16#${1:1:2}));$((16#${1:3:2}));$((16#${1:5:2}))" ;;
     ''|-1|default|*[!0-9]*) REPLY="" ;;
     *) REPLY="38;5;$1" ;;
   esac
@@ -463,17 +500,34 @@ sgr_of() {
 # yields status 0 so they are safe as bare calls under set -e.
 esc()  { sgr_of "$1"; [ -z "$REPLY" ] || REPLY=$'\033['"$REPLY"'m'; }  # coloured
 escb() { sgr_of "$1"; REPLY=$'\033[1'"${REPLY:+;$REPLY}"'m'; }         # bold+coloured
-# tmux style value (-S/-H): hex and -1 pass through; a bare index needs "colour"
+# tmux style value (-S/-H, #[fg=]): a hex passes through, a bare index needs
+# "colour", and inherit is spelled `default` -- tmux rejects `-1` ("invalid
+# style"), and display-popup -S / display-menu -H then drop the WHOLE style
+# without a word, so the palette's -1 has to be translated here.
 tmux_color() {
   case "$1" in
-    '#'*|-1|default|*[!0-9]*) REPLY="$1" ;;
+    '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) REPLY="$1" ;;
+    ''|-1|default|*[!0-9]*) REPLY=default ;;
     *) REPLY="colour$1" ;;
   esac
 }
 
-# fzf --color chrome, rebuilt from the palette (fzf accepts hex/index/-1 as-is)
+# fzf --color chrome, rebuilt from the palette (fzf accepts hex/index/-1 as-is,
+# and the palette is normalised to exactly those above).
+#
+# The leading `dark` is a base scheme, not a colour: fzf REPLACES the whole
+# accumulated theme when it meets one, so every key $FZF_DEFAULT_OPTS set is
+# dropped in a single token, while @interdimux-fzf-opts (appended after this)
+# still wins key by key.  Without it the keys this string does not name -- fg,
+# bg, preview-fg/bg, preview-border, disabled -- came from the user's shell
+# theme, and the popup was a blend of two palettes (measured: the user's fg on
+# every row body, their preview border beside this border).  `dark` rather than
+# enumerating those keys because an unknown key is FATAL (below), and it is
+# safe on a light terminal too: every colour Dark256 and Light256 disagree on is
+# one this string sets, and the rest are the terminal's own fg/bg.  It parses on
+# every fzf this script supports.
 build_fzf_colors() {
-  FZF_COLORS="--color=hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
+  FZF_COLORS="--color=dark,hl:${COLOR_PATH},hl+:${COLOR_MATCH_CURRENT}:bold,bg+:${COLOR_CURRENT_BG},prompt:${COLOR_ACCENT},pointer:${COLOR_ACCENT},marker:${COLOR_SUCCESS},spinner:${COLOR_ACCENT},info:${COLOR_TREE},header:${COLOR_HEADER},border:${COLOR_BORDER},separator:${COLOR_BORDER},scrollbar:${COLOR_BORDER},label:${COLOR_PATH},preview-label:${COLOR_PATH},gutter:-1,query:${COLOR_QUERY}"
   # Every one of these names must exist in the running fzf: an unknown colour
   # key is FATAL ("invalid color specification"), not ignored, so a picker that
   # names `footer:` on fzf < 0.63 does not open at all.  Verified on 0.74.
@@ -624,13 +678,18 @@ hint_cols() {
 # scope` survives longest because it is the least discoverable thing in the tool
 # and, being last in the line, was the first casualty of plain truncation.
 # Array ORDER is what the eye sees and is unchanged from the pre-tier bar.
+#
+# `^r reload` is on every row type because the Gone dialog and the "is gone"
+# status message both tell you to press it; S/W/P used to leave it out, so the
+# advice named a key the bar never showed.  It sits where the D and X sets put
+# it, and at priority 1 it goes second, right after `enter`, when space is short.
 hint_set() {
   local -a scope=()
   fzf_ge 58 && scope=('^]' scope 9)
   case "${1:-}" in
-    S) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^d detach 3  ^o new 4  ^/ preview 2) ;;
-    W) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^s swap 3     ^o new 4  ^/ preview 2) ;;
-    P) HINT_SET=(enter switch 1  ^x kill 7  ^z zoom 5    ^s swap 4     ^t send 3 ^/ preview 2) ;;
+    S) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^d detach 3  ^o new 4  ^r reload 1  ^/ preview 2) ;;
+    W) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^s swap 3     ^o new 4  ^r reload 1  ^/ preview 2) ;;
+    P) HINT_SET=(enter switch 1  ^x kill 7  ^z zoom 5    ^s swap 4     ^t send 3 ^r reload 1  ^/ preview 2) ;;
     D) HINT_SET=(enter open 3    ^o new 4   ^r reload 1  ^/ preview 2) ;;
     *) HINT_SET=(enter switch 1  ^x kill 7  ^e rename 5  ^o new 4      ^r reload 3 ^/ preview 2)
        scope=() ;;
@@ -743,7 +802,31 @@ FZF_THEME=()
 build_fzf_theme() {
   local info=inline
   fzf_ge 42 && info=inline-right
-  FZF_THEME=(
+  # $FZF_DEFAULT_OPTS (and _FILE) is parsed before these flags, and some of what
+  # people put there is layout a picker inside an already-sized popup can never
+  # want, so it is cancelled here rather than merely warned about:
+  #   --tmux/--popup  fzf ignores it outside tmux, which is why it gets set
+  #     globally -- but in here $TMUX is set, so fzf opened a SECOND popup (a
+  #     floating pane on tmux 3.7) and left this one blank, keys echoing into it.
+  #     Every picker was dead.  --no-tmux arrived with --tmux in 0.53 and also
+  #     cancels the 0.71 `--popup` spelling (one option, two names).
+  #   --height        not full-screen inside a popup that is already sized.
+  #   --border/--margin/--padding, and 0.58's --style presets and per-section
+  #     borders: they shrink fzf's window without shrinking FZF_COLUMNS, which
+  #     is what compute_widths and the hint bar are sized from, so every row
+  #     came out too wide and was clipped.  `--style=default` goes FIRST
+  #     because the preset also resets --info, the gutter colour, the separator
+  #     and --highlight-line, all of which are set below.
+  # Each reset is fzf's own default, so without $FZF_DEFAULT_OPTS the screen is
+  # unchanged.  @interdimux-fzf-opts is appended last and can still ask for any
+  # of them -- that is the channel for a deliberate choice.
+  FZF_THEME=()
+  fzf_ge 58 && FZF_THEME+=(--style=default)
+  FZF_THEME+=(
+    --no-height
+    --no-border
+    --margin=0
+    --padding=0
     --ansi
     --reverse
     --cycle
@@ -754,6 +837,7 @@ build_fzf_theme() {
     "$FZF_COLORS"
   )
   fzf_ge 52 && FZF_THEME+=(--highlight-line)
+  fzf_ge 53 && FZF_THEME+=(--no-tmux)
   # The footer's DEFAULT border draws a separator line and costs a second row.
   # Borderless, the hint bar costs exactly the one row the header was already
   # spending, so moving it down is free.  Harmless with no --footer set
