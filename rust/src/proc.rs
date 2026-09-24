@@ -125,13 +125,14 @@ struct PsRow {
 /// Split one `ps` line into its five columns, mirroring bash `read -r pid ppid
 /// pgid tpgid args`: the first four IFS-delimited fields, then the remainder
 /// with its leading IFS whitespace stripped and everything else preserved.
+/// Like `read`, a short line leaves the later fields empty rather than failing.
 /// Trailing whitespace is irrelevant — `full_command`'s trim removes it before
 /// it is used.
 fn parse_ps_line(line: &str) -> Option<PsRow> {
     let (pid_s, rest) = take_word(line.trim_start_matches(IFS_WS))?;
     let (ppid_s, rest) = take_word(rest.trim_start_matches(IFS_WS))?;
-    let (pgid_s, rest) = take_word(rest.trim_start_matches(IFS_WS))?;
-    let (tpgid_s, rest) = take_word(rest.trim_start_matches(IFS_WS))?;
+    let (pgid_s, rest) = take_word(rest.trim_start_matches(IFS_WS)).unwrap_or(("", ""));
+    let (tpgid_s, rest) = take_word(rest.trim_start_matches(IFS_WS)).unwrap_or(("", ""));
     let args = rest.trim_start_matches(IFS_WS).to_string();
     Some(PsRow {
         pid: pid_s.parse().ok()?,
@@ -502,8 +503,9 @@ mod tests {
         // junk / header-ish lines are dropped
         assert_eq!(parse_ps_line("  PID PPID PGID TPGID COMMAND"), None);
         assert_eq!(parse_ps_line(""), None);
-        // too few columns to hold both group ids -> not a row
-        assert_eq!(parse_ps_line("5 1 5"), None);
+        // a short line leaves the later fields empty, as bash `read` does
+        assert_eq!(parse_ps_line("5 1 5"), row(5, 1, 5, 0, ""));
+        assert_eq!(parse_ps_line("5 1"), row(5, 1, 0, 0, ""));
     }
 
     #[test]
