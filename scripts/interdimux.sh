@@ -4942,6 +4942,27 @@ if [ "${1:-}" = "--doctor" ]; then
     fi
   done
 
+  # Where the navigator keeps its scratch files (the resume flag, the preview
+  # state, the stderr it reports): $XDG_RUNTIME_DIR when it is usable, else
+  # $TMPDIR — as the popups' environment has them.  A tmp dir that was gone or
+  # full used to end the navigator before it drew, with nothing here to say why.
+  # It falls back to the state dir now, so this is a warning, unless that one is
+  # unwritable too, which the line above reports.  A real file, not `-w`: a full
+  # disk passes -w.
+  _srt=""
+  _srv_env XDG_RUNTIME_DIR && _srt="$REPLY"
+  _stmp=/tmp
+  _srv_env TMPDIR && [ -n "$REPLY" ] && _stmp="$REPLY"
+  if [ -n "$_srt" ] && [ -d "$_srt" ] && [ -w "$_srt" ]; then
+    _ok "writable: $_srt (the navigator's scratch files)"
+  elif _tf=$(mktemp "$_stmp/interdimux-doctor.XXXXXX" 2>/dev/null); then
+    rm -f "$_tf"
+    _ok "writable: $_stmp (the navigator's scratch files)"
+  else
+    _warn "cannot create a file in $_stmp — the navigator keeps its scratch files in $SCHED_LOGDIR instead"
+    _note "that is \$TMPDIR as the tmux server has it (or /tmp): tmux show-environment -g TMPDIR"
+  fi
+
   # --- key bindings -----------------------------------------------------------
   _sec 'key bindings'
   _k=$(tmux show-option -gqv @interdimux-key);           _k="${_k:-f}"
@@ -5638,10 +5659,22 @@ INTERDIMUX_MODE="${INTERDIMUX_MODE:-switch}"
 # name in a world- or group-writable /tmp can be pre-created as a symlink, and
 # the `: >` below would then truncate whatever it points at.  $XDG_RUNTIME_DIR
 # is per-user and 0700, which removes that race; anywhere else, pay for mktemp.
+#
+# And if that fails too — $TMPDIR pointing somewhere that is gone, a full /tmp —
+# the state dir, which is ours and not shared.  This used to be the end of the
+# navigator: mktemp failed under `set -e` BEFORE stderr is routed to the log
+# below, so its message flashed in a popup that closed on the spot.  When even
+# the state dir will not take a file, say so on the status line, which outlives
+# the popup; --doctor checks both directories.
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
   RESUME_FILE="$XDG_RUNTIME_DIR/interdimux-resume.$$"
-else
-  RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX")
+elif ! RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX" 2>/dev/null) \
+  && ! { mkdir -p "$SCHED_LOGDIR" 2>/dev/null \
+         && RESUME_FILE=$(mktemp "$SCHED_LOGDIR/resume.XXXXXX" 2>/dev/null); }; then
+  # '#' doubled: display-message format-expands its text.
+  _nt="${TMPDIR:-/tmp}"
+  tmux display-message "interdimux: cannot create a scratch file in ${_nt//'#'/##} or ${SCHED_LOGDIR//'#'/##} (see --doctor)" 2>/dev/null || :
+  exit 1
 fi
 PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
 printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null || PREVIEW_STATE_FILE=""

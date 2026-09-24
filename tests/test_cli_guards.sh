@@ -7,6 +7,8 @@
 #   * An argument no mode takes is refused with exit 2.  It used to fall into the
 #     navigator: from a terminal that opened the picker, from a script it failed
 #     there, appended a bogus entry to errors.log and turned --doctor red.
+#   * A tmp dir that is gone no longer ends the navigator before it draws, and
+#     when nothing will take a scratch file the status line says so.
 #   * A helper binary whose output is not a row list is not allowed to BE the
 #     picker; the list falls back to the bash renderer.
 #
@@ -103,6 +105,51 @@ check "--help works outside tmux with an empty PATH" \
 OUT=$(env -u TMUX PATH=/nonexistent "$BASH" "$SCRIPT" --version 2>&1) && RC=0 || RC=$?
 check "--version prints 'interdimux X.Y.Z' there too (got: $OUT)" \
   '[ "$RC" = 0 ] && [[ "$OUT" =~ ^interdimux\ [0-9]+\.[0-9]+\.[0-9]+$ ]]'
+
+# --- the scratch file ------------------------------------------------------------------
+# No runtime dir and a $TMPDIR that is gone: mktemp failed under `set -e` and the
+# navigator died before drawing, its message flashed in a popup that closed.
+run_nav_env() { # $@ = VAR=value pairs for the navigator
+  rm -f "$TMPD/fzf.log"
+  RC=0
+  env "$@" PATH="$STUB:$PATH" timeout 20 bash "$SCRIPT" </dev/null >/dev/null 2>"$TMPD/err" || RC=$?
+  ERR=$(cat "$TMPD/err")
+}
+run_nav_env XDG_RUNTIME_DIR="$TMPD/no-runtime" TMPDIR="$TMPD/gone"
+check "with no usable tmp dir, the navigator still runs" nav_ran
+check "...and nothing about it reaches the screen" '[ -z "$ERR" ]'
+
+# Nothing will take a file at all (the state dir is read-only too): it must say so
+# on the STATUS LINE, which outlives the popup, rather than paint a mktemp error
+# into a popup that is about to close.  Driven from a real pane — display-message
+# is only logged for a client with a terminal.
+mkdir -p "$TMPD/ro/interdimux"
+chmod 500 "$TMPD/ro/interdimux" "$TMPD/ro"
+if { : > "$TMPD/ro/interdimux/probe"; } 2>/dev/null; then
+  echo "  (skipped the read-only case: permissions are not enforced here, e.g. root)"
+else
+  rm -f "$TMPD/fzf.log"
+  tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
+    "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_STATE_HOME='$TMPD/ro' \
+         XDG_RUNTIME_DIR='$TMPD/no-runtime' TMPDIR='$TMPD/gone' \
+         INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 PATH='$STUB:$PATH' \
+         bash '$SCRIPT'; echo EXIT_RC=\$?; sleep 60"
+  screen=""
+  for _ in $(seq 1 200); do
+    screen=$(tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null || true)
+    case "$screen" in *EXIT_RC=*) break ;; esac
+    sleep 0.1
+  done
+  check "with nowhere to put a scratch file, the navigator exits 1" \
+    'case "$screen" in *EXIT_RC=1*) true ;; *) false ;; esac'
+  check "...announced on the status line" \
+    'tmux -L "$SOCK" show-messages 2>/dev/null | grep -q "cannot create a scratch file"'
+  check "...not painted into the popup" \
+    'case "$screen" in *mktemp*) false ;; *) true ;; esac'
+  check "...and the navigator never started" '! nav_ran'
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
+fi
+chmod 700 "$TMPD/ro" "$TMPD/ro/interdimux"
 
 # --- a helper binary that is not imux ---------------------------------------------------
 # INTERDIMUX_BIN accepts any executable, and whatever one printed on exit 0 used

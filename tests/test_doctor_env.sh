@@ -270,6 +270,16 @@ fi
 has "an INTERDIMUX_BIN that is not executable is said to be ignored" \
   "$(INTERDIMUX_BIN="$TMPD/no-such-imux" doctor)" "⚠ INTERDIMUX_BIN=$TMPD/no-such-imux is not an executable file"
 
+# --- the navigator's scratch dir -------------------------------------------------------
+# $TMPDIR as the server has it; with no runtime dir, that is where the resume
+# flag goes, and a missing one used to kill the navigator unexplained.
+unsenv XDG_RUNTIME_DIR
+senv TMPDIR "$TMPD/gone"
+has "an unusable tmp dir is reported" "$(doctor)" "⚠ cannot create a file in $TMPD/gone"
+senv TMPDIR "$TMPD"
+has "...and a usable one is confirmed" "$(doctor)" "✓ writable: $TMPD (the navigator's scratch files)"
+unsenv TMPDIR
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi
