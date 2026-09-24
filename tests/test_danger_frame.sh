@@ -119,6 +119,39 @@ else
   fi
 fi
 
+# --- none: no frame and no title, so the prompt carries the cue ------------------
+# tmux draws nothing around the popup with "none", and no border style can show
+# there -- so the kill picker's own prompt is drawn in the danger colour.  Read
+# back from the screen: the `kill ❯` line as tmux drew it, SGR included.
+prompt_row() { # $1 = popup-border-lines -> the kill picker's prompt line
+  local row
+  T set -g popup-border-lines "$1"
+  bash "$SCRIPT" --launch kill >/dev/null 2>&1 &
+  LPID=$!
+  wait_for "tmux -L '$OUTER' capture-pane -p -t '=drv:' | grep -q 'kill ❯'" || true
+  row=$(tmux -L "$OUTER" capture-pane -p -t '=drv:' | grep -n 'kill ❯' | head -1 | cut -d: -f1 || true)
+  if [ -n "$row" ]; then
+    tmux -L "$OUTER" capture-pane -p -e -t '=drv:' | sed -n "${row}p"
+  fi
+  tmux -L "$OUTER" send-keys -t '=drv:' Escape
+  wait_for "! kill -0 $LPID 2>/dev/null" || kill "$LPID" 2>/dev/null || true
+  wait "$LPID" 2>/dev/null || true
+  LPID=""
+  wait_for "! tmux -L '$OUTER' capture-pane -p -t '=drv:' | grep -q 'kill ❯'" || true
+}
+row=$(prompt_row none)
+if [ -z "$row" ]; then
+  report "the kill picker opens (none)" fail
+else
+  # the prompt's own text, not merely something on the row
+  if printf '%s' "$row" | grep -q "38;5;${DANGER}mkill ❯"; then
+    report "with no border the kill prompt is drawn in the danger colour" pass
+  else
+    report "with no border the kill prompt is drawn in the danger colour" fail
+    ERRORS+="    row: $(printf '%s' "$row" | cat -v | head -c 240 || true)"$'\n'
+  fi
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

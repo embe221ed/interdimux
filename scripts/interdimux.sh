@@ -7625,6 +7625,13 @@ while true; do
       hint_flag enter kill 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='kill ❯ '
+        # The danger cue that needs no border.  The frame turns red (see
+        # danger_style), but with popup-border-lines "none" tmux draws no frame
+        # and no title, and nothing on screen said this Enter destroys.  After
+        # FZF_THEME, so it overrides the accent prompt here only.  An invalid
+        # --color is fatal to fzf, but the palette is normalised to values fzf
+        # parses (#rrggbb, 0-255, -1), and `prompt:` exists on every fzf.
+        --color="prompt:${COLOR_DANGER}"
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload-sync($LIST_CMD)"
       )
