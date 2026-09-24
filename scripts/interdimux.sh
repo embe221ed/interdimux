@@ -2080,6 +2080,37 @@ spec_target() {
   esac
 }
 
+# spec_at TARGET [FORMAT] -- is the W/P row parse_spec read still THAT window
+# (pane)?  TARGET is spec_target's for it.  Status 1 when it is gone, or when
+# TARGET now finds some other window: "=st:=3" still falls back to a window
+# NAMED exactly "3" once index 3 has closed, so the preview showed that window's
+# screen under the row for st:3, and Enter switched to it -- only --action, which
+# compares the indices it gets back, said the row was gone.  When it is there,
+# SPEC_AT is an exact target for it by ID ("$S:@W", "$S:@W.%P": in the row's
+# session, whatever its name spells), and REPLY is FORMAT as tmux expanded it
+# there -- put free text last in it.
+#
+# ONE round-trip, the same one --action's guard makes: has-session is the check
+# that can fail (display-message resolves its target with CANFAIL, and answers a
+# stale index with the session's current window), and a failed command ends the
+# list, so a gone target prints nothing at all.
+SPEC_AT=""
+spec_at() {
+  local info sid wid pid widx pidx
+  SPEC_AT="" REPLY=""
+  info=$(tmux has-session -t "$1" \; display-message -p -t "$1" \
+    "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}${2:-}" 2>/dev/null)
+  IFS="$US" read -r sid wid pid widx pidx REPLY <<< "$info"
+  [ -n "$wid" ] && [ "$widx" = "$SPEC_WIDX" ] || { REPLY=""; return 1; }
+  case "$SPEC_TYPE" in
+    W) SPEC_AT="$sid:$wid" ;;
+    P) [ -n "$pid" ] && [ "$pidx" = "$SPEC_PIDX" ] || { REPLY=""; return 1; }
+       SPEC_AT="$sid:$wid.$pid" ;;
+    *) REPLY=""; return 1 ;;
+  esac
+  return 0
+}
+
 # Human-readable spec label for prompts
 spec_label() {
   case "$SPEC_TYPE" in
@@ -3802,11 +3833,16 @@ if [ "${1:-}" = "--preview" ]; then
       print_capture "$(tmux capture-pane -t "$target" -p -e -S -30 2>/dev/null)" || echo "(no active pane)"
       ;;
     *)
-      # has-session first, in the same round-trip: display-message alone
-      # answers a stale index with the session's current window (CANFAIL).
-      info=$(tmux has-session -t "$target" \; display-message -p -t "$target" \
-        "#{pane_current_command}${US}#{pane_current_path}" 2>/dev/null)
-      IFS="$US" read -r p_cmd p_path <<< "$info"
+      # Checked by index as well (spec_at): a stale row must not preview the
+      # window that merely took its number as a NAME.  Captured by the IDs the
+      # check found, so tmux resolves the row once.
+      p_cmd="" p_path=""
+      if spec_at "$target" "#{pane_current_command}${US}#{pane_current_path}"; then
+        IFS="$US" read -r p_cmd p_path <<< "$REPLY"
+        target="$SPEC_AT"
+      else
+        target="$NO_SUCH_TARGET"
+      fi
       p_path="${p_path/#$HOME/\~}"
       if [ "$SPEC_TYPE" = "W" ]; then
         printf "${BOLD_AMBER}%s:%s${RST}" "$SPEC_SESSION" "$SPEC_WIDX"
@@ -5781,6 +5817,14 @@ if [ "${1:-}" = "--action" ]; then
       dest_spec="${dest##*	}"
       parse_spec "$dest_spec"
       dest_target=$(spec_target)
+      # The destination was listed when this picker opened, and may have
+      # closed since: checked by index, as the source was, and swapped by ID.
+      # A stale "=s:=3" finds a window NAMED "3" -- and swapped with it.
+      if ! spec_at "$dest_target"; then
+        imux_msg "$(spec_label) no longer exists, so nothing was swapped"
+        exit 0
+      fi
+      dest_target="$SPEC_AT"
 
       # The source is the ID the guard resolved before the picker opened.
       parse_spec "$spec"
@@ -8109,8 +8153,16 @@ while true; do
     # (see TMUX_C) -- a key on another terminal while this one was picking used
     # to make THAT terminal the one that switched.
     target=$(spec_target)
-    tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "$target" 2>/dev/null || \
+    # A window or pane row is checked by index first (spec_at): once its index
+    # has closed, the target finds a window NAMED that number, and Enter went
+    # there.  Switched to by the IDs the check found.
+    case "$SPEC_TYPE" in
+      W|P) if spec_at "$target"; then target="$SPEC_AT"; else target=""; fi ;;
+    esac
+    if [ -z "$target" ] \
+       || ! tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "$target" 2>/dev/null; then
       imux_msg "$(spec_label) no longer exists"
+    fi
     exit 0
   fi
 
