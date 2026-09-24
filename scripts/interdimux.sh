@@ -1062,8 +1062,26 @@ _mounts_read() {
     _mount_of "$p" && _MOUNT_BLOCKS["$_MOUNT_AT"]=0
   done
   # nothing left that blocks: empty the table, so the check is free
-  for b in "${_MOUNT_BLOCKS[@]}"; do [ "$b" = 1 ] && return 0; done
-  _MOUNT_BLOCKS=()
+  for b in "${_MOUNT_BLOCKS[@]}"; do [ "$b" = 1 ] && break; done
+  [ "$b" = 1 ] || { _MOUNT_BLOCKS=(); return 0; }
+  # ... and the filesystem $HOME RESOLVES onto.  tmux reports a pane's cwd
+  # resolved, so a HOME that is a symlink onto a network mount (/home/u ->
+  # /gpfs/home/u, as on some clusters) is used through the mount's own path:
+  # exempting only the literal one left every pane there badge-less.  Resolved
+  # (a fork) only when a component of it IS a symlink -- the same test as
+  # rust/src/mounts.rs's resolved_home.
+  case "$HOME" in /*) ;; *) return 0 ;; esac
+  p="$HOME"
+  while [ -n "$p" ] && [ "$p" != / ]; do
+    if [ -L "$p" ]; then
+      p=$(cd -P -- "$HOME" 2>/dev/null && pwd) || return 0
+      [ -n "$p" ] && _mount_of "$p" && _MOUNT_BLOCKS["$_MOUNT_AT"]=0
+      for b in "${_MOUNT_BLOCKS[@]}"; do [ "$b" = 1 ] && return 0; done
+      _MOUNT_BLOCKS=()
+      return 0
+    fi
+    p="${p%/*}"
+  done
 }
 
 # _MOUNT_AT = the recorded mount point $1 is on (the longest one covering it).
@@ -1072,6 +1090,7 @@ _mounts_read() {
 _MOUNT_AT=""
 _mount_of() {
   local p="$1"
+  case "$p" in /*) ;; *) return 1 ;; esac   # relative: on no recorded mount
   while :; do
     [[ -v "_MOUNT_BLOCKS[$p]" ]] && { _MOUNT_AT="$p"; return 0; }
     [ "$p" = / ] && return 1

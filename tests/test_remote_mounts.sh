@@ -73,13 +73,19 @@ mkproj "$TMPD/local/work"   localwork
 mkproj "$TMPD/vault/proj"   vaultbranch
 mkproj "$TMPD/home/proj"    homebranch
 mkproj "$TMPD/local/zdir"   zoxidebranch
+# A $HOME that is a symlink onto an NFS mount (/home/u -> /gpfs/home/u, as on
+# some clusters): tmux reports a pane's cwd resolved, so the pane "in ~/proj"
+# is in gpfs/u/proj.
+mkproj "$TMPD/gpfs/u/proj"  gpfsproj
+mkproj "$TMPD/gpfs/u/other" gpfsother
+ln -s "$TMPD/gpfs/u" "$TMPD/linkhome"
 # 9p: WSL2's Windows drives (drvfs, over fd) and a real network share (over tcp)
 mkproj "$TMPD/wsl/c/work"   drvfswork
 mkproj "$TMPD/wsl/c/proj"   drvfsproj
 mkproj "$TMPD/net9p/proj"   net9pproj
 mkdir -p "$TMPD/data/interdimux" "$TMPD/bin"
 printf '%s\n' "$TMPD/nas/proj" "$TMPD/nas/gone" "$TMPD/local/proj" "$TMPD/vault/proj" "$TMPD/home/proj" \
-  "$TMPD/wsl/c/proj" "$TMPD/net9p/proj" > "$TMPD/data/interdimux/recent_dirs"
+  "$TMPD/gpfs/u/other" "$TMPD/wsl/c/proj" "$TMPD/net9p/proj" > "$TMPD/data/interdimux/recent_dirs"
 
 MI="$TMPD/mountinfo"
 {
@@ -87,6 +93,7 @@ MI="$TMPD/mountinfo"
   echo "900 1 0:900 / $TMPD/nas rw,relatime shared:900 - nfs4 srv:/nas rw"
   echo "901 1 0:901 / $TMPD/vault rw,nosuid shared:901 - fuse.gocryptfs $TMPD/.vault rw"
   echo "902 1 0:902 / $TMPD/home rw,relatime shared:902 - nfs4 srv:/home rw"
+  echo "903 1 0:903 / $TMPD/gpfs rw,relatime shared:903 - nfs4 srv:/gpfs rw"
   # verbatim from a WSL2 host, but for the path
   echo "904 1 0:904 / $TMPD/wsl/c rw,noatime - 9p drvfs rw,dirsync,aname=drvfs;path=C:\\;uid=1000;gid=1000;symlinkroot=/mnt/,mmap,access=client,msize=65536,trans=fd,rfd=5,wfd=5"
   echo "905 1 0:905 / $TMPD/net9p rw,relatime - 9p 10.0.0.1 rw,access=user,trans=tcp,port=564"
@@ -95,6 +102,7 @@ MI="$TMPD/mountinfo"
 tmux -f /dev/null -L "$SOCK" new-session -d -s bench -x 200 -y 50 -c "$TMPD/home" 'sleep 99999'
 tmux -L "$SOCK" new-session -d -s naspane -x 200 -y 50 -c "$TMPD/nas/work" 'sleep 99999'
 tmux -L "$SOCK" new-session -d -s locpane -x 200 -y 50 -c "$TMPD/local/work" 'sleep 99999'
+tmux -L "$SOCK" new-session -d -s gpane -x 200 -y 50 -c "$TMPD/gpfs/u/proj" 'sleep 99999'
 tmux -L "$SOCK" new-session -d -s wslpane -x 200 -y 50 -c "$TMPD/wsl/c/work" 'sleep 99999'
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=bench:0' -F '#{pane_id}' | head -1)"
@@ -104,7 +112,7 @@ export INTERDIMUX_SHOW_DIRS=on INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_SHOW_GIT_BRA
 export INTERDIMUX_DIRS_LIMIT=20 INTERDIMUX_PROJECT_DIRS="$TMPD/nowhere"
 # wide enough that the git-badge column is on (it is off at 80 columns)
 export FZF_COLUMNS=200 INTERDIMUX_NOW="$(date +%s)"
-for _d in nas/work wsl/c/work; do
+for _d in nas/work gpfs/u/proj wsl/c/work; do
   wait_for "the panes' cwds ($_d)" sh -c "tmux -L '$SOCK' list-panes -a -F '#{pane_current_path}' | grep -qx '$TMPD/$_d'"
 done
 
@@ -181,6 +189,31 @@ if [ -n "$nas" ] && [ "$(printf '%s' "$nas" | cut -f2)" = "" ] && [ "$(printf '%
 else
   report "--dirs-list: no type probe on the NFS row, the local one is typed (nas: $nas / local: $loc)" fail
 fi
+
+# $HOME is a symlink onto an NFS mount (review #25).  The exemption went to the
+# mount covering the literal $HOME string -- the local root here -- so the NFS
+# mount the panes are really on stayed skipped and every pane in the home lost
+# its badge.
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  LIST_ENV="INTERDIMUX_MOUNTINFO=$MI HOME=$TMPD/linkhome"
+  got=$(row "$r" "W:gpane:0")
+  case "$got" in *"‹gpfsproj›"*) report "$label: a pane in a \$HOME that is a symlink onto NFS keeps its git badge" pass ;;
+                 *) report "$label: a pane in a \$HOME that is a symlink onto NFS keeps its git badge (got: $got)" fail ;; esac
+  got=$(row "$r" "D:$TMPD/gpfs/u/other")
+  badged "$got" gpfsother && report "$label: a recent dir there keeps its git and type badges" pass \
+                          || report "$label: a recent dir there keeps its git and type badges (got: $got)" fail
+  got=$(row "$r" "D:$TMPD/nas/proj")
+  if [ -n "$got" ] && ! printf '%s' "$got" | grep -q -e '‹' -e 'Rust'; then
+    report "$label: ... and another NFS mount is still skipped" pass
+  else
+    report "$label: ... and another NFS mount is still skipped (got: $got)" fail
+  fi
+done
+dl=$(HOME="$TMPD/linkhome" INTERDIMUX_MOUNTINFO="$MI" bash "$SCRIPT" --dirs-list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+got=$(printf '%s\n' "$dl" | awk -F'\t' -v d="$TMPD/gpfs/u/other" '$3 == d { print $2 }')
+[ "$got" = Rust ] && report "--dirs-list: a dir in a symlinked NFS \$HOME is typed" pass \
+                 || report "--dirs-list: a dir in a symlinked NFS \$HOME is typed (got: '$got')" fail
 
 # 9p by its transport (review #27).  WSL2's Windows drives are 9p over fd
 # (drvfs): the local disk, slow per stat but never a hung server -- every
