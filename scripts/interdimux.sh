@@ -1146,6 +1146,13 @@ hydrate_session() {
 #
 # Everything after the name is done by session ID, never by "=name":
 #
+#   * new-session FORMAT-EXPANDS both -s and -c, while a -t target is taken
+#     literally.  A directory called "proj#Sync" was created as a session named
+#     "proj<current session>ync" whose shell started in $HOME (the expanded -c
+#     did not exist), and the switch-client that followed looked for the name as
+#     typed, found nothing, and silently left the user where they were -- with a
+#     junk session behind them and "duplicate session" on the next Enter.  '##'
+#     is tmux's escape; only the two expanded arguments get it.
 #   * the lookup goes through session_id_of, the one exact-name match: "=$1"
 #     means session ID 1 to tmux whatever the '=' says, and "=c:d" cannot name
 #     anything at all.
@@ -1160,7 +1167,7 @@ connect_dir() {
   session_id_of "$name"; sid="$REPLY"
   if [ -z "$sid" ]; then
     sid=$(tmux new-session -d -P -F '#{session_id}' \
-            -s "$name" -c "$dir" 2>/dev/null) || return 1
+            -s "${name//'#'/##}" -c "${dir//'#'/##}" 2>/dev/null) || return 1
     [ -n "$sid" ] || return 1
     hydrate_session "$sid" "$dir"
   fi
@@ -3973,13 +3980,24 @@ if [ "${1:-}" = "--action" ]; then
         # Capture tmux's own message instead of discarding it: "duplicate
         # session: two" tells the user what to do, where "failed to rename"
         # leaves them guessing (IDEAS #23).
+        #
+        # The new name is FORMAT-EXPANDED by tmux, the target is not: "proj#Sx"
+        # was stored as "proj<this session>x" while the dialog said "renamed to
+        # proj#Sx".  '##' is the escape, and the status line reads the name back
+        # from tmux (by ID, which a rename does not change) rather than echoing
+        # what was typed.
         _err=""
         case "$SPEC_TYPE" in
-          S) _err=$(tmux rename-session -t "$target" -- "$new_name" 2>&1) ;;
-          W) _err=$(tmux rename-window  -t "$target" -- "$new_name" 2>&1) ;;
+          S) _err=$(tmux rename-session -t "$target" -- "${new_name//'#'/##}" 2>&1) ;;
+          W) _err=$(tmux rename-window  -t "$target" -- "${new_name//'#'/##}" 2>&1) ;;
         esac
         if [ $? -eq 0 ]; then
-          dialog_status "${GREEN}✓ renamed to ${new_name}${RST}"
+          case "$SPEC_TYPE" in
+            S) _got=$(tmux display-message -p -t "$target" '#{session_name}' 2>/dev/null) ;;
+            W) _got=$(tmux display-message -p -t "$target" '#{window_name}' 2>/dev/null) ;;
+          esac
+          sanitize_args "${_got:-$new_name}"
+          dialog_status "${GREEN}✓ renamed to ${REPLY}${RST}"
         else
           _err="${_err//$'\n'/ }"
           [ "${#_err}" -gt $(( DLG_W - 12 )) ] && _err="${_err:0:DLG_W-13}…"

@@ -15,6 +15,8 @@
 #            (kill, rename, switch, the preview's window list) missed it
 #   stale    "=st:3" for a window that has since closed is retried as a
 #   index    window NAME, prefix included -- it matched "3rd" and killed it
+#   '#'      new-session and rename-* FORMAT-EXPAND the name (and new-session
+#            its -c too): "proj#Sync" became "proj<session>ync" in $HOME
 #
 # Every oracle is tmux's own state, read back after the fact -- never the
 # script's target-building code.
@@ -212,6 +214,63 @@ act rename 'S:dashsrc' '\025-dash\n' >/dev/null
 has_name '-dash' \
   && report "a rename to '-dash' is taken as the name, not as a flag" pass \
   || report "a rename to '-dash' is taken as the name, not as a flag" fail
+
+# --- '#' in a name: tmux format-expands new-session -s/-c and rename-* ---------------
+mkdir -p "$TMPD/dirs/proj#Sync"
+PROJ="$(cd "$TMPD/dirs/proj#Sync" && pwd -P)"
+bash "$SCRIPT" --connect-dir "$PROJ" >/dev/null 2>&1 || true
+if has_name 'proj#Sync'; then
+  report "a directory named 'proj#Sync' opens as a session of exactly that name" pass
+else
+  report "a directory named 'proj#Sync' opens as a session of exactly that name" fail
+  ERRORS+="    sessions now: $(names | tr '\n' '|')"$'\n'
+fi
+# pane_current_path is read from /proc at query time, and the cwd is set at spawn
+cwd=$(T display-message -p -t "$(T list-sessions -F '#{session_id} #{session_name}' | awk '$2=="proj#Sync"{print $1}'):" '#{pane_current_path}' 2>/dev/null || true)
+[ "$cwd" = "$PROJ" ] \
+  && report "...and its shell starts in that directory, not in \$HOME" pass \
+  || { report "...and its shell starts in that directory, not in \$HOME" fail
+       ERRORS+="    cwd: $cwd"$'\n'; }
+
+n_before=$(names | wc -l)
+rc1=0 rc2=0
+bash "$SCRIPT" --create-from-query 'a#Sb' >/dev/null 2>&1 || rc1=$?
+bash "$SCRIPT" --create-from-query 'a#Sb' >/dev/null 2>&1 || rc2=$?
+n_after=$(names | wc -l)
+if has_name 'a#Sb' && [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && [ "$n_after" = $((n_before + 1)) ]; then
+  report "find-or-create 'a#Sb' makes that session once, and Enter again reuses it" pass
+else
+  report "find-or-create 'a#Sb' makes that session once, and Enter again reuses it" fail
+  ERRORS+="    rc=$rc1/$rc2 sessions: $(names | tr '\n' '|')"$'\n'
+fi
+out=$(bash "$SCRIPT" --describe-create 'a#Sb' 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+case "$out" in
+  "switch to a#Sb "*) report "...and the header then says it will switch to it" pass ;;
+  *) report "...and the header then says it will switch to it (got: $out)" fail ;;
+esac
+
+# rename through the dialog: ^U clears the pre-filled name
+T new-session -d -s hashsrc -x 120 -y 30 -n hashwin
+out=$(act rename 'S:hashsrc' '\025x#Hy\n')
+if has_name 'x#Hy'; then
+  report "renaming a session to 'x#Hy' stores exactly that" pass
+else
+  report "renaming a session to 'x#Hy' stores exactly that" fail
+  ERRORS+="    sessions now: $(names | tr '\n' '|')"$'\n'
+fi
+# whatever the dialog claims, tmux must have a session by exactly that name
+said=$(printf '%s' "$out" | grep -o 'renamed to [^ ]*' | tail -1 | sed 's/^renamed to //' || true)
+if [ -n "$said" ] && has_name "$said"; then
+  report "...and the name the dialog reports is the one tmux stored ($said)" pass
+else
+  report "...and the name the dialog reports is the one tmux stored" fail
+  ERRORS+="    dialog said '$said'; sessions: $(names | tr '\n' '|')"$'\n'
+fi
+act rename 'W:x#Hy:0' '\025w#Sname\n' >/dev/null
+T list-windows -t "$(T list-sessions -F '#{session_id} #{session_name}' | awk '$2=="x#Hy"{print $1}'):" -F '#{window_name}' \
+  | grep -qxF 'w#Sname' \
+  && report "renaming a window to 'w#Sname' stores exactly that" pass \
+  || report "renaming a window to 'w#Sname' stores exactly that" fail
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
