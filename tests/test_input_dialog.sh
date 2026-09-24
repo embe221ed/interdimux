@@ -13,6 +13,10 @@
 #   * Send keys, three CJK characters typed: the padding erased the right border
 #     and the cursor sat inside the second character.
 #
+#   * the common emoji below U+1F000 (✅ ⭐ ⚡) counted one cell for the two tmux
+#     draws, and an emoji sequence (👍🏽, 🇵🇱, 👨‍👩‍👧, ⚙ + U+FE0F) was counted one
+#     character at a time, so the cursor drifted off the text by the error.
+#
 # The buffer was always right; only the picture was wrong.  So every assertion
 # here is about the picture, and the authority for it is tmux's own grid:
 #
@@ -75,6 +79,9 @@ CJK='日本語のセッション名前とても長い名前です本当に長い
 tmux -f /dev/null -L "$SOCK" new-session -d -s host -x 120 -y 30 'sleep 900'
 tmux -L "$SOCK" new-session -d -s solo -x 120 -y 30 'sleep 900'
 tmux -L "$SOCK" new-session -d -s "$CJK" -x 120 -y 30 'sleep 900'
+ZWJ=$'\u200d' VS16=$'\ufe0f'
+EMONAME="emo👍🏽🇵🇱⚙${VS16}👨${ZWJ}👩${ZWJ}👧"                 # 4 emoji sequences, 11 cells in tmux
+tmux -L "$SOCK" new-session -d -s "$EMONAME" -x 120 -y 30 'sleep 900'
 LONGNAME="$(printf '%*s' 110 '' | tr ' ' w)"                 # a title wider than a narrow pane
 tmux -L "$SOCK" new-session -d -s "$LONGNAME" -x 120 -y 30 'sleep 900'
 SOCKPATH="$(tmux -L "$SOCK" display-message -p '#{socket_path}')"
@@ -499,6 +506,141 @@ check "Left through combining marks brings the cursor to the field's start" \
 run test "${VIS:0:1}" != "$MARK"
 check "Left through combining marks never draws a mark onto the prompt" \
       "field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# Kana decomposed the way macOS stores file names -- か + U+3099 for が -- is
+# the same case with a mark that was counted two cells wide, not one.
+open_send "decomposed kana"
+DAKU=$'\u3099'
+typed "か${DAKU}き${DAKU}く${DAKU}"
+wait_vis "か${DAKU}き${DAKU}く${DAKU}" || true
+run cursor_after "か${DAKU}き${DAKU}く${DAKU}"
+check "the cursor follows decomposed kana (が as か + U+3099)" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# ---------------------------------------------------------------------------
+# 6. Emoji that tmux draws two cells wide
+# ---------------------------------------------------------------------------
+# The common emoji below U+1F000 (✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ ...) are two cells in tmux
+# and were counted as one, so three of them left the cursor three cells short,
+# and a long command with a few of them in it pushed the field through the
+# border once it scrolled.
+
+open_send "emoji"
+typed "✅⭐⚡"
+wait_vis "✅⭐⚡" || true
+run cursor_after "✅⭐⚡"
+check "after three emoji (✅⭐⚡) the cursor follows them" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run frame_intact
+check "three emoji leave the border where it was" "$FRAME_WHY" "$RC"
+keys Escape
+
+open_send "a long line with emoji"
+snap
+field_geometry
+EMO="git commit -m '"
+while [ "${#EMO}" -lt $(( FIELD_W + 12 )) ]; do EMO+="✅ pass ❌ fail ⚡ fast "; done
+EMO+="END'"
+typed "$EMO"
+wait_vis "END'" tail || true
+run frame_intact
+check "a command with emoji, wider than the field, scrolls inside the frame" "$FRAME_WHY" "$RC"
+run cursor_after "$VIS"
+check "the cursor follows the scrolled emoji text" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run fills_view "$EMO"
+check "the field shows as much of the emoji text as fits" "$FILL_WHY" "$RC"
+keys Home
+wait_vis "git commit" head || true
+run frame_intact
+check "the start of that line stays inside the frame" "$FRAME_WHY" "$RC"
+keys Escape
+
+# ---------------------------------------------------------------------------
+# 7. Emoji sequences: several characters, one picture
+# ---------------------------------------------------------------------------
+# tmux draws a skin-toned 👍🏽, a flag 🇵🇱 and a ZWJ family 👨‍👩‍👧 two cells wide
+# each, and ⚙ followed by U+FE0F two cells although ⚙ alone is one.  Measured
+# one character at a time they came to 4, 4, 6 and 1+1 -- so the cursor
+# drifted right of the text by the difference, from the first one on.  ✋🏽 is
+# the other side of the skin-tone rule: ✋ is not on tmux's list of bases, and
+# tmux draws the pair four cells wide.  The edits make sure a character is
+# measured again when its neighbour changes.
+
+open_send "emoji sequences"
+SEQ=""
+for _q in "👍🏽" "🇵🇱" "👨${ZWJ}👩${ZWJ}👧" "⚙${VS16}" "✋🏽"; do
+  typed "$_q"; SEQ+="$_q"
+  wait_vis "$SEQ" || true
+  run cursor_after "$SEQ"
+  check "after $_q the cursor follows the text" \
+        "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+done
+run frame_intact
+check "emoji sequences leave the border where it was" "$FRAME_WHY" "$RC"
+keys Escape
+
+# ⚙️ is two cells, and it must scroll out of view as one: a view that opened on
+# its U+FE0F would draw it into the prompt's blank -- widening that cell to two
+# and pushing the whole field one cell right.  The line is sized so the view has
+# to drop exactly the ⚙ in front of the U+FE0F: FIELD_W cells of text if they
+# were one each, plus the cursor's cell.
+open_send "a U+FE0F at the edge of the view"
+snap
+field_geometry
+# (ending in Z: the view shows a tail of a's long before the last key is read)
+gear="⚙${VS16}$(printf '%*s' $(( FIELD_W - 3 )) '' | tr ' ' a)Z"
+typed "$gear"
+wait_vis "aZ" tail || true
+run test "${VIS:0:1}" != "$VS16"
+check "a U+FE0F whose symbol scrolled out of view is not drawn onto the prompt" \
+      "field: '$FIELD_ROW'" "$RC"
+run frame_intact
+check "...and the field stays inside the frame" "$FRAME_WHY" "$RC"
+run cursor_after "$VIS"
+check "...and the cursor follows the text" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+open_send "edits inside emoji sequences"
+typed "👍🏽x"
+wait_vis "👍🏽x" || true
+keys Home DC                          # the base goes: 🏽 stands alone, 2 cells
+wait_vis "🏽x" || true
+keys End
+run cursor_after "🏽x"
+check "deleting an emoji's base measures the skin tone after it again" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Home
+typed "👍"                            # ...and a base put back in front joins it
+wait_vis "👍🏽x" || true
+keys End
+run cursor_after "👍🏽x"
+check "inserting a base before a skin tone joins them again" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys C-u
+wait_vis "" || true
+typed "⚙${VS16}y"
+wait_vis "⚙${VS16}y" || true
+keys Left BSpace                      # U+FE0F goes: ⚙ is one cell again
+wait_vis "⚙y" || true
+keys End
+run cursor_after "⚙y"
+check "deleting a U+FE0F takes its symbol back to one cell" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# A prefilled name is measured the same way.
+RC=0
+open_dialog 80 14 rename "S:$EMONAME" && wait_vis "$EMONAME" || RC=1
+check "the rename editor opens with an emoji name in view" "field: '$FIELD_ROW'" "$RC"
+run cursor_after "$EMONAME"
+check "the cursor starts right after a prefilled name with emoji sequences" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run frame_intact
+check "a prefilled name with emoji sequences stays inside the frame" "$FRAME_WHY" "$RC"
 keys Escape
 
 # ---------------------------------------------------------------------------

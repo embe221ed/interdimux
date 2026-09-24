@@ -4255,12 +4255,26 @@ popup_accent() {
 #
 #   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
 #   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
-#   combining marks, ZWJ, U+FE0E                  0
+#   combining marks (Latin, symbol, kana), ZWJ,   0
+#     U+FE00-FE0E
 #   everything else                               1
 #
 # so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
-# 2 and a flag counts 4 instead of 2 — wide, never narrow.  Exact cluster
-# handling lives in the Rust core, where it is on the path that needs it.
+# 2 — wide, never narrow.  A regional indicator is 1: tmux draws one alone in
+# one cell and a pair (a flag) in two, so a flag is exact too.  Exact cluster
+# handling lives in the Rust core, where it is on the path that needs it, and
+# the input field's per-character rules in _dlg_cw.
+#
+# "Wide" and "0" are what tmux draws (measured on 3.7b, every code point of
+# U+1100-11FF, U+2000-30FF, U+FE00-FE0F and U+1F000-1FAFF, against
+# #{cursor_x}).  Below
+# U+2E80 that is a scattering of emoji -- ✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ and ~60 more -- which
+# counted 1 for the 2 tmux draws, so three of them typed into Send keys left
+# the cursor three cells short, and a long command with a few in it ran
+# through the border.  U+1F000-1FAFF stays wide throughout, bar the regional
+# indicators: its text-style symbols (🖥 🛠) are drawn narrow, but they come
+# with a U+FE0F nearly always, and a range with holes would under-count every
+# emoji a newer Unicode adds.
 #
 # `printf %d "'<char>"` yields the codepoint with no fork; the dialogs are short
 # strings on the action path, so per-character work is affordable here.
@@ -4279,13 +4293,30 @@ dlg_width() {
       continue
     fi
     printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
-    if (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || cp == 0xfe0e )); then
+    if (( cp < 0x300 )); then
+      n=$(( n + 1 ))
+    elif (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || (cp >= 0xfe00 && cp <= 0xfe0e) \
+         || (cp >= 0x20d0 && cp <= 0x20f0) || (cp >= 0x302a && cp <= 0x302d) \
+         || cp == 0x3099 || cp == 0x309a )); then
       :
     elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
          || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
          || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) \
          || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) \
-         || (cp >= 0x1f000 && cp <= 0x1f2ff) || (cp >= 0x20000 && cp <= 0x3fffd) )); then
+         || (cp >= 0x1f000 && cp <= 0x1f1e5) || (cp >= 0x1f200 && cp <= 0x1f2ff) \
+         || (cp >= 0x20000 && cp <= 0x3fffd) )); then
+      n=$(( n + 2 ))
+    elif (( cp >= 0x231a && cp <= 0x2b55 && ( cp <= 0x231b || cp == 0x2329 || cp == 0x232a \
+         || (cp >= 0x23e9 && cp <= 0x23ec) || cp == 0x23f0 || cp == 0x23f3 || cp == 0x25fd \
+         || cp == 0x25fe || cp == 0x2614 || cp == 0x2615 || cp == 0x261d \
+         || (cp >= 0x2648 && cp <= 0x2653) || cp == 0x267f || cp == 0x2693 || cp == 0x26a1 \
+         || cp == 0x26aa || cp == 0x26ab || cp == 0x26bd || cp == 0x26be || cp == 0x26c4 \
+         || cp == 0x26c5 || cp == 0x26ce || cp == 0x26d4 || cp == 0x26ea || cp == 0x26f2 \
+         || cp == 0x26f3 || cp == 0x26f5 || cp == 0x26f9 || cp == 0x26fa || cp == 0x26fd \
+         || cp == 0x2705 || (cp >= 0x270a && cp <= 0x270d) || cp == 0x2728 || cp == 0x274c \
+         || cp == 0x274e || (cp >= 0x2753 && cp <= 0x2755) || cp == 0x2757 \
+         || (cp >= 0x2795 && cp <= 0x2797) || cp == 0x27b0 || cp == 0x27bf || cp == 0x2b1b \
+         || cp == 0x2b1c || cp == 0x2b50 || cp == 0x2b55 ) )); then
       n=$(( n + 2 ))
     else
       n=$(( n + 1 ))
@@ -4482,6 +4513,76 @@ _dlg_cells() {
   REPLY=$(( ${#1} - ${#zeros} + ${#twos} ))
 }
 
+# The width input_dialog's field keeps for CH, with PREV and NEXT the characters
+# either side of it ('' at an end of the buffer).  Sets REPLY.
+#
+# The field puts the cursor after any character, so where dlg_width may err
+# wide this has to be exact for the sequences people type.  tmux draws some
+# characters INTO the cell before them rather than into one of their own
+# (screen_write_combine and utf8_should_combine, tmux 3.7b; each rule below
+# measured there against #{cursor_x}):
+#
+#   U+FE0F after a one-cell character   widens that cell to two     ⚙ 1, ⚙️ 2
+#   a non-ASCII character after a ZWJ   joins the ZWJ's cell        👨‍👩‍👧 2
+#   a skin tone after a modifier base   joins the base's cell       👍🏽 2
+#     -- tmux's own list of bases (_dlg_tone_base); 🎅🏽 and ✋🏽 stay 4
+#
+# Such a character is 0 here, and the cell U+FE0F adds goes on the character it
+# widens, so a 0 always means "drawn into the cell before": the view must never
+# start on one, where it would join the prompt's cell.  Measured one character
+# at a time, 👍🏽 came to 4, 👨‍👩‍👧 to 6, and ⚙️ to 1+1, so a view could open on
+# its U+FE0F.  (A regional indicator is 1 either way -- see dlg_width.)
+_DLG_VS16=$'\xef\xb8\x8f'                 # U+FE0F, as bytes: no locale needed
+_dlg_cw() {
+  local cp pp
+  printf -v cp '%d' "'$2" 2>/dev/null || cp=63
+  if (( cp >= 0x20 && cp < 0x7f )); then
+    REPLY=1                          # tmux never draws ASCII into another cell
+  elif (( cp == 0xfe0f )); then
+    REPLY=0; return 0
+  else
+    if [ -n "$1" ]; then
+      printf -v pp '%d' "'$1" 2>/dev/null || pp=0
+      if (( pp == 0x200d )) || { (( cp >= 0x1f3fb && cp <= 0x1f3ff )) && _dlg_tone_base "$pp"; }; then
+        REPLY=0; return 0
+      fi
+    fi
+    dlg_width "$2"
+  fi
+  if (( REPLY == 1 )) && [ "$3" = "$_DLG_VS16" ]; then REPLY=2; fi
+  return 0
+}
+
+# True for a code point a skin tone joins: tmux's list (utf8_should_combine in
+# utf8-combined.c), which is not all of Unicode's Emoji_Modifier_Base.
+_dlg_tone_base() {
+  local c=$1
+  (( (c >= 0x1f44b && c <= 0x1f450) || (c >= 0x1f466 && c <= 0x1f469) || c == 0x1f46e \
+     || (c >= 0x1f470 && c <= 0x1f478) || c == 0x1f47c || (c >= 0x1f481 && c <= 0x1f483) \
+     || (c >= 0x1f485 && c <= 0x1f487) || c == 0x1f4aa || c == 0x1f575 || c == 0x1f57a \
+     || c == 0x1f590 || c == 0x1f595 || c == 0x1f596 || (c >= 0x1f645 && c <= 0x1f647) \
+     || (c >= 0x1f64b && c <= 0x1f64f) || (c >= 0x1f6b4 && c <= 0x1f6b6) || c == 0x1f926 \
+     || (c >= 0x1f937 && c <= 0x1f939) || c == 0x1f93d || c == 0x1f93e || c == 0x1f9b5 \
+     || c == 0x1f9b6 || c == 0x1f9b8 || c == 0x1f9b9 || (c >= 0x1f9cd && c <= 0x1f9cf) \
+     || (c >= 0x1f9d1 && c <= 0x1f9df) ))
+}
+
+# Measure character J of input_dialog's buffer again, from its neighbours as
+# they are now, into cw.  buf and cw are input_dialog's locals.  An edit changes
+# the neighbours on both sides of where it happened, so every edit re-measures
+# those two characters: deleting 👍 from 👍🏽 leaves a skin tone that stands
+# alone, two cells wide, and deleting the U+FE0F of ⚙️ takes ⚙ back to one.
+_dlg_remeasure() {
+  local j=$1
+  (( j >= 0 && j < ${#buf} )) || return 0
+  if (( j > 0 )); then
+    _dlg_cw "${buf:j-1:1}" "${buf:j:1}" "${buf:j+1:1}"
+  else
+    _dlg_cw "" "${buf:0:1}" "${buf:1:1}"
+  fi
+  cw="${cw:0:j}$REPLY${cw:j+1}"
+}
+
 # input_dialog ACCENT TITLE PROMPT INITIAL [NOTE] — a single-line text editor
 # drawn inside the dialog box.  Sets REPLY (empty = cancelled).
 #
@@ -4529,14 +4630,20 @@ input_dialog() {
     "$irow" "$col_prompt" "$accent" "$prompt" "$RST" >>"$tty_out"
 
   # cw is buf's shadow: ONE DIGIT PER CHARACTER, that character's width in
-  # cells (0, 1 or 2, from dlg_width).  Every edit below applies the same slice
+  # cells (0, 1 or 2, from _dlg_cw).  Every edit below applies the same slice
   # to both strings, so ${cw:i:1} is always the width of ${buf:i:1}.  Each
-  # character is measured once, as it enters the buffer: re-measuring the whole
-  # buffer on every repaint made a paste quadratic, because every pasted
-  # character is its own keystroke and repaint, and dlg_width costs tens of
-  # microseconds a character.
-  local buf="$initial" pos=${#initial} scroll=0 cw="" i
-  for (( i = 0; i < pos; i++ )); do dlg_width "${buf:i:1}"; cw+="$REPLY"; done
+  # character is measured as it enters the buffer, and again only when an
+  # edit changes a neighbour (_dlg_remeasure): re-measuring the whole buffer on
+  # every repaint made a paste quadratic, because every pasted character is
+  # its own keystroke and repaint, and dlg_width costs tens of microseconds a
+  # character.
+  local buf="$initial" pos=${#initial} scroll=0 cw="" i pc="" cc nc
+  cc="${buf:0:1}"
+  for (( i = 0; i < pos; i++ )); do
+    nc="${buf:i+1:1}"
+    _dlg_cw "$pc" "$cc" "$nc"; cw+="$REPLY"
+    pc="$cc" cc="$nc"
+  done
   drain_input
 
   # Read the input source through the process-wide fd (see tty_fd): re-opening
@@ -4604,8 +4711,8 @@ input_dialog() {
         done
       fi
     fi
-    # A zero-width character (a combining mark) cannot open the field: drawn
-    # first, it would attach to the prompt's cell, outside the field.
+    # Nor can a character drawn into the cell before it open the field on the
+    # right: drawn first, it would join the prompt's cell, outside the field.
     while (( scroll < pos )) && [ "${cw:scroll:1}" = 0 ]; do scroll=$(( scroll + 1 )); done
     # The visible text is the longest run from `scroll` that fits.  A wide
     # character that would straddle the edge is left out rather than drawn over
@@ -4648,33 +4755,38 @@ input_dialog() {
               case "$c3" in
                 1|7) pos=0 ;;
                 4|8) pos=$len ;;
-                3) (( pos < len )) && { buf="${buf:0:pos}${buf:pos+1}" cw="${cw:0:pos}${cw:pos+1}"; } ;;   # delete
+                3) (( pos < len )) && {                     # delete
+                     buf="${buf:0:pos}${buf:pos+1}" cw="${cw:0:pos}${cw:pos+1}"
+                     _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; } ;;
               esac ;;
           esac
         else
           buf=""; break                                      # lone ESC → cancel
         fi ;;
-      $'\x7f'|$'\x08') (( pos > 0 )) && { buf="${buf:0:pos-1}${buf:pos}" cw="${cw:0:pos-1}${cw:pos}"; pos=$(( pos - 1 )); } ;;
+      $'\x7f'|$'\x08') (( pos > 0 )) && {
+                         buf="${buf:0:pos-1}${buf:pos}" cw="${cw:0:pos-1}${cw:pos}"; pos=$(( pos - 1 ))
+                         _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; } ;;
       $'\x03') buf=""; break ;;                              # Ctrl-C → cancel
       $'\x01') pos=0 ;;                                       # Ctrl-A → start
       $'\x05') pos=$len ;;                                    # Ctrl-E → end
-      $'\x15') buf="${buf:pos}" cw="${cw:pos}"; pos=0 ;;      # Ctrl-U → delete to start
-      $'\x0b') buf="${buf:0:pos}" cw="${cw:0:pos}" ;;         # Ctrl-K → delete to end
+      $'\x15') buf="${buf:pos}" cw="${cw:pos}"; pos=0; _dlg_remeasure 0 ;;        # Ctrl-U → delete to start
+      $'\x0b') buf="${buf:0:pos}" cw="${cw:0:pos}"; _dlg_remeasure $(( pos - 1 )) ;; # Ctrl-K → delete to end
       $'\x17')                                                # Ctrl-W → delete word before cursor
         local l="${buf:0:pos}" r="${buf:pos}"
         while [ -n "$l" ] && [ "${l: -1}" = ' ' ]; do l="${l%?}"; done
         while [ -n "$l" ] && [ "${l: -1}" != ' ' ]; do l="${l%?}"; done
-        buf="$l$r" cw="${cw:0:${#l}}${cw:pos}"; pos=${#l} ;;
+        buf="$l$r" cw="${cw:0:${#l}}${cw:pos}"; pos=${#l}
+        _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos" ;;
       *)
         if [[ -n "$c" && "$c" != [[:cntrl:]] ]]; then
           printf -v k '%d' "'$c" 2>/dev/null || k=0
           if (( pos == len && k >= 0x20 && k < 0x7f )); then
             # ASCII at the end -- typing, and every character of a paste:
-            # one cell, so append, and slice nothing
+            # nothing either side changes width, so append, and slice nothing
             buf+="$c" cw+=1
           else
-            dlg_width "$c"
-            buf="${buf:0:pos}$c${buf:pos}" cw="${cw:0:pos}$REPLY${cw:pos}"
+            buf="${buf:0:pos}$c${buf:pos}" cw="${cw:0:pos}0${cw:pos}"
+            _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; _dlg_remeasure $(( pos + 1 ))
           fi
           pos=$(( pos + 1 ))
         fi ;;
