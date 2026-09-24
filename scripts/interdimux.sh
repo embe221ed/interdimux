@@ -6460,7 +6460,7 @@ if [ "${1:-}" = "--doctor" ]; then
   # server's INTERDIMUX_BIN named.  Run from the Health popup the two agree.
   _pur=on; _srv_env INTERDIMUX_USE_RUST && _pur="${REPLY:-on}"
   _pib="";  _srv_env INTERDIMUX_BIN && _pib="$REPLY"
-  _pbin=""
+  _pbin="" _prefused=0
   if [ "$_pur" != off ]; then
     for _c in "$_pib" "$_repo/rust/target/release/imux" "$_repo/bin/imux"; do
       if [ -n "$_c" ] && [ -x "$_c" ]; then _pbin="$_c"; break; fi
@@ -6474,7 +6474,27 @@ if [ "${1:-}" = "--doctor" ]; then
     # must not hang the report.
     if _v=$("$_pbin" --version 2>/dev/null </dev/null) && [ -n "$_v" ]; then
       case "$_v" in
-        'imux '*) _ok "$_v at $_pbin" ;;
+        'imux '*)
+          # ...and whether it speaks THIS script's protocol, the way the list
+          # asks: a build from other sources -- the usual state after a `git
+          # pull` or a TPM update, neither of which rebuilds rust/ -- answers
+          # --version like any other and is then refused on every draw
+          # (imux_refused).  It used to get a green tick here, before any list
+          # had been drawn and after.  Exit 2 is the refusal; a build that
+          # speaks IMUX_PROTO reads the empty stdin and exits 3, at once.
+          "$_pbin" "$IMUX_PROTO" </dev/null >/dev/null 2>&1
+          if [ "$?" = 2 ]; then
+            _prefused=1
+            _bad "$_pbin is from another version of interdimux (it does not speak $IMUX_PROTO): the list uses the slower bash renderer"
+            if [ "$_pbin" = "$_repo/rust/target/release/imux" ]; then
+              _build_hint rebuild
+            else
+              _note "rebuild it, or point INTERDIMUX_BIN at a build of this version"
+              _note "for the popups: tmux set-environment -g INTERDIMUX_BIN <path>"
+            fi
+          else
+            _ok "$_v at $_pbin"
+          fi ;;
         *) _bad "$_pbin is not the interdimux helper — its --version says: ${_v%%$'\n'*}"
            _note "the list notices, and falls back to the slow bash renderer; point INTERDIMUX_BIN at an imux build" ;;
       esac
@@ -6595,7 +6615,9 @@ if [ "${1:-}" = "--doctor" ]; then
   # source with the checkout time — would otherwise report it stale for ever.
   # -type f as well, or find returns the start directory and it takes one of the
   # three slots below.  The popups' helper, as picked above.
-  if [ -n "$_pbin" ] && [ -d "$_repo/rust/src" ] \
+  # Not for one the protocol check above refused: the list does not run it at
+  # all, and that line has already said to rebuild it.
+  if [ -n "$_pbin" ] && [ "$_prefused" = 0 ] && [ -d "$_repo/rust/src" ] \
      && case "$_pbin" in "$_repo"/*) true ;; *) false ;; esac; then
     _newer=$(find "$_repo/rust/src" "$_repo/rust/Cargo.toml" -type f -newer "$_pbin" 2>/dev/null | head -3)
     if [ -n "$_newer" ]; then
