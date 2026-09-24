@@ -1256,14 +1256,21 @@ fi
 
 declare -A PS_CHILDREN=()
 declare -A PS_ARGS=()
+declare -A PS_PGID=()
+declare -A PS_TPGID=()
 
 build_process_table() {
   [ "$PROC_CMDLINE_OK" = 1 ] && return 0   # /proc backend needs no table
-  local pid ppid args
-  while read -r pid ppid args; do
+  local pid ppid pgid tpgid args
+  # pgid/tpgid ride along for pick_child: which child is the FOREGROUND job.
+  # Every ps this runs on (procps, macOS, the BSDs) has both keywords, and args
+  # stays last so it keeps its embedded spaces.
+  while read -r pid ppid pgid tpgid args; do
     PS_ARGS[$pid]="$args"
+    PS_PGID[$pid]="$pgid"
+    PS_TPGID[$pid]="$tpgid"
     PS_CHILDREN[$ppid]+="$pid "
-  done < <(ps -eo pid=,ppid=,args= 2>/dev/null)
+  done < <(ps -eo pid=,ppid=,pgid=,tpgid=,args= 2>/dev/null)
   return 0
 }
 
@@ -1314,11 +1321,64 @@ read_cmdline() {
 # Known shells — used to decide whether to descend one level
 SHELLS_PATTERN='^-?(ba|z|fi|da|a|k|tc|c)?sh$|^-?login$'
 
+# /proc/<pid>/stat after its comm field: state ppid pgrp session tty_nr tpgid.
+STAT_IDS_RE='^[^ ]+ [^ ]+ (-?[0-9]+) [^ ]+ [^ ]+ (-?[0-9]+)'
+
+# Process group and the controlling tty's foreground process group of a pid:
+# REPLY="<pgrp> <tpgid>", either half empty when unknown.  The comm field is
+# parenthesised and may itself hold spaces, ')' and even a newline, so the file
+# is read whole and the fields are counted from its LAST ") ".
+proc_group_ids() {
+  REPLY=""
+  local pid="$1" line=""
+  [ -n "$pid" ] || return 0
+  if [ "$PROC_CMDLINE_OK" = 1 ]; then
+    { read -r -d '' line < "/proc/$pid/stat"; } 2>/dev/null || :
+    line="${line##*) }"
+    [[ "$line" =~ $STAT_IDS_RE ]] || return 0
+    REPLY="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+  else
+    REPLY="${PS_PGID[$pid]:-} ${PS_TPGID[$pid]:-}"
+  fi
+  return 0
+}
+
+# Which of a shell's direct children is the command to show.  REPLY = a pid.
+#
+# The one in the pane tty's FOREGROUND process group — the job the shell is
+# waiting on, the same process tmux's own #{pane_current_command} names.  Not
+# simply the first child: that is the OLDEST one, so a job backgrounded earlier
+# (or stopped with ^Z, or a shell plugin's helper) shadowed whatever ran in the
+# foreground after it.  In order:
+#   * the job leader itself, when it is one of the shell's children;
+#   * else the first child in that group — a pipeline whose leader already
+#     exited (`cat f | less`) keeps the dead leader's pid as its group id;
+#   * else the first child: the shell is itself in the foreground (at its
+#     prompt, jobs only in the background), or the foreground belongs to
+#     something that is not the shell's direct child.  Never walk deeper.
+# One child needs no lookup at all: every rule above picks it.
+pick_child() {
+  local pid="$1" children="$2" first c fg
+  first="${children%% *}"
+  REPLY="$first"
+  [[ "${children#"$first"}" == *[0-9]* ]] || return 0
+  proc_group_ids "$pid"; fg="${REPLY#* }"
+  REPLY="$first"
+  case "$fg" in ''|0|-*|"$pid") return 0 ;; esac
+  case " $children " in *" $fg "*) REPLY="$fg"; return 0 ;; esac
+  for c in $children; do
+    proc_group_ids "$c"
+    [ "${REPLY%% *}" = "$fg" ] && { REPLY="$c"; return 0; }
+  done
+  REPLY="$first"
+  return 0
+}
+
 # Get the user's actual command from a pane pid.
-# Strategy: if the pane process is a shell, show its direct child (the
-# command the user typed).  Do NOT walk further — deeper children are
-# subprocesses of that command (LSPs, formatters, watchers, …) and
-# showing those is misleading.
+# Strategy: if the pane process is a shell, show one of its direct children
+# (the command the user typed — pick_child says which).  Do NOT walk further —
+# deeper children are subprocesses of that command (LSPs, formatters,
+# watchers, …) and showing those is misleading.
 #
 # The shell test MUST come from the pane process's own argv.  tmux's
 # #{pane_current_command} names the pane tty's FOREGROUND process group, which
@@ -1348,7 +1408,7 @@ full_command() {
       children="${PS_CHILDREN[$pid]:-}"
     fi
     if [ -n "$children" ]; then
-      child="${children%% *}"
+      pick_child "$pid" "$children"; child="$REPLY"
       if [ "$PROC_CMDLINE_OK" = 1 ]; then
         read_cmdline "$child"
       else

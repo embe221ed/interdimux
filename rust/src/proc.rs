@@ -1,8 +1,10 @@
 //! Full-command resolution, ported from the bash backends.
 //!
-//! Strategy: if the pane's own process is a shell, show its first child (the
-//! command the user typed).  Never walk deeper — grandchildren are the
-//! command's own subprocesses (LSPs, formatters) and showing those misleads.
+//! Strategy: if the pane's own process is a shell, show one of its direct
+//! children (the command the user typed) — the one in the pane tty's
+//! FOREGROUND process group, see `Resolver::pick_child`.  Never walk deeper —
+//! grandchildren are the command's own subprocesses (LSPs, formatters) and
+//! showing those misleads.
 //!
 //! Three backends, each fork-free per pane where possible:
 //!   * `/proc` (Linux): one lazy read per pane, no fork, cost scales with panes.
@@ -61,11 +63,13 @@ pub fn sanitize(s: &str) -> String {
         .collect()
 }
 
-/// A one-shot `ps -eo pid=,ppid=,args=` snapshot, parsed into the same two maps
-/// bash builds (pid -> argv, ppid -> children).  Children preserve ps output
-/// order so `first()` picks the same child bash's `${children%% *}` does.
+/// A one-shot `ps -eo pid=,ppid=,pgid=,tpgid=,args=` snapshot, parsed into the
+/// same maps bash builds (pid -> argv, pid -> (pgid, tpgid), ppid -> children).
+/// Children preserve ps output order so `first()` picks the same child bash's
+/// `${children%% *}` does.
 struct PsTable {
     args: HashMap<u32, String>,
+    groups: HashMap<u32, (i64, i64)>,
     children: HashMap<u32, Vec<u32>>,
 }
 
@@ -74,23 +78,25 @@ impl PsTable {
         // The EXACT command bash forks, inheriting bash's environment, so any
         // width-truncation ps applies is identical on both sides.
         let out = std::process::Command::new("ps")
-            .args(["-eo", "pid=,ppid=,args="])
+            .args(["-eo", "pid=,ppid=,pgid=,tpgid=,args="])
             .output()
             .ok()?;
         // bash ignores ps's exit status and processes whatever it printed.
         let text = String::from_utf8_lossy(&out.stdout);
         let mut args: HashMap<u32, String> = HashMap::new();
+        let mut groups: HashMap<u32, (i64, i64)> = HashMap::new();
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
         for line in text.lines() {
-            if let Some((pid, ppid, a)) = parse_ps_line(line) {
-                args.insert(pid, a);
-                children.entry(ppid).or_default().push(pid);
+            if let Some(r) = parse_ps_line(line) {
+                args.insert(r.pid, r.args);
+                groups.insert(r.pid, (r.pgid, r.tpgid));
+                children.entry(r.ppid).or_default().push(r.pid);
             }
         }
         if args.is_empty() {
             return None; // ps missing or produced nothing -> unavailable, like bash
         }
-        Some(PsTable { args, children })
+        Some(PsTable { args, groups, children })
     }
 }
 
@@ -106,15 +112,45 @@ impl PsTable {
 /// split and trim on ASCII IFS only.
 const IFS_WS: [char; 2] = [' ', '\t'];
 
-/// Split one `ps` line into (pid, ppid, args), mirroring bash `read -r pid ppid
-/// args`: the first two IFS-delimited fields, then the remainder with its leading
-/// IFS whitespace stripped and everything else preserved.  Trailing whitespace is
-/// irrelevant — `full_command`'s trim removes it before it is used.
-fn parse_ps_line(line: &str) -> Option<(u32, u32, String)> {
+/// One parsed `ps` line.
+#[derive(Debug, PartialEq)]
+struct PsRow {
+    pid: u32,
+    ppid: u32,
+    pgid: i64,
+    tpgid: i64,
+    args: String,
+}
+
+/// Split one `ps` line into its five columns, mirroring bash `read -r pid ppid
+/// pgid tpgid args`: the first four IFS-delimited fields, then the remainder
+/// with its leading IFS whitespace stripped and everything else preserved.
+/// Trailing whitespace is irrelevant — `full_command`'s trim removes it before
+/// it is used.
+fn parse_ps_line(line: &str) -> Option<PsRow> {
     let (pid_s, rest) = take_word(line.trim_start_matches(IFS_WS))?;
     let (ppid_s, rest) = take_word(rest.trim_start_matches(IFS_WS))?;
+    let (pgid_s, rest) = take_word(rest.trim_start_matches(IFS_WS))?;
+    let (tpgid_s, rest) = take_word(rest.trim_start_matches(IFS_WS))?;
     let args = rest.trim_start_matches(IFS_WS).to_string();
-    Some((pid_s.parse().ok()?, ppid_s.parse().ok()?, args))
+    Some(PsRow {
+        pid: pid_s.parse().ok()?,
+        ppid: ppid_s.parse().ok()?,
+        // Unparseable group ids only disable the foreground preference (bash's
+        // string compare never matches them either); they never drop the row.
+        pgid: pgid_s.parse().unwrap_or(0),
+        tpgid: tpgid_s.parse().unwrap_or(0),
+        args,
+    })
+}
+
+/// (pgrp, tpgid) from the text of /proc/<pid>/stat.  The comm field is
+/// parenthesised and may hold spaces, ')' and newlines, so the fields are
+/// counted from the LAST ')': state ppid pgrp session tty_nr tpgid.
+fn parse_stat_ids(stat: &str) -> Option<(i64, i64)> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().take(6).collect();
+    Some((f.get(2)?.parse().ok()?, f.get(5)?.parse().ok()?))
 }
 
 fn take_word(s: &str) -> Option<(&str, &str)> {
@@ -228,19 +264,75 @@ impl Resolver {
         String::new()
     }
 
-    /// The pid of the shell's first child, in the same order bash would pick.
-    fn first_child(&self, pid: u32) -> Option<u32> {
+    /// The shell's direct children, in the order bash sees them: fork order
+    /// from /proc, ps output order from the snapshot, ascending pid from libproc.
+    fn children(&self, pid: u32) -> Vec<u32> {
         if self.libproc {
-            return macproc::first_child(pid);
+            return macproc::children(pid);
         }
         if let Some(t) = &self.ps {
-            return t.children.get(&pid).and_then(|v| v.first()).copied();
+            return t.children.get(&pid).cloned().unwrap_or_default();
         }
         if self.proc_ok {
-            let s = fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid)).ok()?;
-            return s.split_whitespace().next()?.parse().ok();
+            // A pid that fails to parse ends the list, as a non-number would
+            // never have matched anything on the bash side either.
+            return fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid))
+                .map(|s| s.split_whitespace().map_while(|w| w.parse().ok()).collect())
+                .unwrap_or_default();
+        }
+        Vec::new()
+    }
+
+    /// (process group, the controlling tty's foreground process group) of `pid`.
+    fn group_ids(&self, pid: u32) -> Option<(i64, i64)> {
+        if pid == 0 {
+            return None;
+        }
+        if self.libproc {
+            return macproc::group_ids(pid);
+        }
+        if let Some(t) = &self.ps {
+            return t.groups.get(&pid).copied();
+        }
+        if self.proc_ok {
+            let raw = fs::read(format!("/proc/{}/stat", pid)).ok()?;
+            return parse_stat_ids(&String::from_utf8_lossy(&raw));
         }
         None
+    }
+
+    /// Which of a shell's direct children is the command to show — the one in
+    /// the pane tty's FOREGROUND process group, the job the shell is waiting
+    /// on (and what tmux's own #{pane_current_command} names).  Not simply the
+    /// first child: that is the OLDEST, so a job backgrounded earlier (or
+    /// stopped with ^Z, or a shell plugin's helper) shadowed whatever ran in
+    /// the foreground after it.  Mirrors bash `pick_child`, in order:
+    ///   * the job leader itself, when it is one of the shell's children;
+    ///   * else the first child in that group — a pipeline whose leader already
+    ///     exited (`cat f | less`) keeps the dead leader's pid as its group id;
+    ///   * else the first child: the shell is itself in the foreground (at its
+    ///     prompt, jobs only in the background), or the foreground belongs to
+    ///     something that is not the shell's direct child.
+    /// One child needs no lookup at all: every rule above picks it.
+    fn pick_child(&self, pid: u32) -> Option<u32> {
+        let kids = self.children(pid);
+        let first = *kids.first()?;
+        if kids.len() == 1 {
+            return Some(first);
+        }
+        let fg = match self.group_ids(pid) {
+            Some((_, t)) if t > 0 && t != i64::from(pid) => t,
+            _ => return Some(first),
+        };
+        if let Some(&leader) = kids.iter().find(|&&c| i64::from(c) == fg) {
+            return Some(leader);
+        }
+        for &c in &kids {
+            if self.group_ids(c).map(|(g, _)| g) == Some(fg) {
+                return Some(c);
+            }
+        }
+        Some(first)
     }
 
     /// The command to display for a pane.  `short` is tmux's
@@ -258,7 +350,7 @@ impl Resolver {
         let own = self.args_of(pid);
         let argv0 = own.split(' ').next().unwrap_or("");
         let resolved = if is_shell(argv0) {
-            match self.first_child(pid) {
+            match self.pick_child(pid) {
                 Some(child) => self.args_of(child),
                 None => own.clone(),
             }
@@ -283,17 +375,29 @@ fn force_ps() -> bool {
 mod tests {
     use super::*;
 
+    /// A ps-backed resolver from (pid, ppid, argv) rows.  Every process leads
+    /// its own group and has no controlling tty (tpgid -1), so no foreground
+    /// job is known and child selection falls back to the first child.
     fn ps_resolver(lines: &[(u32, u32, &str)]) -> Resolver {
+        let rows: Vec<(u32, u32, i64, i64, &str)> =
+            lines.iter().map(|&(pid, ppid, a)| (pid, ppid, i64::from(pid), -1, a)).collect();
+        ps_resolver_groups(&rows)
+    }
+
+    /// A ps-backed resolver from (pid, ppid, pgid, tpgid, argv) rows.
+    fn ps_resolver_groups(lines: &[(u32, u32, i64, i64, &str)]) -> Resolver {
         let mut args = HashMap::new();
+        let mut groups = HashMap::new();
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        for &(pid, ppid, a) in lines {
+        for &(pid, ppid, pgid, tpgid, a) in lines {
             args.insert(pid, a.to_string());
+            groups.insert(pid, (pgid, tpgid));
             children.entry(ppid).or_default().push(pid);
         }
         Resolver {
             proc_ok: false,
             libproc: false,
-            ps: Some(PsTable { args, children }),
+            ps: Some(PsTable { args, groups, children }),
             ps_tried: true,
             cache: HashMap::new(),
             mac_buf: Vec::new(),
@@ -379,21 +483,27 @@ mod tests {
 
     // --- ps-backend parsing + resolution ------------------------------------
 
+    fn row(pid: u32, ppid: u32, pgid: i64, tpgid: i64, args: &str) -> Option<PsRow> {
+        Some(PsRow { pid, ppid, pgid, tpgid, args: args.to_string() })
+    }
+
     #[test]
     fn parses_ps_lines_like_bash_read() {
         // leading pad, multi-space padding, internal spacing preserved
-        assert_eq!(parse_ps_line("  501  1234 /usr/bin/vim foo.rs"),
-                   Some((501, 1234, "/usr/bin/vim foo.rs".to_string())));
-        assert_eq!(parse_ps_line("1 0 /sbin/launchd"),
-                   Some((1, 0, "/sbin/launchd".to_string())));
+        assert_eq!(parse_ps_line("  501  1234   501  -1 /usr/bin/vim foo.rs"),
+                   row(501, 1234, 501, -1, "/usr/bin/vim foo.rs"));
+        assert_eq!(parse_ps_line("1 0 1 0 /sbin/launchd"),
+                   row(1, 0, 1, 0, "/sbin/launchd"));
         // an internal double space in argv survives
-        assert_eq!(parse_ps_line("7 7 cmd  two"),
-                   Some((7, 7, "cmd  two".to_string())));
+        assert_eq!(parse_ps_line("7 7 7 9 cmd  two"),
+                   row(7, 7, 7, 9, "cmd  two"));
         // no args column (kernel thread style) -> empty argv, still parses
-        assert_eq!(parse_ps_line("9 2 "), Some((9, 2, String::new())));
+        assert_eq!(parse_ps_line("9 2 0 -1 "), row(9, 2, 0, -1, ""));
         // junk / header-ish lines are dropped
-        assert_eq!(parse_ps_line("  PID PPID COMMAND"), None);
+        assert_eq!(parse_ps_line("  PID PPID PGID TPGID COMMAND"), None);
         assert_eq!(parse_ps_line(""), None);
+        // too few columns to hold both group ids -> not a row
+        assert_eq!(parse_ps_line("5 1 5"), None);
     }
 
     #[test]
@@ -402,14 +512,117 @@ mod tests {
         // verbatim; bash `read` (ASCII IFS) KEEPS a leading one in the args
         // field, so the parser must too — a Unicode `trim_start` here diverges
         // from bash at shell detection on a pathological argv0.
-        assert_eq!(parse_ps_line("501 1 \u{a0}-bash --norc"),
-                   Some((501, 1, "\u{a0}-bash --norc".to_string())));
+        assert_eq!(parse_ps_line("501 1 501 501 \u{a0}-bash --norc"),
+                   row(501, 1, 501, 501, "\u{a0}-bash --norc"));
         // pid/ppid still split on ASCII space; internal Unicode ws survives
-        assert_eq!(parse_ps_line("7 7 cmd\u{2000}two"),
-                   Some((7, 7, "cmd\u{2000}two".to_string())));
+        assert_eq!(parse_ps_line("7 7 7 7 cmd\u{2000}two"),
+                   row(7, 7, 7, 7, "cmd\u{2000}two"));
         // a leading ASCII tab before a field is IFS and IS stripped, like bash
-        assert_eq!(parse_ps_line("\t3 4 x"), Some((3, 4, "x".to_string())));
+        assert_eq!(parse_ps_line("\t3 4 3 -1 x"), row(3, 4, 3, -1, "x"));
     }
+
+    #[test]
+    fn stat_ids_are_counted_from_the_last_paren() {
+        // a real line: pid (comm) state ppid pgrp session tty_nr tpgid ...
+        assert_eq!(parse_stat_ids("762622 (cat) R 762615 762615 762615 34816 762700 4194304"),
+                   Some((762615, 762700)));
+        // comm may hold spaces, ')' and a newline; only the LAST ')' ends it
+        assert_eq!(parse_stat_ids("42 (a) b) c\nd) S 1 40 40 34816 41 0"), Some((40, 41)));
+        // no controlling tty
+        assert_eq!(parse_stat_ids("7 (kworker) I 2 0 0 0 -1 0"), Some((0, -1)));
+        // a vanished process reads as nothing, never as garbage ids
+        assert_eq!(parse_stat_ids(""), None);
+        assert_eq!(parse_stat_ids("12 (x) S 1"), None);
+    }
+
+    // --- which child: the foreground job ------------------------------------
+
+    #[test]
+    fn a_foreground_job_beats_an_older_background_one() {
+        // `sleep 601 &` then `sleep 600`: the shell's FIRST child is the older
+        // background job, but the tty's foreground group is the newer one.
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 300, "bash"),
+            (200, 100, 200, 300, "sleep 601"),
+            (300, 100, 300, 300, "sleep 600"),
+        ]);
+        assert_eq!(r.full_command(100, "sleep"), "sleep 600");
+    }
+
+    #[test]
+    fn a_pipeline_whose_leader_exited_is_found_by_its_group() {
+        // `sleep 605 & true | sleep 606`: `true` led the pipeline's group (250)
+        // and is gone, so the foreground group names no live child — the child
+        // IN that group is the command.
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 250, "bash"),
+            (200, 100, 200, 250, "sleep 605"),
+            (260, 100, 250, 250, "sleep 606"),
+        ]);
+        assert_eq!(r.full_command(100, "bash"), "sleep 606");
+    }
+
+    #[test]
+    fn a_shell_at_its_prompt_keeps_showing_its_first_child() {
+        // tpgid == the shell: nothing runs in the foreground, the children are
+        // background jobs -> the first one, exactly as before.  The second
+        // child sits in the SHELL's own group (a prompt plugin's async worker,
+        // forked without job control): being "in the foreground group" must not
+        // promote it while the shell itself is that group.
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 100, "zsh"),
+            (200, 100, 200, 100, "sleep 601"),
+            (300, 100, 100, 100, "zsh-async-worker"),
+        ]);
+        assert_eq!(r.full_command(100, "zsh"), "sleep 601");
+    }
+
+    #[test]
+    fn a_foreground_group_outside_the_shells_children_is_not_followed() {
+        // The foreground belongs to a grandchild's group (sudo, a nested shell):
+        // never walk deeper — the first child, as before.
+        let mut r = ps_resolver_groups(&[
+            (100, 1, 100, 900, "bash"),
+            (200, 100, 200, 900, "sleep 601"),
+            (300, 100, 300, 900, "sudo -s"),
+            (900, 300, 900, 900, "vim /etc/hosts"),
+        ]);
+        assert_eq!(r.full_command(100, "bash"), "sleep 601");
+    }
+
+    #[test]
+    fn unknown_or_absent_foreground_groups_fall_back_to_the_first_child() {
+        for tpgid in [0, -1] {
+            let mut r = ps_resolver_groups(&[
+                (100, 1, 100, tpgid, "bash"),
+                (200, 100, 200, tpgid, "first"),
+                (300, 100, 300, tpgid, "second"),
+            ]);
+            assert_eq!(r.full_command(100, "bash"), "first", "tpgid {}", tpgid);
+        }
+    }
+
+    #[test]
+    fn proc_stat_ids_agree_with_ps() {
+        // The /proc parse against an independent reader of the same kernel
+        // record: `ps -o pgid=,tpgid=` for this very process.
+        let me = std::process::id();
+        let raw = match std::fs::read_to_string(format!("/proc/{}/stat", me)) {
+            Ok(s) => s,
+            Err(_) => return, // not a /proc host
+        };
+        let out = match std::process::Command::new("ps")
+            .args(["-o", "pgid=,tpgid=", "-p", &me.to_string()])
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return, // no ps to compare against
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let want: Vec<i64> = text.split_whitespace().map(|w| w.parse().unwrap()).collect();
+        assert_eq!(parse_stat_ids(&raw), Some((want[0], want[1])), "ps said {:?}", text);
+    }
+
 
     #[test]
     fn ps_backend_unicode_ws_argv0_is_not_a_shell_matching_bash() {
