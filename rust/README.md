@@ -8,7 +8,21 @@ that was ~181 ms of in-process bash.
 
 `scripts/interdimux.sh` picks the binary up automatically from
 `rust/target/release/imux`. Set `INTERDIMUX_BIN=/path/to/imux` to use one
-installed elsewhere, or `INTERDIMUX_USE_RUST=off` to force the bash renderer.
+installed elsewhere — for the popups, in the tmux server's environment
+(`tmux set-environment -g INTERDIMUX_BIN …`) — or `INTERDIMUX_USE_RUST=off` to
+force the bash renderer. A binary whose output is not rows is not trusted: the
+list falls back to bash.
+
+The plugin runs that build itself. When cargo is on the tmux server's PATH (or
+in `$CARGO_HOME/bin`, `~/.cargo/bin` by default) and the binary is missing or
+older than `src/` or `Cargo.toml`, `interdimux.tmux` starts it as a tmux job
+(`run-shell -b`), so loading the plugin never waits for it. It is niced,
+`--locked` so the checkout's `Cargo.lock` is never rewritten, and has
+`CARGO_TARGET_DIR` pinned to `rust/target`. One build at a time (a lock in
+`target/`), output in `$XDG_STATE_HOME/interdimux/build.log`, and a status-line
+message at the end. `set -g @interdimux-autobuild off` turns it off; it is not
+done at all when `INTERDIMUX_BIN` names a binary or `INTERDIMUX_USE_RUST=off`,
+since the in-repo build would not be used.
 
 ## The boundary
 

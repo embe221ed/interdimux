@@ -22,7 +22,8 @@ A portal gun for your tmux sessions.
   `popup-border-style` / `popup-border-lines` settings, with titled
   frames on tmux >= 3.3 and a red frame during kill prompts and kill
   mode on tmux >= 3.6 (only the colour is overridden — your border
-  lines and background are kept)
+  lines and background are kept; with `padded` lines, which have no line
+  to colour, the frame's background turns red instead)
 - Dashboard as a native tmux menu on tmux >= 3.4 (fzf menu fallback below)
 - Proper confirmation dialogs (centered boxes, `y`/`n`/`esc`) instead of raw
   prompts; rename pre-fills the current name with readline editing
@@ -56,20 +57,26 @@ A portal gun for your tmux sessions.
   simply blank. Measured: 3.4 → 0 rows, 3.5a → 0 rows, 3.6 → works. Note that
   Ubuntu 24.04 ships 3.4 and Debian 13 ships 3.5a, so on those you want tmux
   from source or a backport.
-- **`fzf` >= 0.74.** Older versions still open a working picker — every feature
-  is version-gated and degrades on its own (0.46 the find-or-create
-  announcement and re-fitting on resize, 0.52 full-line highlight, 0.53 errors
-  logged instead of drawn over the list, 0.58 match-scope cycling, 0.61 ghost
-  text, 0.63 the footer hint bar, 0.66 the scope highlight, 0.67 the frozen
-  identity column, 0.74 raw filter mode) — but 0.74 is the only version the
-  test suite exercises in full; `tests/test_old_fzf.sh` checks just that 0.44
-  and 0.52 open and draw.
-- `bash` >= 4.3, on the tmux server's PATH (macOS's own `/bin/bash` is 3.2)
+- **`fzf` >= 0.40, and 0.74 for everything.** Below 0.40 the picker refuses to
+  start, and says so. From 0.40 up it opens a working picker, and every newer
+  feature is version-gated and degrades on its own (0.46 the find-or-create
+  announcement and re-fitting on resize, 0.51 a hint bar that follows the
+  cursor without starting a process per move, 0.52 full-line highlight, 0.53
+  errors logged instead of drawn over the list, 0.58 match-scope cycling, 0.61
+  ghost text, 0.63 the footer hint bar, 0.66 the scope highlight, 0.67 the
+  frozen identity column, 0.74 raw filter mode) — but 0.74 is the only version
+  the test suite exercises in full; `tests/test_old_fzf.sh` checks just that
+  0.44 and 0.52 open and draw.
+- `bash` >= 4.3, on the tmux server's PATH (macOS's own `/bin/bash` is 3.2). An
+  older one is refused with a one-line error — on the status line, too, when
+  tmux runs it — rather than failing somewhere inside.
 - A UTF-8 locale. The tree glyphs are multibyte and every column width is
   counted in cells; under `LC_ALL=C` the columns misalign. `--doctor` says so.
 - `fd` or `find` (for directory picker)
 - `at` (optional — the Schedule and Jobs entries; needs its job-runner enabled)
 - `zoxide` (optional — feeds the recent tier and find-or-create)
+- A Rust toolchain (optional, recommended — builds the fast renderer; see
+  [The Rust core](#the-rust-core-optional-recommended))
 
 CI builds tmux 3.7b and installs fzf 0.74 rather than using the distro packages,
 for exactly these reasons — see [docs/CI.md](docs/CI.md).
@@ -103,6 +110,40 @@ Reload tmux:
 ```bash
 tmux source-file ~/.tmux.conf
 ```
+
+### The Rust core (optional, recommended)
+
+The list is rendered by a small Rust binary when there is one, and by a bash
+fallback when there is not. The fallback works, but it slows down as the list
+grows — 1.7× slower at a dozen rows, 7.8× at five hundred — and it pads columns
+by character count, so a CJK or emoji name shifts every column after it.
+
+When `cargo` is on the tmux server's `PATH` (or in `~/.cargo/bin`, where rustup
+puts it), the plugin builds the binary itself. Loading it — `prefix + I`, a
+`tmux source-file`, a new server — starts `cargo build --release` in the
+background whenever `rust/target/release/imux` is missing or older than its
+sources. Nothing waits for it: tmux starts and the keys are bound while it
+compiles, niced; the status line says when it is done or has failed, and the
+output goes to `~/.local/state/interdimux/build.log` (`$XDG_STATE_HOME`). The
+first build downloads one crate. `set -g @interdimux-autobuild 'off'` stops it,
+and this is the same build by hand:
+
+```bash
+cd ~/.tmux/plugins/interdimux/rust && cargo build --release
+```
+
+No cargo? Install Rust from [rustup.rs](https://rustup.rs), or use an `imux`
+built elsewhere by naming it in the tmux server's environment (in
+`~/.tmux.conf`, or run once):
+
+```tmux
+set-environment -g INTERDIMUX_BIN '/path/to/imux'
+```
+
+That is an environment variable, not a tmux option, on purpose: it chooses the
+program every picker runs. `--doctor` says which binary is in use, whether it is
+older than its sources, and what to do when there is none. More in
+[rust/README.md](rust/README.md).
 
 ## Usage
 
@@ -140,7 +181,7 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 | Key | Action |
 |---|---|
 | `Enter` | Switch to the selected target — or create a session named after the query when nothing matches |
-| `Ctrl-x` | Kill the selected session, window, or pane — killing the session you are attached to hops your client to the most recent other session first (no surprise detach) |
+| `Ctrl-x` | Kill the selected session, window, or pane — killing a session with clients on it, yours included, first hops them to the most recent other session (no surprise detach). So does killing its last window or last pane, which closes the session too; the dialog says so before you answer |
 | `Ctrl-e` | Rename the selected session or window (pre-filled with the current name) |
 | `Ctrl-o` | Open directory picker to create a new session |
 | `Ctrl-z` | Toggle zoom on the selected pane |
@@ -195,6 +236,14 @@ editor window of the *proj* session) and the command column. Paths, git
 badges, and metadata are visible but not matched — press `Ctrl-]` to
 cycle the scope when you *do* want to search by path.
 
+On fzf >= 0.74 the list filters in *raw* mode: a query dims the rows it does not
+match instead of removing them, so the tree keeps its shape while you type, and
+the cursor moves to the best match — and stays where it is when the list
+reloads under it (`Ctrl-r`, the preview, a resize, a cancelled kill). With
+nothing matched, `Enter` still creates a session from the query, and the other
+action keys only say so: a dimmed row is never a target.
+`set -g @interdimux-raw 'off'` gives plain filtering.
+
 The session name on a window row is matched as it is *displayed*. A name
 longer than 16 characters is shortened with `…`, and so is any name on a
 popup too narrow for the rest of the row — the path and the branch badge
@@ -208,6 +257,13 @@ new one — typing `circle` with a `circle/sui-cctp` session open goes there, no
 into a fresh session made from a `Circle` directory — and a session is picked
 ahead of its own windows. This is a tiebreak, not a rule that sessions always
 win: a directory whose name is genuinely the better match is still picked first.
+
+Any session name tmux will hold works here — `$1`, `my.app`, `c:d`, `a#Sb` —
+for switching, previewing and killing alike, and a directory called `proj#Sync`
+gives a session of exactly that name. Rename refuses two kinds of name that
+tmux itself would take, because nothing could reach them by name afterwards
+(`tmux attach -t` included): one containing `:`, where tmux splits a target, and
+a session name starting with `$`, which tmux reads as a session ID.
 
 ### Numbered jumps (opt-in)
 
@@ -228,13 +284,15 @@ tmux offers no way to ask what it was bound to and restore it later.
 The mode is also usable directly, for a different key layout or a different N:
 
 ```tmux
-bind-key -n M-0 run-shell -b "TMUX_PANE=#{pane_id} bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --jump 4"
+bind-key -n M-0 run-shell -b "TMUX_PANE=#{pane_id} INTERDIMUX_CLIENT=#{q:client_name} bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --jump 4"
 ```
 
 `TMUX_PANE=#{pane_id}` is required, not decoration: `run-shell` passes the tmux
 *server's* global environment, not the pressing client's pane, so without it
 the "which session am I in" question — and therefore the numbering — can be
-answered for the wrong session.
+answered for the wrong session. `INTERDIMUX_CLIENT` does the same for the
+client: with two terminals attached, the one you pressed the key on is the one
+that moves, rather than whichever tmux last saw a key from.
 
 ### Directory picker (`Ctrl-o` / dashboard "New Session")
 
@@ -245,7 +303,8 @@ Creates (or switches to) a session from a directory. The list has three tiers:
 - `·` plain directories
 
 A directory that already has a session is marked `▸` and shows which one, so
-`Enter` there is visibly a switch rather than a create:
+`Enter` there is visibly a switch rather than a create. A session belongs to the
+directory it was started in, even after you `cd` somewhere else inside it:
 
 ```
   ▸  ~/code/api          → api
@@ -267,6 +326,10 @@ When a query matches nothing the prompt says so and points at `Ctrl-r`, so a
 fruitless deep search is not a blank panel with no visible way back.
 
 The preview shows project type, git branch/status/last commit, a README excerpt, and the directory contents. Session names are derived from the directory basename; when two projects share a basename, the new session is disambiguated with the parent directory name.
+
+On a network or FUSE mount (see [Tree display](#tree-display)) a directory goes
+without its type badge, and a recent one is offered without checking that it
+still exists, so one stalled mount cannot hold up the list.
 
 ### Tree display
 
@@ -303,6 +366,11 @@ The preview shows project type, git branch/status/last commit, a README excerpt,
   never the flags
 - SSH connections show `user@host` highlighted in blue
 - Editors show the filename highlighted in green
+- The command is the one in the pane's foreground — a job you backgrounded does
+  not hide it — and it is named, not pathed: `python3 tool.py`, not
+  `/usr/bin/python3 /home/me/bin/tool.py`
+- An idle shell is just its name (`zsh`, not `-zsh`) in the tree colour, so
+  the rows where something is running are the ones that stand out
 - Panes only shown for multi-pane windows
 - Column widths adapt to the content and the popup width. When a row does not
   fit, what you only read gives way before what you type: the path shrinks
@@ -329,7 +397,8 @@ interdimux doctor                                    23 ok, 2 warn, 1 problem
 ```
 
 Reports what tmux, fzf and interdimux itself can see: versions and the features
-they gate, whether the Rust helper is built *and newer than its sources*, whether
+they gate, whether the Rust helper is built *and newer than its sources* (and if
+not, the command that builds it — or, with no cargo, where to get one), whether
 the key bindings are actually installed, whether the state directories are
 writable, whether your locale is UTF-8 (the tree glyphs and every column width
 assume it), whether `sort -s` works (the session order is stable and locale-free
@@ -354,7 +423,9 @@ The environment it checks is the one the popups get: the tmux server's `PATH`,
 locale and `$FZF_DEFAULT_OPTS`, not your shell's. The two differ exactly when
 it matters — fzf on `PATH` only through a shell rc, a UTF-8 locale that is named
 but not installed — so run from a shell, it says which one it read.
-`interdimux.sh --help` lists the other command-line modes.
+`interdimux.sh --help` lists the other command-line modes, and `--version` prints
+the version; an argument that is not a mode is refused with exit status 2
+rather than opening the navigator.
 
 It is also where past failures surface. The navigator sends its stderr to the
 status line and to `$XDG_STATE_HOME/interdimux/errors.log` rather than to the
@@ -373,7 +444,7 @@ way.
 All options are set via tmux options in `~/.tmux.conf`:
 
 ```tmux
-# Navigator key binding (default: f)
+# Navigator key binding (default: f).  Any key tmux can bind: C-f, M-g, F5 …
 set -g @interdimux-key 'f'
 
 # Dashboard key binding (default: g)
@@ -418,6 +489,10 @@ set -g @interdimux-scope-highlight 'on'
 # last) or 'index' (tmux native order)  (default: mru)
 set -g @interdimux-order 'mru'
 
+# Raw filtering (fzf >= 0.74): a query dims the rows it does not match
+# instead of hiding them, so the tree keeps its shape (default: on)
+set -g @interdimux-raw 'on'
+
 # Extra fzf flags appended to every picker (advanced; applied after the
 # built-in theme so your colors win).
 #
@@ -451,7 +526,8 @@ set -g @interdimux-use-zoxide 'on'
 set -g @interdimux-dirs-live-search 'off'
 
 # Colon-separated extra project markers, added to the built-in list
-# (.git, package.json, Cargo.toml, go.mod, ...)
+# (.git, package.json, Cargo.toml, go.mod, ...).  A path such as
+# .github/workflows works too; an empty entry (a doubled ':') is ignored.
 set -g @interdimux-project-markers 'Move.toml:deno.json'
 
 # Show recent/zoxide directories inline in the navigator as dim '+ name'
@@ -467,6 +543,11 @@ set -g @interdimux-hydrate 'on'
 
 # Fallback startup command, used when nothing more specific matches
 set -g @interdimux-startup-command 'nvim .'
+
+# Build the Rust core in the background when the plugin loads, if cargo is
+# available and the binary is missing or older than its sources (default: on).
+# See "The Rust core" under Installation.
+set -g @interdimux-autobuild 'on'
 ```
 
 ### Scheduled keys
@@ -581,18 +662,21 @@ your prompt appears. Set `@interdimux-hydrate off` to disable.
 A directory can also be bound straight to a key, skipping the picker:
 
 ```tmux
-bind-key C-a run-shell -b "bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh \
-  --connect-dir ~/code/api"
+bind-key C-a run-shell -b "TMUX_PANE=#{pane_id} INTERDIMUX_CLIENT=#{q:client_name} \
+  bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --connect-dir ~/code/api"
 ```
+
+(The two variables are the ones the [numbered jumps](#numbered-jumps-opt-in)
+example explains.)
 
 ### Colors
 
 Every color is a tmux option. A value is a hex `#rrggbb`, a 256-color
 index (0-255), or `-1` / `default` (inherit the terminal); anything else is
-treated as `-1`, so a typo costs a color, not the picker. The defaults reproduce
-the built-in warm palette, so you only set what you want to change. Hex
-values render as truecolor and need an RGB-capable terminal (`$COLORTERM`
-= `truecolor`); the index defaults work everywhere.
+treated as `-1`, so a typo costs a color, not the picker, and `--doctor` names
+it. The defaults reproduce the built-in warm palette, so you only set what you
+want to change. Hex values render as truecolor and need an RGB-capable terminal
+(`$COLORTERM` = `truecolor`); the index defaults work everywhere.
 
 ```tmux
 set -g @interdimux-color-accent  '#e78a4e'  # commands, marker, hint keys, prompt, titles
@@ -602,7 +686,7 @@ set -g @interdimux-color-ssh     '#7daea3'  # ssh host, activity flag
 set -g @interdimux-color-editor  '#a9b665'  # editor filename
 set -g @interdimux-color-success '#a9b665'  # ✓ marks, project-dir ◆
 set -g @interdimux-color-danger  '#ea6962'  # kill accents, bell flag, danger border
-set -g @interdimux-color-tree    '#6b665f'  # tree glyphs, fzf info
+set -g @interdimux-color-tree    '#6b665f'  # tree glyphs, idle shells, fzf info
 set -g @interdimux-color-separator '#504945' # the │ column separator
 set -g @interdimux-color-query   '#ddc7a1'  # typed query text
 set -g @interdimux-color-match-current '#e78a4e' # highlight on the current row
