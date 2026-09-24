@@ -865,11 +865,27 @@ detect_project_type() {
 
 RECENT_DIRS_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/interdimux/recent_dirs"
 
+# Is $1 valid UTF-8?  Byte-wise, so the answer does not depend on the locale:
+# the regex runs under LC_ALL=C, where a bracket range is a range of BYTES.  The
+# same definition Rust's str::from_utf8 uses (no overlongs, no surrogates,
+# nothing past U+10FFFF).  Pure ASCII -- nearly every path -- never reaches it.
+_UTF8_SEQ=$'^([\x01-\x7f]|[\xc2-\xdf][\x80-\xbf]|\xe0[\xa0-\xbf][\x80-\xbf]|[\xe1-\xec\xee\xef][\x80-\xbf][\x80-\xbf]|\xed[\x80-\x9f][\x80-\xbf]|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]|[\xf1-\xf3][\x80-\xbf][\x80-\xbf][\x80-\xbf]|\xf4[\x80-\x8f][\x80-\xbf][\x80-\xbf])*$'
+is_utf8() {
+  case "$1" in *[![:ascii:]]*) ;; *) return 0 ;; esac
+  local LC_ALL=C
+  [[ "$1" =~ $_UTF8_SEQ ]]
+}
+
+# A directory whose name is not valid UTF-8 is skipped (is_utf8), in both
+# renderers.  Listing it is worse than useless: fzf hands a selection back with
+# every invalid byte replaced by U+FFFD, so the row names a directory that does
+# not exist and can never be opened.  The Rust core skips the same lines.
 load_recent_dirs() {
   local d count=0
   local -A _recent_seen=()
   if [ -f "$RECENT_DIRS_FILE" ]; then
     while IFS= read -r d; do
+      is_utf8 "$d" || continue
       [ -d "$d" ] || continue
       [[ -v "_recent_seen[$d]" ]] && continue
       _recent_seen["$d"]=1
@@ -883,6 +899,7 @@ load_recent_dirs() {
   if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
     local zcount=0
     while IFS= read -r d; do
+      is_utf8 "$d" || continue
       [ -d "$d" ] || continue
       [[ -v "_recent_seen[$d]" ]] && continue
       _recent_seen["$d"]=1

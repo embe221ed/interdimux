@@ -25,11 +25,18 @@ bash keeps its own renderer, so the plugin works with no binary at all.
 `tests/test_rust_parity.sh` diffs the two across the configuration space that
 changes output, with a bash-vs-bash control on every case.
 
-## One intentional divergence
+## Intentional divergences
 
 bash pads columns by *character count*, so a CJK or emoji name — two terminal
 cells per character — misaligns every column to its right. The binary uses real
 display width. Identical for ASCII, correct where bash was not.
+
+A pane cwd that is not valid UTF-8 is displayed differently: bash writes the raw
+byte, the binary U+FFFD. Display only — a window or pane row's spec is its
+session and index, never its path. A *directory* row is different, because its
+spec IS the path, and fzf hands a selection back with every invalid byte
+replaced by U+FFFD: such a row could never be opened. So both renderers skip a
+recent/zoxide directory whose name is not valid UTF-8, rather than offer it.
 
 ## Measured
 

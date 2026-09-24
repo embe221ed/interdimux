@@ -73,7 +73,10 @@ export XDG_DATA_HOME="$TMPD/data"
 mkdir -p "$XDG_DATA_HOME/interdimux"
 mkdir -p "$TMPD/rustproj" && printf '[package]\n' > "$TMPD/rustproj/Cargo.toml"
 mkdir -p "$TMPD/gitproj/.git" && printf 'ref: refs/heads/parity-branch\n' > "$TMPD/gitproj/.git/HEAD"
-printf '%s\n%s\n' "$TMPD/rustproj" "$TMPD/gitproj" > "$XDG_DATA_HOME/interdimux/recent_dirs"
+# a directory whose name is not UTF-8: neither renderer may offer it (fzf would
+# hand the selection back with U+FFFD in place of the byte, naming nothing)
+mkdir -p "$TMPD/nonutf8-"$'\377'
+printf '%s\n%s\n%s\n' "$TMPD/rustproj" "$TMPD/nonutf8-"$'\377' "$TMPD/gitproj" > "$XDG_DATA_HOME/interdimux/recent_dirs"
 sleep 4
 
 rows=$(INTERDIMUX_USE_RUST=off bash "$SCRIPT" --list 2>/dev/null | wc -l)
