@@ -28,7 +28,7 @@ fn corpus_dir() -> PathBuf {
 /// renderer itself. Everything time-, host-, or config-dependent is fixed here.
 fn render(dump: &str, extra: &[(&str, &str)]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_imux"));
-    cmd.arg("gather")
+    cmd.arg("gather2")
         .env_clear()
         .env("HOME", "/home/u")
         .env("PATH", "/usr/bin:/bin")
@@ -76,7 +76,7 @@ fn render(dump: &str, extra: &[(&str, &str)]) -> String {
 /// falls back to its own renderer rather than showing a mis-framed list.
 fn try_render(dump: &str) -> (Option<i32>, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
-        .arg("gather")
+        .arg("gather2")
         .env_clear()
         .env("HOME", "/home/u")
         .env("PATH", "/usr/bin:/bin")

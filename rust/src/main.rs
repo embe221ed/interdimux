@@ -4,9 +4,10 @@
 //! the part that was 181ms of in-process bash: parsing the tmux dumps, sizing
 //! the columns, resolving commands and git branches, and rendering the rows.
 //!
-//! Contract: `imux gather` writes exactly what `interdimux.sh --list` writes.
+//! Contract: `imux gather2` writes exactly what `interdimux.sh --list` writes.
 //! bash falls back to its own implementation when this binary is absent, so the
-//! two must stay in step — tests/test_rust_parity.sh enforces that.
+//! two must stay in step — tests/test_rust_parity.sh enforces that.  The
+//! subcommand's name is the stdin protocol's version: see PROTOCOL.
 
 mod dirs;
 mod format;
@@ -28,6 +29,23 @@ use text::{age_of, truncate, width};
 use widths::{Maxima, Widths};
 
 const US: char = '\u{1f}';
+
+/// The stdin protocol this build speaks, and the subcommand bash runs it with.
+/// The name IS the version: bump it (gather3, ...) with every change to the
+/// framing or to the position of any field, in step with IMUX_PROTO in
+/// scripts/interdimux.sh.
+///
+/// Nothing else can make an old binary refuse new input.  Neither TPM's update
+/// nor a `git pull` rebuilds rust/, and an INTERDIMUX_BIN installed elsewhere
+/// is never rebuilt at all, so a script newer than its binary is routine.  When
+/// the session name moved from the second field to the first, a binary built
+/// before that read the timestamp as the name: every session was drawn as
+/// `S:1790254646`, no window or pane matched one, and the exit status was 0, so
+/// that WAS the picker.  An old binary exits 2 on a subcommand it does not
+/// know, and an extra argument or an environment variable would only have been
+/// ignored.  So a mismatch in either direction fails closed: bash falls back to
+/// its own renderer and says, once, that the binary needs rebuilding.
+const PROTOCOL: &str = "gather2";
 
 fn env_is(name: &str, want: &str) -> bool {
     std::env::var(name).map(|v| v == want).unwrap_or(false)
@@ -73,10 +91,20 @@ struct Pane {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("gather") => gather(),
+        Some(PROTOCOL) => gather(),
         Some("--version") | Some("-V") => println!("imux {}", env!("CARGO_PKG_VERSION")),
+        // Another version of the protocol: a script older (`gather`) or newer
+        // than this build.  Refused like any unknown subcommand -- exit 2 and
+        // nothing on stdout -- so that script renders the list itself.
+        Some(other) if other.starts_with("gather") => {
+            eprintln!(
+                "imux: this build speaks {}, not {}: the script and this binary are from different versions of interdimux",
+                PROTOCOL, other
+            );
+            std::process::exit(2);
+        }
         _ => {
-            eprintln!("imux: usage: imux gather");
+            eprintln!("imux: usage: imux {}", PROTOCOL);
             std::process::exit(2);
         }
     }

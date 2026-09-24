@@ -83,6 +83,15 @@ if [ "${INTERDIMUX_USE_RUST:-on}" != "off" ]; then
   done
   unset _c _imux_repo
 fi
+# The stdin protocol the binary is asked to speak.  It is the SUBCOMMAND, and
+# its name is its version: bump it with every change to the section framing or
+# to the position of any field, in step with PROTOCOL in rust/src/main.rs.  A
+# binary built from other sources -- routine after a `git pull` or a TPM update,
+# which never rebuild rust/ -- then exits 2 on the name instead of reading new
+# fields at old positions (when the session name moved to the front, an old
+# binary drew every session as its timestamp and no window at all, with exit
+# 0), and the list falls back to the bash renderer.  See imux_refused.
+IMUX_PROTO=gather2
 
 # ---------------------------------------------------------------------------
 # Option table
@@ -2661,6 +2670,45 @@ emit_dir_rows() {
   return 0
 }
 
+# The Rust core refused IMUX_PROTO (exit 2): it was built from other sources
+# than this script.  The list has already fallen back to the bash renderer --
+# correct, only slower -- so this is about telling the user, and ONCE: the list
+# is fetched on every open and every reload, and a message per fetch would
+# bury the status line and errors.log alike.  Said on the status line and in
+# errors.log, which --doctor reports, naming the binary and how to rebuild it.
+#
+# The stamp in the state directory names the binary it was said for, and a
+# rebuild makes the binary newer than the stamp, so a rebuild that is still the
+# wrong version is reported again.  Nothing is said while interdimux.tmux's
+# background build is replacing this very binary: that job announces its own
+# result, and the next open uses what it built.  All of it is off the fast path
+# -- only a refused binary gets here -- and nothing in it can fail the list.
+imux_refused() {
+  local dir="${SCHED_LOGDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/interdimux}"
+  local repo="${SCRIPT_PATH%/scripts/*}" stamp seen="" owner how msg
+  stamp="$dir/imux-refused"
+  if [ -f "$stamp" ] && ! [ "$IMUX_BIN" -nt "$stamp" ]; then
+    { IFS= read -r seen < "$stamp"; } 2>/dev/null || :
+    [ "$seen" = "$IMUX_BIN" ] && return 0
+  fi
+  if [ "$IMUX_BIN" = "$repo/rust/target/release/imux" ]; then
+    if owner=$(readlink "$repo/rust/target/.interdimux-autobuild.lock" 2>/dev/null) \
+       && [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
+      return 0
+    fi
+    how="rebuild it: (cd '$repo/rust' && cargo build --release)"
+  else
+    how="rebuild it, or point INTERDIMUX_BIN at a build of this version"
+  fi
+  msg="the Rust core at $IMUX_BIN is from another version of interdimux (it does not speak $IMUX_PROTO), so the list uses the slower bash renderer; $how"
+  imux_msg "$msg"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '== %(%Y-%m-%d %H:%M:%S)T rust core refused %s\ninterdimux: %s\n' -1 "$IMUX_PROTO" "$msg" \
+    >> "$dir/errors.log" 2>/dev/null || :
+  printf '%s\n' "$IMUX_BIN" > "$stamp" 2>/dev/null || :
+  return 0
+}
+
 gather_targets() {
   local current_session current_window current_pane cur_raw
   local sessions_raw all_windows_raw all_panes_raw
@@ -2707,7 +2755,7 @@ gather_targets() {
   if [ -n "${INTERDIMUX_DUMP_IN:-}" ]; then
     # Test seam: the four sections from a FILE instead of from tmux, framed
     # exactly as the batched query below returns them -- which is also the
-    # framing `imux gather` reads on stdin.  It is what lets the golden corpus
+    # framing `imux gather2` reads on stdin.  It is what lets the golden corpus
     # (rust/tests/corpus/*.dump) reach THIS renderer, the one every install
     # without cargo runs, with no server and no timing:
     # tests/test_corpus_parity.sh.  Same family as INTERDIMUX_NO_BATCH and
@@ -2866,6 +2914,14 @@ gather_targets() {
     # The assignments live INSIDE the substitution on purpose: written as a
     # `VAR=v \ _imux_out=$(...)` prefix chain, bash parses the lot as a list of
     # assignments with NO command, so the binary would run without any of them.
+    #
+    # Its stderr is dropped.  Every failure falls back to the bash renderer
+    # below, which draws the right list, and the one failure worth telling the
+    # user about is reported by imux_refused, once.  Left to reach the
+    # navigator's stderr, a binary older than IMUX_PROTO printed its usage line
+    # on every open and every reload, and each one became another entry in
+    # errors.log and another status-line message.
+    local _imux_rc=0
     _imux_out=$(
       INTERDIMUX_COLS="$(term_cols)" \
       INTERDIMUX_NOW="$NOW_EPOCH" \
@@ -2886,7 +2942,7 @@ gather_targets() {
       INTERDIMUX_COLOR_DANGER="$COLOR_DANGER" \
       INTERDIMUX_COLOR_TREE="$COLOR_TREE" \
       INTERDIMUX_COLOR_SEPARATOR="$COLOR_SEPARATOR" \
-      "$IMUX_BIN" gather <<IMUX_SECTIONS
+      "$IMUX_BIN" "$IMUX_PROTO" 2>/dev/null <<IMUX_SECTIONS
 ${sessions_raw}
 $RS
 ${all_windows_raw}
@@ -2895,7 +2951,10 @@ ${all_panes_raw}
 $RS
 ${cur_raw}
 IMUX_SECTIONS
-    ) || _imux_out=""
+    ) || { _imux_rc=$?; _imux_out=""; }
+    # Exit 2 is a subcommand the binary does not know: it was built from other
+    # sources than this script, and speaks another version of the protocol.
+    if [ "$_imux_rc" = 2 ]; then imux_refused; fi
     # A failed or empty render must fall through to the bash renderer, never be
     # mistaken for "there is nothing to show".  Capturing costs ~2ms (the binary
     # renders the whole list in about that) and buys a safe failure mode.

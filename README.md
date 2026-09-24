@@ -140,6 +140,10 @@ built elsewhere by naming it in the tmux server's environment (in
 set-environment -g INTERDIMUX_BIN '/path/to/imux'
 ```
 
+Rebuild that one whenever you update the plugin. A binary from another version
+is not trusted: the list falls back to the bash renderer, and the status line
+says so once, naming the binary.
+
 That is an environment variable, not a tmux option, on purpose: it chooses the
 program every picker runs. `--doctor` says which binary is in use, whether it is
 older than its sources, and what to do when there is none. More in

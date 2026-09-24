@@ -23,7 +23,7 @@ fn d_rows(root: &PathBuf, dump: &str, recent: &[&str]) -> Vec<String> {
     std::fs::create_dir_all(data.join("interdimux")).unwrap();
     std::fs::write(data.join("interdimux/recent_dirs"), recent.join("\n") + "\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
-        .arg("gather")
+        .arg("gather2")
         .env_clear()
         .env("HOME", "/home/u")
         .env("PATH", "/usr/bin:/bin")

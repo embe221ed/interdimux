@@ -18,7 +18,7 @@ const US: &str = "\u{1f}";
 
 fn render(dump: &str, extra: &[(&str, &str)]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_imux"));
-    cmd.arg("gather")
+    cmd.arg("gather2")
         .env_clear()
         .env("HOME", "/home/u")
         .env("PATH", "/usr/bin:/bin")
