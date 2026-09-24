@@ -2227,9 +2227,13 @@ only_options() {
 # /proc/<pid>/stat is `pid (comm) state ppid pgrp session tty_nr tpgid ...`,
 # read straight into words.  comm may itself hold blanks, ')' and even a
 # newline, so it ends at the LAST word with a ')' in it: every field after comm
-# is a number or a state letter.  comm is at most 15 bytes (TASK_COMM_LEN), so
-# at most 7 blanks, and that word is one of f[1]..f[8].  The usual comm (no
-# blank, so f[1] is all of it) is one test.
+# is a number or a state letter.  comm is at most 15 bytes (TASK_COMM_LEN), and
+# "(" + 15 bytes + ")" splits into at most NINE words -- ` a b c d e f g `
+# gives `( a b c d e f g )`, its '(' a word of its own -- so that word is one
+# of f[1]..f[9].  (Bounded at f[8], such a name came back unknown, or with its
+# ppid and tty read as the ids.)  f[9] is otherwise a number or the state, so
+# looking one word further never matches wrongly.  The usual comm (no blank,
+# so f[1] is all of it) is one test.
 #
 # No regex and no whole-line pattern strip.  `${line##*) }` over the ~300-byte
 # line is quadratic in its length, and with the regex after it cost ~0.3 ms a
@@ -2244,7 +2248,7 @@ proc_group_ids() {
     if [[ "${f[1]-}" == *')' && "${f[*]:2:7}" != *')'* ]]; then
       last=1
     else
-      for (( i = 1; i <= 8 && i < ${#f[@]}; i++ )); do
+      for (( i = 1; i <= 9 && i < ${#f[@]}; i++ )); do
         case "${f[i]}" in *')'*) last=$i ;; esac
       done
       [ "$last" -gt 0 ] || return 0
