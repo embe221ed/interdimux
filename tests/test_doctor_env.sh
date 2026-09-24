@@ -215,6 +215,30 @@ for good in '--color=bg+:237' '--bind "ctrl-x:execute(echo hi)"' "--prompt='\$ '
 done
 unsetopt fzf-opts
 
+# --- key names: anything tmux can bind ------------------------------------------------
+for k in C-f M-g F5 Space; do
+  setopt key "$k"
+  bash "$SCRIPT" --bind-keys
+  out=$(doctor)
+  # tmux's own verdict first: the key-bindings section looks the binding up.
+  has "prefix+$k is bound by --bind-keys (tmux accepts it)" "$out" "✓ prefix+$k opens the navigator"
+  hasnt "...and @interdimux-key '$k' is not called wrong" "$out" "✗ @interdimux-key"
+  tmux -L "$SOCK" unbind-key -T prefix "$k" 2>/dev/null || true
+done
+unsetopt key
+setopt dashboard-key M-g
+bash "$SCRIPT" --bind-keys
+hasnt "@interdimux-dashboard-key 'M-g' is not called wrong" "$(doctor)" "✗ @interdimux-dashboard-key"
+[ "$(doctor_rc)" = 0 ] && report "...and a multi-character key config exits 0" pass \
+                       || report "...and a multi-character key config exits 0" fail
+tmux -L "$SOCK" unbind-key -T prefix M-g 2>/dev/null || true
+unsetopt dashboard-key
+bash "$SCRIPT" --bind-keys
+# A key tmux refuses is still refused.
+setopt key 'ff'
+has "a key tmux does not know is still a problem" "$(doctor)" "✗ @interdimux-key = 'ff'"
+unsetopt key
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

@@ -4961,7 +4961,18 @@ if [ "${1:-}" = "--doctor" ]; then
           *) [ "$v" -le 255 ] || printf 'a colour index must be 0-255' ;;
         esac ;;
       key|dashboard-key)
-        [ "${#v}" -eq 1 ] || printf 'expected a single key' ;;
+        # Any key tmux can bind, not one character: --bind-keys hands the value to
+        # `tmux bind-key` as it is, and C-f, M-g, F5 and Space all bind fine — a
+        # length test called them wrong in the same report that confirmed them
+        # bound.  So ask tmux: `list-keys -T prefix <key>` changes nothing and
+        # fails with "invalid key" on exactly what bind-key would refuse ('ff').
+        # A bare ';' is the one it cannot judge — tmux reads it as a command
+        # separator, so the query "succeeds" and the binding never happens.
+        case "$v" in
+          ';') printf "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
+          *)   tmux list-keys -T prefix "$v" >/dev/null 2>&1 \
+                 || printf 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
+        esac ;;
       fzf-opts)
         # Two ways this option silently does nothing, both checked the way the
         # pickers meet the value.  build_fzf_theme evals it into words and, when
