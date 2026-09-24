@@ -245,7 +245,9 @@ match instead of removing them, so the tree keeps its shape while you type, and
 the cursor moves to the best match — and stays where it is when the list
 reloads under it (`Ctrl-r`, the preview, a resize, a cancelled kill). With
 nothing matched, `Enter` still creates a session from the query, and the other
-action keys only say so: a dimmed row is never a target.
+action keys only say so. A dimmed row is never a target: `Up`/`Down` can still
+move onto one, but `Enter` and the action keys then only say that it does not
+match (`Ctrl-n`/`Ctrl-p` hop between the matches).
 `set -g @interdimux-raw 'off'` gives plain filtering.
 
 The session name on a window row is matched as it is *displayed*. A name

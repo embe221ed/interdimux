@@ -7830,6 +7830,26 @@ while true; do
       # dispatches on $FZF_MATCH_COUNT and performs the create inside fzf.
       if [ "$RAW_MODE" = "on" ] && fzf_ge 74; then
         _raw_on=1
+        # A dimmed row is never a target.  With nothing matched every row is
+        # dimmed and Enter creates from the query instead; but Up/Down still
+        # walk onto a dimmed row while OTHER rows match, and there Enter
+        # switched to it, ^x offered to kill it and ^z zoomed it with no
+        # dialog at all -- a row the query had just excluded.  fzf exports
+        # FZF_RAW in raw mode: 1 on a matching row, 0 on a dimmed one -- and 0
+        # with no current row at all (the cursor past the end after a kill,
+        # until fzf next draws), which FZF_CURRENT_ITEM tells apart: fzf sets
+        # it only for a real row (0.73+), and an inherited one is dropped
+        # below.  Past the end the keys do what they always did there (fzf
+        # skips a row action whose {-1} has no row to expand to).
+        #
+        # This is the MIDDLE branch of each key's dispatch: `<zero matches>;
+        # <dimmed> || <zero matches> || <act>`.  Three outcomes need either
+        # grouping or an if, and neither parses in both POSIX sh and fish (a
+        # user's --with-shell); `;` and single tests do, and the tests are
+        # disjoint, so exactly one echo runs.
+        _dimmed='[ "$FZF_MATCH_COUNT" != 0 ] && [ "$FZF_RAW" = 0 ] && [ -n "$FZF_CURRENT_ITEM" ]'
+        hint_r '∅' 'this row does not match' '^n' 'next match'
+        _dimmed="$_dimmed && echo 'change-$HINT_BAR:$REPLY' || [ \"\$FZF_MATCH_COUNT\" = 0 ] ||"
         fzf_opts+=(
           --raw
           # :strip:dim, not a bare colour — setting a colour REPLACES fzf's
@@ -7845,7 +7865,9 @@ while true; do
           # reached --create-from-query as two words — it created `zzz` while the
           # bar promised `zzz-shell`.  fzf exports FZF_QUERY to execute's shell,
           # so the query is never re-parsed.
-          --bind="enter:transform:[ \"\${FZF_MATCH_COUNT:-0}\" -eq 0 ] && echo 'execute(bash \"$SQ_SCRIPT\" --create-from-query \"\$FZF_QUERY\")+abort' || echo accept"
+          # Plain string compares, as in _action_bind below, so the dispatch
+          # parses in fish too (`${FZF_MATCH_COUNT:-0}` did not).
+          --bind="enter:transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'execute(bash \"$SQ_SCRIPT\" --create-from-query \"\$FZF_QUERY\")+abort'; $_dimmed echo accept"
         )
       fi
 
@@ -8033,7 +8055,7 @@ while true; do
       _action_bind() { # key action exec-kind nomatch-label [trailing actions]
         if [ "$_raw_on" = 1 ]; then
           hint_r '∅' "nothing matches · no row to $4"
-          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY' || echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload-sync(bash \"$SQ_SCRIPT\" --list)${5:-}'")
+          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY'; $_dimmed echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload-sync(bash \"$SQ_SCRIPT\" --list)${5:-}'")
         else
           fzf_opts+=(--bind="$1:${_wait}$3($ACTION_CMD $2 {-1})+reload-sync($LIST_CMD)${5:-}")
         fi
