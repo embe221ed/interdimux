@@ -1771,6 +1771,11 @@ fi
 # before a '[' (unlike esc_fmt): the expander keeps "##[" as it is, and the
 # status line then draws it as a literal "#[" -- where a bare "#[b'" would be
 # swallowed as a style.
+#
+# Every "interdimux: ..." status line goes through here.  A bare display-message
+# lets tmux pick the client, and from a popup or run-shell it picks the one with
+# the latest keypress -- another terminal on the same session, once a key was
+# typed there while this one's picker or menu was open.
 imux_msg() {
   local m="interdimux: $1"
   tmux display-message ${TMUX_C[@]+"${TMUX_C[@]}"} "${m//'#'/##}" 2>/dev/null || :
@@ -4202,7 +4207,7 @@ fi
 if [ "${1:-}" = "--create-from-query" ]; then
   set +e
   create_from_query "${2:-}" || {
-    tmux display-message "interdimux: could not create a session from '${2:-}'" 2>/dev/null
+    imux_msg "could not create a session from '${2:-}'"
     exit 1
   }
   exit 0
@@ -6887,9 +6892,7 @@ if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNT
 elif ! RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX" 2>/dev/null) \
   && ! { mkdir -p "$SCHED_LOGDIR" 2>/dev/null \
          && RESUME_FILE=$(mktemp "$SCHED_LOGDIR/resume.XXXXXX" 2>/dev/null); }; then
-  # '#' doubled: display-message format-expands its text.
-  _nt="${TMPDIR:-/tmp}"
-  tmux display-message "interdimux: cannot create a scratch file in ${_nt//'#'/##} or ${SCHED_LOGDIR//'#'/##} (see --doctor)" 2>/dev/null || :
+  imux_msg "cannot create a scratch file in ${TMPDIR:-/tmp} or $SCHED_LOGDIR (see --doctor)"
   exit 1
 fi
 PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
@@ -6931,11 +6934,11 @@ _report_stderr() {
   local first
   { read -r first < "$ERR_FILE"; } 2>/dev/null || :
   [ -n "$first" ] || return 0
-  # `#` would be format-expanded by display-message; a long line would be
-  # truncated by the status line anyway, so cut it where it stays readable
-  first="${first//\#/##}"
+  # A long line would be truncated by the status line anyway, so cut it where
+  # it stays readable.  imux_msg escapes the '#'s -- after the cut, which
+  # therefore cannot split a "##" pair and leave a lone '#' to start a format.
   [ "${#first}" -gt 160 ] && first="${first:0:157}…"
-  tmux display-message "interdimux: $first" 2>/dev/null || :
+  imux_msg "$first"
   if mkdir -p "$SCHED_LOGDIR" 2>/dev/null; then
     {
       printf '== %s navigator stderr\n' "$(date '+%Y-%m-%d %H:%M:%S')"
