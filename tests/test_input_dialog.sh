@@ -13,6 +13,10 @@
 #   * Send keys, three CJK characters typed: the padding erased the right border
 #     and the cursor sat inside the second character.
 #
+#   * the common emoji below U+1F000 (✅ ⭐ ⚡) counted one cell for the two tmux
+#     draws, and an emoji sequence (👍🏽, 🇵🇱, 👨‍👩‍👧, ⚙ + U+FE0F) was counted one
+#     character at a time, so the cursor drifted off the text by the error.
+#
 # The buffer was always right; only the picture was wrong.  So every assertion
 # here is about the picture, and the authority for it is tmux's own grid:
 #
@@ -75,6 +79,11 @@ CJK='日本語のセッション名前とても長い名前です本当に長い
 tmux -f /dev/null -L "$SOCK" new-session -d -s host -x 120 -y 30 'sleep 900'
 tmux -L "$SOCK" new-session -d -s solo -x 120 -y 30 'sleep 900'
 tmux -L "$SOCK" new-session -d -s "$CJK" -x 120 -y 30 'sleep 900'
+ZWJ=$'\u200d' VS16=$'\ufe0f'
+EMONAME="emo👍🏽🇵🇱⚙${VS16}👨${ZWJ}👩${ZWJ}👧"                 # 4 emoji sequences, 11 cells in tmux
+tmux -L "$SOCK" new-session -d -s "$EMONAME" -x 120 -y 30 'sleep 900'
+LONGNAME="$(printf '%*s' 110 '' | tr ' ' w)"                 # a title wider than a narrow pane
+tmux -L "$SOCK" new-session -d -s "$LONGNAME" -x 120 -y 30 'sleep 900'
 SOCKPATH="$(tmux -L "$SOCK" display-message -p '#{socket_path}')"
 ANCHOR="$(tmux -L "$SOCK" list-panes -t '=host:' -F '#{pane_id}' | head -1)"
 
@@ -116,12 +125,18 @@ cells() {
 # canonical mode off exactly as the edit loop's own `read -rsN1` does.  (A
 # poll on -icanon lost the first keys 4 times in 12.)  Only the edit loop's
 # repaint says the drain is over -- see wait_vis and editor_ready_empty.
-open_dialog() { # $1 cols, $2 rows, $3 action, $4 spec
+#
+# With a 5th argument the dialog runs under `bash -x`, its trace going to that
+# file through BASH_XTRACEFD: stderr would not do, the action sends it to
+# /dev/null once it opens its input.
+open_dialog() { # $1 cols, $2 rows, $3 action, $4 spec, [$5 xtrace file]
+  local pre="" x=""
+  [ -n "${5:-}" ] && pre="exec 7>'$5'; " x="BASH_XTRACEFD=7 bash -x"
   tmux -L "$SOCK" kill-session -t '=drv' 2>/dev/null || true
   tmux -L "$SOCK" new-session -d -s drv -x "$1" -y "$2" \
-    "env TMUX='$SOCKPATH,99999,0' TMUX_PANE='$ANCHOR' INTERDIMUX_OPTS_PRIMED=1 \
+    "${pre}env TMUX='$SOCKPATH,99999,0' TMUX_PANE='$ANCHOR' INTERDIMUX_OPTS_PRIMED=1 \
          INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
-         bash '$SCRIPT' --action $3 '$4'; exec sleep 60"
+         ${x:-bash} '$SCRIPT' --action $3 '$4'; exec sleep 60"
   local i
   for i in $(seq 1 200); do
     tmux -L "$SOCK" capture-pane -t '=drv:' -p 2>/dev/null | grep -q '❯ ' && return 0
@@ -209,8 +224,8 @@ editor_ready_empty() {
 
 # Open a Send keys dialog in an 80x20 pane and make sure its edit loop is
 # reading.  A failure here is reported, not counted as a pass.
-open_send() { # $1 what the section is about
-  if ! open_dialog 80 20 send 'P:solo:0:0' || ! editor_ready_empty; then
+open_send() { # $1 what the section is about, [$2 cols, $3 spec, $4 xtrace file]
+  if ! open_dialog "${2:-80}" 20 send "${3:-P:solo:0:0}" "${4:-}" || ! editor_ready_empty; then
     report "the send editor opens and reads keys ($1)" fail
     ERRORS+="      screen: $(printf '%s' "$SCREEN" | grep '❯' || true)"$'\n'
   fi
@@ -326,9 +341,10 @@ check "after three CJK characters the cursor follows them, not the middle" \
 run frame_intact
 check "three CJK characters leave the border where it was" "$FRAME_WHY" "$RC"
 
-LONG='日本語のコマンドをここに入力しますとてもながいものです'   # 28 chars, 56 cells
+# 40 chars, 80 cells: wider than any field an 80-column pane can hold
+LONG='日本語のコマンドをここに入力しますとてもながいものですもっと長くしてみます本当に'
 typed "${LONG:3}"
-wait_vis "ものです" tail || true
+wait_vis "本当に" tail || true
 run frame_intact
 check "a CJK line wider than the field scrolls inside the frame" "$FRAME_WHY" "$RC"
 run cursor_after "$VIS"
@@ -476,7 +492,205 @@ check "a combining mark whose base scrolled out of view is not drawn onto the pr
 run cursor_after "$VIS"
 check "the cursor follows text with combining marks" \
       "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+
+# ...and on the way back.  Left one character at a time moves the view's start
+# onto every character in turn, marks included, whenever the cursor passes it.
+# A view opened on a mark drew it onto the prompt's blank -- which is never
+# repainted, so each step stacked one more accent there (observed: seven).
+_lefts=()
+for (( _k = 0; _k < ${#decomposed} + 1; _k++ )); do _lefts+=(Left); done
+keys "${_lefts[@]}"
+run cursor_after ""
+check "Left through combining marks brings the cursor to the field's start" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run test "${VIS:0:1}" != "$MARK"
+check "Left through combining marks never draws a mark onto the prompt" \
+      "field: '$FIELD_ROW'" "$RC"
 keys Escape
+
+# Kana decomposed the way macOS stores file names -- か + U+3099 for が -- is
+# the same case with a mark that was counted two cells wide, not one.
+open_send "decomposed kana"
+DAKU=$'\u3099'
+typed "か${DAKU}き${DAKU}く${DAKU}"
+wait_vis "か${DAKU}き${DAKU}く${DAKU}" || true
+run cursor_after "か${DAKU}き${DAKU}く${DAKU}"
+check "the cursor follows decomposed kana (が as か + U+3099)" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# ---------------------------------------------------------------------------
+# 6. Emoji that tmux draws two cells wide
+# ---------------------------------------------------------------------------
+# The common emoji below U+1F000 (✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ ...) are two cells in tmux
+# and were counted as one, so three of them left the cursor three cells short,
+# and a long command with a few of them in it pushed the field through the
+# border once it scrolled.
+
+open_send "emoji"
+typed "✅⭐⚡"
+wait_vis "✅⭐⚡" || true
+run cursor_after "✅⭐⚡"
+check "after three emoji (✅⭐⚡) the cursor follows them" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run frame_intact
+check "three emoji leave the border where it was" "$FRAME_WHY" "$RC"
+keys Escape
+
+open_send "a long line with emoji"
+snap
+field_geometry
+EMO="git commit -m '"
+while [ "${#EMO}" -lt $(( FIELD_W + 12 )) ]; do EMO+="✅ pass ❌ fail ⚡ fast "; done
+EMO+="END'"
+typed "$EMO"
+wait_vis "END'" tail || true
+run frame_intact
+check "a command with emoji, wider than the field, scrolls inside the frame" "$FRAME_WHY" "$RC"
+run cursor_after "$VIS"
+check "the cursor follows the scrolled emoji text" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run fills_view "$EMO"
+check "the field shows as much of the emoji text as fits" "$FILL_WHY" "$RC"
+keys Home
+wait_vis "git commit" head || true
+run frame_intact
+check "the start of that line stays inside the frame" "$FRAME_WHY" "$RC"
+keys Escape
+
+# ---------------------------------------------------------------------------
+# 7. Emoji sequences: several characters, one picture
+# ---------------------------------------------------------------------------
+# tmux draws a skin-toned 👍🏽, a flag 🇵🇱 and a ZWJ family 👨‍👩‍👧 two cells wide
+# each, and ⚙ followed by U+FE0F two cells although ⚙ alone is one.  Measured
+# one character at a time they came to 4, 4, 6 and 1+1 -- so the cursor
+# drifted right of the text by the difference, from the first one on.  ✋🏽 is
+# the other side of the skin-tone rule: ✋ is not on tmux's list of bases, and
+# tmux draws the pair four cells wide.  The edits make sure a character is
+# measured again when its neighbour changes.
+
+open_send "emoji sequences"
+SEQ=""
+for _q in "👍🏽" "🇵🇱" "👨${ZWJ}👩${ZWJ}👧" "⚙${VS16}" "✋🏽"; do
+  typed "$_q"; SEQ+="$_q"
+  wait_vis "$SEQ" || true
+  run cursor_after "$SEQ"
+  check "after $_q the cursor follows the text" \
+        "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+done
+run frame_intact
+check "emoji sequences leave the border where it was" "$FRAME_WHY" "$RC"
+keys Escape
+
+# ⚙️ is two cells, and it must scroll out of view as one: a view that opened on
+# its U+FE0F would draw it into the prompt's blank -- widening that cell to two
+# and pushing the whole field one cell right.  The line is sized so the view has
+# to drop exactly the ⚙ in front of the U+FE0F: FIELD_W cells of text if they
+# were one each, plus the cursor's cell.
+open_send "a U+FE0F at the edge of the view"
+snap
+field_geometry
+# (ending in Z: the view shows a tail of a's long before the last key is read)
+gear="⚙${VS16}$(printf '%*s' $(( FIELD_W - 3 )) '' | tr ' ' a)Z"
+typed "$gear"
+wait_vis "aZ" tail || true
+run test "${VIS:0:1}" != "$VS16"
+check "a U+FE0F whose symbol scrolled out of view is not drawn onto the prompt" \
+      "field: '$FIELD_ROW'" "$RC"
+run frame_intact
+check "...and the field stays inside the frame" "$FRAME_WHY" "$RC"
+run cursor_after "$VIS"
+check "...and the cursor follows the text" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+open_send "edits inside emoji sequences"
+typed "👍🏽x"
+wait_vis "👍🏽x" || true
+keys Home DC                          # the base goes: 🏽 stands alone, 2 cells
+wait_vis "🏽x" || true
+keys End
+run cursor_after "🏽x"
+check "deleting an emoji's base measures the skin tone after it again" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Home
+typed "👍"                            # ...and a base put back in front joins it
+wait_vis "👍🏽x" || true
+keys End
+run cursor_after "👍🏽x"
+check "inserting a base before a skin tone joins them again" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys C-u
+wait_vis "" || true
+typed "⚙${VS16}y"
+wait_vis "⚙${VS16}y" || true
+keys Left BSpace                      # U+FE0F goes: ⚙ is one cell again
+wait_vis "⚙y" || true
+keys End
+run cursor_after "⚙y"
+check "deleting a U+FE0F takes its symbol back to one cell" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Escape
+
+# A prefilled name is measured the same way.
+RC=0
+open_dialog 80 14 rename "S:$EMONAME" && wait_vis "$EMONAME" || RC=1
+check "the rename editor opens with an emoji name in view" "field: '$FIELD_ROW'" "$RC"
+run cursor_after "$EMONAME"
+check "the cursor starts right after a prefilled name with emoji sequences" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+run frame_intact
+check "a prefilled name with emoji sequences stays inside the frame" "$FRAME_WHY" "$RC"
+keys Escape
+
+# ---------------------------------------------------------------------------
+# 8. Typing at the end of a long line costs the same in any field width
+# ---------------------------------------------------------------------------
+# With the cursor at the end of a line wider than the field -- every keystroke
+# of a long paste -- the editor re-derived the view's start by walking back
+# from the cursor across the whole field, one character at a time.  A paste is
+# one keystroke per character, so it cost O(field width) per character: 3-6x
+# slower than before the field was laid out in cells (1500 characters, 0.3 s
+# then, 1.5-3.8 s now).  Moving the start forward from where it was costs O(1).
+#
+# Wall-clock time is the load of the box as much as the code, so the cost is
+# counted instead: the dialog runs under `bash -x`, and every command it
+# executes is a line of trace.  The same text is typed at the end of the same
+# line into a narrow field (a 60-column pane) and a wide one (250 columns --
+# the long session name widens the box); per character, the two must cost the
+# same, give or take a few commands.
+
+# trace_cost COLS -- commands the editor runs per character typed at the end
+# of a scrolled line, in a COLSx20 pane.  Sets REPLY (-1 on failure).
+trace_cost() {
+  local tf="$TMPD/trace.$1" pre paste n0 n1
+  REPLY=-1
+  open_send "the cost of typing, $1 columns" "$1" "P:$LONGNAME:0:0" "$tf" || return 1
+  snap
+  field_geometry
+  # first scroll the line, so every character measured below scrolls it
+  pre=$(printf '%*s' $(( FIELD_W + 10 )) '' | tr ' ' b)
+  typed "${pre}PRE"
+  wait_vis "PRE" tail || return 1
+  n0=$(wc -l < "$tf")
+  paste="$(printf '%*s' 200 '' | tr ' ' a)END"
+  typed "$paste"
+  wait_vis "END" tail || return 1
+  n1=$(wc -l < "$tf")
+  keys Escape
+  REPLY=$(( (n1 - n0) / ${#paste} ))
+  COST_FIELD[$1]=$FIELD_W
+}
+declare -A COST_FIELD=()
+trace_cost 60;  NARROW=$REPLY
+trace_cost 250; WIDE=$REPLY
+run test "$NARROW" -gt 0 -a "$WIDE" -gt 0
+check "the editor's cost per character can be counted" "narrow=$NARROW wide=$WIDE" "$RC"
+run test "$WIDE" -le $(( NARROW + 5 ))
+check "typing at the end of a long line costs no more in a wide field than a narrow one" \
+      "commands per character: ${COST_FIELD[60]:-?}-cell field $NARROW, ${COST_FIELD[250]:-?}-cell field $WIDE" "$RC"
+printf '    \033[2m(commands per character typed: %s in a %s-cell field, %s in a %s-cell one)\033[0m\n' \
+  "$NARROW" "${COST_FIELD[60]:-?}" "$WIDE" "${COST_FIELD[250]:-?}"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

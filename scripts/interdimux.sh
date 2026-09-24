@@ -159,6 +159,7 @@ opens one (the plugin binds it), and so does `--launch switch`.
   --session-name-for DIR     print the session name DIR would get
   --send-at WHEN TARGET CMD  type CMD into TARGET at WHEN (an at(1) time)
   --send-in SECS TARGET CMD  the same, SECS seconds from now
+                             (a CMD that is one key name, e.g. C-c, is pressed)
   --sched-list               list what --send-at / --send-in have queued
   --sched-cancel ID          cancel one of those
   --launch MODE              open a picker in a popup: switch kill rename zoom
@@ -1466,9 +1467,9 @@ resolve_session_name() {
 # ---------------------------------------------------------------------------
 #
 # Every place that types the user's text into a pane -- ctrl-t's send, startup
-# commands, and both scheduled paths -- goes through send_line / sh_send_line,
-# because a bare `send-keys -- "$text" Enter` got three things wrong (all
-# measured on tmux 3.7b):
+# commands, and both scheduled paths -- goes through send_line (directly, or via
+# send_input / sh_send_input), because a bare `send-keys -- "$text" Enter` got
+# three things wrong (all measured on tmux 3.7b):
 #
 #   * tmux's ARGV parser reads an argument ending in ';' as a command separator
 #     and turns a trailing '\;' into ';'.  `find . -exec rm {} \;` arrived as
@@ -1479,7 +1480,8 @@ resolve_session_name() {
 #     does to it: 'x;' is passed as 'x\;' and arrives as 'x;', and 'x\;' is
 #     passed as 'x\\;' and arrives as 'x\;'.
 #   * without -l every argument is first looked up as a KEY NAME, so a command
-#     that is just `Enter`, `Home` or `C-c` was pressed rather than typed.
+#     that is just `Enter` or `Home` was pressed rather than typed.  (Pressing
+#     a key is kept, on purpose and in a narrower form: see send_input.)
 #   * a pane in copy-mode reads keys as copy-mode bindings: the command never
 #     ran, vi's `D` in "echo COPYMODE" copied into a NEW paste buffer on its way
 #     out of the mode, and the dialog said only "1 failed".  `copy-mode -q`
@@ -1513,16 +1515,61 @@ send_line() {
        send-keys -t "$target" Enter
 }
 
-# sh_send_line TMUX TARGET TEXT -- send_line as a /bin/sh command line, for the
-# paths that run later under a POSIX shell (the at job body and the sub-minute
-# run-shell), where no bash function exists.  TMUX and TARGET are already sh
-# words (e.g. 'tmux -S "$sock"' and '"$pane"'); TEXT is raw and is quoted here,
-# with shq and never %q.  Sets REPLY.
-sh_send_line() {
+# ctrl-t's send is titled "Send keys", and the one key worth sending on its own
+# is C-c: interrupting what runs in a pane -- or, through a W:/S: fan-out, in
+# every pane of a window or session.  So the interactive send and the scheduled
+# sends (not startup commands, which are a list of commands to type) PRESS a
+# text that is, as a whole, exactly one control or navigation key name in
+# tmux's spelling -- C-x, M-x, C-M-x, ^x, Escape, the arrows, PPage/NPage,
+# BTab, F1-F12 -- with no Enter after it.  Anything else, including `Enter`,
+# `Home`, `c-c` and `C-c C-c`, is typed and then Enter is pressed: no command
+# is spelled like one of these keys, while the keys a command might be (Enter,
+# Home, End, Tab, Space) are left out.  Case-sensitive, like the rest of it.
+send_key_name() {
+  local ch cp
+  case "$1" in
+    Escape|Up|Down|Left|Right|PPage|NPage|BTab|F[1-9]|F1[0-2]) return 0 ;;
+    C-M-?|M-C-?|C-?|M-?|^?) ch="${1: -1}" ;;
+    *) return 1 ;;
+  esac
+  # A modifier takes one printable ASCII character.  tmux has no name for,
+  # say, C-é, and would type it as text -- without the Enter.
+  printf -v cp '%d' "'$ch" 2>/dev/null || return 1
+  (( cp > 32 && cp < 127 ))
+}
+
+# send_input TARGET TEXT -- ctrl-t's send: press TEXT if it is a key name (see
+# send_key_name), otherwise send_line it.  A pane in copy-mode leaves it first
+# either way, so a C-c reaches the program rather than copy-mode's bindings.
+send_input() {
+  local target="$1"
+  if send_key_name "$2"; then
+    tmux_text_arg "$2"            # C-; would otherwise lose its ';' to tmux
+    tmux copy-mode -q -t "$target" \; send-keys -t "$target" -- "$REPLY"
+  else
+    send_line "$target" "$2"
+  fi
+}
+
+# sh_send_input TMUX TARGET TEXT -- send_input as a /bin/sh command line, for
+# the paths that run later under a POSIX shell (the at job body and the
+# sub-minute run-shell), where no bash function exists.  TMUX and TARGET are
+# already sh words (e.g. 'tmux -S "$sock"' and '"$pane"'); TEXT is raw and is
+# quoted here, with shq and never %q.  Sets REPLY.
+sh_send_input() {
   local tm="$1" tg="$2"
+  if send_key_name "$3"; then
+    tmux_text_arg "$3"; shq "$REPLY"
+    REPLY="$tm copy-mode -q -t $tg \\; send-keys -t $tg -- $REPLY"
+    return 0
+  fi
   tmux_text_arg "$3"; shq "$REPLY"
   REPLY="$tm copy-mode -q -t $tg \\; send-keys -t $tg -l -- $REPLY \\; send-keys -t $tg Enter"
 }
+
+# The note under the Send keys and Schedule fields: the key rule above is not
+# something anyone would guess from a text field.
+SEND_NOTE="${DIM}typed + Enter · a lone key name (C-c, Escape, Up) is pressed${RST}"
 
 # The startup command for DIR, or empty.  Sets REPLY.
 resolve_startup_command() {
@@ -4135,9 +4182,10 @@ sched_job_body() {
   shq "$sock";         q_sock="$REPLY"
   shq "$srvpid";       q_want="$REPLY"
   shq "$pane";         q_pane="$REPLY"
-  # the whole send, as send_line does it (see there): a trailing ';' survives
-  # tmux's argv parser, and a pane left in copy-mode still runs the command
-  sh_send_line 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
+  # the whole send, as send_input does it (see there): a lone key name is
+  # pressed, any other text survives tmux's argv parser with a trailing ';'
+  # intact, and a pane left in copy-mode still runs the command
+  sh_send_input 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
   # One field per line, each "rest of line".  The single-line form packed all
   # three into "pane=… target=… desc=…", which stops being parseable the moment
   # a session name contains a space or the literal "desc=" — and tmux allows
@@ -4237,18 +4285,19 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
   # but tmux can.  Caveat, verified: a pending run-shell -d does NOT keep the
   # server alive — if the last session closes, the job is lost silently.
   if [ "$_mode" = "--send-in" ] && [[ "$_when" =~ ^[0-9]+$ ]] && [ "$_when" -lt 60 ]; then
+    # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
+    # sh_send_input quotes the keys itself, after protecting a trailing ';', and
+    # decides from the text AS TYPED whether it is a key to press (C-#, say).
+    shq "$SCHED_SOCK"; _q_sock="$REPLY"
+    shq "$SCHED_PANE"; _q_pane="$REPLY"
+    sh_send_input "tmux -S $_q_sock" "$_q_pane" "$_keys"
     # run-shell FORMAT-EXPANDS its argument before /bin/sh ever sees it, so a
     # '#H' or '#{...}' in the user's command is substituted by tmux — verified:
     # "echo host-is-#H" arrived as "echo host-is-krootabulon".  Worse, the
     # substituted text is not re-quoted, so a pane title could inject shell.
-    # '##' is tmux's escape for a literal '#'.
-    _rs_keys="${_keys//\#/##}"
-    # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
-    # sh_send_line quotes the keys itself, after protecting a trailing ';'.
-    shq "$SCHED_SOCK"; _q_sock="$REPLY"
-    shq "$SCHED_PANE"; _q_pane="$REPLY"
-    sh_send_line "tmux -S $_q_sock" "$_q_pane" "$_rs_keys"
-    tmux run-shell -b -d "$_when" "$REPLY" \
+    # '##' is tmux's escape for a literal '#'; applied to the whole command, so
+    # a '#' in the socket path is not expanded either.
+    tmux run-shell -b -d "$_when" "${REPLY//\#/##}" \
       2>/dev/null \
       && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
       || { echo "interdimux: could not schedule" >&2; exit 1; }
@@ -4457,12 +4506,26 @@ popup_accent() {
 #
 #   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
 #   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
-#   combining marks, ZWJ, U+FE0E                  0
+#   combining marks (Latin, symbol, kana), ZWJ,   0
+#     U+FE00-FE0E
 #   everything else                               1
 #
 # so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
-# 2 and a flag counts 4 instead of 2 — wide, never narrow.  Exact cluster
-# handling lives in the Rust core, where it is on the path that needs it.
+# 2 — wide, never narrow.  A regional indicator is 1: tmux draws one alone in
+# one cell and a pair (a flag) in two, so a flag is exact too.  Exact cluster
+# handling lives in the Rust core, where it is on the path that needs it, and
+# the input field's per-character rules in _dlg_cw.
+#
+# "Wide" and "0" are what tmux draws (measured on 3.7b, every code point of
+# U+1100-11FF, U+2000-30FF, U+FE00-FE0F and U+1F000-1FAFF, against
+# #{cursor_x}).  Below
+# U+2E80 that is a scattering of emoji -- ✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ and ~60 more -- which
+# counted 1 for the 2 tmux draws, so three of them typed into Send keys left
+# the cursor three cells short, and a long command with a few in it ran
+# through the border.  U+1F000-1FAFF stays wide throughout, bar the regional
+# indicators: its text-style symbols (🖥 🛠) are drawn narrow, but they come
+# with a U+FE0F nearly always, and a range with holes would under-count every
+# emoji a newer Unicode adds.
 #
 # `printf %d "'<char>"` yields the codepoint with no fork; the dialogs are short
 # strings on the action path, so per-character work is affordable here.
@@ -4481,13 +4544,30 @@ dlg_width() {
       continue
     fi
     printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
-    if (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || cp == 0xfe0e )); then
+    if (( cp < 0x300 )); then
+      n=$(( n + 1 ))
+    elif (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || (cp >= 0xfe00 && cp <= 0xfe0e) \
+         || (cp >= 0x20d0 && cp <= 0x20f0) || (cp >= 0x302a && cp <= 0x302d) \
+         || cp == 0x3099 || cp == 0x309a )); then
       :
     elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
          || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
          || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) \
          || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) \
-         || (cp >= 0x1f000 && cp <= 0x1f2ff) || (cp >= 0x20000 && cp <= 0x3fffd) )); then
+         || (cp >= 0x1f000 && cp <= 0x1f1e5) || (cp >= 0x1f200 && cp <= 0x1f2ff) \
+         || (cp >= 0x20000 && cp <= 0x3fffd) )); then
+      n=$(( n + 2 ))
+    elif (( cp >= 0x231a && cp <= 0x2b55 && ( cp <= 0x231b || cp == 0x2329 || cp == 0x232a \
+         || (cp >= 0x23e9 && cp <= 0x23ec) || cp == 0x23f0 || cp == 0x23f3 || cp == 0x25fd \
+         || cp == 0x25fe || cp == 0x2614 || cp == 0x2615 || cp == 0x261d \
+         || (cp >= 0x2648 && cp <= 0x2653) || cp == 0x267f || cp == 0x2693 || cp == 0x26a1 \
+         || cp == 0x26aa || cp == 0x26ab || cp == 0x26bd || cp == 0x26be || cp == 0x26c4 \
+         || cp == 0x26c5 || cp == 0x26ce || cp == 0x26d4 || cp == 0x26ea || cp == 0x26f2 \
+         || cp == 0x26f3 || cp == 0x26f5 || cp == 0x26f9 || cp == 0x26fa || cp == 0x26fd \
+         || cp == 0x2705 || (cp >= 0x270a && cp <= 0x270d) || cp == 0x2728 || cp == 0x274c \
+         || cp == 0x274e || (cp >= 0x2753 && cp <= 0x2755) || cp == 0x2757 \
+         || (cp >= 0x2795 && cp <= 0x2797) || cp == 0x27b0 || cp == 0x27bf || cp == 0x2b1b \
+         || cp == 0x2b1c || cp == 0x2b50 || cp == 0x2b55 ) )); then
       n=$(( n + 2 ))
     else
       n=$(( n + 1 ))
@@ -4684,6 +4764,76 @@ _dlg_cells() {
   REPLY=$(( ${#1} - ${#zeros} + ${#twos} ))
 }
 
+# The width input_dialog's field keeps for CH, with PREV and NEXT the characters
+# either side of it ('' at an end of the buffer).  Sets REPLY.
+#
+# The field puts the cursor after any character, so where dlg_width may err
+# wide this has to be exact for the sequences people type.  tmux draws some
+# characters INTO the cell before them rather than into one of their own
+# (screen_write_combine and utf8_should_combine, tmux 3.7b; each rule below
+# measured there against #{cursor_x}):
+#
+#   U+FE0F after a one-cell character   widens that cell to two     ⚙ 1, ⚙️ 2
+#   a non-ASCII character after a ZWJ   joins the ZWJ's cell        👨‍👩‍👧 2
+#   a skin tone after a modifier base   joins the base's cell       👍🏽 2
+#     -- tmux's own list of bases (_dlg_tone_base); 🎅🏽 and ✋🏽 stay 4
+#
+# Such a character is 0 here, and the cell U+FE0F adds goes on the character it
+# widens, so a 0 always means "drawn into the cell before": the view must never
+# start on one, where it would join the prompt's cell.  Measured one character
+# at a time, 👍🏽 came to 4, 👨‍👩‍👧 to 6, and ⚙️ to 1+1, so a view could open on
+# its U+FE0F.  (A regional indicator is 1 either way -- see dlg_width.)
+_DLG_VS16=$'\xef\xb8\x8f'                 # U+FE0F, as bytes: no locale needed
+_dlg_cw() {
+  local cp pp
+  printf -v cp '%d' "'$2" 2>/dev/null || cp=63
+  if (( cp >= 0x20 && cp < 0x7f )); then
+    REPLY=1                          # tmux never draws ASCII into another cell
+  elif (( cp == 0xfe0f )); then
+    REPLY=0; return 0
+  else
+    if [ -n "$1" ]; then
+      printf -v pp '%d' "'$1" 2>/dev/null || pp=0
+      if (( pp == 0x200d )) || { (( cp >= 0x1f3fb && cp <= 0x1f3ff )) && _dlg_tone_base "$pp"; }; then
+        REPLY=0; return 0
+      fi
+    fi
+    dlg_width "$2"
+  fi
+  if (( REPLY == 1 )) && [ "$3" = "$_DLG_VS16" ]; then REPLY=2; fi
+  return 0
+}
+
+# True for a code point a skin tone joins: tmux's list (utf8_should_combine in
+# utf8-combined.c), which is not all of Unicode's Emoji_Modifier_Base.
+_dlg_tone_base() {
+  local c=$1
+  (( (c >= 0x1f44b && c <= 0x1f450) || (c >= 0x1f466 && c <= 0x1f469) || c == 0x1f46e \
+     || (c >= 0x1f470 && c <= 0x1f478) || c == 0x1f47c || (c >= 0x1f481 && c <= 0x1f483) \
+     || (c >= 0x1f485 && c <= 0x1f487) || c == 0x1f4aa || c == 0x1f575 || c == 0x1f57a \
+     || c == 0x1f590 || c == 0x1f595 || c == 0x1f596 || (c >= 0x1f645 && c <= 0x1f647) \
+     || (c >= 0x1f64b && c <= 0x1f64f) || (c >= 0x1f6b4 && c <= 0x1f6b6) || c == 0x1f926 \
+     || (c >= 0x1f937 && c <= 0x1f939) || c == 0x1f93d || c == 0x1f93e || c == 0x1f9b5 \
+     || c == 0x1f9b6 || c == 0x1f9b8 || c == 0x1f9b9 || (c >= 0x1f9cd && c <= 0x1f9cf) \
+     || (c >= 0x1f9d1 && c <= 0x1f9df) ))
+}
+
+# Measure character J of input_dialog's buffer again, from its neighbours as
+# they are now, into cw.  buf and cw are input_dialog's locals.  An edit changes
+# the neighbours on both sides of where it happened, so every edit re-measures
+# those two characters: deleting 👍 from 👍🏽 leaves a skin tone that stands
+# alone, two cells wide, and deleting the U+FE0F of ⚙️ takes ⚙ back to one.
+_dlg_remeasure() {
+  local j=$1
+  (( j >= 0 && j < ${#buf} )) || return 0
+  if (( j > 0 )); then
+    _dlg_cw "${buf:j-1:1}" "${buf:j:1}" "${buf:j+1:1}"
+  else
+    _dlg_cw "" "${buf:0:1}" "${buf:1:1}"
+  fi
+  cw="${cw:0:j}$REPLY${cw:j+1}"
+}
+
 # input_dialog ACCENT TITLE PROMPT INITIAL [NOTE] — a single-line text editor
 # drawn inside the dialog box.  Sets REPLY (empty = cancelled).
 #
@@ -4731,14 +4881,20 @@ input_dialog() {
     "$irow" "$col_prompt" "$accent" "$prompt" "$RST" >>"$tty_out"
 
   # cw is buf's shadow: ONE DIGIT PER CHARACTER, that character's width in
-  # cells (0, 1 or 2, from dlg_width).  Every edit below applies the same slice
+  # cells (0, 1 or 2, from _dlg_cw).  Every edit below applies the same slice
   # to both strings, so ${cw:i:1} is always the width of ${buf:i:1}.  Each
-  # character is measured once, as it enters the buffer: re-measuring the whole
-  # buffer on every repaint made a paste quadratic, because every pasted
-  # character is its own keystroke and repaint, and dlg_width costs tens of
-  # microseconds a character.
-  local buf="$initial" pos=${#initial} scroll=0 cw="" i
-  for (( i = 0; i < pos; i++ )); do dlg_width "${buf:i:1}"; cw+="$REPLY"; done
+  # character is measured as it enters the buffer, and again only when an
+  # edit changes a neighbour (_dlg_remeasure): re-measuring the whole buffer on
+  # every repaint made a paste quadratic, because every pasted character is
+  # its own keystroke and repaint, and dlg_width costs tens of microseconds a
+  # character.
+  local buf="$initial" pos=${#initial} scroll=0 cw="" i pc="" cc nc
+  cc="${buf:0:1}"
+  for (( i = 0; i < pos; i++ )); do
+    nc="${buf:i+1:1}"
+    _dlg_cw "$pc" "$cc" "$nc"; cw+="$REPLY"
+    pc="$cc" cc="$nc"
+  done
   drain_input
 
   # Read the input source through the process-wide fd (see tty_fd): re-opening
@@ -4768,7 +4924,16 @@ input_dialog() {
   printf -v blank '%*s' "$field_w" ''
   while true; do
     len=${#buf}
-    (( pos < scroll )) && scroll=$pos
+    if (( pos < scroll )); then
+      # The cursor moved left of the view: start the view at the cursor -- or,
+      # when that character is drawn into the cell before it (width 0: a
+      # combining mark, say), at the character that cell belongs to.  Started
+      # on the mark, the view drew it onto the prompt's blank, which is never
+      # repainted, so every step Left through decomposed text stacked one more
+      # accent there.
+      scroll=$pos
+      while (( scroll > 0 )) && [ "${cw:scroll:1}" = 0 ]; do scroll=$(( scroll - 1 )); done
+    fi
     # The cursor needs the cells of the character under it — or the one blank
     # cell after the text — inside the field too.
     cur=1
@@ -4776,22 +4941,35 @@ input_dialog() {
     _dlg_cells "${cw:scroll:pos-scroll}"; off=$REPLY
     if (( off + cur > field_w )); then
       # The cursor ran off the right edge: start at the leftmost character from
-      # which it fits.  Walked back from the cursor, not forward from the old
-      # start, so End on a long buffer costs one field's width, not its length.
-      scroll=$pos off=0
-      while (( scroll > 0 )); do
-        w=${cw:scroll-1:1}
-        (( off + w + cur > field_w )) && break
-        scroll=$(( scroll - 1 )) off=$(( off + w ))
-      done
+      # which it fits.  Stepping the start forward from where it was finds
+      # exactly that one -- the cells from the start to the cursor only shrink
+      # as the start moves right, and every start left of the old one failed
+      # already -- and typing at the end, it is one step or two.  A paste is
+      # one keystroke per character, and the walk back across the whole field
+      # this used to do on each made a paste 3-6x slower.  A big jump (End on
+      # a long line) walks back from the cursor instead: one field's width,
+      # not the length of the jump.
+      if (( off + cur - field_w < field_w )); then
+        while (( off + cur > field_w && scroll < pos )); do
+          off=$(( off - ${cw:scroll:1} )) scroll=$(( scroll + 1 ))
+        done
+      else
+        scroll=$pos off=0
+        while (( scroll > 0 )); do
+          w=${cw:scroll-1:1}
+          (( off + w + cur > field_w )) && break
+          scroll=$(( scroll - 1 )) off=$(( off + w ))
+        done
+      fi
     fi
-    # A zero-width character (a combining mark) cannot open the field: drawn
-    # first, it would attach to the prompt's cell, outside the field.
+    # Nor can a character drawn into the cell before it open the field on the
+    # right: drawn first, it would join the prompt's cell, outside the field.
     while (( scroll < pos )) && [ "${cw:scroll:1}" = 0 ]; do scroll=$(( scroll + 1 )); done
     # The visible text is the longest run from `scroll` that fits.  A wide
     # character that would straddle the edge is left out rather than drawn over
-    # the gutter; the cell it would have started in stays blank.
-    _dlg_cells "${cw:scroll}"
+    # the gutter; the cell it would have started in stays blank.  At the end of
+    # the text, the run is the one `off` already measured.
+    if (( pos == len )); then REPLY=$off; else _dlg_cells "${cw:scroll}"; fi
     if (( REPLY <= field_w )); then
       vis="${buf:scroll}"
     else
@@ -4828,27 +5006,40 @@ input_dialog() {
               case "$c3" in
                 1|7) pos=0 ;;
                 4|8) pos=$len ;;
-                3) (( pos < len )) && { buf="${buf:0:pos}${buf:pos+1}" cw="${cw:0:pos}${cw:pos+1}"; } ;;   # delete
+                3) (( pos < len )) && {                     # delete
+                     buf="${buf:0:pos}${buf:pos+1}" cw="${cw:0:pos}${cw:pos+1}"
+                     _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; } ;;
               esac ;;
           esac
         else
           buf=""; break                                      # lone ESC → cancel
         fi ;;
-      $'\x7f'|$'\x08') (( pos > 0 )) && { buf="${buf:0:pos-1}${buf:pos}" cw="${cw:0:pos-1}${cw:pos}"; pos=$(( pos - 1 )); } ;;
+      $'\x7f'|$'\x08') (( pos > 0 )) && {
+                         buf="${buf:0:pos-1}${buf:pos}" cw="${cw:0:pos-1}${cw:pos}"; pos=$(( pos - 1 ))
+                         _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; } ;;
       $'\x03') buf=""; break ;;                              # Ctrl-C → cancel
       $'\x01') pos=0 ;;                                       # Ctrl-A → start
       $'\x05') pos=$len ;;                                    # Ctrl-E → end
-      $'\x15') buf="${buf:pos}" cw="${cw:pos}"; pos=0 ;;      # Ctrl-U → delete to start
-      $'\x0b') buf="${buf:0:pos}" cw="${cw:0:pos}" ;;         # Ctrl-K → delete to end
+      $'\x15') buf="${buf:pos}" cw="${cw:pos}"; pos=0; _dlg_remeasure 0 ;;        # Ctrl-U → delete to start
+      $'\x0b') buf="${buf:0:pos}" cw="${cw:0:pos}"; _dlg_remeasure $(( pos - 1 )) ;; # Ctrl-K → delete to end
       $'\x17')                                                # Ctrl-W → delete word before cursor
         local l="${buf:0:pos}" r="${buf:pos}"
         while [ -n "$l" ] && [ "${l: -1}" = ' ' ]; do l="${l%?}"; done
         while [ -n "$l" ] && [ "${l: -1}" != ' ' ]; do l="${l%?}"; done
-        buf="$l$r" cw="${cw:0:${#l}}${cw:pos}"; pos=${#l} ;;
+        buf="$l$r" cw="${cw:0:${#l}}${cw:pos}"; pos=${#l}
+        _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos" ;;
       *)
         if [[ -n "$c" && "$c" != [[:cntrl:]] ]]; then
-          dlg_width "$c"
-          buf="${buf:0:pos}$c${buf:pos}" cw="${cw:0:pos}$REPLY${cw:pos}"; pos=$(( pos + 1 ))
+          printf -v k '%d' "'$c" 2>/dev/null || k=0
+          if (( pos == len && k >= 0x20 && k < 0x7f )); then
+            # ASCII at the end -- typing, and every character of a paste:
+            # nothing either side changes width, so append, and slice nothing
+            buf+="$c" cw+=1
+          else
+            buf="${buf:0:pos}$c${buf:pos}" cw="${cw:0:pos}0${cw:pos}"
+            _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; _dlg_remeasure $(( pos + 1 ))
+          fi
+          pos=$(( pos + 1 ))
         fi ;;
     esac
   done
@@ -5173,7 +5364,7 @@ if [ "${1:-}" = "--action" ]; then
       ;;
 
     send)
-      input_dialog "$BOLD_AMBER" "Send keys to ${label}" "❯ " ""
+      input_dialog "$BOLD_AMBER" "Send keys to ${label}" "❯ " "" "$SEND_NOTE"
       send_cmd="$REPLY"
       if [ -n "$send_cmd" ]; then
         # Build list of pane targets to send to
@@ -5198,9 +5389,10 @@ if [ "${1:-}" = "--action" ]; then
 
         sent=0 failed=0
         for t in "${send_targets[@]}"; do
-          # send_line: literal text, a trailing ';' intact, and a pane in
-          # copy-mode taken out of it first so the command actually runs
-          if send_line "$t" "$send_cmd" 2>/dev/null; then
+          # send_input: a lone key name pressed, any other text typed
+          # literally with a trailing ';' intact, and a pane in copy-mode
+          # taken out of it first so the command actually runs
+          if send_input "$t" "$send_cmd" 2>/dev/null; then
             sent=$((sent + 1))
           else
             failed=$((failed + 1))
@@ -5248,7 +5440,7 @@ if [ "${1:-}" = "--action" ]; then
         # user the command they already typed.
         if [ -z "$sched_cmd" ]; then
           input_dialog "$BOLD_AMBER" "Schedule ${sched_when} → ${SCHED_LABEL}" "❯ " "" \
-            "${DIM}sent as keys, then Enter${RST}"
+            "$SEND_NOTE"
           sched_cmd="$REPLY"
           [ -n "$sched_cmd" ] || { dialog_close; exit 0; }
         fi
