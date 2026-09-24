@@ -5253,8 +5253,16 @@ export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
 # rendered rows and then vanishes with the popup, which is how a read-only
 # $XDG_DATA_HOME turned into three "Permission denied" lines smeared across the
 # tree, and how every other silent failure this picker has had stayed silent.
-# fzf draws its interface on /dev/tty rather than stderr, so redirecting fd 2
-# costs the UI nothing.
+# From fzf 0.53 on, fzf draws its interface on /dev/tty rather than stderr, so
+# redirecting fd 2 costs the UI nothing.
+#
+# BEFORE 0.53 it costs the whole UI.  Those releases paint every frame on
+# stderr (0.52.1's LightRenderer.flush writes to os.Stderr; 0.53.0's writes to
+# the tty it opens), and an execute() child such as ctrl-o's directory picker
+# inherits that stderr and draws on it the same way.  Redirected, the popup
+# stayed black, Esc still quit, and errors.log filled with the rendered frames.
+# There the picker keeps its real stderr and the redirect is simply skipped:
+# a stray error line over the list is the price of a picker that draws at all.
 #
 # Reported, never swallowed: the first line goes to `display-message` (which
 # also lands in `tmux show-messages`) and the whole thing is appended to a log
@@ -5263,7 +5271,7 @@ export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
 # Only on this path.  Child modes (--list, --preview, --action, --doctor …) keep
 # their real stderr: they are called by fzf, by the test suites, and by the user.
 ERR_FILE="${RESUME_FILE}.err"
-if : > "$ERR_FILE" 2>/dev/null; then
+if fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null; then
   exec 2>"$ERR_FILE"
 else
   ERR_FILE=""
@@ -5480,8 +5488,13 @@ while true; do
         # A reload used to cost ~195ms, which is why this was deferred; it is
         # ~25ms now.
         --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload($LIST_CMD)$_refit"
-        --bind="resize:reload($LIST_CMD)$_refit"
       )
+      # The `resize` event arrived in fzf 0.46 (its CHANGELOG), and fzf REFUSES
+      # TO START on an event it does not know ("unsupported key: resize"), so
+      # ungated this one bind closed the popup the instant it opened on
+      # 0.40-0.45 -- Ubuntu 24.04 ships 0.44.1.  Below 0.46 a resized popup
+      # keeps its old column widths until ^r, which is the whole loss.
+      fzf_ge 46 && fzf_opts+=(--bind="resize:reload($LIST_CMD)$_refit")
       # An empty bar means nothing fits at this width.  Passing --footer='' still
       # costs a row (measured — the section is drawn, blank), so omit the flag
       # entirely; a transform that emits nothing later removes the section again
