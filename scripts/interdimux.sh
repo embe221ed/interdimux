@@ -6821,7 +6821,16 @@ while true; do
     --nth=1,3
     --tiebreak=index
     --bind='change:first'
-    --bind="ctrl-r:reload($LIST_CMD)"
+    # reload-SYNC, here and on every navigator reload (^/, resize, each
+    # action's execute+reload): the old list stays up until the new one is
+    # complete, then swaps in whole.  A plain `reload` clears the list and
+    # shows rows as they stream in, and the bash renderer (every install
+    # without the Rust core) prints row by row: the cursor, which fzf keeps by
+    # row NUMBER, landed on row 1 of a half-drawn list and stayed there, so in
+    # raw mode ^r, ^/ and a resize threw it to the top after all -- the Rust
+    # core's output arrives in one write, which is why only it was fixed.
+    # (fzf >= 0.36; the floor is 0.40.)
+    --bind="ctrl-r:reload-sync($LIST_CMD)"
   )
 
 
@@ -6881,7 +6890,7 @@ while true; do
       fzf_opts+=(
         --prompt='kill ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     rename)
@@ -6889,7 +6898,7 @@ while true; do
       fzf_opts+=(
         --prompt='rename ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD rename {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD rename {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     zoom)
@@ -6897,7 +6906,7 @@ while true; do
       fzf_opts+=(
         --prompt='zoom ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload($LIST_CMD)+refresh-preview"
+        --bind="enter:${_wait}execute-silent($ACTION_CMD zoom {-1})+reload-sync($LIST_CMD)+refresh-preview"
       )
       ;;
     swap)
@@ -6905,7 +6914,7 @@ while true; do
       fzf_opts+=(
         --prompt='swap ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD swap {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD swap {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     detach)
@@ -6913,7 +6922,7 @@ while true; do
       fzf_opts+=(
         --prompt='detach ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD detach {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD detach {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     send)
@@ -6921,7 +6930,7 @@ while true; do
       fzf_opts+=(
         --prompt='send ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD send {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD send {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     schedule)
@@ -6929,7 +6938,7 @@ while true; do
       fzf_opts+=(
         --prompt='schedule ❯ '
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
-        --bind="enter:${_wait}execute($ACTION_CMD schedule {-1})+reload($LIST_CMD)"
+        --bind="enter:${_wait}execute($ACTION_CMD schedule {-1})+reload-sync($LIST_CMD)"
       )
       ;;
     *)
@@ -6967,14 +6976,14 @@ while true; do
         # the reload the rows stay sized for the old geometry (IDEAS #26).
         # A reload used to cost ~195ms, which is why this was deferred; it is
         # ~25ms now.
-        --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload($LIST_CMD)$_refit"
+        --bind="ctrl-/:toggle-preview+execute-silent(f='$PREVIEW_STATE_FILE'; read -r st < \"\$f\" 2>/dev/null; [ \"\$st\" = on ] && printf off > \"\$f\" || printf on > \"\$f\")+reload-sync($LIST_CMD)$_refit"
       )
       # The `resize` event arrived in fzf 0.46 (its CHANGELOG), and fzf REFUSES
       # TO START on an event it does not know ("unsupported key: resize"), so
       # ungated this one bind closed the popup the instant it opened on
       # 0.40-0.45 -- Ubuntu 24.04 ships 0.44.1.  Below 0.46 a resized popup
       # keeps its old column widths until ^r, which is the whole loss.
-      fzf_ge 46 && fzf_opts+=(--bind="resize:reload($LIST_CMD)$_refit")
+      fzf_ge 46 && fzf_opts+=(--bind="resize:reload-sync($LIST_CMD)$_refit")
       # An empty bar means nothing fits at this width.  Passing --footer='' still
       # costs a row (measured — the section is drawn, blank), so omit the flag
       # entirely; a transform that emits nothing later removes the section again
@@ -7218,9 +7227,9 @@ while true; do
       _action_bind() { # key action exec-kind nomatch-label [trailing actions]
         if [ "$_raw_on" = 1 ]; then
           hint_r '∅' "nothing matches · no row to $4"
-          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY' || echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload(bash \"$SQ_SCRIPT\" --list)${5:-}'")
+          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY' || echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload-sync(bash \"$SQ_SCRIPT\" --list)${5:-}'")
         else
-          fzf_opts+=(--bind="$1:${_wait}$3($ACTION_CMD $2 {-1})+reload($LIST_CMD)${5:-}")
+          fzf_opts+=(--bind="$1:${_wait}$3($ACTION_CMD $2 {-1})+reload-sync($LIST_CMD)${5:-}")
         fi
       }
       _action_bind ctrl-x kill   execute        kill
