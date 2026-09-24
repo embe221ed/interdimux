@@ -7212,26 +7212,60 @@ while true; do
       # user's own.  Degrades to the old unconditional `best` if the file cannot
       # be made.  No commas, no single quotes, no parentheses and no `${x}` that
       # fzf would read as a placeholder: it rides inside transform(...), and on
-      # the fallback path inside `sh -c '...'` too.
-      _res_pre=""
+      # the fallback path inside `sh -c '...'` too.  The file's third line, the
+      # last match count, is for the fallback path below.
+      _res_pre="" _res_bind=""
       if [ "$_raw_on" = 1 ]; then
         unset FZF_CURRENT_ITEM
-        _best_guard='f=$INTERDIMUX_QUERY_STATE; k="$FZF_NTH $FZF_QUERY"; t=${FZF_TOTAL_COUNT:-0}; b=;'
-        _best_guard+=' { read -r n; IFS= read -r p; } 2>/dev/null < "$f";'
+        _best_guard='f=$INTERDIMUX_QUERY_STATE; k="$FZF_NTH $FZF_QUERY"; t=${FZF_TOTAL_COUNT:-0}; b=; n=; p=; m=;'
+        _best_guard+=' { read -r n; IFS= read -r p; read -r m; } 2>/dev/null < "$f";'
         _best_guard+=' [ "$n" -ge 0 ] 2>/dev/null || n=0;'
         _best_guard+=' [ "$p" = "$k" ] || b=1;'
         _best_guard+=' if [ "$t" -gt "$n" ]; then n=$t; [ -z "$FZF_QUERY" ] || b=1; fi;'
         _best_guard+=' [ "${FZF_RAW:-1}" = 0 ] && [ "${FZF_MATCH_COUNT:-0}" -gt 0 ]'
         _best_guard+=' && { [ -n "$FZF_CURRENT_ITEM" ] || [ -n "$FZF_QUERY" ]; } && b=1;'
-        _best_guard+=' { printf "%s\n%s" "$n" "$k" > "$f"; } 2>/dev/null;'
-        _best_guard+=' [ -z "$b" ] || echo best'
+        _best_guard+=' { printf "%s\n%s\n%s\n" "$n" "$k" "$FZF_MATCH_COUNT" > "$f"; } 2>/dev/null;'
         if ! : > "$QUERY_STATE_FILE" 2>/dev/null; then
           _res_pre="best+"
         elif [ "$INLINE_CALLBACKS" = 1 ]; then
-          _res_pre="transform($_best_guard)+"
+          _res_pre="transform($_best_guard [ -z \"\$b\" ] || echo best)+"
         else
-          # A user-supplied --with-shell may not speak POSIX (fish)
-          _res_pre="transform(sh -c '$_best_guard')+"
+          # The fallback path (a user --with-shell).  Its bar is written by a
+          # re-exec of this whole script (--footer-for, ~20 ms), and `focus`
+          # already does that whenever the row changes -- the `result` bind
+          # used to do it AGAIN on every keystroke.  It is only needed where
+          # focus is blind: at zero matches, where raw mode leaves the cursor
+          # on a dimmed row, and on the keystroke that leaves them with the
+          # cursor unmoved.  The guard already runs on every result, so it
+          # decides that too and prints the bar update with (or instead of)
+          # `best`; with matches on both sides of a keystroke it prints
+          # nothing and the bar stays as focus left it.  The action text comes
+          # in through the environment, so neither its quotes nor its {-1}
+          # pass through the guard's own quoting (fzf expands the {-1} when it
+          # runs the printed action).
+          export INTERDIMUX_BAR_ACTION="bg-cancel+bg-transform-$HINT_BAR($_footer_for)"
+          _best_guard+=' o=; [ -z "$b" ] || o=best;'
+          _best_guard+=' if [ "$FZF_MATCH_COUNT" = 0 ] || [ "$m" = 0 ]; then o="$o+$INTERDIMUX_BAR_ACTION"; fi;'
+          _best_guard+=' o=${o#+}; [ -z "$o" ] || printf "%s\n" "$o"'
+          # The guard is POSIX, and wrapping it in `sh -c` inside the user's
+          # shell cost a second shell per keystroke (measured: 5.3 ms under
+          # bash, 9.1 ms under zsh, against 2.4 ms for sh alone).  So it runs
+          # in the user's shell directly when that shell is a known POSIX-
+          # family one, and keeps the wrapper only for anything else (fish
+          # cannot parse it).  The shell is the LAST --with-shell fzf is
+          # handed: the user's, appended after the theme's own `sh -c`.
+          _wsh=""
+          for (( _i = 0; _i < ${#FZF_THEME[@]}; _i++ )); do
+            case "${FZF_THEME[_i]}" in
+              --with-shell=*) _wsh="${FZF_THEME[_i]#--with-shell=}" ;;
+              --with-shell)   _wsh="${FZF_THEME[_i+1]:-}" ;;
+            esac
+          done
+          read -r _wsh _ <<< "$_wsh" || :
+          case "${_wsh##*/}" in
+            sh|ash|dash|bash|ksh|mksh|zsh) _res_bind="transform:$_best_guard" ;;
+            *) _res_bind="transform:sh -c '$_best_guard'" ;;
+          esac
         fi
       fi
 
@@ -7264,8 +7298,14 @@ while true; do
         # Fallback path in raw mode (a user --with-shell on fzf >= 0.74).  Rows
         # stay displayed, so the cursor sits on a dimmed row at zero matches and
         # `focus` does not fire there, nor when a keystroke brings the match
-        # back under an unmoved cursor: only `result` sees every change.
-        fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+        # back under an unmoved cursor: only `result` sees every change.  The
+        # guard decides when that needs the bar rewritten (above); without the
+        # state file there is no guard, and every result rewrites it.
+        if [ -n "$_res_bind" ]; then
+          fzf_opts+=(--bind="result:$_res_bind")
+        else
+          fzf_opts+=(--bind="result:${_res_pre}bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+        fi
       elif fzf_ge 46; then
         # Fallback path, plain filtering: `focus` covers the way into and out
         # of zero matches (the current item becomes none and back), `zero` the
