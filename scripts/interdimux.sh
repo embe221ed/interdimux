@@ -4795,7 +4795,8 @@ popup_accent() {
 #   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
 #   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
 #   combining marks (Latin, symbol, kana), ZWJ,   0
-#     U+FE00-FE0E
+#     U+FE00-FE0E, medial and final Hangul
+#     jamo, the Hangul filler U+3164
 #   everything else                               1
 #
 # so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
@@ -4806,7 +4807,12 @@ popup_accent() {
 #
 # "Wide" and "0" are what tmux draws (measured on 3.7b, every code point of
 # U+1100-11FF, U+2000-30FF, U+FE00-FE0F and U+1F000-1FAFF, against
-# #{cursor_x}).  Below
+# #{cursor_x}).  The medial and final jamo -- U+1160-11FF, and the assigned
+# parts of U+D7B0-D7FF (the unassigned D7C7-D7CA and D7FC-D7FF draw one) --
+# are 0 on any cell: tmux joins them to the cell before, the way it joins a
+# mark, and one it cannot join is dropped.  That is how macOS stores a Korean
+# name (NFD, 한 as U+1112 U+1161 U+11AB), one wide cell a syllable; counted one
+# each, the field's cursor drifted two cells right per syllable.  Below
 # U+2E80 that is a scattering of emoji -- ✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ and ~60 more -- which
 # counted 1 for the 2 tmux draws, so three of them typed into Send keys left
 # the cursor three cells short, and a long command with a few in it ran
@@ -4836,7 +4842,8 @@ dlg_width() {
       n=$(( n + 1 ))
     elif (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || (cp >= 0xfe00 && cp <= 0xfe0e) \
          || (cp >= 0x20d0 && cp <= 0x20f0) || (cp >= 0x302a && cp <= 0x302d) \
-         || cp == 0x3099 || cp == 0x309a )); then
+         || cp == 0x3099 || cp == 0x309a || (cp >= 0x1160 && cp <= 0x11ff) \
+         || (cp >= 0xd7b0 && cp <= 0xd7c6) || (cp >= 0xd7cb && cp <= 0xd7fb) || cp == 0x3164 )); then
       :
     elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
          || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
@@ -5070,7 +5077,16 @@ _dlg_cells() {
 # widens, so a 0 always means "drawn into the cell before": the view must never
 # start on one, where it would join the prompt's cell.  Measured one character
 # at a time, 👍🏽 came to 4, 👨‍👩‍👧 to 6, and ⚙️ to 1+1, so a view could open on
-# its U+FE0F.  (A regional indicator is 1 either way -- see dlg_width.)
+# its U+FE0F.  (A regional indicator is 1 either way -- see dlg_width, which
+# also has the medial and final Hangul jamo at 0.)
+#
+# One rule of that tmux function is left out on purpose: it also joins a
+# modifier BASE to a skin tone standing alone before it -- 🏽👍 is two cells,
+# counted four here.  Whether a tone stands alone depends on every character
+# before it (🏽👍🏽👍 is 2+2 in tmux, 🏽👍🏽 is 2+2 too), so no fixed-size
+# re-measure keeps it right, and leaving it out only ever errs WIDE: at every
+# point of such a run the count here is at least tmux's, so the cursor may sit
+# right of the text but the text never reaches the border.
 _DLG_VS16=$'\xef\xb8\x8f'                 # U+FE0F, as bytes: no locale needed
 _dlg_cw() {
   local cp pp
@@ -5212,13 +5228,15 @@ input_dialog() {
   printf -v blank '%*s' "$field_w" ''
   while true; do
     len=${#buf}
-    if (( pos < scroll )); then
+    if (( pos <= scroll )); then
       # The cursor moved left of the view: start the view at the cursor -- or,
       # when that character is drawn into the cell before it (width 0: a
       # combining mark, say), at the character that cell belongs to.  Started
-      # on the mark, the view drew it onto the prompt's blank, which is never
-      # repainted, so every step Left through decomposed text stacked one more
-      # accent there.
+      # on the mark, the view drew it onto the prompt's blank, so every step
+      # Left through decomposed text stacked one more accent there.  The
+      # cursor AT the view's start needs it too: Delete of the view's first
+      # character, or Backspace between it and its mark, leaves the view on
+      # that mark with the cursor unmoved.
       scroll=$pos
       while (( scroll > 0 )) && [ "${cw:scroll:1}" = 0 ]; do scroll=$(( scroll - 1 )); done
     fi
@@ -5269,13 +5287,29 @@ input_dialog() {
       done
       vis="${buf:scroll:k-scroll}"
     fi
+    # At the buffer's start there is no base to walk back to: a mark or a
+    # U+FE0F that an edit left first (Home, Delete on a decomposed É, or on
+    # ⚙️) would join the prompt's blank -- a U+FE0F widening it to two cells
+    # and pushing the whole field right.  Such characters are left out of the
+    # picture; they have no cells, so `off` stands.
+    if (( scroll == 0 )) && [ "${cw:0:1}" = 0 ]; then
+      k=0
+      while (( k < ${#vis} )) && [ "${cw:k:1}" = 0 ]; do k=$(( k + 1 )); done
+      vis="${vis:k}"
+    fi
     # Blank the field, draw the text, place the cursor.  Blanking first instead
     # of padding after means a glyph dlg_width over-counts (a ZWJ sequence)
-    # cannot leave stale cells at the end of the field.  Nothing is written
+    # cannot leave stale cells at the end of the field.  The prompt is drawn
+    # again AFTER the text: a character tmux draws into the cell before it that
+    # the widths above do not know about (a Thai, Hebrew, Arabic or Devanagari
+    # mark, which dlg_width counts as a cell) can still open the view, and
+    # joins the prompt's blank -- rewritten, that cell drops it in the same
+    # frame instead of stacking one more on each.  Nothing else is written
     # outside [field_start, field_end], so the borders are never touched.
-    printf '\033[%d;%dH%s\033[%d;%dH%s\033[%d;%dH' \
+    printf '\033[%d;%dH%s\033[%d;%dH%s\033[%d;%dH%s%s%s\033[%d;%dH' \
       "$irow" "$field_start" "$blank" \
       "$irow" "$field_start" "$vis" \
+      "$irow" "$col_prompt" "$accent" "$prompt" "$RST" \
       "$irow" $(( field_start + off )) >>"$tty_out"
 
     IFS= read -rsN1 -u "$ifd" c || { _input_eof=1; c=$'\n'; }   # EOF → accept what we have
@@ -7748,6 +7782,13 @@ while true; do
       hint_flag enter kill 3 ^r reload 1 esc quit 2
       fzf_opts+=(
         --prompt='kill ❯ '
+        # The danger cue that needs no border.  The frame turns red (see
+        # danger_style), but with popup-border-lines "none" tmux draws no frame
+        # and no title, and nothing on screen said this Enter destroys.  After
+        # FZF_THEME, so it overrides the accent prompt here only.  An invalid
+        # --color is fatal to fzf, but the palette is normalised to values fzf
+        # parses (#rrggbb, 0-255, -1), and `prompt:` exists on every fzf.
+        --color="prompt:${COLOR_DANGER}"
         ${HINT_FLAG[@]+"${HINT_FLAG[@]}"}
         --bind="enter:${_wait}execute($ACTION_CMD kill {-1})+reload-sync($LIST_CMD)"
       )
@@ -7946,6 +7987,26 @@ while true; do
       # dispatches on $FZF_MATCH_COUNT and performs the create inside fzf.
       if [ "$RAW_MODE" = "on" ] && fzf_ge 74; then
         _raw_on=1
+        # A dimmed row is never a target.  With nothing matched every row is
+        # dimmed and Enter creates from the query instead; but Up/Down still
+        # walk onto a dimmed row while OTHER rows match, and there Enter
+        # switched to it, ^x offered to kill it and ^z zoomed it with no
+        # dialog at all -- a row the query had just excluded.  fzf exports
+        # FZF_RAW in raw mode: 1 on a matching row, 0 on a dimmed one -- and 0
+        # with no current row at all (the cursor past the end after a kill,
+        # until fzf next draws), which FZF_CURRENT_ITEM tells apart: fzf sets
+        # it only for a real row (0.73+), and an inherited one is dropped
+        # below.  Past the end the keys do what they always did there (fzf
+        # skips a row action whose {-1} has no row to expand to).
+        #
+        # This is the MIDDLE branch of each key's dispatch: `<zero matches>;
+        # <dimmed> || <zero matches> || <act>`.  Three outcomes need either
+        # grouping or an if, and neither parses in both POSIX sh and fish (a
+        # user's --with-shell); `;` and single tests do, and the tests are
+        # disjoint, so exactly one echo runs.
+        _dimmed='[ "$FZF_MATCH_COUNT" != 0 ] && [ "$FZF_RAW" = 0 ] && [ -n "$FZF_CURRENT_ITEM" ]'
+        hint_r '∅' 'this row does not match' '^n' 'next match'
+        _dimmed="$_dimmed && echo 'change-$HINT_BAR:$REPLY' || [ \"\$FZF_MATCH_COUNT\" = 0 ] ||"
         fzf_opts+=(
           --raw
           # :strip:dim, not a bare colour — setting a colour REPLACES fzf's
@@ -7961,7 +8022,9 @@ while true; do
           # reached --create-from-query as two words — it created `zzz` while the
           # bar promised `zzz-shell`.  fzf exports FZF_QUERY to execute's shell,
           # so the query is never re-parsed.
-          --bind="enter:transform:[ \"\${FZF_MATCH_COUNT:-0}\" -eq 0 ] && echo 'execute(bash \"$SQ_SCRIPT\" --create-from-query \"\$FZF_QUERY\")+abort' || echo accept"
+          # Plain string compares, as in _action_bind below, so the dispatch
+          # parses in fish too (`${FZF_MATCH_COUNT:-0}` did not).
+          --bind="enter:transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'execute(bash \"$SQ_SCRIPT\" --create-from-query \"\$FZF_QUERY\")+abort'; $_dimmed echo accept"
         )
       fi
 
@@ -8039,9 +8102,20 @@ while true; do
           # in through the environment, so neither its quotes nor its {-1}
           # pass through the guard's own quoting (fzf expands the {-1} when it
           # runs the printed action).
+          #
+          # And after a RELOAD, a result with the same query as the last one.
+          # focus fires only when the cursor's row NUMBER changes, and a reload
+          # keeps the number while the row under it may be a different kind:
+          # kill the last pane but one of a window and both pane rows go, so a
+          # session row slides under the cursor -- which kept the pane's hints
+          # (^z zoom ^s swap ^t send).  A swap can do it with the row count
+          # unchanged, so the test is "not a keystroke", not "fewer rows".
+          # Reloads are the user's own actions (^r, ^/, a resize, each ^x ^e
+          # ^z ^s ^d ^t) plus the snapshots of the first load, never typing,
+          # so the per-keystroke saving above stands.
           export INTERDIMUX_BAR_ACTION="bg-cancel+bg-transform-$HINT_BAR($_footer_for)"
           _best_guard+=' o=; [ -z "$b" ] || o=best;'
-          _best_guard+=' if [ "$FZF_MATCH_COUNT" = 0 ] || [ "$m" = 0 ]; then o="$o+$INTERDIMUX_BAR_ACTION"; fi;'
+          _best_guard+=' if [ "$FZF_MATCH_COUNT" = 0 ] || [ "$m" = 0 ] || [ "$p" = "$k" ]; then o="$o+$INTERDIMUX_BAR_ACTION"; fi;'
           _best_guard+=' o=${o#+}; [ -z "$o" ] || printf "%s\n" "$o"'
           # The guard is POSIX, and wrapping it in `sh -c` inside the user's
           # shell cost a second shell per keystroke (measured: 5.3 ms under
@@ -8138,7 +8212,7 @@ while true; do
       _action_bind() { # key action exec-kind nomatch-label [trailing actions]
         if [ "$_raw_on" = 1 ]; then
           hint_r '∅' "nothing matches · no row to $4"
-          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY' || echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload-sync(bash \"$SQ_SCRIPT\" --list)${5:-}'")
+          fzf_opts+=(--bind="$1:${_wait}transform:[ \"\$FZF_MATCH_COUNT\" = 0 ] && echo 'change-$HINT_BAR:$REPLY'; $_dimmed echo '$3(bash \"$SQ_SCRIPT\" --action $2 \\{-1})+reload-sync(bash \"$SQ_SCRIPT\" --list)${5:-}'")
         else
           fzf_opts+=(--bind="$1:${_wait}$3($ACTION_CMD $2 {-1})+reload-sync($LIST_CMD)${5:-}")
         fi
