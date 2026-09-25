@@ -15,6 +15,10 @@
 #      have rules, so their own titles still show.
 #   4. a rule whose STATE is not one of the six words gives no state (README
 #      "Title rules"), though it still matches and gives its DESC
+#   5. @interdimux-agents off stops the naming and only that: rows keep their
+#      whole command, a native agent's title rules and Claude's registry still
+#      give it a state (after the command), an npm install is `node` to the
+#      rules; the rows of old need all three agent settings off
 #
 # Expected rows are written out here, not computed by either renderer.
 
@@ -272,6 +276,53 @@ WHAT=(
 check_dump "state words"
 rm -f "$TMPD/home/titles"
 EXTRA=()
+
+# --- 5. @interdimux-agents off ------------------------------------------------
+# pane %0 (pid 1000) has a live Claude registry record: working, 5 minutes
+REG="%0${US}1000${US}working${US}1700086100"
+CX_TITLE='[ ! ] Action Required | Fix the build | proj'
+CASES=(
+  'claude 2400|✳ Validate user input on signup'
+  "codex 2400|$CX_TITLE"
+  "node /usr/lib/node_modules/@openai/codex/bin/codex resume 0199a1b2-aaaa|$CX_TITLE"
+)
+EXTRA=()
+EXPECT=(
+  'claude working 5m Validate user input on signup'
+  'codex approve Fix the build'
+  'codex approve Fix the build'
+)
+WHAT=(
+  "claude, named and its arguments dropped"
+  "a native codex"
+  "an npm codex is codex too"
+)
+check_dump "agents on"
+EXTRA=(INTERDIMUX_AGENTS=off)
+EXPECT=(
+  'claude 2400 working 5m Validate user input on signup'
+  'codex 2400 approve Fix the build'
+  'node codex resume 0199a1b2-aaaa'
+)
+WHAT=(
+  "claude keeps its arguments; the registry state follows them"
+  "a native codex keeps its arguments; its title rule's state follows them"
+  "an npm codex is node to the title rules: no state"
+)
+check_dump "agents off"
+EXTRA=(INTERDIMUX_AGENTS=off INTERDIMUX_AGENT_STATE=off INTERDIMUX_SHOW_TITLE=off)
+EXPECT=(
+  'claude 2400'
+  'codex 2400'
+  'node codex resume 0199a1b2-aaaa'
+)
+WHAT=(
+  "claude as it always was"
+  "codex as it always was"
+  "an npm codex as it always was"
+)
+check_dump "all three off"
+REG="" EXTRA=()
 
 echo
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"

@@ -416,7 +416,13 @@ command column, as plain words you can search for:
   `node …/bin/codex` or `python …/bin/aider`; the row says `codex`, `aider`.
   Recognised: claude, codex, gemini, qwen, opencode, amp, goose, crush,
   kiro-cli, aider, copilot, cursor-agent — add your own with
-  `@interdimux-agents`.
+  `@interdimux-agents`. `@interdimux-agents off` turns the naming off, and
+  only that: rows keep their whole command line, and a state or description
+  still follows it (`codex 2400 approve Fix the build`). Title rules go by the
+  command's name, so a native `codex` keeps its state while
+  `node …/bin/codex` — `node` to the rules — has none. With
+  `@interdimux-agent-state` and `@interdimux-show-title` off as well, rows are
+  what they were before any of this.
 - **A state word, with its age:** `approve` (a permission waits — in the
   danger colour), `input` (a question or dialog is open), `working`, `idle`,
   `done`, `error`. Type `approve` to find every agent waiting on you.
@@ -767,7 +773,9 @@ set -g @interdimux-agent-state 'on'
 set -g @interdimux-agent-args 'off'
 
 # More agent names, space-separated, recognised as agents (their titles show
-# only with a title rule for them); 'off' recognises none (default: unset)
+# only with a title rule for them); 'off' recognises none, so rows keep their
+# whole command -- states still show, see "Agents and pane titles"
+# (default: unset)
 set -g @interdimux-agents 'myagent'
 
 # Your title rules file (default: ~/.config/interdimux/titles)

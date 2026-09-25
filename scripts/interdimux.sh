@@ -2766,8 +2766,13 @@ format_command() {
 
 # Recognised by argv0's basename.  AGENT_SCRIPTS are the ones npm or pip
 # install as a script an interpreter runs, recognised by the script's basename.
-# @interdimux-agents adds names to both lists; `off` empties them, and with
-# them every agent rule (the title shows only on agent rows by default).
+# @interdimux-agents adds names to both lists; `off` empties them.  That stops
+# only the NAMING (`codex` for `node .../codex`, the arguments dropped): title
+# rules are picked by the command's name, Claude's registry by pane, and
+# whether a state shows is @interdimux-agent-state's.  So under `off` a native
+# `codex` still gets its state from its title, after its whole command line
+# (the layout of any row that is not an agent's), while `node .../codex` is
+# node to the rules and gets none.  The rows of old need all three off.
 AGENT_KNOWN=' claude codex gemini qwen opencode amp goose crush kiro-cli kiro-cli-chat aider copilot cursor-agent '
 AGENT_SCRIPTS=' codex gemini qwen copilot crush aider '
 if [ "$AGENT_NAMES" = off ]; then
