@@ -2785,6 +2785,31 @@ fi
 AGENT_ON=0
 [ "$SHOW_TITLE" != off ] || [ "$AGENT_STATE" = on ] || [ -n "$AGENT_KNOWN" ] && AGENT_ON=1
 
+# The agents view: the navigator the dashboard's Agents entry opens
+# (`--launch agents` sets INTERDIMUX_VIEW=agents for it, and its reloads
+# inherit it).  Its rows are the navigator's, plus a MARK in the gutter where
+# `*` marks the current target: `!` on the row of a pane whose state is
+# `approve`, `?` on one in `input` -- one row per pane (the pane row where a
+# window has them, else the window row; the first session that shows it), so
+# the rows marked are the panes the entry counted.  The view opens with
+# AGENTS_QUERY typed, which matches exactly those rows: `^` anchors a term to
+# the start of a searched field, the gutter starts field 1, and nothing but
+# the renderer writes there.  (Field 3, the other one searched, starts with a
+# command name, which would have to begin with `!` or `?`.)
+#
+# It used to open on `'approve' | 'input'`, which matched the words anywhere in
+# the name and command fields: a description (`Approve button styling`, `Fix
+# input validation`), an argument (`vim input.go`), a window called
+# `input-form`.  fzf's count ran past the entry's, and raw mode's cursor went
+# to the best such match -- a working agent, where Enter then switched (review
+# R03).  fzf cannot search a field it does not show, so the mark has to be
+# drawn; and a highlighted mark, not the state word, leaves `approve` its
+# danger colour and `input` its amber in this view (review R28).  Both
+# renderers draw it (rust/src/main.rs), from the env var bash hands on.
+VIEW=""
+[ "${INTERDIMUX_VIEW:-}" = agents ] && VIEW=agents
+AGENTS_QUERY='^! | ^?'
+
 # Is argv ($1, the resolved command) an agent?  Sets AG_NAME (empty if not) and
 # AG_REST, the arguments after what names it (a leading blank, or empty).
 agent_of() {
@@ -3423,6 +3448,21 @@ agent_state_r() {
   return 0
 }
 
+# The agents view's gutter mark for a row whose pane ($2, empty when unknown)
+# is in state $1, in REPLY: `!` for approve, `?` for input, empty for anything
+# else -- or for a pane already marked on an earlier row (a session group or a
+# linked window shows it again).  Reads and fills gather_targets' AMARKED.
+agent_mark_r() {
+  REPLY=""
+  case "$1" in
+    approve) [ -n "$2" ] && [[ ${AMARKED[$2]+x} ]] && return 0; REPLY="${BOLD_RED}!${RST}" ;;
+    input)   [ -n "$2" ] && [[ ${AMARKED[$2]+x} ]] && return 0; REPLY="${BOLD_AMBER}?${RST}" ;;
+    *) return 0 ;;
+  esac
+  [ -n "$2" ] && AMARKED[$2]=1
+  return 0
+}
+
 # The command field of a window or pane row, in REPLY.  The arguments are
 # agent_state_r's; it also reads CUR_HOST/CUR_HOST_SHORT from gather_targets.
 #
@@ -3435,6 +3475,7 @@ agent_state_r() {
 # (or always, under @interdimux-show-title all).
 cmd_field() {
   local raw="$1"
+  AS_STATE=""   # the row's state, for the agents view's mark (agent_mark_r)
   format_command "$raw"
   [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
   local fc="$REPLY" a0 b name state since desc rest r w
@@ -4526,6 +4567,7 @@ gather_targets() {
       INTERDIMUX_AGENT_STATE="$AGENT_STATE" \
       INTERDIMUX_TITLE_RULESET="$TITLE_RULESET" \
       INTERDIMUX_STATE_OPTS="$STATE_OPTS" \
+      INTERDIMUX_VIEW="$VIEW" \
       "$IMUX_BIN" "$IMUX_PROTO" 2>/dev/null <<IMUX_SECTIONS
 ${sessions_raw}
 $RS
@@ -4743,6 +4785,7 @@ IMUX_SECTIONS
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
   local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts _wopt
+  local -A AMARKED=()   # the agents view: panes already marked (agent_mark_r)
 
   while IFS="$US" read -r sname sla swins sattach spath; do
     [ -z "$sname" ] && continue
@@ -4862,6 +4905,13 @@ IMUX_SECTIONS
       _hline="${active_pane[${sname}${US}${widx}]-}"
       _wopt="${_hline#*"$US"}"   # title US options
       cmd_field "$raw_cmd" "$wpid" "${_hline%%"$US"*}" "${_wopt%%"$US"*}" "${_wopt#*"$US"}"; cmd_formatted="$REPLY"
+      # The agents view marks the window row only where no pane rows follow
+      # to carry the mark themselves (see VIEW).
+      if [ -n "$VIEW" ] && [ -n "$AS_STATE" ] \
+         && { [ "$wpanes" -le 1 ] || [ -z "${panes_by_window[${sname}${US}${widx}]:-}" ]; }; then
+        agent_mark_r "$AS_STATE" "${_hline%%"$US"*}"
+        [ -n "$REPLY" ] && ident="$REPLY${ident#"$wmarker"}"
+      fi
 
       printf '%s\t%s\t%s\tW:%s:%s\n' \
         "$ident" "$ctx" "$cmd_formatted" "$sname" "$widx"
@@ -4931,6 +4981,10 @@ IMUX_SECTIONS
 
           resolve_command "$pcmd" "$ppid"; raw_cmd="$REPLY"
           cmd_field "$raw_cmd" "$ppid" "$ppane" "$ptitle" "$popts"; cmd_formatted="$REPLY"
+          if [ -n "$VIEW" ] && [ -n "$AS_STATE" ]; then
+            agent_mark_r "$AS_STATE" "$ppane"
+            [ -n "$REPLY" ] && ident="$REPLY${ident#"$pmarker"}"
+          fi
 
           printf '%s\t%s\t%s\tP:%s:%s:%s\n' \
             "$ident" "$ctx" "$cmd_formatted" "$sname" "$widx" "$pidx"
@@ -5416,6 +5470,7 @@ fi
 # are dropped, the way fzf drops them: `docs ` names `docs`, not `docs-`, and
 # a query of blanks names nothing.  resolve_create_target calls this, so the
 # bar that announces a name and the create that makes it cannot disagree.
+QW_WHY=""
 query_words_r() {
   local rest="$1" t lead out=""
   while [ -n "$rest" ]; do
@@ -5431,7 +5486,8 @@ query_words_r() {
 }
 
 # What a query WOULD become.  Sets CREATE_DIR / CREATE_NAME / CREATE_SRC;
-# returns 1 when the query cannot produce a session at all.
+# returns 1 when the query cannot produce a session at all -- with QW_WHY=mark
+# when that is because it is the agents view's query (see VIEW).
 #
 # One resolver for both the header and the accept, because they used to derive
 # the name independently and disagreed: describe_create did a plain
@@ -5442,11 +5498,13 @@ query_words_r() {
 # derived from the same code that does it.
 resolve_create_target() {
   local query expanded
-  CREATE_DIR=""; CREATE_NAME=""; CREATE_SRC=""
-  # The query a launcher opened the navigator with (the dashboard's Agents
-  # entry) is a filter, never a name -- for every caller: the bar's create-key
-  # entry and alt-enter too, not only Enter (see create_from_query).
-  [ -n "${INTERDIMUX_QUERY:-}" ] && [ "$1" = "$INTERDIMUX_QUERY" ] && return 1
+  CREATE_DIR=""; CREATE_NAME=""; CREATE_SRC=""; QW_WHY=""
+  # The agents view's query is a filter, never a name: while one of its mark
+  # terms is in the query, whatever else was typed, it names nothing -- for
+  # every caller, the bar's create-key entry and alt-enter too, not only Enter.
+  if [ -n "$VIEW" ]; then
+    case " $1 " in *' ^! '*|*' ^? '*) QW_WHY=mark; return 1 ;; esac
+  fi
   query_words_r "$1"; query="$REPLY"
   [ -n "$query" ] || return 1
   expanded="${query/#\~/$HOME}"
@@ -5471,15 +5529,14 @@ resolve_create_target() {
 
 # Sets REPLY to the session name; prints nothing.
 #
-# The query a launcher opened the navigator with (INTERDIMUX_QUERY, the
-# dashboard's Agents entry) is a filter, not a name: when it matches nothing
-# -- no agent waits any more -- Enter creates nothing (REPLY stays empty), and
-# the bar says so (describe_create).
+# A query that names nothing -- blanks, only fzf syntax, the agents view's
+# query when no agent waits any more -- creates nothing, quietly
+# (REPLY stays empty): it is a filter, and the bar has said so
+# (describe_create).  Returns 1 only when a create was tried and failed.
 create_from_query() {
   local query="$1"
   REPLY=""
-  [ -n "${INTERDIMUX_QUERY:-}" ] && [ "$query" = "$INTERDIMUX_QUERY" ] && return 0
-  resolve_create_target "$query" || return 1
+  resolve_create_target "$query" || return 0
   # session_id_of, not has-session "=name": the same exact match connect_dir
   # uses, so a query like "$0" is not mistaken for session ID 0.
   session_id_of "$CREATE_NAME"
@@ -5523,11 +5580,16 @@ create_key_hint_r() {
 describe_create() {
   local query="$1" verb
   REPLY=""
-  if [ -n "${INTERDIMUX_QUERY:-}" ] && [ "$query" = "$INTERDIMUX_QUERY" ]; then
-    hint_r '∅' 'nothing matches the query this opened with' esc quit
+  # A query that names nothing gets no announcement, only the reason when
+  # there is one worth giving: Enter does nothing here, and says so.
+  if ! resolve_create_target "$query"; then
+    if [ "$QW_WHY" = mark ] && [ "$query" = "$AGENTS_QUERY" ]; then
+      hint_r '∅' 'no agent is waiting on you' esc quit
+    elif [ "$QW_WHY" = mark ]; then
+      hint_r '∅' 'no waiting agent matches' esc quit
+    fi
     return 0
   fi
-  resolve_create_target "$query" || return 0
   create_verb_r; verb="$REPLY"
   printf -v REPLY '%s%s%s%s %s%s %sin %s%s %s(%s)%s' \
     "$ACCENT_ESC" "$verb" "$RST" "$DIM" "$RST$ACCENT_ESC$CREATE_NAME" "$RST" \
@@ -8902,15 +8964,11 @@ if [ "${1:-}" = "--launch" ]; then
     agents)   title=' interdimux · agents ' ;;
   esac
 
-  # `agents` is the navigator, opened on the two state words that need you
-  # (the dashboard's Agents entry).  As a QUERY, typed for the user, rather
-  # than a filtered list: raw mode dims the other rows so the tree keeps its
-  # shape, the cursor lands on the first match, and a keystroke widens it.
-  # Quoted at both ends it is fzf's exact-BOUNDARY match (0.55+), so a title
-  # saying `inputs` or `approved` does not count.  Before 0.55 the closing
-  # quote is a literal character and matches nothing, so there it is a plain
-  # exact match.
-  if fzf_ge 55; then _agents_q="'approve' | 'input'"; else _agents_q="'approve | 'input"; fi
+  # `agents` is the navigator in the agents view (VIEW): the panes that need
+  # you marked, and a QUERY typed for the user that matches exactly them,
+  # rather than a filtered list: raw mode dims the other rows so the tree
+  # keeps its shape, the cursor lands on the first match, and a keystroke
+  # widens it.  `^` and `|` are as old as fzf itself: no version split.
 
   sp="$SQ_SCRIPT"
   chrome=()
@@ -8942,7 +9000,7 @@ if [ "${1:-}" = "--launch" ]; then
       jobs)   cmd="bash '$sp' --jobs" ;;
       doctor) cmd="bash '$sp' --doctor-view" ;;
       switch) cmd="bash '$sp'" ;;
-      agents) chrome+=(-e "INTERDIMUX_QUERY=$_agents_q"); cmd="bash '$sp'" ;;
+      agents) chrome+=(-e "INTERDIMUX_VIEW=agents"); cmd="bash '$sp'" ;;
       *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="bash '$sp'" ;;
     esac
   else
@@ -8952,7 +9010,7 @@ if [ "${1:-}" = "--launch" ]; then
       jobs)   cmd="$env_fwd bash '$sp' --jobs" ;;
       doctor) cmd="$env_fwd bash '$sp' --doctor-view" ;;
       switch) cmd="$env_fwd bash '$sp'" ;;
-      agents) shq "INTERDIMUX_QUERY=$_agents_q"; cmd="$env_fwd $REPLY bash '$sp'" ;;
+      agents) cmd="$env_fwd INTERDIMUX_VIEW=agents bash '$sp'" ;;
       *)      cmd="$env_fwd INTERDIMUX_MODE=$mode bash '$sp'" ;;
     esac
   fi
@@ -9640,8 +9698,8 @@ while true; do
       # it (FZF_DEFAULT_OPTS, @interdimux-fzf-opts) comes earlier on the
       # command line and gives way here, as it does for ^x and the rest.
       fzf_ge 46 && fzf_opts+=(--bind="alt-enter:transform:[ -n \"\$FZF_QUERY\" ] && bash '$SQ_SCRIPT' --create-key")
-      # The query a launcher opens it with (`--launch agents`), as if typed.
-      [ -n "${INTERDIMUX_QUERY:-}" ] && fzf_opts+=(--query="$INTERDIMUX_QUERY")
+      # The agents view opens with its query typed (see VIEW).
+      [ -n "$VIEW" ] && fzf_opts+=(--query="$AGENTS_QUERY")
       # An empty bar means nothing fits at this width.  Passing --footer='' still
       # costs a row (measured — the section is drawn, blank), so omit the flag
       # entirely; a transform that emits nothing later removes the section again

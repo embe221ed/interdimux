@@ -235,6 +235,14 @@ pub fn pane_ident(
     pad_to(&body, plain, w.ident)
 }
 
+/// An identity column with `mark` in its gutter, the one-cell column where
+/// `*` marks the current target (the agents view's `!` / `?`, which take its
+/// place).  `current` says which gutter the column was drawn with.
+pub fn with_gutter(ident: &str, current: bool, mark: &str, p: &Palette) -> String {
+    let gutter = if current { format!("{}*{}", p.marker, RST) } else { " ".to_string() };
+    format!("{}{}", mark, ident.strip_prefix(gutter.as_str()).unwrap_or(ident))
+}
+
 /// Directory row identity column (the one-list model).  The name is sanitized
 /// like the context column's path, and before the cut: an ESC in it was drawn
 /// live.  (A TAB never gets here: such a directory is not offered.)

@@ -168,6 +168,8 @@ fn gather() {
     let cols: usize = env_or("INTERDIMUX_COLS", "80").parse().unwrap_or(80);
     let session_rule = env_is("INTERDIMUX_SESSION_RULE", "on");
     let now: i64 = env_or("INTERDIMUX_NOW", "0").parse().unwrap_or(0);
+    // The agents view (bash VIEW): marks in the gutter, one row per waiting pane.
+    let agents_view = env_is("INTERDIMUX_VIEW", "agents");
 
     let mut cur = cur_raw.splitn(5, US);
     let current_session = cur.next().unwrap_or("").to_string();
@@ -363,7 +365,8 @@ fn gather() {
     let mut out = io::BufWriter::new(stdout.lock());
     let mut session_dirs: std::collections::HashSet<String> = Default::default();
 
-    let cmd_field = |cmd: &str, pid: u32, pn: Option<&&Pane>, r: &mut Resolver| -> String {
+    let mut marked: std::collections::HashSet<String> = Default::default();
+    let cmd_field = |cmd: &str, pid: u32, pn: Option<&&Pane>, r: &mut Resolver| -> (String, String) {
         let raw = if show_full { r.full_command(pid, cmd) } else { cmd.replace('\t', " ") };
         let (id, opts, title) =
             pn.map(|x| (x.id.as_str(), x.opts.as_str(), x.title.as_str())).unwrap_or(("", "", ""));
@@ -399,7 +402,7 @@ fn gather() {
             if x.active && !x.path.is_empty() {
                 session_dirs.insert(x.path.clone());
             }
-            let ident = render::window_ident(&sdisp, &x.idx, &x.name, last, wcur, &w, &p);
+            let mut ident = render::window_ident(&sdisp, &x.idx, &x.name, last, wcur, &w, &p);
             let ctx = render::ctx_field(
                 &x.path, x.zoomed, x.bell, x.activity, &w, &p, &home, &mut git, show_git,
             );
@@ -407,7 +410,15 @@ fn gather() {
             let ap = panes_by_win
                 .get(&(x.session.as_str(), x.idx.as_str()))
                 .and_then(|ps| ps.iter().rev().find(|pn| pn.active));
-            let cmd = cmd_field(&x.cmd, x.pid, ap, &mut res);
+            let (cmd, state) = cmd_field(&x.cmd, x.pid, ap, &mut res);
+            let pane_rows = x.panes > 1 && panes_by_win.contains_key(&(x.session.as_str(), x.idx.as_str()));
+            // ...on the window row only where no pane rows follow to carry it
+            if agents_view && !pane_rows {
+                let id = ap.map(|pn| pn.id.as_str()).unwrap_or("");
+                if let Some(m) = agent::view_mark(&state, id, &mut marked, &p) {
+                    ident = render::with_gutter(&ident, wcur, &m, &p);
+                }
+            }
             writeln!(out, "{}\t{}\t{}\tW:{}:{}", ident, ctx, cmd, x.session, x.idx).ok();
 
             if x.panes > 1 {
@@ -415,12 +426,17 @@ fn gather() {
                     for (j, pn) in ps.iter().enumerate() {
                         let plast = j + 1 == ps.len();
                         let pcur = wcur && pn.idx == current_pane;
-                        let ident =
+                        let mut ident =
                             render::pane_ident(&sdisp, &pn.widx, &pn.idx, cont, plast, pcur, &w, &p);
                         let ctx = render::ctx_field(
                             &pn.path, false, false, false, &w, &p, &home, &mut git, show_git,
                         );
-                        let cmd = cmd_field(&pn.cmd, pn.pid, Some(pn), &mut res);
+                        let (cmd, state) = cmd_field(&pn.cmd, pn.pid, Some(pn), &mut res);
+                        if agents_view {
+                            if let Some(m) = agent::view_mark(&state, &pn.id, &mut marked, &p) {
+                                ident = render::with_gutter(&ident, pcur, &m, &p);
+                            }
+                        }
                         writeln!(
                             out, "{}\t{}\t{}\tP:{}:{}:{}",
                             ident, ctx, cmd, pn.session, pn.widx, pn.idx

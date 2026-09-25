@@ -96,9 +96,15 @@ fn try_render(dump: &str) -> (Option<i32>, String) {
 }
 
 fn check(case: &str, extra: &[(&str, &str)]) {
+    check_as(case, case, extra);
+}
+
+/// `check`, with the expectation under a name of its own: one dump rendered
+/// two ways (`<dump>.expected` and, say, `<dump>.view.expected`).
+fn check_as(dump_case: &str, case: &str, extra: &[(&str, &str)]) {
     let dir = corpus_dir();
-    let dump = std::fs::read_to_string(dir.join(format!("{}.dump", case)))
-        .unwrap_or_else(|e| panic!("read {}.dump: {}", case, e));
+    let dump = std::fs::read_to_string(dir.join(format!("{}.dump", dump_case)))
+        .unwrap_or_else(|e| panic!("read {}.dump: {}", dump_case, e));
     let got = render(&dump, extra);
     let exp_path = dir.join(format!("{}.expected", case));
 
@@ -516,4 +522,46 @@ fn waiting_agents() {
     let rules = shipped_title_rules();
     let opts = shipped_state_opts();
     check("waiting", &[("INTERDIMUX_TITLE_RULESET", &rules), ("INTERDIMUX_STATE_OPTS", &opts)]);
+}
+
+/// The same server in the agents view (INTERDIMUX_VIEW=agents, what the
+/// dashboard's Agents entry opens): the gutter carries `!` / `?` on exactly one
+/// row per waiting pane -- the pane row, not its window's; the first session
+/// of a group; the mark in place of the current window's `*` -- and every
+/// other row is the plain render's, byte for byte.
+#[test]
+fn waiting_agents_in_the_agents_view() {
+    let rules = shipped_title_rules();
+    let opts = shipped_state_opts();
+    let env = [("INTERDIMUX_TITLE_RULESET", rules.as_str()), ("INTERDIMUX_STATE_OPTS", opts.as_str())];
+    check_as("waiting", "waiting.view", &[env[0], env[1], ("INTERDIMUX_VIEW", "agents")]);
+
+    // Independent of the blessed file: the marked rows, by their targets.
+    let dump = std::fs::read_to_string(corpus_dir().join("waiting.dump")).unwrap();
+    let plain = render(&dump, &env);
+    let view = render(&dump, &[env[0], env[1], ("INTERDIMUX_VIEW", "agents")]);
+    let strip = |s: &str| {
+        let mut out = String::new();
+        let mut esc = false;
+        for c in s.chars() {
+            if esc { if c == 'm' { esc = false } } else if c == '\x1b' { esc = true } else { out.push(c) }
+        }
+        out
+    };
+    let mut marked = vec![];
+    for (pl, vl) in plain.lines().zip(view.lines()) {
+        let (pf, vf): (Vec<&str>, Vec<&str>) = (pl.split('\t').collect(), vl.split('\t').collect());
+        assert_eq!(&pf[1..], &vf[1..], "the view changed more than the identity column: {:?}", vl);
+        let g = strip(vf[0]).chars().next().unwrap();
+        if g == '!' || g == '?' {
+            marked.push(format!("{}{}", g, vf[3]));
+            // only the gutter differs
+            assert_eq!(strip(pf[0]).chars().skip(1).collect::<String>(),
+                       strip(vf[0]).chars().skip(1).collect::<String>());
+        } else {
+            assert_eq!(pf[0], vf[0], "an unmarked row changed: {:?}", vl);
+        }
+    }
+    assert_eq!(plain.lines().count(), view.lines().count());
+    assert_eq!(marked, ["!W:misc2:1", "!W:work:0", "!P:work:1:0", "?P:work:1:2"]);
 }

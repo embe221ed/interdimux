@@ -227,6 +227,35 @@ else
   report "an empty query creates nothing" fail
 fi
 
+# --- the agents view's query is a filter (review R03) ------------------------------
+# The agents view (the dashboard's Agents entry) opens on `^! | ^?`.  Any
+# edit of it -- a trailing space, a word typed after it, the OR taken out --
+# is still that filter, and names nothing (it used to offer and create
+# `approve-|-input-qqq` in ~).
+agents_names_nothing() { # $1 = label, $2 = query
+  local d k before
+  d=$(INTERDIMUX_VIEW=agents bash "$SCRIPT" --describe-create "$2" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+  k=$(INTERDIMUX_VIEW=agents FZF_QUERY="$2" bash "$SCRIPT" --create-key 2>/dev/null)
+  before=$(sessions | tr '\n' ' ')
+  INTERDIMUX_VIEW=agents bash "$SCRIPT" --create-from-query "$2" >/dev/null 2>&1 || true
+  if [[ "$d" == "∅"* && "$d" != *create* ]] && [ -z "$k" ] && [ "$before" = "$(sessions | tr '\n' ' ')" ]; then
+    report "agents view, $1: names nothing, no alt-enter action, no session" pass
+  else
+    report "agents view, $1: names nothing (bar: '$d', alt-enter: '$k', sessions: $(sessions | tr '\n' ' '))" fail
+  fi
+}
+agents_names_nothing "its own query"              '^! | ^?'
+agents_names_nothing "with a trailing space"      '^! | ^? '
+agents_names_nothing "with a word typed after it" '^! | ^? qqq'
+agents_names_nothing "with the OR taken out"      '^! qqq'
+agents_names_nothing "with one mark left"         '^?'
+# ...and once the marks are gone it is an ordinary query again.
+if [ "$(INTERDIMUX_VIEW=agents announced_name 'agq')" = agq ]; then
+  report "agents view: a query without its marks names a session as usual" pass
+else
+  report "agents view: a query without its marks names a session as usual" fail
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

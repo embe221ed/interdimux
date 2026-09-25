@@ -167,7 +167,7 @@ menu on tmux >= 3.4 (one keypress per action: `s`, `e`, `n`, `r`, `i`, `w`,
 
 - **Switch** (`s`) — Navigate & jump to target
 - **Agents** (`e`) — The agents waiting on you, e.g. `Agents (2 need you)`:
-  the navigator, opened on them (see [Agents and pane titles](#agents-and-pane-titles))
+  the navigator, opened on them, marked (see [Agents and pane titles](#agents-and-pane-titles))
 - **New session** (`n`) — Create session from directory
 - **Rename** (`r`) — Rename a session or window
 - **Kill** (`i`) — Remove sessions, windows, or panes
@@ -419,14 +419,19 @@ command column, as plain words you can search for:
   `@interdimux-agents`.
 - **A state word, with its age** (from a minute on): `approve` (a permission
   waits — in the danger colour), `input` (a question or dialog is open),
-  `working`, `idle`, `done`, `error`. Type `approve` to find every agent
-  waiting on you.
+  `working`, `idle`, `done`, `error`. Typing `approve` finds those rows — and
+  any title or name with the word in it; for exactly the agents waiting on
+  you, use the dashboard.
 - **The dashboard counts them.** `prefix + g` shows `Agents (2 need you)` —
   the panes in `approve` or `input`, by the same rules as the rows, each pane
-  once however many sessions show it — and its `e` opens the navigator with
-  `'approve' | 'input'` already typed: the cursor starts on the first of them,
-  raw mode keeps the rest of the tree on screen, and editing the query
-  searches as usual. With none waiting the entry is greyed out.
+  once however many sessions show it — and its `e` opens the navigator on
+  them. Each one's row is marked in the gutter, where `*` marks where you are:
+  `!` for `approve`, `?` for `input` (one row per pane: the pane's own row
+  where its window lists panes). The query `^! | ^?` is typed for you, and it
+  matches exactly those rows: the cursor starts on the first of them, raw mode
+  keeps the rest of the tree on screen, and editing the query searches as
+  usual — while it still holds `^!` or `^?` it creates no session. With
+  none waiting the entry is greyed out.
 - **The description** is the agent's title with its status glyph and
   boilerplate removed. An agent row that shows a state or a description drops
   its arguments (`--resume <uuid>` …); the preview still has them.
