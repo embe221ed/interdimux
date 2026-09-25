@@ -276,6 +276,35 @@ else
   report "agents view: a query without its marks names a session as usual" fail
 fi
 
+# --- the hint bar asks zoxide nothing (review R21) ---------------------------------
+# From fzf 0.63 the bar's `M-⏎ create <name>` entry is worked out on every
+# keystroke of a typed query, in a --footer-for process.  For a query that is
+# not a directory the name is the query itself, whatever zoxide says, so that
+# process must not run it; describe_create (zero matches), which also shows
+# the directory, still does.  A PATH zoxide that only logs its calls.
+mkdir -p "$TMPD/zbin"
+cat > "$TMPD/zbin/zoxide" <<ZEOF
+#!/bin/sh
+echo "\$*" >> "$TMPD/zoxide-calls"
+exit 1
+ZEOF
+chmod +x "$TMPD/zbin/zoxide"
+rm -f "$TMPD/zoxide-calls"
+bar=$(PATH="$TMPD/zbin:$PATH" INTERDIMUX_USE_ZOXIDE=on FZF_MATCH_COUNT=3 FZF_QUERY=zqdocs FZF_COLUMNS=200 \
+        bash "$SCRIPT" --footer-for 'S:anchor' 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+key=$(PATH="$TMPD/zbin:$PATH" INTERDIMUX_USE_ZOXIDE=on FZF_QUERY=zqdocs bash "$SCRIPT" --create-key 2>/dev/null)
+if [[ "$bar" == *"create zqdocs"* ]] && [ -n "$key" ] && [ ! -e "$TMPD/zoxide-calls" ]; then
+  report "the bar's create entry and alt-enter's check run no zoxide" pass
+else
+  report "the bar's create entry and alt-enter's check run no zoxide (bar: '$bar', key: '$key', calls: $(cat "$TMPD/zoxide-calls" 2>/dev/null | tr '\n' ';'))" fail
+fi
+PATH="$TMPD/zbin:$PATH" INTERDIMUX_USE_ZOXIDE=on bash "$SCRIPT" --describe-create zqdocs >/dev/null 2>&1 || true
+if grep -q 'zqdocs' "$TMPD/zoxide-calls" 2>/dev/null; then
+  report "...while the zero-match announcement still asks it (the stub is reached)" pass
+else
+  report "...while the zero-match announcement still asks it (the stub is reached)" fail
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

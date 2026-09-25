@@ -5508,6 +5508,12 @@ query_words_r() {
 # why when there is more to say than "nothing left of it": `or` (a `|` term,
 # see query_words_r) or `mark` (the agents view's query, see VIEW).
 #
+# $2 = `name`: only CREATE_NAME is wanted (the bar's alt-enter entry, and
+# --create-key, which asks whether there is one).  The name of a query that is
+# not a directory is the query itself, whatever zoxide says, so the zoxide
+# lookup -- a subshell and two execs, on every keystroke of a typed query
+# (review R21) -- is skipped, and CREATE_DIR / CREATE_SRC are left empty.
+#
 # One resolver for both the header and the accept, because they used to derive
 # the name independently and disagreed: describe_create did a plain
 # `basename | tr`, while the accept went through resolve_session_name, which
@@ -5516,7 +5522,7 @@ query_words_r() {
 # The header is the only thing telling the user what Enter does, so it has to be
 # derived from the same code that does it.
 resolve_create_target() {
-  local query expanded
+  local query expanded mode="${2:-}"
   CREATE_DIR=""; CREATE_NAME=""; CREATE_SRC=""; QW_WHY=""
   # The agents view's query is a filter, never a name: while one of its mark
   # terms is in the query, whatever else was typed, it names nothing -- for
@@ -5534,6 +5540,9 @@ resolve_create_target() {
     # the PHYSICAL path, so a symlinked query names the session after where it
     # actually lands -- describe_create used the unresolved one
     CREATE_NAME=$(resolve_session_name "$CREATE_DIR")
+  elif [ "$mode" = name ]; then
+    CREATE_DIR=""
+    CREATE_NAME="${query//[.: \/]/-}"
   else
     CREATE_DIR=""
     if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
@@ -5587,7 +5596,7 @@ create_verb_r() {
 create_key_hint_r() {
   local h
   REPLY="" REPLY_W=0
-  resolve_create_target "$1" || return 0
+  resolve_create_target "$1" name || return 0
   create_verb_r
   hint_r 'M-⏎' "$REPLY $CREATE_NAME"; h="$REPLY"
   dlg_width "$h"; REPLY_W="$REPLY"
@@ -5973,7 +5982,7 @@ fi
 # quoting reason the raw-mode Enter gives.
 if [ "${1:-}" = "--create-key" ]; then
   set +e
-  resolve_create_target "${FZF_QUERY:-}" \
+  resolve_create_target "${FZF_QUERY:-}" name \
     && printf '%s\n' "execute(bash '$SQ_SCRIPT' --create-from-query \"\$FZF_QUERY\")+abort"
   exit 0
 fi
