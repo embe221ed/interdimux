@@ -187,6 +187,17 @@ fn this_host_prompt(desc: &str, hs: &str) -> bool {
     desc == tag || desc.strip_prefix(tag.as_str()).is_some_and(|r| r.starts_with(' '))
 }
 
+/// The command a title's word would name: its basename -- or nothing, for a
+/// word with a ':' before its last '/', which is a prompt
+/// (`deploy@web1:/etc/ssh`, `host:~/ssh`) and no command path, whatever its
+/// last directory is called (bash cmd_field's `*:*/*`).
+fn cmd_base(w: &str) -> &str {
+    match (w.find(':'), w.rfind('/')) {
+        (Some(c), Some(s)) if c < s => "",
+        _ => basename(w),
+    }
+}
+
 /// A description that only repeats the row: the app's own name, tmux's
 /// default title (the host name), a prompt of this host, or -- from a preexec
 /// hook -- the command line itself.
@@ -201,7 +212,7 @@ fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
     for x in desc.split(' ').filter(|x| !x.is_empty()) {
         w = x;
         // a prefix that is itself argv0: `sudo docker run ...` on a sudo row
-        if basename(x) == b {
+        if !cmd_base(x).is_empty() && cmd_base(x) == b {
             break;
         }
         if x.contains('=')
@@ -221,7 +232,8 @@ fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
     } else {
         ""
     };
-    basename(w) == b || (!r.is_empty() && basename(w) == basename(r))
+    let cw = cmd_base(w);
+    !cw.is_empty() && (cw == b || (!r.is_empty() && cw == basename(r)))
 }
 
 fn cap(s: String, max: usize) -> String {
@@ -439,6 +451,19 @@ mod tests {
         // a prefix that is not argv0 is still skipped
         assert!(repeats_row("sudo docker run -v /a:/b img@sha256:ab bash", "", "docker run", &c));
         assert!(!repeats_row("sudo root@3f2a: /", "", "docker exec -it 3f2a bash", &c));
+    }
+
+    #[test]
+    fn a_prompt_whose_directory_is_named_like_the_app_is_no_command_line() {
+        let c = cfg();
+        // Fedora, Arch and oh-my-zsh put no blank after the colon
+        assert!(!repeats_row("deploy@web1:/etc/ssh", "ssh", "ssh web1", &c));
+        assert!(!repeats_row("deploy@web1:~/ssh", "ssh", "ssh web1", &c));
+        assert!(!repeats_row("web1:/srv/ssh", "ssh", "ssh web1", &c));
+        assert!(!repeats_row("root@3f2a9c1b:/var/lib/docker", "docker", "docker exec -it 3f2a bash", &c));
+        // a command path is still one, and so is a colon after its last '/'
+        assert!(repeats_row("/usr/bin/ssh web1", "ssh", "ssh web1", &c));
+        assert!(repeats_row("ssh web1:/etc", "ssh", "ssh web1", &c));
     }
 
     #[test]

@@ -3409,7 +3409,7 @@ cmd_field() {
   local raw="$1"
   format_command "$raw"
   [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
-  local fc="$REPLY" a0 b name state since desc rest r w
+  local fc="$REPLY" a0 b name state since desc rest r w cw=""
   agent_state_r "$@" || { REPLY="$fc"; return 0; }
   name="$AS_NAME" state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
   a0="${raw%% *}"; b="${a0##*/}"
@@ -3428,7 +3428,10 @@ cmd_field() {
     #     cut to 10 characters (fish_title).
     #   * a command line: its first word, past VAR=x and sudo-like prefixes, is
     #     argv0 -- or, for an interpreter, the script it runs.  A prefix that
-    #     is itself argv0 counts: `sudo docker run ...` on a sudo row.
+    #     is itself argv0 counts: `sudo docker run ...` on a sudo row.  A word
+    #     with a ':' before its last '/' is no command path but a prompt
+    #     (`deploy@web1:/etc/ssh`, `host:~/ssh`): its last directory is not
+    #     argv0 however it is spelled.
     r="$CUR_HOST_SHORT"
     if [ "$desc" = "$name" ] || [ "$desc" = "$CUR_HOST" ] || [ "$desc" = "$r" ] \
        || { [ -n "$r" ] && [[ "$desc" == *"@$r" || "$desc" == *"@$r"[!A-Za-z0-9_-]* \
@@ -3437,7 +3440,8 @@ cmd_field() {
     else
       set -f
       for w in $desc; do
-        [ "${w##*/}" = "${b#-}" ] && break
+        cw="${w##*/}"; [[ "$w" == *:*/* ]] && cw=""
+        [ -n "$cw" ] && [ "$cw" = "${b#-}" ] && break
         case "$w" in *=*|sudo|env|nohup|exec|time|command|builtin|noglob|nice) continue ;; esac
         break
       done
@@ -3450,7 +3454,9 @@ cmd_field() {
       esac
       [[ "$SHELL_NAMES" == *" ${b#-} "* ]] && r=1
       if [ -n "$r" ]; then r="${raw#"$a0"}"; r="${r# }"; r="${r%% *}"; fi
-      [ "${w##*/}" = "${b#-}" ] || { [ -n "$r" ] && [ "${w##*/}" = "${r##*/}" ]; } && desc=""
+      if [ -n "$cw" ] && { [ "$cw" = "${b#-}" ] || { [ -n "$r" ] && [ "$cw" = "${r##*/}" ]; }; }; then
+        desc=""
+      fi
     fi
     if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
   fi
