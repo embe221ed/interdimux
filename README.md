@@ -413,10 +413,14 @@ command column, as plain words you can search for:
 ```
 
 - **Agents are named by what they are.** An npm or pip install runs as
-  `node …/bin/codex` or `python …/bin/aider`; the row says `codex`, `aider`.
+  `node …/bin/codex` or `python …/bin/aider`, a package's own file as
+  `node …/codex/bin/codex.js`, and `npx @google/gemini-cli` as npx itself
+  (npm starts the agent under it); the row says `codex`, `aider`, `gemini`.
   Recognised: claude, codex, gemini, qwen, opencode, amp, goose, crush,
   kiro-cli, aider, copilot, cursor-agent — add your own with
-  `@interdimux-agents`.
+  `@interdimux-agents`. This reads the process's arguments, so with
+  `@interdimux-show-full-command 'off'` an npm-installed agent is just `node`,
+  with no state from its title.
 - **A state word, with its age:** `approve` (a permission waits — in the
   danger colour), `input` (a question or dialog is open), `working`, `idle`,
   `done`, `error`. Type `approve` to find every agent waiting on you.
@@ -667,7 +671,8 @@ set -g @interdimux-popup-height '75%'
 set -g @interdimux-show-preview 'off'
 
 # Show full command line with arguments (default: on)
-# Set to 'off' to show only the command name (faster for many panes)
+# Set to 'off' to show only the command name (faster for many panes).  Agents
+# installed with npm or pip then show as node / python, without a state.
 set -g @interdimux-show-full-command 'on'
 
 # Show git branch in tree display (default: on)
