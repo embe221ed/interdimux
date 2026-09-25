@@ -1359,7 +1359,7 @@ is_utf8() {
 # cut, which counted bytes and could split a character (review R14).  An
 # LC_ALL or LC_CTYPE the user set is left alone.  Tried once per process,
 # fork-free: an assignment to LC_CTYPE is a setlocale(3) in bash.
-_UTF8_CT=unset
+_UTF8_CT='unset'
 utf8_ctype_r() {
   if [ "$_UTF8_CT" = unset ]; then
     _UTF8_CT=""
