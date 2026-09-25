@@ -5470,12 +5470,30 @@ fi
 # are dropped, the way fzf drops them: `docs ` names `docs`, not `docs-`, and
 # a query of blanks names nothing.  resolve_create_target calls this, so the
 # bar that announces a name and the create that makes it cannot disagree.
-QW_WHY=""
+#
+# Two more pieces of fzf's syntax (review R05).  A term that is exactly `|` is
+# fzf's OR, and a query with one is a filter -- `foo | bar` made `foo-|-bar`,
+# and any edit of the agents view's query (a trailing space, one more word)
+# offered and made junk like `approve-|-input-qqq` in ~ -- so it names
+# nothing, and QW_OR=1 says why.  And `\ ` is a space INSIDE a term, not
+# between two: `my\ proj` is one term, and names `my-proj` (not `my\-proj`);
+# `~/my\ dir` is that directory.  (`foo |bar` is a literal term to fzf too.)
+QW_OR=0 QW_WHY=""
 query_words_r() {
-  local rest="$1" t lead out=""
+  local rest="$1" t="" lead out="" c
+  local -a terms=()
+  QW_OR=0
   while [ -n "$rest" ]; do
-    t="${rest%% *}"
-    if [ "$t" = "$rest" ]; then rest=""; else rest="${rest#* }"; fi
+    case "$rest" in
+      '\ '*) t+=" "; rest="${rest:2}" ;;
+      ' '*)  terms+=("$t"); t=""; rest="${rest:1}" ;;
+      *)     c="${rest%%[\\ ]*}"; [ -n "$c" ] || c="${rest:0:1}"
+             t+="$c"; rest="${rest:${#c}}" ;;
+    esac
+  done
+  terms+=("$t")
+  for t in "${terms[@]}"; do
+    if [ "$t" = "|" ]; then QW_OR=1; REPLY=""; return 0; fi
     lead="${t%%[!\'^!]*}"          # the leading run of ' ^ !
     t="${t#"$lead"}"
     t="${t%\$}"
@@ -5486,8 +5504,9 @@ query_words_r() {
 }
 
 # What a query WOULD become.  Sets CREATE_DIR / CREATE_NAME / CREATE_SRC;
-# returns 1 when the query cannot produce a session at all -- with QW_WHY=mark
-# when that is because it is the agents view's query (see VIEW).
+# returns 1 when the query cannot produce a session at all, with QW_WHY saying
+# why when there is more to say than "nothing left of it": `or` (a `|` term,
+# see query_words_r) or `mark` (the agents view's query, see VIEW).
 #
 # One resolver for both the header and the accept, because they used to derive
 # the name independently and disagreed: describe_create did a plain
@@ -5502,10 +5521,12 @@ resolve_create_target() {
   # The agents view's query is a filter, never a name: while one of its mark
   # terms is in the query, whatever else was typed, it names nothing -- for
   # every caller, the bar's create-key entry and alt-enter too, not only Enter.
+  # (Its `|` alone covers most edits; this covers the rest.)
   if [ -n "$VIEW" ]; then
     case " $1 " in *' ^! '*|*' ^? '*) QW_WHY=mark; return 1 ;; esac
   fi
   query_words_r "$1"; query="$REPLY"
+  [ "$QW_OR" = 1 ] && QW_WHY=or
   [ -n "$query" ] || return 1
   expanded="${query/#\~/$HOME}"
   if [ -d "$expanded" ] && CREATE_DIR=$(cd "$expanded" 2>/dev/null && pwd -P); then
@@ -5529,8 +5550,8 @@ resolve_create_target() {
 
 # Sets REPLY to the session name; prints nothing.
 #
-# A query that names nothing -- blanks, only fzf syntax, the agents view's
-# query when no agent waits any more -- creates nothing, quietly
+# A query that names nothing -- blanks, only fzf syntax, an OR, the agents
+# view's query when no agent waits any more -- creates nothing, quietly
 # (REPLY stays empty): it is a filter, and the bar has said so
 # (describe_create).  Returns 1 only when a create was tried and failed.
 create_from_query() {
@@ -5587,6 +5608,8 @@ describe_create() {
       hint_r '∅' 'no agent is waiting on you' esc quit
     elif [ "$QW_WHY" = mark ]; then
       hint_r '∅' 'no waiting agent matches' esc quit
+    elif [ "$QW_WHY" = or ]; then
+      hint_r '∅' 'a query with | is a filter, not a name' esc quit
     fi
     return 0
   fi

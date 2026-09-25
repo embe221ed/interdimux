@@ -13,7 +13,8 @@ A portal gun for your tmux sessions.
 - Find-or-create: `Enter` on a query that matches nothing creates a session
   with that name (resolved as a path, then via zoxide, then under `$HOME`);
   `Alt-Enter` creates it even when something matches. fzf's search syntax is
-  not part of the name, so `'docs` creates `docs`
+  not part of the name, so `'docs` creates `docs`, and a query with fzf's OR
+  (`|`) is a filter that creates nothing
 - Scoped fuzzy matching — queries match names and commands, not paths,
   padding, badges, or tree glyphs; cycle the scope with `Ctrl-]`
   (name / path / cmd / all / name+cmd, fzf >= 0.58). The searchable columns
@@ -192,7 +193,7 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 
 | Key | Action |
 |---|---|
-| `Enter` | Switch to the selected target — or create a session named after the query when nothing matches. fzf's search syntax is left out of the name: `'docs`, `^docs`, `docs$` and `!docs` all name `docs` |
+| `Enter` | Switch to the selected target — or create a session named after the query when nothing matches. fzf's search syntax is left out of the name: `'docs`, `^docs`, `docs$` and `!docs` all name `docs`, and `my\ proj` (one term, an escaped space) names `my-proj`. A query with fzf's OR, `foo \| bar`, is a filter: it names no session, and `Enter` there does nothing |
 | `Alt-Enter` | Create a session named after the query even when rows match (or switch to it, when a session has that name). A long command line — `kubectl logs -f deployment/payments-api …` — fuzzy-matches almost any short word, and `Enter` would switch to that pane instead. While a query is typed the bar names what `Alt-Enter` makes: `M-⏎ create docs` (fzf >= 0.63; the key itself works from 0.46). An empty query does nothing |
 | `Ctrl-x` | Kill the selected session, window, or pane — killing a session with clients on it, yours included, first hops them to the most recent other session (no surprise detach). So does killing its last window or last pane, which closes the session too; the dialog says so before you answer |
 | `Ctrl-e` | Rename the selected session or window (pre-filled with the current name) |
@@ -430,7 +431,7 @@ command column, as plain words you can search for:
   where its window lists panes). The query `^! | ^?` is typed for you, and it
   matches exactly those rows: the cursor starts on the first of them, raw mode
   keeps the rest of the tree on screen, and editing the query searches as
-  usual — while it still holds `^!` or `^?` it creates no session. With
+  usual — while it still holds `^!`, `^?` or `|` it creates no session. With
   none waiting the entry is greyed out.
 - **The description** is the agent's title with its status glyph and
   boilerplate removed. An agent row that shows a state or a description drops

@@ -227,6 +227,26 @@ else
   report "an empty query creates nothing" fail
 fi
 
+# --- fzf's OR and its escaped space (review R05) -----------------------------------
+# A term that is exactly `|` is fzf's OR: the query is a filter, and names
+# nothing -- `foo | bar` made `foo-|-bar`.  The bar says why instead of
+# offering a name, and Enter creates nothing.
+desc=$(bash "$SCRIPT" --describe-create 'foo | bar' 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+if [[ "$desc" == *"filter, not a name"* && "$desc" != *create* ]]; then
+  report "an OR query is announced as a filter, not a name" pass
+else
+  report "an OR query is announced as a filter, not a name (bar: '$desc')" fail
+fi
+before=$(sessions | tr '\n' ' ')
+bash "$SCRIPT" --create-from-query 'foo | bar' >/dev/null 2>&1 || true
+if [ "$before" = "$(sessions | tr '\n' ' ')" ]; then
+  report "...and creates nothing" pass
+else
+  report "...and creates nothing (now: $(sessions | tr '\n' ' '))" fail
+fi
+# `\ ` is a space inside ONE term: `my\ proj` names my-proj, not my\-proj.
+check_named "an escaped space is part of the term" 'escq\ proj' escq-proj
+
 # --- the agents view's query is a filter (review R03) ------------------------------
 # The agents view (the dashboard's Agents entry) opens on `^! | ^?`.  Any
 # edit of it -- a trailing space, a word typed after it, the OR taken out --
