@@ -489,11 +489,14 @@ lazygit, ranger, python…), editors set one only with `set title` (and it names
 the file the row already shows), and yazi's or mc's is the directory, which
 they change to, so the directory column already has it.
 
-A title no rule knows is not shown, and neither is one that repeats the row:
-tmux's default (the host name), a prompt of *this* host (`user@thishost:…`,
-fish's `[thishost] …`) and a preexec hook's copy of the command line.
-`@interdimux-show-title all` shows every other title, the way `prefix + w`
-does.
+A title no rule knows is not shown — on an agent's row too: an agent that
+sets no title (aider, or one you add with `@interdimux-agents`) would show
+whatever the last program left in the pane as its task. The agents that title
+themselves have rules; for your own, add one (`myagent - = *` shows its whole
+title). Nor is a title shown that repeats the row: tmux's default (the host
+name), a prompt of *this* host (`user@thishost:…`, fish's `[thishost] …`) and
+a preexec hook's copy of the command line. `@interdimux-show-title all` shows
+every other title, the way `prefix + w` does.
 
 #### Title rules
 
@@ -746,8 +749,8 @@ set -g @interdimux-hydrate 'on'
 set -g @interdimux-startup-command 'nvim .'
 
 # Agent rows (see "Agents and pane titles").  Which pane titles to show:
-# 'known' (agents' and those a title rule knows), 'all' (every title that adds
-# something, as prefix+w does) or 'off'  (default: known)
+# 'known' (those a title rule knows, an agent's included), 'all' (every title
+# that adds something, as prefix+w does) or 'off'  (default: known)
 set -g @interdimux-show-title 'known'
 
 # Longest description shown, in characters (default: 40)
@@ -761,8 +764,8 @@ set -g @interdimux-agent-state 'on'
 # (default: off)
 set -g @interdimux-agent-args 'off'
 
-# More agent names, space-separated, recognised as agents; 'off' recognises
-# none (default: unset)
+# More agent names, space-separated, recognised as agents (their titles show
+# only with a title rule for them); 'off' recognises none (default: unset)
 set -g @interdimux-agents 'myagent'
 
 # Your title rules file (default: ~/.config/interdimux/titles)

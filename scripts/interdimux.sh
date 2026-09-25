@@ -2841,9 +2841,12 @@ agent_of() {
 #
 # Lines of @interdimux-title-rules (a file, default
 # ~/.config/interdimux/titles) come before these, so they override them.  A
-# row that no title rule knows shows its title only under
-# @interdimux-show-title all, or when it is an agent's.  rust/src/titles.rs
-# applies the same text: bash hands it over whole.
+# title no rule knows shows only under @interdimux-show-title all -- on an
+# agent's row too: a shell that sets no title leaves the last program's title
+# in the pane, and an agent that sets none (aider) would show that as its
+# task.  So every agent whose own title should show has a rule here that
+# matches it, even a bare `=  *`.  rust/src/titles.rs applies the same text:
+# bash hands it over whole.
 DEFAULT_TITLE_RULES='
 # --- agents: titles ------------------------------------------------------
 # Claude Code: `✳ <title>`; ◐/◑ or a spinner while busy outside a multiplexer
@@ -2852,6 +2855,7 @@ claude          -        -   Claude Code
 claude          working  $1  ◐ *
 claude          working  $1  ◑ *
 claude          working  $1  %spin *
+claude          -        $1  ✳ *
 # Codex: `<spinner> <thread> | <project>`; `[ ! ] Action Required | ...`
 # blinking to `[ . ]` while an approval waits.  No spinner is not idle: the
 # activity item can be switched off.
@@ -2885,7 +2889,9 @@ amp             idle     $1  * - amp - *
 # opencode, Cursor, goose, crush, GitHub Copilot
 opencode        -        $1  OC | *
 opencode        -        -   OpenCode
+# Cursor: its chat name, which has no mark of its own
 cursor-agent    -        -   Cursor Agent
+cursor-agent    -        =   *
 goose           -        -   🪿*
 crush           -        -   crush *
 copilot         -        $1  * - GitHub Copilot
@@ -3374,11 +3380,11 @@ agent_state_r() {
   if [ -n "$odesc" ]; then
     desc="$odesc" known=1 pubd=1
   elif [ -n "$title" ]; then
-    # A title nothing can use -- not an agent's, no rule for the app, and not
-    # `all` -- is not even cleaned: most rows are shells and editors.
+    # A title nothing can use -- no rule for the app, and not `all` -- is not
+    # even cleaned: most rows are shells and editors.
     [ "$TR_LOADED" = 1 ] || load_title_rules
     if [ -n "$name" ] && [[ ${TR_IDX[$name]+x} ]]; then REPLY="${TR_IDX[$name]}"; else title_idx_r "$name"; fi
-    if [ -n "$REPLY" ] || [ "$agent_row" = 1 ] || [ "$SHOW_TITLE" = all ]; then
+    if [ -n "$REPLY" ] || [ "$SHOW_TITLE" = all ]; then
       title_text_r "$title"; w="$REPLY"
       title_rule_r "$name" "$w"
       if [ "$TR_HIT" = 1 ]; then
@@ -3404,7 +3410,7 @@ agent_state_r() {
 # An agent row is headed by the agent (`codex`, not `node codex`); when it
 # shows a state or a title its arguments go, unless @interdimux-agent-args is
 # on (they are still in the preview).  Any other row is exactly what
-# format_command draws, with the title after it when a rule knows its app
+# format_command draws.  Either kind shows its title only when a rule knows it
 # (or always, under @interdimux-show-title all).
 cmd_field() {
   local raw="$1"
@@ -3416,7 +3422,7 @@ cmd_field() {
   a0="${raw%% *}"; b="${a0##*/}"
   case "$SHOW_TITLE" in
     off)   desc="" ;;
-    known) [ "$AS_KNOWN" = 1 ] || [ "$AS_AGENT" = 1 ] || desc="" ;;
+    known) [ "$AS_KNOWN" = 1 ] || desc="" ;;
   esac
   if [ -n "$desc" ] && [ "$AS_PUBD" = 1 ]; then
     # Published text (@agent_desc, a plugin's option, an @option rule's DESC)

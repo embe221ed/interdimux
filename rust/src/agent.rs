@@ -24,7 +24,7 @@ const SCRIPTS: &[&str] = &["codex", "gemini", "qwen", "copilot", "crush", "aider
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum ShowTitle {
-    /// titles of agents and of apps a rule knows
+    /// titles a rule knows (an agent's too: see DEFAULT_TITLE_RULES)
     Known,
     All,
     Off,
@@ -320,7 +320,7 @@ pub fn command_field(
     }
     match cfg.show_title {
         ShowTitle::Off => desc.clear(),
-        ShowTitle::Known if !known && !agent_row => desc.clear(),
+        ShowTitle::Known if !known => desc.clear(),
         _ => {}
     }
     if !desc.is_empty() {

@@ -9,6 +9,10 @@
 #   2. a description a hook or plugin PUBLISHED (@agent_desc, an option rule's
 #      DESC) is shown as published: the filters for stale or copied titles are
 #      not for it, only a bare repeat of the row's name goes
+#   3. an agent's row shows a title only when a rule knows it, like any other
+#      row: a title the last program left in the pane (a shell that sets none
+#      keeps it) is not an agent's task.  The agents that title themselves
+#      have rules, so their own titles still show.
 #
 # Expected rows are written out here, not computed by either renderer.
 
@@ -180,6 +184,59 @@ WHAT=(
   "not: one that is only the name"
 )
 check_dump "published"
+
+# --- 3. an agent's title needs a rule, as any other title does ----------------
+EXTRA=(INTERDIMUX_AGENTS=myagent)
+CASES=(
+  'aider --model sonnet|✳ Refactor auth middleware'
+  'python3 /h/.local/bin/aider|✳ Refactor auth middleware'
+  'myagent|Thanks for flying Vim'
+  'kiro-cli|root@3f2a9c1b: /app'
+  'sh ./my-agent|✳ Refactor auth middleware§agent_state=working'
+  'claude|Thanks for flying Vim'
+  'claude|✳ Fix the parser'
+  'claude|✳ Claude Code'
+  'cursor-agent|Refactor the store'
+  'cursor-agent|Cursor Agent'
+  'codex|Fix login | app'
+  'gemini|✦  Planning the refactor'
+)
+EXPECT=(
+  'aider --model sonnet'
+  'aider'
+  'myagent'
+  'kiro-cli'
+  'sh my-agent working'
+  'claude'
+  'claude Fix the parser'
+  'claude'
+  'cursor-agent Refactor the store'
+  'cursor-agent'
+  'codex Fix login'
+  'gemini working Planning the refactor'
+)
+WHAT=(
+  "not: a leftover title on aider, which sets none"
+  "not: ...on an npm aider"
+  "not: ...on a name added with @interdimux-agents"
+  "not: ...a container prompt on kiro-cli"
+  "not: ...on a wrapper made an agent row by @agent_state"
+  "not: ...what vim left on a claude row"
+  "Claude's session title"
+  "not: Claude's name for itself"
+  "Cursor's chat name"
+  "not: Cursor's name for itself"
+  "codex's thread"
+  "gemini's thought"
+)
+check_dump "agent titles"
+# ...and under `all`, every title shows, as it did
+SHOW=all
+CASES=('aider --model sonnet|✳ Refactor auth middleware' 'myagent|Thanks for flying Vim')
+EXPECT=('aider Refactor auth middleware' 'myagent Thanks for flying Vim')
+WHAT=("aider's leftover title" "a user-added agent's leftover title")
+check_dump "agent titles"
+SHOW=known EXTRA=()
 
 echo
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"
