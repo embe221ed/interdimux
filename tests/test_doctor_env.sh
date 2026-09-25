@@ -50,6 +50,13 @@ echo
 # depend on the developer's own locale or fzf opts.
 export LC_ALL=C.UTF-8 LANG=C.UTF-8
 unset FZF_DEFAULT_OPTS FZF_DEFAULT_OPTS_FILE
+# The agents section reads ~/.claude, ~/.codex and the title rules, which are
+# the developer's, not the install's: a Claude that sends its alerts nowhere
+# tmux can see would make "everything checks out" false for a reason that is
+# not about this code (tests/test_doctor_agents.sh covers that section, with a
+# fake HOME).  Pointed at directories that do not exist, each is one dim line.
+export CLAUDE_CONFIG_DIR="$TMPD/no-claude" CODEX_HOME="$TMPD/no-codex" XDG_CONFIG_HOME="$TMPD/config"
+unset INTERDIMUX_CLAUDE_DIR INTERDIMUX_TITLE_RULES CLAUDE_CODE_DISABLE_TERMINAL_TITLE
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s envdoc -x 120 -y 40
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
