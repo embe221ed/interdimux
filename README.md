@@ -419,10 +419,14 @@ command column, as plain words you can search for:
 ```
 
 - **Agents are named by what they are.** An npm or pip install runs as
-  `node …/bin/codex` or `python …/bin/aider`; the row says `codex`, `aider`.
+  `node …/bin/codex` or `python …/bin/aider`, a package's own file as
+  `node …/codex/bin/codex.js`, and `npx @google/gemini-cli` as npx itself
+  (npm starts the agent under it); the row says `codex`, `aider`, `gemini`.
   Recognised: claude, codex, gemini, qwen, opencode, amp, goose, crush,
   kiro-cli, aider, copilot, cursor-agent — add your own with
-  `@interdimux-agents`. `@interdimux-agents off` turns the naming off, and
+  `@interdimux-agents`. This reads the process's arguments, so with
+  `@interdimux-show-full-command 'off'` an npm-installed agent is just `node`,
+  with no state from its title. `@interdimux-agents off` turns the naming off, and
   only that: rows keep their whole command line, and a state or description
   still follows it (`codex 2400 approve Fix the build`). Title rules go by the
   command's name, so a native `codex` keeps its state while
@@ -728,7 +732,8 @@ set -g @interdimux-popup-height '75%'
 set -g @interdimux-show-preview 'off'
 
 # Show full command line with arguments (default: on)
-# Set to 'off' to show only the command name (faster for many panes)
+# Set to 'off' to show only the command name (faster for many panes).  Agents
+# installed with npm or pip then show as node / python, without a state.
 set -g @interdimux-show-full-command 'on'
 
 # Show git branch in tree display (default: on)
