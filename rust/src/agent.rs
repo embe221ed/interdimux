@@ -284,6 +284,8 @@ pub fn command_field(
     }
     let mut desc = String::new();
     let mut known = false;
+    // published (an option), not a title: bash AS_PUBD
+    let mut pubd = false;
     // then what a plugin or a hook published, then the title
     let mut odesc = String::new();
     if opts.chars().any(|c| c != '\u{1d}') {
@@ -300,6 +302,7 @@ pub fn command_field(
     if !odesc.is_empty() {
         desc = odesc;
         known = true;
+        pubd = true;
     } else if !title.is_empty() {
         let t = titles::text(title);
         match titles::apply(&cfg.rules, name, &t) {
@@ -321,7 +324,10 @@ pub fn command_field(
         _ => {}
     }
     if !desc.is_empty() {
-        if repeats_row(&desc, name, raw, cfg) {
+        // published text is shown as published: only a bare repeat of the
+        // name goes (a title can be stale, or a copy of the command line)
+        let repeat = if pubd { desc == name } else { repeats_row(&desc, name, raw, cfg) };
+        if repeat {
             desc.clear();
         }
         desc = cap(desc, cfg.title_max);

@@ -449,7 +449,10 @@ Where the state comes from, first source that speaks wins:
    my-agent "$@"
    tmux set -p -t "$TMUX_PANE" @agent_state done
    ```
-   (`@agent_state` takes the words above; `@agent_desc` any text.)
+   (`@agent_state` takes the words above; `@agent_desc` any text, shown as
+   it is: the filters below are for titles, which can be stale or a copy of
+   the command line, and only a description that is just the app's name is
+   left out.)
 3. **The title**, by per-app rules (below): codex's `[ ! ] Action Required`
    is `approve` and its spinner `working`; gemini's `✋` / `✦` / `◇`, qwen's
    `✳` / `◐`, amp's spinner and `◆` likewise. A title rule is chosen by the

@@ -6,6 +6,9 @@
 #
 #   1. a remote or container prompt is not a command line, even when its
 #      directory is named like the app (`deploy@web1:/etc/ssh` on an ssh row)
+#   2. a description a hook or plugin PUBLISHED (@agent_desc, an option rule's
+#      DESC) is shown as published: the filters for stale or copied titles are
+#      not for it, only a bare repeat of the row's name goes
 #
 # Expected rows are written out here, not computed by either renderer.
 
@@ -146,6 +149,37 @@ WHAT=(
   "not: a preexec line with a colon after its last slash"
 )
 check_dump "prompts"
+
+# --- 2. a published description is shown as published --------------------------
+# This host is web.example.com, `web` for short.
+CASES=(
+  'claude|✳ Fix it§agent_state=working;agent_desc=claude reviewing PR 42'
+  'sleep 100|§agent_state=working;agent_desc=sleep until the build finishes'
+  'make build|§agent_desc=make is running'
+  'vim foo|§agent_desc=web'
+  'sleep 30|§agent_desc=deploy@web: /srv'
+  'sh ./my-agent|§agent_state=working;agent_desc=my-agent step 2 of 5'
+  'claude|§agent_state=working;agent_desc=claude'
+)
+EXPECT=(
+  'claude working claude reviewing PR 42'
+  'sleep 100 working sleep until the build finishes'
+  'make build make is running'
+  'vim foo web'
+  'sleep 30 deploy@web: /srv'
+  'sh my-agent working my-agent step 2 of 5'
+  'claude working'
+)
+WHAT=(
+  "one that starts with the agent's name"
+  "one that starts with argv0"
+  "one that starts with argv0, and no state"
+  "one that is this host's short name"
+  "one shaped like a prompt of this host"
+  "one that starts with the script a shell runs"
+  "not: one that is only the name"
+)
+check_dump "published"
 
 echo
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"

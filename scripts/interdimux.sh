@@ -3327,15 +3327,16 @@ claude_registry_r() {
 #   AS_STATE  a state word, or empty (and AS_SINCE, the registry's epoch)
 #   AS_DESC   the description, before cmd_field trims it for the row
 #   AS_KNOWN  1 when a rule knew the description
+#   AS_PUBD   1 when the description was published (an option), not a title
 #   AS_AGENT  1 when the row is an agent's
 #
 # and AG_NAME / AG_REST (agent_of).  Returns 1, with all of them empty, for a
 # row that can have none of it: no command, or an idle shell.
 agent_state_r() {
-  AS_NAME="" AS_STATE="" AS_SINCE="" AS_DESC="" AS_KNOWN=0 AS_AGENT=0 AG_NAME="" AG_REST=""
+  AS_NAME="" AS_STATE="" AS_SINCE="" AS_DESC="" AS_KNOWN=0 AS_PUBD=0 AS_AGENT=0 AG_NAME="" AG_REST=""
   local raw="$1" pid="$2" pane="$3" title="$4" opts="${5-}"
   [ -n "$raw" ] || return 1
-  local a0 b name state="" since="" desc="" agent_row=0 known=0 r v w
+  local a0 b name state="" since="" desc="" agent_row=0 known=0 pubd=0 r v w
   a0="${raw%% *}"; b="${a0##*/}"
   # An idle shell is nobody's agent: whatever state or title it had went with
   # the program that set it.
@@ -3371,7 +3372,7 @@ agent_state_r() {
     [ -n "$odesc" ] && agent_row=1
   fi
   if [ -n "$odesc" ]; then
-    desc="$odesc" known=1
+    desc="$odesc" known=1 pubd=1
   elif [ -n "$title" ]; then
     # A title nothing can use -- not an agent's, no rule for the app, and not
     # `all` -- is not even cleaned: most rows are shells and editors.
@@ -3391,7 +3392,7 @@ agent_state_r() {
       title_glyph_r "$desc"; desc="$REPLY"
     fi
   fi
-  AS_NAME="$name" AS_STATE="$state" AS_SINCE="$since" AS_DESC="$desc" AS_KNOWN="$known" AS_AGENT="$agent_row"
+  AS_NAME="$name" AS_STATE="$state" AS_SINCE="$since" AS_DESC="$desc" AS_KNOWN="$known" AS_PUBD="$pubd" AS_AGENT="$agent_row"
   return 0
 }
 
@@ -3417,7 +3418,14 @@ cmd_field() {
     off)   desc="" ;;
     known) [ "$AS_KNOWN" = 1 ] || [ "$AS_AGENT" = 1 ] || desc="" ;;
   esac
-  if [ -n "$desc" ]; then
+  if [ -n "$desc" ] && [ "$AS_PUBD" = 1 ]; then
+    # Published text (@agent_desc, a plugin's option, an @option rule's DESC)
+    # is what its publisher meant to say: it is no stale title and no copy of
+    # the command line, so it is shown as it is -- only a bare repeat of the
+    # name goes.
+    [ "$desc" = "$name" ] && desc=""
+    if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
+  elif [ -n "$desc" ]; then
     # What only repeats the row: the app's own name, tmux's default title (the
     # host name), a prompt of this host and, from a preexec hook, the command
     # line itself.
