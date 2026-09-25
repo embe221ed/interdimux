@@ -712,6 +712,44 @@ trims were the `${t#"${t%%[! ]*}"}` idiom. Now two byte-wise substitutions
 and two anchored regexes. prefix+g's count — always bash — with one codex
 pane titled 5,000 × é and a U+0085: 4.3 s → 0.09 s.
 
+### prefix+g's count (review R08)
+
+The dashboard's Agents entry counts the waiting agents in bash, in a fresh
+process, before display-menu can draw. Once ssh, docker, kubectl and the other
+remote shells had title rules (none with a state), every such pane went
+through `agent_state_r` -- a title parse and match -- for a state it could
+never have, and so did every Claude pane, whose rules say only `working`; any
+shell's default title (the host name) loaded the whole rule index first. Now a
+pane reaches `agent_state_r` only when something could make it wait: a
+registry record that says approve or input (one that says anything else is
+final), a published option, an interpreter (named by its script), or a title
+whose app has a rule that says approve or input -- `DEFAULT_AW_CAN` for the
+shipped rules, spelled out because reading it off the rule text cost as much
+as the index it saves. In that mode `agent_state_r` stops at the first source
+that gives a state and skips the description. Duplicate lines (a session
+group, a linked window) are dropped before any of it, and `load_title_rules`
+no longer rewrites every line for a tab it does not have (~40% of its time).
+
+Two private servers, each with a client attached from an outer one,
+`--dashboard-launch` with display-menu stubbed, 50 interleaved runs, CPU time
+of the process tree (getrusage) and the count's own wall time, min / median
+in ms, on a box other agents were loading:
+
+| | round 2 before | after | main (no count) |
+|---|---|---|---|
+| **31 panes**: 5 codex (1 as `./codex`), a Claude, 2 node, 14 ssh/docker, 8 shells | | | |
+| the count alone | 39.7 / 52.5 | 27.0 / 36.2 | -- |
+| whole launch, CPU | 76-88 / 100-108 | 81-84 / 96-102 | 62-63 / 74-79 |
+| **30 panes**: 20 ssh, 10 shells, no agent | | | |
+| the count alone | 25.7 / 31.7 | 13.6 / 17.0 | -- |
+| whole launch, CPU | 76-85 / 100-109 | 64-72 / 88-92 | 67 / 78-81 |
+
+(Ranges are two runs of the benchmark.) The count's remaining cost is mostly
+the one `list-panes` (~11 ms wall of the 13.6), and with real agents to read,
+the rule index (~5-8 ms) and their titles. "Before" also counted the
+`./codex` pane as nothing (review R12). A count-only subcommand in the Rust
+core would take the rest, for installs that have it.
+
 ## Suggested rollout
 
 1. **Tier 0 (0.1 + 0.2 + 0.3)** in one pass — pure fork removal, no gate, test-covered. This

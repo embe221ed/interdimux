@@ -8,11 +8,18 @@
 #     plugins publish, then the title -- including the rows' own exceptions (an
 #     idle shell shows no state whatever option it carries; a session
 #     @interdimux-hide keeps out of the navigator is not counted)
-#   * none waiting greys the entry out and drops its key, as Jobs does
-#   * its key opens the navigator with the query `'approve' | 'input'` typed,
-#     the cursor on a waiting agent
+#   * each pane once: a session group and a linked window show it again
+#     (review R06), and an agent started by a relative path (`./codex`) counts
+#     like any other (review R12)
+#   * none waiting greys the entry out and drops its key, as Jobs does; one
+#     says `1 needs you` (review R28)
+#   * its key opens the navigator in the agents view: fzf matches exactly the
+#     waiting panes -- not a working agent whose description says `Approve`,
+#     nor a window called `input-x` (review R03) -- and Enter goes to one;
+#     `approve` keeps its danger colour there (review R28)
 #   * the fzf fallback dashboard (short clients, tmux < 3.4) says the count too
-#   * with nothing waiting, Enter on the unmatched query creates no session
+#   * editing its query creates no session (review R05), and with nothing
+#     waiting, Enter on the unmatched query creates none either
 #
 # Everything is RENDERED: display-menu needs an attached client, so an outer
 # private server's pane attaches to an inner one, and the menu and the popup
@@ -90,13 +97,28 @@ cat > "$TMPD/codex-native" <<'EOF'
 printf '\033]0;[ . ] Action Required | Fix the build | proj\007'
 exec -a codex sleep 990
 EOF
+# A codex built from source, started by a relative path: tmux strips the
+# directory only from an argv0 that starts with '/', so its
+# #{pane_current_command} is `./codex` (review R12).
+cat > "$TMPD/codex-rel" <<'EOF'
+#!/usr/bin/env bash
+printf '\033]0;[ ! ] Action Required | Relative build | proj\007'
+exec -a ./codex sleep 988
+EOF
+# Decoys for the query (review R03): a WORKING codex whose description says
+# Approve, and (below) a window called input-x.
+cat > "$TMPD/codex-busy" <<'EOF'
+#!/usr/bin/env bash
+printf '\033]0;\342\240\213 Approve button styling | app\007'
+exec -a codex sleep 987
+EOF
 # A wrapper script that publishes a state for a tool (the README's recipe):
 # to tmux the pane runs `sh`, and the row shows the command under it.
 cat > "$TMPD/wrapper" <<'EOF'
 sleep 995
 echo done
 EOF
-chmod +x "$TMPD/claude" "$TMPD/codex" "$TMPD/codex-native"
+chmod +x "$TMPD/claude" "$TMPD/codex" "$TMPD/codex-native" "$TMPD/codex-rel" "$TMPD/codex-busy"
 
 tin() { tmux -L "$IN" "$@"; }
 
@@ -115,7 +137,18 @@ tin split-window -d -t '=work:qq' -c "$TMPD" "exec sleep 993"          # inactiv
 tin new-window -d -t '=work:' -n busy -c "$TMPD" "exec sleep 992"
 tin new-window -d -t '=work:' -n idle -c "$TMPD" "exec bash --norc --noprofile -i"
 tin new-window -d -t '=work:' -n wrap -c "$TMPD" "exec sh '$TMPD/wrapper'"
+tin new-window -d -t '=work:' -n rel -c "$TMPD" "exec '$TMPD/codex-rel'"
 tin new-session -d -s hidden-x -x 110 -y 38 -c "$TMPD" "exec sleep 991"
+# Every pane of `work` again, in a session group, and the native codex's
+# window linked into one more session: list-panes -a prints those panes once
+# per session that holds them.
+tin new-session -d -s view -t '=work'
+tin new-session -d -s lnk -x 110 -y 38 -c "$TMPD" "exec sleep 985"
+tin link-window -d -s '=work:cn' -t '=lnk:'
+# The decoys, in the session made last: the most recent, so it is listed
+# first, where the old query's best match -- and the cursor -- fell on them.
+tin new-session -d -s deco -x 110 -y 38 -n ab -c "$TMPD" "exec '$TMPD/codex-busy'"
+tin new-window -d -t '=deco:' -n input-x -c "$TMPD" "exec sleep 986"
 
 pane_of() { tin display-message -p -t "$1" '#{pane_id}'; }
 QQ1=$(tin list-panes -t '=work:qq' -F '#{pane_index} #{pane_id}' | awk '$1 == 1 { print $2 }')
@@ -132,6 +165,9 @@ settled() {
   [ "$(tin display-message -p -t '=work:cx' '#{pane_title}')" = "[ ! ] Action Required | Add tests | proj" ] || return 1
   [ "$(tin display-message -p -t '=work:cn' '#{pane_current_command}')" = codex ] || return 1
   [[ "$(tin display-message -p -t '=work:cn' '#{pane_title}')" == "[ . ] Action Required"* ]] || return 1
+  [ "$(tin display-message -p -t '=work:rel' '#{pane_current_command}')" = ./codex ] || return 1
+  [[ "$(tin display-message -p -t '=work:rel' '#{pane_title}')" == "[ ! ] Action Required"* ]] || return 1
+  [[ "$(tin display-message -p -t '=deco:ab' '#{pane_title}')" == *"Approve button styling"* ]] || return 1
   [[ "$(tr '\0' ' ' < "/proc/$CL_PID/cmdline")" == "claude "* ]] || return 1
   [[ "$(tr '\0' ' ' < "/proc/$(tin display-message -p -t '=work:cx' '#{pane_pid}')/cmdline")" == node* ]] || return 1
   [ -n "$(cat "/proc/$(tin display-message -p -t '=work:wrap' '#{pane_pid}')/task/"*/children 2>/dev/null)" ] || return 1
@@ -144,10 +180,14 @@ printf '{"pid":%s,"sessionId":"x","cwd":"/tmp","startedAt":1,"procStart":"%s","v
   "$CL_PID" "${_st[21]}" "$CL_PANE" "$(( $(date +%s) * 1000 ))" > "$INTERDIMUX_CLAUDE_DIR/sessions/$CL_PID.json"
 
 # Waiting: claude (registry: approve), codex (its title, via `node`: approve),
-# the native codex (its title), qq's inactive pane (@agent_state input) and
-# the wrapper (@agent_state approve).  Not: busy (working), the idle shell,
-# the hidden session.
-WANT=5
+# the native codex (its title), the relative-path codex (its title), qq's
+# inactive pane (@agent_state input) and the wrapper (@agent_state approve).
+# Not: busy (working), the working codex whose description says Approve, the
+# idle shell, input-x, the hidden session -- and not the group's or the link's
+# second sight of the same panes.
+WANT=6
+# The panes that wait, by id: where Enter from the agents view must land.
+WAITING=" $(pane_of '=work:cl') $(pane_of '=work:cx') $(pane_of '=work:cn') $(pane_of '=work:rel') $QQ1 $(pane_of '=work:wrap') "
 
 SOCKP=$(tin display-message -p '#{socket_path}')
 HOSTPANE=$(pane_of '=host:')
@@ -179,35 +219,92 @@ if [[ "$row" == *"Agents ($WANT need you)"*"(e)"* ]]; then
   report "the menu says 'Agents ($WANT need you)' with its key (e)" pass
 else
   report "the menu says 'Agents ($WANT need you)' with its key (row: '$row')" fail
-  ERRORS+="$(screen | grep -v '^ *$' | head -24 | sed 's/^/      /')"$'\n'
+  ERRORS+="$(screen | grep -v '^ *$' | head -24 | sed 's/^/      /' || true)"$'\n'
 fi
 
 # --- choosing it opens the navigator on those agents --------------------------
+QRE='\^! \| \^\?'   # the agents view's query, `^! | ^?`, as an ERE
 tmux -L "$OUT" send-keys -t '=drv:' e
-if wait_for "interdimux · agents" && wait_for "'approve' \| 'input'"; then
+if wait_for "interdimux · agents" && wait_for "$QRE"; then
   report "its key opens the navigator titled 'agents', the query typed" pass
 else
   report "its key opens the navigator titled 'agents', the query typed" fail
-  ERRORS+="$(screen | grep -v '^ *$' | head -8 | sed 's/^/      /')"$'\n'
+  ERRORS+="$(screen | grep -v '^ *$' | head -8 | sed 's/^/      /' || true)"$'\n'
 fi
-# The rows that match are exactly the four agents' (qq's is a pane row; the
-# window row above it shows its ACTIVE pane, which waits for nothing): fzf's
+# The rows that match are exactly the waiting panes, one row each -- not the
+# working codex that says Approve, nor input-x, nor the window rows that
+# repeat a waiting active pane, nor the group's or the link's copies: fzf's
 # own count on the prompt line, once the list has loaded.
 for _ in $(seq 1 60); do screen | grep -qE " $WANT/[0-9]+" && break; sleep 0.15; done
-line=$(screen | grep -F "'approve'" | head -1 || true)
+line=$(screen | grep -E "$QRE" | head -1 || true)
 if [[ "$line" =~ \ $WANT/[0-9]+ ]]; then
   report "fzf matches $WANT rows: the waiting agents, one row each" pass
 else
   report "fzf matches $WANT rows (prompt line: '$line')" fail
 fi
-cur=$(screen | grep -m1 '▌' || true)
-if [[ "$cur" == *approve* || "$cur" == *input* ]]; then
-  report "the cursor is on a waiting agent" pass
+# The state words keep their own colour here (review R28): fzf highlights
+# what the query matched, and it matched the words, so `approve` came out in
+# the highlight colour, not the danger red it has everywhere else.  tmux's own
+# grid says which colour each `approve` has, on every row that matched (the
+# ones marked in the gutter; raw mode dims the rest on purpose).  The danger
+# colour is @interdimux-color-danger's default, 167.
+cap=$(tmux -L "$OUT" capture-pane -e -p -t '=drv:' 2>/dev/null || true)
+colours=$(printf '%s\n' "$cap" | perl -CS -ne '
+  (my $t = $_) =~ s/\e\[[0-9;]*m//g;
+  next unless $t =~ /\x{2502}[\x{258c} ]*[!?] /;      # border, pointer, then a mark
+  while (/((?:\e\[[0-9;]*m)*)approve/g) { $n++; $r++ if $1 =~ /38;5;167[;m]/ }
+  END { printf "%d %d", $n // 0, $r // 0 }')
+if [ "${colours% *}" -gt 0 ] && [ "${colours% *}" = "${colours#* }" ]; then
+  report "on the rows that match, 'approve' keeps its danger colour (${colours#* } of ${colours% *})" pass
 else
-  report "the cursor is on a waiting agent (cursor row: '$cur')" fail
+  report "on the rows that match, 'approve' keeps its danger colour (${colours#* } of ${colours% *} do)" fail
 fi
-tmux -L "$OUT" send-keys -t '=drv:' Escape
+# Enter goes where the cursor is: tmux itself says which pane the client
+# landed on, and it must be one that waits.
+tmux -L "$OUT" send-keys -t '=drv:' Enter
 wait_gone "interdimux · agents" || true
+landed=""
+for _ in $(seq 1 40); do
+  landed=$(tin display-message -p -c "$CLIENT" '#{pane_id}' 2>/dev/null || true)
+  [ -n "$landed" ] && [ "$landed" != "$HOSTPANE" ] && break
+  sleep 0.1
+done
+if [ -n "$landed" ] && [[ "$WAITING" == *" $landed "* ]]; then
+  report "the cursor starts on a waiting agent: Enter lands on one" pass
+else
+  report "the cursor starts on a waiting agent: Enter lands on one (landed on '$landed', waiting:$WAITING)" fail
+fi
+tin switch-client -c "$CLIENT" -t '=host:' 2>/dev/null || true
+
+# --- editing the query makes no session -------------------------------------
+# A word typed after the query leaves nothing matching; Enter there used to
+# create `approve-|-input-qqq` in ~ (review R05).
+before=$(tin list-sessions -F '#{session_name}' | sort | tr '\n' ' ')
+env TMUX="$SOCKP,99999,0" TMUX_PANE="$HOSTPANE" INTERDIMUX_CLIENT="$CLIENT" \
+  bash "$SCRIPT" --launch agents >/dev/null 2>&1 &
+wait_for "$QRE" || true
+for _ in $(seq 1 60); do screen | grep -qE " $WANT/[0-9]+" && break; sleep 0.15; done
+tmux -L "$OUT" send-keys -t '=drv:' -l ' qqq'
+if wait_for "$QRE qqq +0/[0-9]+"; then
+  report "a word typed after the query leaves nothing matching" pass
+else
+  report "a word typed after the query leaves nothing matching" fail
+  ERRORS+="$(screen | grep -v '^ *$' | head -3 | sed 's/^/      /' || true)"$'\n'
+fi
+if wait_for 'no waiting agent matches'; then
+  report "...and the bar says no waiting agent matches, not what it would create" pass
+else
+  report "...and the bar says no waiting agent matches, not what it would create" fail
+  ERRORS+="$(screen | grep -v '^ *$' | tail -3 | sed 's/^/      /' || true)"$'\n'
+fi
+tmux -L "$OUT" send-keys -t '=drv:' Enter
+wait_gone "interdimux · agents" || true
+after=$(tin list-sessions -F '#{session_name}' | sort | tr '\n' ' ')
+if [ "$before" = "$after" ]; then
+  report "...and Enter there creates no session" pass
+else
+  report "...and Enter there creates no session (before: $before after: $after)" fail
+fi
 
 # --- the fzf fallback says it too ---------------------------------------------
 # tmux < 3.4 takes the fallback at any height.
@@ -222,13 +319,26 @@ fi
 tmux -L "$OUT" send-keys -t '=drv:' Escape
 wait_gone 'interdimux ❯' || true
 
-# --- nobody waiting: greyed out, no key ---------------------------------------
+# --- one waiting: `needs` -----------------------------------------------------
 tin kill-window -t '=work:cl'
 tin kill-window -t '=work:cx'
 tin kill-window -t '=work:cn'
 tin kill-window -t '=work:wrap'
-tin set -pu -t "$QQ1" @agent_state
+tin kill-window -t '=work:rel'
 rm -f "$INTERDIMUX_CLAUDE_DIR/sessions/"*.json
+dashboard
+wait_for 'Switch' || true
+row=$(menu_row 'Agents')
+if [[ "$row" == *"Agents (1 needs you)"*"(e)"* ]]; then
+  report "with one waiting the menu says 'Agents (1 needs you)'" pass
+else
+  report "with one waiting the menu says 'Agents (1 needs you)' (row: '$row')" fail
+fi
+tmux -L "$OUT" send-keys -t '=drv:' q
+wait_gone 'Switch' || true
+
+# --- nobody waiting: greyed out, no key ---------------------------------------
+tin set -pu -t "$QQ1" @agent_state
 dashboard
 wait_for 'Switch' || true
 row=$(menu_row 'Agents')
@@ -245,11 +355,11 @@ wait_gone 'Switch' || true
 before=$(tin list-sessions -F '#{session_name}' | sort | tr '\n' ' ')
 env TMUX="$SOCKP,99999,0" TMUX_PANE="$HOSTPANE" INTERDIMUX_CLIENT="$CLIENT" \
   bash "$SCRIPT" --launch agents >/dev/null 2>&1 &
-if wait_for "'approve' \| 'input'" && wait_for 'nothing matches the query'; then
-  report "with none waiting the bar says the query matches nothing" pass
+if wait_for "$QRE" && wait_for 'no agent is waiting on you'; then
+  report "with none waiting the bar says no agent is waiting on you" pass
 else
-  report "with none waiting the bar says the query matches nothing" fail
-  ERRORS+="$(screen | grep -v '^ *$' | tail -4 | sed 's/^/      /')"$'\n'
+  report "with none waiting the bar says no agent is waiting on you" fail
+  ERRORS+="$(screen | grep -v '^ *$' | tail -4 | sed 's/^/      /' || true)"$'\n'
 fi
 tmux -L "$OUT" send-keys -t '=drv:' Enter
 # The popup's own border (its title), not the query: an execute() child takes

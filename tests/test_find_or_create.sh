@@ -227,6 +227,84 @@ else
   report "an empty query creates nothing" fail
 fi
 
+# --- fzf's OR and its escaped space (review R05) -----------------------------------
+# A term that is exactly `|` is fzf's OR: the query is a filter, and names
+# nothing -- `foo | bar` made `foo-|-bar`.  The bar says why instead of
+# offering a name, and Enter creates nothing.
+desc=$(bash "$SCRIPT" --describe-create 'foo | bar' 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+if [[ "$desc" == *"filter, not a name"* && "$desc" != *create* ]]; then
+  report "an OR query is announced as a filter, not a name" pass
+else
+  report "an OR query is announced as a filter, not a name (bar: '$desc')" fail
+fi
+before=$(sessions | tr '\n' ' ')
+bash "$SCRIPT" --create-from-query 'foo | bar' >/dev/null 2>&1 || true
+if [ "$before" = "$(sessions | tr '\n' ' ')" ]; then
+  report "...and creates nothing" pass
+else
+  report "...and creates nothing (now: $(sessions | tr '\n' ' '))" fail
+fi
+# `\ ` is a space inside ONE term: `my\ proj` names my-proj, not my\-proj.
+check_named "an escaped space is part of the term" 'escq\ proj' escq-proj
+
+# --- the agents view's query is a filter (review R03) ------------------------------
+# The agents view (the dashboard's Agents entry) opens on `^! | ^?`.  Any
+# edit of it -- a trailing space, a word typed after it, the OR taken out --
+# is still that filter, and names nothing (it used to offer and create
+# `approve-|-input-qqq` in ~).
+agents_names_nothing() { # $1 = label, $2 = query
+  local d k before
+  d=$(INTERDIMUX_VIEW=agents bash "$SCRIPT" --describe-create "$2" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+  k=$(INTERDIMUX_VIEW=agents FZF_QUERY="$2" bash "$SCRIPT" --create-key 2>/dev/null)
+  before=$(sessions | tr '\n' ' ')
+  INTERDIMUX_VIEW=agents bash "$SCRIPT" --create-from-query "$2" >/dev/null 2>&1 || true
+  if [[ "$d" == "∅"* && "$d" != *create* ]] && [ -z "$k" ] && [ "$before" = "$(sessions | tr '\n' ' ')" ]; then
+    report "agents view, $1: names nothing, no alt-enter action, no session" pass
+  else
+    report "agents view, $1: names nothing (bar: '$d', alt-enter: '$k', sessions: $(sessions | tr '\n' ' '))" fail
+  fi
+}
+agents_names_nothing "its own query"              '^! | ^?'
+agents_names_nothing "with a trailing space"      '^! | ^? '
+agents_names_nothing "with a word typed after it" '^! | ^? qqq'
+agents_names_nothing "with the OR taken out"      '^! qqq'
+agents_names_nothing "with one mark left"         '^?'
+# ...and once the marks are gone it is an ordinary query again.
+if [ "$(INTERDIMUX_VIEW=agents announced_name 'agq')" = agq ]; then
+  report "agents view: a query without its marks names a session as usual" pass
+else
+  report "agents view: a query without its marks names a session as usual" fail
+fi
+
+# --- the hint bar asks zoxide nothing (review R21) ---------------------------------
+# From fzf 0.63 the bar's `M-⏎ create <name>` entry is worked out on every
+# keystroke of a typed query, in a --footer-for process.  For a query that is
+# not a directory the name is the query itself, whatever zoxide says, so that
+# process must not run it; describe_create (zero matches), which also shows
+# the directory, still does.  A PATH zoxide that only logs its calls.
+mkdir -p "$TMPD/zbin"
+cat > "$TMPD/zbin/zoxide" <<ZEOF
+#!/bin/sh
+echo "\$*" >> "$TMPD/zoxide-calls"
+exit 1
+ZEOF
+chmod +x "$TMPD/zbin/zoxide"
+rm -f "$TMPD/zoxide-calls"
+bar=$(PATH="$TMPD/zbin:$PATH" INTERDIMUX_USE_ZOXIDE=on FZF_MATCH_COUNT=3 FZF_QUERY=zqdocs FZF_COLUMNS=200 \
+        bash "$SCRIPT" --footer-for 'S:anchor' 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+key=$(PATH="$TMPD/zbin:$PATH" INTERDIMUX_USE_ZOXIDE=on FZF_QUERY=zqdocs bash "$SCRIPT" --create-key 2>/dev/null)
+if [[ "$bar" == *"create zqdocs"* ]] && [ -n "$key" ] && [ ! -e "$TMPD/zoxide-calls" ]; then
+  report "the bar's create entry and alt-enter's check run no zoxide" pass
+else
+  report "the bar's create entry and alt-enter's check run no zoxide (bar: '$bar', key: '$key', calls: $(cat "$TMPD/zoxide-calls" 2>/dev/null | tr '\n' ';'))" fail
+fi
+PATH="$TMPD/zbin:$PATH" INTERDIMUX_USE_ZOXIDE=on bash "$SCRIPT" --describe-create zqdocs >/dev/null 2>&1 || true
+if grep -q 'zqdocs' "$TMPD/zoxide-calls" 2>/dev/null; then
+  report "...while the zero-match announcement still asks it (the stub is reached)" pass
+else
+  report "...while the zero-match announcement still asks it (the stub is reached)" fail
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

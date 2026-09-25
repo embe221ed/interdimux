@@ -249,7 +249,9 @@ fn cap(s: String, max: usize) -> String {
     }
 }
 
-/// The command field of a window or pane row (bash cmd_field).
+/// The command field of a window or pane row (bash cmd_field), and the state
+/// word it shows (empty when none) -- which the agents view marks the row by
+/// (bash agent_mark_r).
 #[allow(clippy::too_many_arguments)]
 pub fn command_field(
     raw: &str,
@@ -261,10 +263,10 @@ pub fn command_field(
     reg: &Registry,
     p: &Palette,
     now: i64,
-) -> String {
+) -> (String, String) {
     let fc = format_command(raw, p).0;
     if !cfg.on() || fc.is_empty() || is_idle_shell(raw) {
-        return fc;
+        return (fc, String::new());
     }
     let agent = agent_of(raw, cfg);
     let a0 = raw.split(' ').next().unwrap_or("");
@@ -330,7 +332,8 @@ pub fn command_field(
         desc = cap(desc, cfg.title_max);
     }
     if !agent_row && desc.is_empty() {
-        return fc;
+        // agent_row is set wherever a state is, so there is none here
+        return (fc, String::new());
     }
     let mut extra = String::new();
     if !state.is_empty() {
@@ -340,8 +343,9 @@ pub fn command_field(
             _ => &p.dim_tree,
         };
         extra.push_str(&format!(" {}{}{}", col, &state, RST));
+        // no age under a minute: `approve now Fix the parser` read as an order
         let age = age_of(since, now);
-        if !age.is_empty() {
+        if !age.is_empty() && age != "now" {
             extra.push_str(&format!(" {}{}{}", p.dim_tree, age, RST));
         }
     }
@@ -349,17 +353,39 @@ pub fn command_field(
         extra.push_str(&format!(" {}{}{}", p.dim_edit, desc, RST));
     }
     let (name, rest) = match &agent {
-        None => return format!("{}{}", fc, extra),
+        None => return (format!("{}{}", fc, extra), state),
         Some((n, r)) => (n.as_str(), *r),
     };
     let rest = if !extra.is_empty() && !cfg.keep_args { "" } else { rest };
-    if extra.is_empty() {
+    let field = if extra.is_empty() {
         format!("{}{}{}{}", p.dim_cmd, name, rest, RST)
     } else if !rest.is_empty() {
         format!("{}{}{}{}{}{}{}", p.dim_cmd, name, RST, extra, p.dim_cmd, rest, RST)
     } else {
         format!("{}{}{}{}", p.dim_cmd, name, RST, extra)
+    };
+    (field, state)
+}
+
+/// The agents view's gutter mark for a row whose pane (`pane`, empty when
+/// unknown) is in `state` (bash agent_mark_r): `!` for approve, `?` for input,
+/// None for anything else -- or for a pane `marked` already holds, which an
+/// earlier row of a session group or a linked window carried.
+pub fn view_mark(
+    state: &str,
+    pane: &str,
+    marked: &mut std::collections::HashSet<String>,
+    p: &Palette,
+) -> Option<String> {
+    let m = match state {
+        "approve" => format!("{}!{}", p.bold_red, RST),
+        "input" => format!("{}?{}", p.bold_amber, RST),
+        _ => return None,
+    };
+    if !pane.is_empty() && !marked.insert(pane.to_string()) {
+        return None;
     }
+    Some(m)
 }
 
 #[cfg(test)]
