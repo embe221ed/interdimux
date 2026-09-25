@@ -11,7 +11,9 @@ A portal gun for your tmux sessions.
   query + `Enter` = toggle between your two latest sessions); the current
   session is parked at the bottom
 - Find-or-create: `Enter` on a query that matches nothing creates a session
-  with that name (resolved as a path, then via zoxide, then under `$HOME`)
+  with that name (resolved as a path, then via zoxide, then under `$HOME`);
+  `Alt-Enter` creates it even when something matches. fzf's search syntax is
+  not part of the name, so `'docs` creates `docs`
 - Scoped fuzzy matching — queries match names and commands, not paths,
   padding, badges, or tree glyphs; cycle the scope with `Ctrl-]`
   (name / path / cmd / all / name+cmd, fzf >= 0.58). The searchable columns
@@ -61,13 +63,13 @@ A portal gun for your tmux sessions.
 - **`fzf` >= 0.40, and 0.74 for everything.** Below 0.40 the picker refuses to
   start, and says so. From 0.40 up it opens a working picker, and every newer
   feature is version-gated and degrades on its own (0.46 the find-or-create
-  announcement and re-fitting on resize, 0.51 a hint bar that follows the
-  cursor without starting a process per move, 0.52 full-line highlight, 0.53
-  errors logged instead of drawn over the list, 0.58 match-scope cycling, 0.61
-  ghost text, 0.63 the footer hint bar, 0.66 the scope highlight, 0.67 the
-  frozen identity column, 0.74 raw filter mode) — but 0.74 is the only version
-  the test suite exercises in full; `tests/test_old_fzf.sh` checks just that
-  0.44 and 0.52 open and draw.
+  announcement, `Alt-Enter` and re-fitting on resize, 0.51 a hint bar that
+  follows the cursor without starting a process per move, 0.52 full-line
+  highlight, 0.53 errors logged instead of drawn over the list, 0.58
+  match-scope cycling, 0.61 ghost text, 0.63 the footer hint bar, 0.66 the
+  scope highlight, 0.67 the frozen identity column, 0.74 raw filter mode) —
+  but 0.74 is the only version the test suite exercises in full;
+  `tests/test_old_fzf.sh` checks just that 0.44 and 0.52 open and draw.
 - `bash` >= 4.3, on the tmux server's PATH (macOS's own `/bin/bash` is 3.2). An
   older one is refused with a one-line error — on the status line, too, when
   tmux runs it — rather than failing somewhere inside.
@@ -188,7 +190,8 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 
 | Key | Action |
 |---|---|
-| `Enter` | Switch to the selected target — or create a session named after the query when nothing matches |
+| `Enter` | Switch to the selected target — or create a session named after the query when nothing matches. fzf's search syntax is left out of the name: `'docs`, `^docs`, `docs$` and `!docs` all name `docs` |
+| `Alt-Enter` | Create a session named after the query even when rows match (or switch to it, when a session has that name). A long command line — `kubectl logs -f deployment/payments-api …` — fuzzy-matches almost any short word, and `Enter` would switch to that pane instead. While a query is typed the bar names what `Alt-Enter` makes: `M-⏎ create docs` (fzf >= 0.63; the key itself works from 0.46). An empty query does nothing |
 | `Ctrl-x` | Kill the selected session, window, or pane — killing a session with clients on it, yours included, first hops them to the most recent other session (no surprise detach). So does killing its last window or last pane, which closes the session too; the dialog says so before you answer |
 | `Ctrl-e` | Rename the selected session or window (pre-filled with the current name) |
 | `Ctrl-o` | Open directory picker to create a new session |
@@ -259,7 +262,8 @@ longer than 16 characters is shortened with `…`, and so is any name on a
 popup too narrow for the rest of the row — the path and the branch badge
 give way first, so that takes a genuinely narrow popup. Then type what you
 see (`my-pr shell`). When a query matches nothing, the bar says what `Enter`
-would create before you press it.
+would create before you press it; when it matches something, what `Alt-Enter`
+would.
 
 When two rows match a query *equally well*, the list's own order decides. So an
 existing session is picked ahead of a directory that is only being offered as a

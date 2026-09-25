@@ -176,6 +176,43 @@ else
   report "re-running an existing query switches instead of duplicating ($before -> $after)" fail
 fi
 
+# --- fzf's search syntax is not part of the name (review UX-54) --------------------
+# `'docs` is fzf's exact match, and the instinctive way out of a scattered
+# match -- it reaches zero matches, and Enter created a session called `'docs`.
+# Each query must be announced AND created as the plain name, so this checks
+# both against a literal, not only against each other.
+check_named() { # $1 = label, $2 = query, $3 = the name it must make
+  local want got
+  want=$(announced_name "$2")
+  got=$(created_name "$2")
+  if [ "$want" = "$3" ] && [ "$got" = "$3" ]; then
+    report "$1 — announced '$want', created '$got'" pass
+  else
+    report "$1 — announced '$want', created '$got', want '$3'" fail
+    ERRORS+="    query: $2"$'\n'
+  fi
+}
+check_named "a leading ' (exact) is not part of the name"   "'opexact"     opexact
+check_named "nor a leading ^ (prefix)"                      '^opprefix'    opprefix
+check_named "nor a trailing \$ (suffix)"                     'opsuffix$'    opsuffix
+check_named "nor a leading ! (not)"                          '!opnot'       opnot
+check_named "nor 'word' quotes (word boundaries)"            "'opbound'"    opbound
+check_named "nor ^...\$ together"                             '^opwhole$'    opwhole
+check_named "each term loses its own, runs of blanks are one" "'op  ^multi$ " op-multi
+if [ -z "$(bash "$SCRIPT" --describe-create "' ^ !" 2>/dev/null)" ]; then
+  report "a query that is only fzf syntax describes nothing" pass
+else
+  report "a query that is only fzf syntax describes nothing" fail
+fi
+before=$(sessions | wc -l)
+bash "$SCRIPT" --create-from-query "'  " >/dev/null 2>&1 || true
+if [ "$before" = "$(sessions | wc -l)" ]; then
+  report "...and creates nothing" pass
+else
+  report "...and creates nothing" fail
+  ERRORS+="    sessions: $(sessions | tr '\n' ' ')"$'\n'
+fi
+
 # --- an empty query produces neither an announcement nor a session -----------------
 if [ -z "$(bash "$SCRIPT" --describe-create '' 2>/dev/null)" ]; then
   report "an empty query describes nothing" pass

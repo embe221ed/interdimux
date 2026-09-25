@@ -5114,6 +5114,34 @@ fi
 # $HOME.  Factored out of the navigator's accept path so raw mode can invoke it
 # from inside fzf (see the `zero`/enter transform below), where there is no exit
 # code to signal "nothing matched".
+
+# A query with fzf's search syntax taken out: the words a session is named
+# from.  Sets REPLY (empty when nothing is left).
+#
+# fzf reads a query as space-separated terms, each of which may carry
+# operators: a leading ' (exact), ^ (prefix) or ! (not), a trailing $ (suffix),
+# and 'word' (exact on word boundaries).  None of that is part of a name, but
+# the create took the query literally (review UX-54).  fzf's own exact syntax
+# is the instinctive escape from a scattered match -- `'docs` does reach zero
+# matches -- and Enter then made a session called `'docs`.  So every term loses
+# its operators, and the empty terms that leaves (runs of spaces, a lone `'`)
+# are dropped, the way fzf drops them: `docs ` names `docs`, not `docs-`, and
+# a query of blanks names nothing.  resolve_create_target calls this, so the
+# bar that announces a name and the create that makes it cannot disagree.
+query_words_r() {
+  local rest="$1" t lead out=""
+  while [ -n "$rest" ]; do
+    t="${rest%% *}"
+    if [ "$t" = "$rest" ]; then rest=""; else rest="${rest#* }"; fi
+    lead="${t%%[!\'^!]*}"          # the leading run of ' ^ !
+    t="${t#"$lead"}"
+    t="${t%\$}"
+    case "$lead" in *\'*) t="${t%\'}" ;; esac
+    [ -n "$t" ] && out+="${out:+ }$t"
+  done
+  REPLY="$out"
+}
+
 # What a query WOULD become.  Sets CREATE_DIR / CREATE_NAME / CREATE_SRC;
 # returns 1 when the query cannot produce a session at all.
 #
@@ -5125,8 +5153,9 @@ fi
 # The header is the only thing telling the user what Enter does, so it has to be
 # derived from the same code that does it.
 resolve_create_target() {
-  local query="$1" expanded
+  local query expanded
   CREATE_DIR=""; CREATE_NAME=""; CREATE_SRC=""
+  query_words_r "$1"; query="$REPLY"
   [ -n "$query" ] || return 1
   expanded="${query/#\~/$HOME}"
   if [ -d "$expanded" ] && CREATE_DIR=$(cd "$expanded" 2>/dev/null && pwd -P); then
@@ -5140,7 +5169,9 @@ resolve_create_target() {
       CREATE_DIR=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
     fi
     if [ -d "$CREATE_DIR" ]; then CREATE_SRC="zoxide"; else CREATE_DIR="$HOME"; CREATE_SRC="home"; fi
-    CREATE_NAME=$(printf '%s' "$query" | tr '.: /' '----')
+    # What `tr '.: /' '----'` did, without its two forks: the bar's create-key
+    # entry runs this on every keystroke of a typed query.
+    CREATE_NAME="${query//[.: \/]/-}"
   fi
   [ -n "$CREATE_NAME" ] || return 1
   return 0
@@ -5162,6 +5193,32 @@ create_from_query() {
   return 0
 }
 
+# "switch to", not "create", when the name already exists -- that is what
+# connect_dir does, and promising a new session it will not make is the same
+# class of lie as naming the wrong one.  After resolve_create_target; sets REPLY.
+create_verb_r() {
+  session_id_of "$CREATE_NAME"
+  if [ -n "$REPLY" ]; then REPLY="switch to"; else REPLY="create"; fi
+}
+
+# The create key's entry in the hint bar while a query is typed and rows match
+# (review UX-54): alt-enter creates from the query whatever the match count, and
+# a scattered match holding the cursor is exactly when the user needs to be told
+# so.  Same resolver and verb as describe_create, so it names what alt-enter
+# will make, styled like every other entry in the bar.  Sets REPLY (empty when
+# the query names nothing) and REPLY_W, its width in cells -- dlg_width, since
+# the name is whatever was typed, wide characters included.
+create_key_hint_r() {
+  local h
+  REPLY="" REPLY_W=0
+  resolve_create_target "$1" || return 0
+  create_verb_r
+  hint_r 'M-⏎' "$REPLY $CREATE_NAME"; h="$REPLY"
+  dlg_width "$h"; REPLY_W="$REPLY"
+  REPLY="$h"
+  return 0
+}
+
 # What find-or-create WOULD do for a query, as a human-readable string.  Used by
 # the zero-match header so the feature stops being invisible (IDEAS #1) and a
 # typo cannot silently create junk.
@@ -5169,15 +5226,7 @@ describe_create() {
   local query="$1" verb
   REPLY=""
   resolve_create_target "$query" || return 0
-  # "switch to", not "create", when the name already exists -- that is what
-  # connect_dir does, and promising a new session it will not make is the same
-  # class of lie as naming the wrong one.
-  session_id_of "$CREATE_NAME"
-  if [ -n "$REPLY" ]; then
-    verb="switch to"
-  else
-    verb="create"
-  fi
+  create_verb_r; verb="$REPLY"
   printf -v REPLY '%s%s%s%s %s%s %sin %s%s %s(%s)%s' \
     "$ACCENT_ESC" "$verb" "$RST" "$DIM" "$RST$ACCENT_ESC$CREATE_NAME" "$RST" \
     "$DIM" "$RST$DIM${CREATE_DIR/#$HOME/\~}" "$RST" "$DIM" "$CREATE_SRC" "$RST"
@@ -5524,6 +5573,21 @@ if [ "${1:-}" = "--describe-create" ]; then
   set +e
   describe_create "${2:-}"
   printf '%s\n' "$REPLY"
+  exit 0
+fi
+
+# The navigator's alt-enter (review UX-54), as the fzf action it runs: create
+# from the query in FZF_QUERY whatever it matches, or nothing at all when the
+# query names no session.  The bind already skips an empty query without a
+# process; this is for one that is only fzf syntax or blanks (`'`, `!`, `  `),
+# which the bar gives no create entry either, so the key does what the bar
+# says: nothing, with the navigator still open.  The action reads the query
+# from the environment again when it runs, never from this text, for the
+# quoting reason the raw-mode Enter gives.
+if [ "${1:-}" = "--create-key" ]; then
+  set +e
+  resolve_create_target "${FZF_QUERY:-}" \
+    && printf '%s\n' "execute(bash '$SQ_SCRIPT' --create-from-query \"\$FZF_QUERY\")+abort"
   exit 0
 fi
 
@@ -6982,6 +7046,25 @@ if [ "${1:-}" = "--footer-for" ]; then
   spec="${2:-}"
   spec="${spec%%	*}"
   hint_set "${spec%%:*}"
+  # A typed query with rows matching: alt-enter would create from it, and the
+  # bar says what, after the row's own hints (review UX-54).  Those get the
+  # width that is left, dropping entries by their usual priority; the create
+  # entry goes only when it does not fit on its own.  From fzf 0.63, where the
+  # navigator runs this in the background on every keystroke (see _hint_bind);
+  # below that nothing asks on each keystroke, so the name would go stale.
+  if [ -n "${FZF_QUERY:-}" ] && fzf_ge 63; then
+    set +e
+    create_key_hint_r "$FZF_QUERY"
+    _ck="$REPLY" _ckw="$REPLY_W"
+    hint_cols; _w="$REPLY"
+    if [ -n "$_ck" ] && [ "$_ckw" -le "$_w" ]; then
+      hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+      hint_pick $(( _w - _ckw - 2 )) "$REPLY"
+      if [ -n "$REPLY" ]; then REPLY+="  $_ck"; else REPLY="$_ck"; fi
+      printf '%s\n' "$REPLY"
+      exit 0
+    fi
+  fi
   hint_bar_r ${HINT_SET[@]+"${HINT_SET[@]}"}
   # Nothing, not a bare newline: an EMPTY transform removes the footer section
   # and the list reflows into the row, where "\n" leaves a blank bar drawn.
@@ -8745,6 +8828,24 @@ while true; do
       # 0.40-0.45 -- Ubuntu 24.04 ships 0.44.1.  Below 0.46 a resized popup
       # keeps its old column widths until ^r, which is the whole loss.
       fzf_ge 46 && fzf_opts+=(--bind="resize:reload-sync($LIST_CMD)$_refit")
+      # alt-enter: create from the query WHATEVER it matches (review UX-54).
+      # Enter only creates at zero matches, and in the default name+cmd scope
+      # the command column is a pane's whole argv: one `kubectl logs -f
+      # deployment/payments-api -n production --since=1h` scatter-matches docs,
+      # blog, auth, cli, search -- and an agent row's state words and
+      # description add more -- so Enter switched there and find-or-create was
+      # unreachable for ordinary names.  Scattered matches hit the identity
+      # column too (`blog` matches `prod-db 1:logs`), so no narrower scope
+      # would have fixed it; only a key that does not ask fzf can.
+      #
+      # An empty query runs nothing at all (an empty transform is a no-op); any
+      # other asks --create-key, which prints raw mode's create-and-close, or
+      # nothing when the query is only fzf syntax.  Needs `transform` (0.45)
+      # and FZF_QUERY in the environment (0.46), and parses in fish too.  Not
+      # alt-enter in anything fzf binds by default, and a user's own binding of
+      # it (FZF_DEFAULT_OPTS, @interdimux-fzf-opts) comes earlier on the
+      # command line and gives way here, as it does for ^x and the rest.
+      fzf_ge 46 && fzf_opts+=(--bind="alt-enter:transform:[ -n \"\$FZF_QUERY\" ] && bash '$SQ_SCRIPT' --create-key")
       # An empty bar means nothing fits at this width.  Passing --footer='' still
       # costs a row (measured — the section is drawn, blank), so omit the flag
       # entirely; a transform that emits nothing later removes the section again
@@ -8805,7 +8906,25 @@ while true; do
       # description is a real process, but it only runs at zero matches, where
       # focus fires once on the transition (and, in raw mode, on each move over
       # the dimmed rows -- which is right, since Enter creates from every one).
-      _hint_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hint_case; else bash '$SQ_SCRIPT' --describe-create {q}; fi"
+      #
+      # A THIRD state since review UX-54: rows match and a query is typed.
+      # alt-enter creates from the query there, and a scattered match in some
+      # pane's argv holding the cursor is exactly when Enter would not, so the
+      # bar names what alt-enter would make ("M-⏎ create docs").  That name
+      # needs the same resolver as the zero-match one, so it is --footer-for's
+      # job: a real process on every keystroke of a typed query (a bash start
+      # and a tmux query, tens of ms), which is why only fzf >= 0.63 gets it,
+      # where bg-transform runs it off the input loop and bg-cancel drops the
+      # ones a fast typist has outrun.  Below that the transform is synchronous
+      # and would stall each keystroke for it; the key still works there
+      # (0.46), and the README names it.
+      if fzf_ge 63; then
+        _hint_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ] && [ -z \"\$FZF_QUERY\" ]; then $_hint_case;"
+        _hint_bind+=" elif [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then bash '$SQ_SCRIPT' --footer-for {-1};"
+      else
+        _hint_bind="if [ \"\${FZF_MATCH_COUNT:-0}\" -gt 0 ]; then $_hint_case;"
+      fi
+      _hint_bind+=" else bash '$SQ_SCRIPT' --describe-create {q}; fi"
       # The fallback path's dispatcher is --footer-for, which makes the same
       # zero-match decision itself (FZF_MATCH_COUNT and FZF_QUERY reach it as
       # environment, from fzf 0.46).
@@ -8976,7 +9095,15 @@ while true; do
           # so the per-keystroke saving above stands.
           export INTERDIMUX_BAR_ACTION="bg-cancel+bg-transform-$HINT_BAR($_footer_for)"
           _best_guard+=' o=; [ -z "$b" ] || o=best;'
-          _best_guard+=' if [ "$FZF_MATCH_COUNT" = 0 ] || [ "$m" = 0 ] || [ "$p" = "$k" ]; then o="$o+$INTERDIMUX_BAR_ACTION"; fi;'
+          #
+          # And while a query is typed, or on the keystroke that clears one:
+          # the bar then names what alt-enter would create (review UX-54), and
+          # that name has to follow every keystroke, so typing does pay the
+          # re-exec again -- in the background (raw mode means fzf >= 0.74),
+          # where it stalls nothing.  ${p#* } is the last query (k is "nth
+          # query", and nth has no blank).
+          _best_guard+=' if [ "$FZF_MATCH_COUNT" = 0 ] || [ "$m" = 0 ] || [ "$p" = "$k" ]'
+          _best_guard+=' || [ -n "$FZF_QUERY" ] || [ -n "${p#* }" ]; then o="$o+$INTERDIMUX_BAR_ACTION"; fi;'
           _best_guard+=' o=${o#+}; [ -z "$o" ] || printf "%s\n" "$o"'
           # The guard is POSIX, and wrapping it in `sh -c` inside the user's
           # shell cost a second shell per keystroke (measured: 5.3 ms under
@@ -9044,8 +9171,15 @@ while true; do
         # as it was when the list emptied.  --footer-for needs fzf 0.46's
         # FZF_MATCH_COUNT and FZF_QUERY; below that it cannot tell, and the bar
         # stays the generic one.
+        #
+        # From 0.63 it is `result`, not `zero` (review UX-54): while a query is
+        # typed the bar names what alt-enter would create, and that has to
+        # follow every keystroke, matches or not, where `zero` saw only the
+        # fruitless ones.  In the background, so it costs no keystroke a
+        # stall; below 0.63 it could only be synchronous, and there the bar
+        # keeps to the zero-match announcement (see _hint_bind).
         if fzf_ge 63; then
-          fzf_opts+=(--bind="zero:bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
+          fzf_opts+=(--bind="result:bg-cancel+bg-transform-$HINT_BAR($_footer_for)")
         else
           fzf_opts+=(--bind="zero:transform-$HINT_BAR($_footer_for)")
         fi
