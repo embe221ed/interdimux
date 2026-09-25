@@ -2,13 +2,18 @@
 #
 # Pane titles are chosen by the program in the pane -- over ssh, from a
 # container, from `cat` of a file -- so the title code has to hold up against
-# any of them, in BOTH renderers (review R01):
+# any of them, in BOTH renderers (review R01, R13):
 #
 #   * the Rust matcher captures exactly what bash's ERE does: a seeded random
 #     set of patterns and titles, each through both renderers
 #   * a title that almost matches the default remote-shell rule
 #     (`*:*:* - "*"*`, 2,000 colons) renders in both, within a budget: the
 #     backtracking matcher took 12 s on half of it
+#   * a rule reads a title's first 256 characters, and not the 257th: counted
+#     in characters, so width and bytes change nothing, and zero-width
+#     characters are counted too
+#   * a 100,000-character title costs the bash renderer well under its budget
+#     (the window row split it with ${x#*"$US"}: quadratic, 90 s at 1 MB)
 #
 # Expected rows are written out, not computed by either renderer; where the
 # case is random the two renderers are each other's oracle -- bash matches with
@@ -158,6 +163,48 @@ for r in $RENDERERS; do
   else
     report "$(label "$r"): 2,000 colons against the remote-shell rule render within 10 s (rc $RC, got: '${GOT[0]-}' / '${GOT[1]-}')" fail
   fi
+done
+
+# --- 3. the rules read a title's first 256 characters -----------------------
+printf '%s\n' 'capt  -  hit  *Z' 'capz  -  hit  Z*' > "$TMPD/home/titles"
+rep() { printf "$1%.0s" $(seq "$2"); }
+mkdump "$TMPD/cap.dump" \
+  "capt|$(rep a 255)Z" \
+  "capt|$(rep a 256)Z" \
+  "capt|$(rep é 255)Z" \
+  "capt|$(rep 中 255)Z" \
+  "capt|$(rep $'\xe2\x80\x8b' 255)Z" \
+  "capt|$(rep $'\xe2\x80\x8b' 256)Z" \
+  "capz|Z$(rep $'\xe2\x80\x8b' 5000) tail"
+CAP_EXPECT=('capt hit' 'capt' 'capt hit' 'capt hit' 'capt hit' 'capt' 'capz hit')
+CAP_WHAT=(
+  "the 256th character is read"
+  "...the 257th is not"
+  "characters, not bytes (é is two)"
+  "characters, not cells (中 is two)"
+  "zero-width characters count (U+200B)"
+  "...to the same 256"
+  "a title cut in the middle still matches a rule for its head"
+)
+for r in $RENDERERS; do
+  render "$r" "$TMPD/cap.dump" 20
+  for i in "${!CAP_EXPECT[@]}"; do
+    [ "${GOT[i]-}" = "${CAP_EXPECT[i]}" ] && report "$(label "$r"): ${CAP_WHAT[i]}" pass \
+      || report "$(label "$r"): ${CAP_WHAT[i]} (got: '${GOT[i]-}', want: '${CAP_EXPECT[i]}')" fail
+  done
+done
+
+# --- 4. a 100,000-character title --------------------------------------------
+# What a program can set (tmux keeps an OSC title of up to 1 MB), through the
+# whole bash renderer.  The window row's old split ran past the budget on it
+# (40,000 characters cost 1.6 s, 1 MB 90 s).
+printf '%s\n' 'capz  -  hit  Z*' > "$TMPD/home/titles"
+mkdump "$TMPD/long.dump" "capz|Z$(rep $'\xe2\x80\x8b' 100000)"
+for r in $RENDERERS; do
+  render "$r" "$TMPD/long.dump" 3
+  [ "$RC" = 0 ] && [ "${GOT[0]-}" = "capz hit" ] \
+    && report "$(label "$r"): a 100,000-character title renders within 3 s" pass \
+    || report "$(label "$r"): a 100,000-character title renders within 3 s (rc $RC, got: '${GOT[0]-}')" fail
 done
 
 echo

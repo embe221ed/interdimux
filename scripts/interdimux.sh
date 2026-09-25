@@ -2963,6 +2963,21 @@ ssh,autossh,et,docker,docker-compose,podman,nerdctl,kubectl,oc,lxc,incus,machine
 tmux  -  $1  * - "*"*
 '
 
+# How much of a pane title the rules read: its first TITLE_CAP characters
+# (agent_state_r cuts it; rust/src/titles.rs `head` is the same cut).  Nothing
+# else bounds a title.  The program in the pane chooses it, over ssh or from a
+# container too, tmux keeps an OSC 2 title of 1 MB whole, and every row and
+# the dashboard's count clean and match it.  256 because a row shows at most
+# 200 characters of a description (@interdimux-title-max), and every built-in
+# rule shows the title from its start (=) or its first capture ($1, after a
+# prefix of at most 26 characters): the 200 that can show, and the separator
+# after them, are in the first 256.  tmux's own #{=256:pane_title} was not the
+# cut: it counts cells, so a title of zero-width characters (combining marks,
+# U+200B, U+0085) passes it whole, and it rewrites what it keeps -- `###`
+# comes back as `####`, and an unclosed `#[` drops the rest (tmux 3.7b,
+# format_trim_left).  Review R01.
+TITLE_CAP=256
+
 # A title's text before any rule sees it, in REPLY: control characters made
 # safe as in a command (tmux already escapes them: a C0 never reaches a
 # title), bidi controls dropped (a U+202E would reverse the rest of the row),
@@ -3378,6 +3393,7 @@ agent_state_r() {
     [ "$TR_LOADED" = 1 ] || load_title_rules
     if [ -n "$name" ] && [[ ${TR_IDX[$name]+x} ]]; then REPLY="${TR_IDX[$name]}"; else title_idx_r "$name"; fi
     if [ -n "$REPLY" ] || [ "$agent_row" = 1 ] || [ "$SHOW_TITLE" = all ]; then
+      [ "${#title}" -le "$TITLE_CAP" ] || title="${title:0:TITLE_CAP}"
       title_text_r "$title"; w="$REPLY"
       title_rule_r "$name" "$w"
       if [ "$TR_HIT" = 1 ]; then
@@ -4652,7 +4668,8 @@ IMUX_SECTIONS
   local sla sname swins sattach spath marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
-  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts _wopt
+  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts
+  local -a _hf=()
 
   while IFS="$US" read -r sname sla swins sattach spath; do
     [ -z "$sname" ] && continue
@@ -4770,8 +4787,12 @@ IMUX_SECTIONS
 
       resolve_command "$wcmd" "$wpid"; raw_cmd="$REPLY"
       _hline="${active_pane[${sname}${US}${widx}]-}"
-      _wopt="${_hline#*"$US"}"   # title US options
-      cmd_field "$raw_cmd" "$wpid" "${_hline%%"$US"*}" "${_wopt%%"$US"*}" "${_wopt#*"$US"}"; cmd_formatted="$REPLY"
+      # id US title US options, split by word splitting like the lines they
+      # came from: ${x#*"$US"} and ${x%%"$US"*} are quadratic in where the US
+      # is, and the title before it is as long as a program makes it -- a
+      # 40,000-character one cost the list 1.6 s, a 1 MB one 90 s.
+      set -f; IFS="$US"; _hf=($_hline$US); unset IFS; set +f
+      cmd_field "$raw_cmd" "$wpid" "${_hf[0]-}" "${_hf[1]-}" "${_hf[2]-}"; cmd_formatted="$REPLY"
 
       printf '%s\t%s\t%s\tW:%s:%s\n' \
         "$ident" "$ctx" "$cmd_formatted" "$sname" "$widx"

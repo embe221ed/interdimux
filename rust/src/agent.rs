@@ -289,7 +289,7 @@ pub fn command_field(
         desc = odesc;
         known = true;
     } else if !title.is_empty() {
-        let t = titles::text(title);
+        let t = titles::text(titles::head(title));
         match titles::apply(&cfg.rules, name, &t) {
             Some(h) => {
                 known = true;

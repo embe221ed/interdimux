@@ -221,6 +221,19 @@ fn is_vs(c: char) -> bool {
     c == '\u{fe0e}' || c == '\u{fe0f}'
 }
 
+/// How much of a pane title the rules read, in characters (bash TITLE_CAP,
+/// where the why is).
+pub const CAP: usize = 256;
+
+/// A pane title's first CAP characters: all a rule, a row or the dashboard's
+/// count ever reads of it (bash agent_state_r).
+pub fn head(t: &str) -> &str {
+    match t.char_indices().nth(CAP) {
+        Some((i, _)) => &t[..i],
+        None => t,
+    }
+}
+
 /// A title's text before any rule sees it (bash title_text_r).
 pub fn text(t: &str) -> String {
     let t: String = sanitize(t).chars().filter(|&c| !is_bidi(c)).collect();

@@ -510,6 +510,9 @@ myagent   working  $1   %spin *
 - `PATTERN` is literal text matched against the whole title; each `*`
   captures, greedily from the left. A leading `%spin` matches one braille
   spinner character.
+- A rule sees a title's first 256 characters. The program in a pane chooses
+  its title (tmux keeps one of up to a megabyte), and a row shows at most 200
+  characters of it, so a longer one is cut there before anything reads it.
 - `STATE` is a word (approve input working idle done error) or `-`.
 - `DESC` is `-` (show nothing), `=` (the whole title) or a template such as
   `$1` or `$2: $1`.
