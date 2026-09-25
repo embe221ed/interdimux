@@ -525,16 +525,33 @@ get_opt TITLE_RULES_FILE  "${INTERDIMUX_TITLE_RULES:-}"      @interdimux-title-r
 case "$RECENT_LIMIT" in ''|*[!0-9]*) RECENT_LIMIT=10 ;; esac
 case "$DIRS_LIMIT"   in ''|*[!0-9]*) DIRS_LIMIT=15   ;; esac
 case "$SCAN_DEPTH"   in ''|*[!0-9]*) SCAN_DEPTH=3    ;; esac
+case "$TITLE_MAX"    in ''|*[!0-9]*) TITLE_MAX=40    ;; esac
+# And DECIMAL, whatever the leading zeros.  `[ -gt ]` reads 08 as eight, but
+# bash arithmetic reads a leading 0 as OCTAL: @interdimux-title-max 08 made the
+# title cut (${desc:0:TITLE_MAX-1}) fail with "value too great for base", which
+# ended gather_targets and left the bash renderer's --list with no rows at all,
+# and 050 cut at forty where the Rust core, which parses decimal, cut at fifty.
+# scan-depth reaches $(( )) in the directory search the same way.  Stripped
+# here, once, so every reader -- [ ], $(( )), find and the binary -- sees the
+# one number the user meant.  Before the clamps, so 0040 is forty, not "more
+# than three digits".
+for _c in RECENT_LIMIT DIRS_LIMIT SCAN_DEPTH TITLE_MAX; do
+  case "${!_c}" in
+    0?*) _v="${!_c}"; _v="${_v#"${_v%%[!0]*}"}"; printf -v "$_c" '%s' "${_v:-0}" ;;
+  esac
+done
+unset _c _v
 # A deep scan is a footgun rather than a preference: `find -maxdepth 40` over
-# $HOME does not return within a popup's lifetime.
-[ "$SCAN_DEPTH" -gt 10 ] && SCAN_DEPTH=10
+# $HOME does not return within a popup's lifetime.  The length first: `[ -gt ]`
+# on a 20-digit number is not false but an error, on stderr.
+{ [ "${#SCAN_DEPTH}" -gt 2 ] || [ "$SCAN_DEPTH" -gt 10 ]; } && SCAN_DEPTH=10
 case "$ORDER" in mru|index) ;; *) ORDER=mru ;; esac
 # The agent options (see "Agents" below).  A title cap under 8 would leave
-# nothing but the ellipsis, and one over 200 is no cap.
+# nothing but the ellipsis, and one over 200 is no cap.  --doctor names every
+# value these replace (_check_value), in the same terms.
 case "$SHOW_TITLE"  in known|all|off) ;; *) SHOW_TITLE=known ;; esac
 case "$AGENT_ARGS"  in on|off) ;; *) AGENT_ARGS=off ;; esac
 case "$AGENT_STATE" in on|off) ;; *) AGENT_STATE=on ;; esac
-case "$TITLE_MAX"   in ''|*[!0-9]*) TITLE_MAX=40 ;; esac
 [ "${#TITLE_MAX}" -gt 3 ] && TITLE_MAX=200
 [ "$TITLE_MAX" -lt 8 ] && TITLE_MAX=8
 [ "$TITLE_MAX" -gt 200 ] && TITLE_MAX=200

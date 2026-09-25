@@ -63,7 +63,7 @@ impl Config {
             "off" => ShowTitle::Off,
             _ => ShowTitle::Known,
         };
-        let title_max = var("INTERDIMUX_TITLE_MAX").parse::<usize>().unwrap_or(40).clamp(8, 200);
+        let title_max = title_max(&var("INTERDIMUX_TITLE_MAX"));
         let names = var("INTERDIMUX_AGENTS");
         let (mut known, mut scripts): (Vec<String>, Vec<String>) = if names == "off" {
             (vec![], vec![])
@@ -103,6 +103,22 @@ impl Config {
     fn on(&self) -> bool {
         self.show_title != ShowTitle::Off || self.state || !self.known.is_empty()
     }
+}
+
+/// @interdimux-title-max as bash normalises it: digits only (anything else is
+/// the default, 40), read as DECIMAL whatever the leading zeros, and clamped to
+/// 8..=200 -- a number too long to parse is more than 200.  bash hands over
+/// the value it normalised, so this matters only for a value set straight in
+/// the environment, where the two renderers must still agree.
+fn title_max(v: &str) -> usize {
+    if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return 40;
+    }
+    let d = v.trim_start_matches('0');
+    if d.len() > 3 {
+        return 200;
+    }
+    d.parse::<usize>().unwrap_or(0).clamp(8, 200)
 }
 
 /// The fifth input section: `<%pane>US<sid>US<word>US<since>` per line.
@@ -439,6 +455,24 @@ mod tests {
         // a prefix that is not argv0 is still skipped
         assert!(repeats_row("sudo docker run -v /a:/b img@sha256:ab bash", "", "docker run", &c));
         assert!(!repeats_row("sudo root@3f2a: /", "", "docker exec -it 3f2a bash", &c));
+    }
+
+    #[test]
+    fn title_max_is_read_as_bash_reads_it() {
+        // decimal, whatever the leading zeros (bash arithmetic would read octal)
+        assert_eq!(title_max("040"), 40);
+        assert_eq!(title_max("09"), 9);
+        assert_eq!(title_max("0040"), 40);
+        assert_eq!(title_max("000000000000000000000050"), 50);
+        // clamped, and a number too long to parse is over the top
+        assert_eq!(title_max("000"), 8);
+        assert_eq!(title_max("7"), 8);
+        assert_eq!(title_max("201"), 200);
+        assert_eq!(title_max("99999999999999999999999"), 200);
+        // anything else is the default
+        assert_eq!(title_max(""), 40);
+        assert_eq!(title_max("4O"), 40);
+        assert_eq!(title_max("+40"), 40);
     }
 
     #[test]
