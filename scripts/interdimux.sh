@@ -3293,16 +3293,26 @@ claude_registry_r() {
     j=""
     { IFS= read -r -d '' j < "$f"; } 2>/dev/null || :
     [[ "$j" == *'}' ]] || continue
-    [[ "$j" =~ \"kind\":\"interactive\" ]] || continue
+    # A glob where nothing is captured, and whether the pid still runs BEFORE
+    # the other fields: bash compiles a [[ =~ ]] regex on every match (~30 µs
+    # each here), and a record whose Claude has gone -- they stay behind after
+    # a crash -- paid for all seven only to be dropped (review R15).  The
+    # waiting reason is read only for a record that is waiting.
+    [[ "$j" == *'"kind":"interactive"'* ]] || continue
     [[ "$j" =~ \"pid\":([0-9]+) ]] && pid="${BASH_REMATCH[1]}" || continue
+    if [ -r /proc/self/stat ]; then
+      [ -e "/proc/$pid/stat" ] || continue
+    else
+      kill -0 "$pid" 2>/dev/null || continue
+    fi
     [[ "$j" =~ \"tmux\":\"[^\"]*(%[0-9]+)\" ]] && pane="${BASH_REMATCH[1]}" || continue
     [[ "$j" =~ \"status\":\"([a-z]+)\" ]] && st="${BASH_REMATCH[1]}" || continue
-    wf=""; [[ "$j" =~ \"waitingFor\":\"([^\"]*)\" ]] && wf="${BASH_REMATCH[1]}"
     upd=0; [[ "$j" =~ \"statusUpdatedAt\":([0-9]+) ]] && upd="${BASH_REMATCH[1]}"
     case "$st" in
       busy) word=working ;;
       idle|shell) word=idle ;;
       waiting)
+        wf=""; [[ "$j" =~ \"waitingFor\":\"([^\"]*)\" ]] && wf="${BASH_REMATCH[1]}"
         case "$wf" in
           'permission prompt'|'worker request'|'sandbox request') word=approve ;;
           *) word=input ;;
@@ -3316,15 +3326,17 @@ claude_registry_r() {
       sf=()
       { IFS=$' \t\n' read -r -d '' -a sf < "/proc/$pid/stat"; } 2>/dev/null || :
       # comm ends at the LAST word holding a ')' (see proc_group_ids): field N
-      # of stat is sf[last + N - 2].
+      # of stat is sf[last + N - 2].  The usual comm (one word) is one test.
       local i last=0
-      for (( i = 1; i <= 9 && i < ${#sf[@]}; i++ )); do
-        case "${sf[i]}" in *')'*) last=$i ;; esac
-      done
+      if [[ "${sf[1]-}" == *')' && "${sf[*]:2:7}" != *')'* ]]; then
+        last=1
+      else
+        for (( i = 1; i <= 9 && i < ${#sf[@]}; i++ )); do
+          case "${sf[i]}" in *')'*) last=$i ;; esac
+        done
+      fi
       [ "$last" -gt 0 ] && [ "${sf[last+20]-}" = "$pst" ] || continue
       sid="${sf[last+4]}"
-    else
-      kill -0 "$pid" 2>/dev/null || continue
     fi
     CLAUDE_REG+="$pane$US$sid$US$word$US$(( upd / 1000 ))"$'\n'
   done
