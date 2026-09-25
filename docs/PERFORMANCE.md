@@ -681,6 +681,37 @@ tmux looking up options. The bash fallback pays ~0.5 ms a row for the agent
 column: most of it is bash's own function-call cost on this machine, and the
 rows that are not agents take the shortest path through it.
 
+**A title is input from anywhere** (review R01, R13). The program in the pane
+sets it — over ssh, from a container, from `cat` of a file — and tmux keeps an
+OSC 2 title of up to `input-buffer-size` (1 MB) whole. Measured through the
+dump seam, one row, `--list` wall time:
+
+```
+                                               bash renderer    Rust core
+ssh row, 800 × "a:" (remote-shell rule)        0.14 s           1.79 s → 0.07 s
+ssh row, 4000 × "a:"                           0.09 s           80 s   → 0.04 s
+40,000 × "a", a rule for its app               1.59 s → 0.16 s  0.09 s
+1 MB of U+200B (330,000 zero-width), same      88.6 s → 1.0 s   0.28 s
+```
+
+The Rust matcher backtracked (now it places the pattern's literal pieces from
+the right, in linear time); the bash window row split its pane's
+`id US title US options` with `${x#*"$US"}`, which is quadratic in where the
+US is (now word splitting). Both renderers read only a title's first 256
+characters (`TITLE_CAP`, `titles::head`), which bounds everything after the
+split. tmux's `#{=256:pane_title}` would have cut it at the source, but it
+counts cells — a title of zero-width characters passes it whole — and it
+rewrites `###` as `####`. What is left at 1 MB is bash copying the line a
+dozen times on its way to the cut.
+
+The bash cleaning a title or a published description goes through was
+quadratic as well, and a description is not cut at 256 (tmux caps an option
+at 128 *cells*, and a C1 control is zero cells wide): the control-character
+loop read `${s:i:1}`, O(i) per character in a UTF-8 locale, and the blank
+trims were the `${t#"${t%%[! ]*}"}` idiom. Now two byte-wise substitutions
+and two anchored regexes. prefix+g's count — always bash — with one codex
+pane titled 5,000 × é and a U+0085: 4.3 s → 0.09 s.
+
 ## Suggested rollout
 
 1. **Tier 0 (0.1 + 0.2 + 0.3)** in one pass — pure fork removal, no gate, test-covered. This

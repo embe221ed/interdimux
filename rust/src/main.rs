@@ -49,12 +49,20 @@ const US: char = '\u{1f}';
 /// its own renderer and says, once, that the binary needs rebuilding.
 const PROTOCOL: &str = "gather3";
 
+/// A variable's value as text, whatever bytes it holds.  std::env::var gives
+/// NOTHING for a value that is not UTF-8: one Latin-1 byte in the user's
+/// title rules emptied the whole rule set bash handed over, every built-in
+/// rule with it (review R02).  Lossy: a U+FFFD fails every test the stray
+/// byte would, and compares with a path decoded the same way.
+pub(crate) fn env_text(name: &str) -> String {
+    std::env::var_os(name).map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()
+}
 fn env_is(name: &str, want: &str) -> bool {
-    std::env::var(name).map(|v| v == want).unwrap_or(false)
+    env_text(name) == want
 }
 fn env_or(name: &str, default: &str) -> String {
-    match std::env::var(name) {
-        Ok(v) if !v.is_empty() => v,
+    match env_text(name) {
+        v if !v.is_empty() => v,
         _ => default.to_string(),
     }
 }

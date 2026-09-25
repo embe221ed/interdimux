@@ -1330,6 +1330,34 @@ is_utf8() {
   [[ "$1" =~ $_UTF8_SEQ ]]
 }
 
+# The character type the bash renderer and the dashboard's count run under,
+# in REPLY: a UTF-8 locale name when bash would otherwise count BYTES and
+# nothing in the environment chose that -- no LC_ALL, no LC_CTYPE, only a
+# LANG that is C, missing or not installed, which is what a popup gets from a
+# tmux server started without one.  "" when none is needed, or none works.
+# The caller makes it `local LC_CTYPE`: not exported (none was), so the ps,
+# sort and fzf it starts keep the environment's, and only bash's own ${#},
+# ${s:0:n} and pattern matching change.  Under it the bash rows are the Rust
+# core's -- widths, the 256-character title cut, the @interdimux-title-max
+# cut, which counted bytes and could split a character (review R14).  An
+# LC_ALL or LC_CTYPE the user set is left alone.  Tried once per process,
+# fork-free: an assignment to LC_CTYPE is a setlocale(3) in bash.
+_UTF8_CT=unset
+utf8_ctype_r() {
+  if [ "$_UTF8_CT" = unset ]; then
+    _UTF8_CT=""
+    local probe=$'\xe2\x94\x82' l
+    if [ "${#probe}" != 1 ] && [ -z "${LC_ALL:-}" ] && [ -z "${LC_CTYPE:-}" ]; then
+      for l in C.UTF-8 C.utf8 en_US.UTF-8 UTF-8; do
+        { LC_CTYPE="$l"; } 2>/dev/null
+        if [ "${#probe}" = 1 ]; then _UTF8_CT="$l"; break; fi
+      done
+      unset LC_CTYPE
+    fi
+  fi
+  REPLY="$_UTF8_CT"
+}
+
 # A directory whose name is not valid UTF-8 is skipped (is_utf8), in both
 # renderers.  Listing it is worse than useless: fzf hands a selection back with
 # every invalid byte replaced by U+FFFD, so the row names a directory that does
@@ -2302,28 +2330,35 @@ build_process_table() {
 # core's rule was Cc only, so a cwd or a branch holding one rendered differently
 # in the two renderers, and on a libc whose class leaves them out bash would
 # pass them through too.  Both renderers now list them explicitly (rust/src/
-# proc.rs sanitize), as bytes, so the test is the same in any locale.
-_LSEP=$'\xe2\x80\xa8' _PSEP=$'\xe2\x80\xa9'
+# proc.rs sanitize), as bytes, so the test is the same in any locale.  So are
+# the C1 controls (U+0080-009F, _C1): in a C locale [[:cntrl:]] is bytes and
+# never sees one (review R14).
+_LSEP=$'\xe2\x80\xa8' _PSEP=$'\xe2\x80\xa9' _C1=$'\xc2'[$'\x80'-$'\x9f']
 sanitize_args() {
   REPLY="$1"
   case "$REPLY" in
-    *[[:cntrl:]]*|*"$_LSEP"*|*"$_PSEP"*) ;;
+    *[[:cntrl:]]*|*"$_LSEP"*|*"$_PSEP"*|*$_C1*) ;;
     *) return 0 ;;
   esac
   REPLY="${REPLY//$'\n'/ }"
   REPLY="${REPLY//"$_LSEP"/?}"
   REPLY="${REPLY//"$_PSEP"/?}"
-  case "$REPLY" in *[[:cntrl:]]*) ;; *) return 0 ;; esac
-  local out="" i ch
-  for (( i = 0; i < ${#REPLY}; i++ )); do
-    ch="${REPLY:i:1}"
-    case "$ch" in
-      [[:cntrl:]]) out+='?' ;;
-      *)           out+="$ch" ;;
-    esac
-  done
-  REPLY="$out"
+  case "$REPLY" in *[[:cntrl:]]*|*$_C1*) ;; *) return 0 ;; esac
+  _sanitize_cntrl
   return 0
+}
+# Every control left in REPLY made '?', in two substitutions over the BYTES: a
+# C0 control or DEL is one byte, a C1 control (U+0080-009F) is \xc2 and one of
+# \x80-\x9f -- \xc2 only ever leads a sequence, so that pair is always one
+# character.  The class the Rust core names (char::is_control), in every
+# locale.  It was a loop of ${REPLY:i:1}, which costs O(i) per character in a
+# UTF-8 locale: a title of 8,000 characters with one U+0085 in it (tmux keeps
+# C1 controls in titles) took 8 s (review R13).  A function, for the local
+# LC_ALL.
+_sanitize_cntrl() {
+  local LC_ALL=C
+  REPLY="${REPLY//[[:cntrl:]]/?}"
+  REPLY="${REPLY//$_C1/?}"
 }
 
 # Space-joined argv of a pid, ps-style.  REPLY is empty when the process is
@@ -2963,6 +2998,21 @@ ssh,autossh,et,docker,docker-compose,podman,nerdctl,kubectl,oc,lxc,incus,machine
 tmux  -  $1  * - "*"*
 '
 
+# How much of a pane title the rules read: its first TITLE_CAP characters
+# (agent_state_r cuts it; rust/src/titles.rs `head` is the same cut).  Nothing
+# else bounds a title.  The program in the pane chooses it, over ssh or from a
+# container too, tmux keeps an OSC 2 title of 1 MB whole, and every row and
+# the dashboard's count clean and match it.  256 because a row shows at most
+# 200 characters of a description (@interdimux-title-max), and every built-in
+# rule shows the title from its start (=) or its first capture ($1, after a
+# prefix of at most 26 characters): the 200 that can show, and the separator
+# after them, are in the first 256.  tmux's own #{=256:pane_title} was not the
+# cut: it counts cells, so a title of zero-width characters (combining marks,
+# U+200B, U+0085) passes it whole, and it rewrites what it keeps -- `###`
+# comes back as `####`, and an unclosed `#[` drops the rest (tmux 3.7b,
+# format_trim_left).  Review R01.
+TITLE_CAP=256
+
 # A title's text before any rule sees it, in REPLY: control characters made
 # safe as in a command (tmux already escapes them: a C0 never reaches a
 # title), bidi controls dropped (a U+202E would reverse the rest of the row),
@@ -2976,27 +3026,48 @@ title_text_r() {
   case "$t" in
     *$'\xe2\x80'*|*$'\xe2\x81'*) for _b in "${_BIDI_CHARS[@]}"; do t="${t//"$_b"/}"; done ;;
   esac
-  t="${t#"${t%%[! ]*}"}"
-  REPLY="${t%"${t##*[! ]}"}"
+  trim_blanks_r "$t"
+}
+
+# $1 without its leading and trailing blanks, in REPLY.  Each run is measured
+# with an anchored regex and cut by its length: the ${t#"${t%%[! ]*}"} and
+# ${t%"${t##*[! ]}"} idiom is quadratic in the run (16,000 trailing blanks
+# cost 2.2 s, review R13), and ONE regex over the whole text, ^ *(.*[^ ]) *$,
+# does not match at all once the text holds a byte that is not UTF-8.
+trim_blanks_r() {
+  REPLY="$1"
+  case "$REPLY" in ' '*) [[ "$REPLY" =~ ^\ + ]] && REPLY="${REPLY:${#BASH_REMATCH[0]}}" ;; esac
+  case "$REPLY" in *' ') [[ "$REPLY" =~ \ +$ ]] && REPLY="${REPLY:0:${#REPLY}-${#BASH_REMATCH[0]}}" ;; esac
+  return 0
 }
 
 # A description as the row shows it: one leading status glyph dropped, with
 # the variation selector and blanks around it.  The glyphs agents lead with:
-# braille spinners (U+2800-28FF), ✳ (U+2733), ◐◑◒◓ (U+25D0-25D3).  Compared
-# by code point, as the Rust core does.
+# braille spinners (U+2800-28FF), ✳ (U+2733), ◐◑◒◓ (U+25D0-25D3).
+#
+# Matched as BYTES, the same code points the Rust core compares: a spinner is
+# \xe2, one of \xa0-\xa3, then a continuation byte.  ${t:0:1} and printf's
+# code point read the first BYTE in a C locale (what a popup gets from a tmux
+# server started with no LANG), so codex and claude lost `working`, amp said
+# `idle` while it worked, and the glyphs stayed in the text (review R14).  A
+# pattern of partial characters matches byte by byte in any locale, bash 3.2
+# to 5.2 alike.
+_SPIN=$'\xe2'[$'\xa0'-$'\xa3'][$'\x80'-$'\xbf']
+_HALF=$'\xe2\x97'[$'\x90'-$'\x93']                 # ◐◑◒◓
+_STAR=$'\xe2\x9c\xb3'                               # ✳
+_VS=$'\xef\xb8'[$'\x8e'$'\x8f']                     # U+FE0E, U+FE0F
 title_glyph_r() {
-  local t="$1" cp
-  t="${t#"${t%%[! ]*}"}"
-  case "${t:0:1}" in $'\xef\xb8\x8e'|$'\xef\xb8\x8f') t="${t:1}"; t="${t#"${t%%[! ]*}"}" ;; esac
-  if [ -n "$t" ]; then
-    printf -v cp '%d' "'${t:0:1}" 2>/dev/null || cp=0
-    if (( (cp >= 0x2800 && cp <= 0x28ff) || cp == 0x2733 || (cp >= 0x25d0 && cp <= 0x25d3) )); then
-      t="${t:1}"
-      case "${t:0:1}" in $'\xef\xb8\x8e'|$'\xef\xb8\x8f') t="${t:1}" ;; esac
-      t="${t#"${t%%[! ]*}"}"
-    fi
-  fi
-  REPLY="${t%"${t##*[! ]}"}"
+  local t
+  trim_blanks_r "$1"; t="$REPLY"
+  case "$t" in $_VS*) trim_blanks_r "${t#$_VS}"; t="$REPLY" ;; esac
+  case "$t" in
+    $_SPIN*) t="${t#$_SPIN}" ;;
+    $_STAR*) t="${t#$_STAR}" ;;
+    $_HALF*) t="${t#$_HALF}" ;;
+    *) REPLY="$t"; return 0 ;;
+  esac
+  t="${t#$_VS}"
+  trim_blanks_r "$t"
 }
 
 # One rule line split into its four fields (RULE_A RULE_S RULE_D RULE_P), the
@@ -3022,18 +3093,31 @@ DEFAULT_STATE_OPTS=' agent_state agent_desc pane_status pane_wait_reason claude_
 # STATE_OPTS: the option names the option rules read -- the defaults', and any
 # the user's file adds (valid tmux option names only: they are spliced into
 # the list-panes format).
+#
+# A line of the file that is not valid UTF-8 (is_utf8) is dropped here, and
+# only that line: a Latin-1 comment in an otherwise good file is common, and
+# the Rust core cannot hold such a byte at all -- handed the whole text, it
+# read an EMPTY rule set, every built-in rule gone with it, while bash went on
+# (review R02).  rust/src/agent.rs drops the same lines, should one ever reach
+# it some other way; --doctor names them.  A NUL (a UTF-16 file) ends the
+# text: bash cannot hold one, so what follows it is never read.
 TITLE_RULESET="" STATE_OPTS="" CUR_HOST="" CUR_HOST_SHORT=""
 title_ruleset() {
-  local f="${TITLE_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/titles}" txt="" l o
+  local f="${TITLE_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/titles}" txt="" l o kept=""
   local -a lines=()
   STATE_OPTS="$DEFAULT_STATE_OPTS"
   if [ -f "$f" ] && [ -r "$f" ]; then
     { IFS= read -r -d '' txt < "$f"; } 2>/dev/null || :
   fi
+  if ! is_utf8 "$txt"; then
+    set -f; IFS=$'\n'; lines=($txt); unset IFS; set +f
+    for l in ${lines[@]+"${lines[@]}"}; do is_utf8 "$l" && kept+="$l"$'\n'; done
+    txt="$kept"
+  fi
   TITLE_RULESET="$txt"$'\n'"$DEFAULT_TITLE_RULES"
   [[ "$txt" == *@* ]] || return 0
   set -f; IFS=$'\n'; lines=($txt); unset IFS; set +f
-  for l in "${lines[@]}"; do
+  for l in ${lines[@]+"${lines[@]}"}; do
     [[ "$l" == *@* ]] || continue
     rule_fields "$l" || continue
     [[ "$RULE_A" == @* ]] || continue
@@ -3162,17 +3246,14 @@ _rule_desc() {
 # one does.
 title_rule_r() {
   TR_HIT=0 TR_S="" TR_D=""
-  local name="$1" t="$2" s i cp
+  local name="$1" t="$2" s i
   title_idx_r "$name"
   for i in $REPLY; do
     [ -n "${TR_OK[i]-}" ] || tr_parse "$i"
     [ "${TR_OK[i]}" = 1 ] || continue
     s="$t"
-    if [ "${TR_SPIN[i]}" = 1 ]; then
-      [ -n "$s" ] || continue
-      printf -v cp '%d' "'${s:0:1}" 2>/dev/null || cp=0
-      (( cp >= 0x2800 && cp <= 0x28ff )) || continue
-      s="${s:1}"
+    if [ "${TR_SPIN[i]}" = 1 ]; then   # a spinner, as bytes: see title_glyph_r
+      case "$s" in $_SPIN*) s="${s#$_SPIN}" ;; *) continue ;; esac
     fi
     [[ "$s" =~ ${TR_RE[i]} ]] || continue
     TR_HIT=1
@@ -3193,7 +3274,7 @@ option_rule_r() {
   [[ "$1" == *[!$GS]* ]] || return 0
   [ "$TR_LOADED" = 1 ] || load_title_rules
   local -A val=()
-  local i o v cp
+  local i o v
   local -a vals=() names=() ons=()
   set -f
   IFS="$GS"; vals=($1$GS); unset IFS
@@ -3219,9 +3300,7 @@ option_rule_r() {
       [ -n "$o" ] && [[ ${val[$o]+x} ]] || continue
       v="${val[$o]}"
       if [ "${TR_SPIN[i]}" = 1 ]; then
-        printf -v cp '%d' "'${v:0:1}" 2>/dev/null || cp=0
-        (( cp >= 0x2800 && cp <= 0x28ff )) || continue
-        v="${v:1}"
+        case "$v" in $_SPIN*) v="${v#$_SPIN}" ;; *) continue ;; esac
       fi
       [[ "$v" =~ ${TR_RE[i]} ]] || continue
       [ -z "$OR_S" ] && [ "${TR_STATE[i]}" != - ] && OR_S="${TR_STATE[i]}"
@@ -3244,6 +3323,11 @@ option_rule_r() {
 #
 #   * only `<digits>.json`.  The directory also holds `<pid>.<hash>.key`
 #     files, which are never opened;
+#   * only a regular file (or a link to one), and only its first 65,536
+#     characters: a FIFO there blocked the open(2) until a writer came --
+#     every list, reload and prefix+g, in both renderers, hung (review R24).
+#     A record is a few hundred bytes; a longer one fails the closing-brace
+#     test below;
 #   * written by truncating and rewriting, so a read can catch it empty or
 #     half written: no closing brace, or a key missing, skips it for this paint;
 #   * the pid must still be that process: /proc/<pid>/stat's start time equals
@@ -3273,8 +3357,9 @@ claude_registry_r() {
   for f in ${files[@]+"${files[@]}"}; do
     stem="${f##*/}"; stem="${stem%.json}"
     case "$stem" in ''|*[!0-9]*) continue ;; esac
+    [ -f "$f" ] || continue
     j=""
-    { IFS= read -r -d '' j < "$f"; } 2>/dev/null || :
+    { IFS= read -r -N 65536 j < "$f"; } 2>/dev/null || :
     [[ "$j" == *'}' ]] || continue
     [[ "$j" =~ \"kind\":\"interactive\" ]] || continue
     [[ "$j" =~ \"pid\":([0-9]+) ]] && pid="${BASH_REMATCH[1]}" || continue
@@ -3378,6 +3463,7 @@ agent_state_r() {
     [ "$TR_LOADED" = 1 ] || load_title_rules
     if [ -n "$name" ] && [[ ${TR_IDX[$name]+x} ]]; then REPLY="${TR_IDX[$name]}"; else title_idx_r "$name"; fi
     if [ -n "$REPLY" ] || [ "$agent_row" = 1 ] || [ "$SHOW_TITLE" = all ]; then
+      [ "${#title}" -le "$TITLE_CAP" ] || title="${title:0:TITLE_CAP}"
       title_text_r "$title"; w="$REPLY"
       title_rule_r "$name" "$w"
       if [ "$TR_HIT" = 1 ]; then
@@ -3514,6 +3600,9 @@ AW_CLIENT=""
 agents_waiting_r() {
   REPLY=0 AW_CLIENT=""
   [ "$AGENT_ON" = 1 ] && [ "$AGENT_STATE" = on ] || return 0
+  utf8_ctype_r   # the rows' character type (see gather_targets)
+  [ -z "$REPLY" ] || local LC_CTYPE="$REPLY"
+  REPLY=0
   local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e'
   local -a f=() lines=()
   local -A CLAUDE_BY_PANE=()
@@ -4471,6 +4560,11 @@ IMUX_SECTIONS
   # bash renderer will do the work, and IT needs the ps process table (the binary
   # built its own).  On Linux this is a no-op (the /proc backend needs no table);
   # elsewhere it is the one ps fork, paid only when there is no working binary.
+  #
+  # And it counts characters, as the Rust core does, even where the popup's
+  # locale is C (utf8_ctype_r).
+  utf8_ctype_r
+  [ -z "$REPLY" ] || local LC_CTYPE="$REPLY"
   [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
 
   # MRU ordering: most recently attended sessions first (last-attached,
@@ -4652,7 +4746,8 @@ IMUX_SECTIONS
   local sla sname swins sattach spath marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
-  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts _wopt
+  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts
+  local -a _hf=()
 
   while IFS="$US" read -r sname sla swins sattach spath; do
     [ -z "$sname" ] && continue
@@ -4770,8 +4865,12 @@ IMUX_SECTIONS
 
       resolve_command "$wcmd" "$wpid"; raw_cmd="$REPLY"
       _hline="${active_pane[${sname}${US}${widx}]-}"
-      _wopt="${_hline#*"$US"}"   # title US options
-      cmd_field "$raw_cmd" "$wpid" "${_hline%%"$US"*}" "${_wopt%%"$US"*}" "${_wopt#*"$US"}"; cmd_formatted="$REPLY"
+      # id US title US options, split by word splitting like the lines they
+      # came from: ${x#*"$US"} and ${x%%"$US"*} are quadratic in where the US
+      # is, and the title before it is as long as a program makes it -- a
+      # 40,000-character one cost the list 1.6 s, a 1 MB one 90 s.
+      set -f; IFS="$US"; _hf=($_hline$US); unset IFS; set +f
+      cmd_field "$raw_cmd" "$wpid" "${_hf[0]-}" "${_hf[1]-}" "${_hf[2]-}"; cmd_formatted="$REPLY"
 
       printf '%s\t%s\t%s\tW:%s:%s\n' \
         "$ident" "$ctx" "$cmd_formatted" "$sname" "$widx"
@@ -8301,15 +8400,23 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # Your title rules, read before the built-in ones.  A line that is not a rule
   # is skipped by both renderers without a word, so say which: rule_fields is
-  # their own split.
+  # their own split.  The text is what title_ruleset reads -- up to a NUL, if
+  # the file holds one (UTF-16) -- and a line that is not UTF-8 is one it
+  # drops (review R02).
   _trf="${TITLE_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/titles}"
   _tl "$_trf"; _trf_d="$REPLY"
   if [ -f "$_trf" ] && [ -r "$_trf" ]; then
-    _nr=0 _ln=0 _trn=() _re_skip='^ *(#|$)'
+    _nr=0 _ln=0 _trn=() _re_skip='^ *(#|$)' _trt="" _trnul=0
+    { IFS= read -r -d '' _trt < "$_trf"; } 2>/dev/null && _trnul=1
+    [ "$_trnul" = 1 ] && _trn+=("it holds a NUL byte (is it UTF-16?): nothing after the first one is read")
     while IFS= read -r _l || [ -n "$_l" ]; do
       _ln=$((_ln + 1))
       _l="${_l//[$'\t\r']/ }"
       [[ "$_l" =~ $_re_skip ]] && continue
+      if ! is_utf8 "$_l"; then
+        _trn+=("line $_ln is not UTF-8, so it is skipped: save the file as UTF-8")
+        continue
+      fi
       if ! rule_fields "$_l"; then
         _trn+=("line $_ln is not a rule (APPS STATE DESC PATTERN), so it is skipped")
         continue
@@ -8330,7 +8437,7 @@ if [ "${1:-}" = "--doctor" ]; then
           *[!A-Za-z0-9_-]*) _trn+=("line $_ln: @$_o is not an option name tmux can be asked for, so it is never read"); break ;;
         esac
       done
-    done 2>/dev/null < "$_trf"
+    done 2>/dev/null <<< "$_trt"
     _nof "$_nr" rule
     _ok "your title rules: $_trf_d holds $REPLY, read before the built-in ones"
     for (( _i = 0; _i < ${#_trn[@]} && _i < 5; _i++ )); do _note "${_trn[_i]}"; done
@@ -8494,7 +8601,7 @@ if [ "${1:-}" = "--doctor" ]; then
         [[ "${_f##*/}" =~ ^[0-9]+\.json$ ]] || continue
         if ! { [ -f "$_f" ] && [ -r "$_f" ]; }; then _nunr=$((_nunr + 1)); continue; fi
         _j=""
-        { IFS= read -r -d '' _j; } 2>/dev/null < "$_f"
+        { IFS= read -r -N 65536 _j; } 2>/dev/null < "$_f"   # as claude_registry_r
         if [[ "$_j" == *'}' && "$_j" =~ \"pid\":[0-9]+ && "$_j" =~ \"status\":\"[a-z]+\" ]]; then
           _nrec=$((_nrec + 1))
         else

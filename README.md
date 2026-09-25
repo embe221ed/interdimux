@@ -74,7 +74,12 @@ A portal gun for your tmux sessions.
   older one is refused with a one-line error — on the status line, too, when
   tmux runs it — rather than failing somewhere inside.
 - A UTF-8 locale. The tree glyphs are multibyte and every column width is
-  counted in cells; under `LC_ALL=C` the columns misalign. `--doctor` says so.
+  counted in cells. The Rust core counts cells in any locale. The list's bash
+  renderer picks `C.UTF-8` (or another UTF-8 locale that is installed) by
+  itself when nothing names one, as for a tmux server started with no
+  `LANG`, but keeps an `LC_ALL` or `LC_CTYPE` you set. Anywhere else — the
+  dialogs, the dashboard — bash counts bytes in a locale that is not UTF-8,
+  and columns misalign. `--doctor` says so.
 - `fd` or `find` (for directory picker)
 - `at` (optional — the Schedule and Jobs entries; needs its job-runner enabled)
 - `zoxide` (optional — feeds the recent tier and find-or-create)
@@ -510,6 +515,11 @@ myagent   working  $1   %spin *
 - `PATTERN` is literal text matched against the whole title; each `*`
   captures, greedily from the left. A leading `%spin` matches one braille
   spinner character.
+- The file is UTF-8. A line that is not (a Latin-1 `é`, say) is skipped, and
+  only that line; `--doctor` names it.
+- A rule sees a title's first 256 characters. The program in a pane chooses
+  its title (tmux keeps one of up to a megabyte), and a row shows at most 200
+  characters of it, so a longer one is cut there before anything reads it.
 - `STATE` is a word (approve input working idle done error) or `-`.
 - `DESC` is `-` (show nothing), `=` (the whole title) or a template such as
   `$1` or `$2: $1`.
@@ -629,7 +639,8 @@ settings; Claude Code's session registry (how many records parse, and which are
 live sessions in a pane here); `preferredNotifChannel` and `hooks` in
 `~/.claude/settings.json`; the `[tui]` notification keys in
 `~/.codex/config.toml`; which agent plugins publish state, on how many panes;
-and your title rules file, naming any line that is not a rule. An agent that is
+and your title rules file, naming any line that is not a rule or not UTF-8
+(and a NUL, which ends what is read of a UTF-16 file). An agent that is
 not installed is one dim line. It only reads: no agent is started, no option
 value is shown, and no credential file (`~/.codex/auth.json`,
 `~/.claude/.credentials*`, the registry's `.key` files) is opened. A config it

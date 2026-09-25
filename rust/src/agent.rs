@@ -53,11 +53,26 @@ pub struct Record {
 }
 pub type Registry = HashMap<String, Record>;
 
+/// Rule text with each line that is not UTF-8 left out whole: what bash
+/// title_ruleset hands over already, and never a lossy U+FFFD, which would
+/// make the line another rule.  One Latin-1 byte in the user's file used to
+/// empty the whole variable here, the built-in rules with it (review R02).
+fn utf8_lines(b: &[u8]) -> String {
+    b.split(|&c| c == b'\n')
+        .filter_map(|l| std::str::from_utf8(l).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+fn env_lines(k: &str) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    utf8_lines(std::env::var_os(k).unwrap_or_default().as_bytes())
+}
+
 impl Config {
     /// From the environment bash hands over; every value is already
     /// normalised there, and these defaults are bash's.
     pub fn from_env(host: &str, host_short: &str) -> Self {
-        let var = |k: &str| std::env::var(k).unwrap_or_default();
+        let var = crate::env_text;
         let show_title = match var("INTERDIMUX_SHOW_TITLE").as_str() {
             "all" => ShowTitle::All,
             "off" => ShowTitle::Off,
@@ -90,7 +105,7 @@ impl Config {
             state: var("INTERDIMUX_AGENT_STATE") != "off",
             host: host.to_string(),
             host_short: host_short.to_string(),
-            rules: titles::parse(&var("INTERDIMUX_TITLE_RULESET")),
+            rules: titles::parse(&env_lines("INTERDIMUX_TITLE_RULESET")),
             state_opts: var("INTERDIMUX_STATE_OPTS")
                 .split([' ', '\t', '\n'])
                 .filter(|w| !w.is_empty())
@@ -289,7 +304,7 @@ pub fn command_field(
         desc = odesc;
         known = true;
     } else if !title.is_empty() {
-        let t = titles::text(title);
+        let t = titles::text(titles::head(title));
         match titles::apply(&cfg.rules, name, &t) {
             Some(h) => {
                 known = true;
@@ -439,6 +454,17 @@ mod tests {
         // a prefix that is not argv0 is still skipped
         assert!(repeats_row("sudo docker run -v /a:/b img@sha256:ab bash", "", "docker run", &c));
         assert!(!repeats_row("sudo root@3f2a: /", "", "docker exec -it 3f2a bash", &c));
+    }
+
+    #[test]
+    fn a_rule_line_that_is_not_utf8_is_the_only_one_dropped() {
+        let text = utf8_lines(b"# caf\xe9 rules\nfoo - = *\nbar - caf\xe9:$1 x*\n\ncodex - - *");
+        assert_eq!(text, "foo - = *\n\ncodex - - *");
+        let rules = titles::parse(&text);
+        assert!(titles::apply(&rules, "foo", "x").is_some());
+        assert!(titles::apply(&rules, "codex", "x").is_some());
+        assert!(titles::apply(&rules, "bar", "xy").is_none());
+        assert_eq!(utf8_lines(b"caf\xc3\xa9"), "caf\u{e9}");
     }
 
     #[test]
