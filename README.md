@@ -198,7 +198,7 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 
 | Key | Action |
 |---|---|
-| `Enter` | Switch to the selected target — or create a session named after the query when nothing matches. fzf's search syntax is left out of the name: `'docs`, `^docs`, `docs$` and `!docs` all name `docs`, and `my\ proj` (one term, an escaped space) names `my-proj`. A query with fzf's OR, `foo \| bar`, is a filter: it names no session, and `Enter` there does nothing |
+| `Enter` | Switch to the selected target — or create a session named after the query when nothing matches. fzf's search syntax is left out of the name: `'docs`, `^docs`, `docs$` and `!docs` all name `docs`, and `my\ proj` (one term, an escaped space) names `my-proj`. A query with fzf's OR, `foo \| bar`, is a filter: it names no session, and `Enter` there closes the navigator without creating one |
 | `Alt-Enter` | Create a session named after the query even when rows match (or switch to it, when a session has that name). A long command line — `kubectl logs -f deployment/payments-api …` — fuzzy-matches almost any short word, and `Enter` would switch to that pane instead. While a query is typed the bar names what `Alt-Enter` makes: `M-⏎ create docs` (fzf >= 0.63; the key itself works from 0.46). An empty query does nothing |
 | `Ctrl-x` | Kill the selected session, window, or pane — killing a session with clients on it, yours included, first hops them to the most recent other session (no surprise detach). So does killing its last window or last pane, which closes the session too; the dialog says so before you answer |
 | `Ctrl-e` | Rename the selected session or window (pre-filled with the current name) |
@@ -476,7 +476,9 @@ Where the state comes from, first source that speaks wins:
    #!/bin/sh
    # my-agent, saying so in its pane; the state goes however it ends
    trap 'tmux set -pu -t "$TMUX_PANE" @agent_state' EXIT
-   trap 'exit 130' INT TERM HUP
+   trap : INT
+   trap 'exit 143' TERM
+   trap 'exit 129' HUP
    tmux set -p -t "$TMUX_PANE" @agent_state working
    my-agent "$@"
    ```
@@ -484,10 +486,11 @@ Where the state comes from, first source that speaks wins:
    whatever runs in the pane next (only a shell at its prompt shows none):
    a `set … done` at the end would be seen only on the *next* program, as
    would a `working` that Ctrl-C left behind. So the wrapper unsets it on
-   the way out, and the second `trap` is what makes the first one run on
-   Ctrl-C too (dash, the `sh` of Debian and Ubuntu, skips an EXIT trap when
-   a signal kills it). A hook that publishes a state should clear it the
-   same way when its agent ends.
+   the way out, and the other traps are what make that run whichever way it
+   ends (dash, the `sh` of Debian and Ubuntu, skips an EXIT trap when a
+   signal kills it): Ctrl-C goes to `my-agent`, which may only interrupt a
+   turn, and the wrapper waits for it and exits with its status. A hook that
+   publishes a state should clear it the same way when its agent ends.
    (`@agent_state` takes the words above; `@agent_desc` any text, shown as
    it is: the filters below are for titles, which can be stale or a copy of
    the command line, and only a description that is just the app's name is
