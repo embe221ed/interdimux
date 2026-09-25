@@ -10,6 +10,14 @@
 #     and the pane loop then read that way: each character of every title cost
 #     about two system calls per list.  So the number of read(2) calls must
 #     not grow with the titles' length.
+#   * the callbacks fzf runs while you type and move -- the preview, the
+#     footer, the zero-match description, the scope prompt -- never reach the
+#     agent layer (review R15).  bash parses a script as it runs it, so a
+#     callback that exits above those ~850 lines never parses them, and every
+#     one of them paid ~2 ms to parse code that only a list draws with.  The
+#     witness is bash's own execution trace (-x): the agent layer's first
+#     top-level assignment, AGENT_KNOWN, is in the trace of a --list and must
+#     not be in a callback's;
 #   * the shortcut cmd_field takes for a row nothing can be added to (no
 #     option published, no registry record, not an agent, no title a rule
 #     reads -- review R09) is taken by no other row.  Each row below has
@@ -209,6 +217,52 @@ for r in "${renderers[@]}"; do
     ERRORS+="      $(head -3 "$TMPD/err")"$'\n'
   fi
 done
+
+# --- the callbacks never reach the agent layer --------------------------------
+# A private server for the ones that ask tmux (the preview captures a pane).
+SOCK="interdimux-rcost-test-$$"
+cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$TMPD"; }
+unset TMUX TMUX_PANE
+tmux -f /dev/null -L "$SOCK" new-session -d -s rc -x 120 -y 30
+tmux -L "$SOCK" new-window -d -t '=rc:' -n second
+export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
+export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=rc:0' -F '#{pane_id}')"
+export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1 \
+       XDG_DATA_HOME="$TMPD/data" XDG_STATE_HOME="$TMPD/state" XDG_CONFIG_HOME="$TMPD/config" \
+       INTERDIMUX_USE_ZOXIDE=off FZF_COLUMNS=120
+# $1 = label, $2 = what its output must contain (the callback did its job),
+# then the arguments; env assignments go first, as `env` takes them.
+traced() {
+  local label="$1" want="$2"; shift 2
+  env "$@" > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
+  if ! grep -qF -- "$want" "$TMPD/cb.out"; then
+    report "$label: runs (its output has '$want')" fail
+    ERRORS+="      out: $(head -c 300 "$TMPD/cb.out")"$'\n'"      err: $(grep -v '^+' "$TMPD/cb.trace" | head -3)"$'\n'
+  elif grep -q '^+ AGENT_KNOWN=' "$TMPD/cb.trace"; then
+    report "$label: never reaches the agent layer" fail
+  else
+    report "$label: never reaches the agent layer" pass
+  fi
+}
+traced "--preview (every cursor move)" "rc:1" \
+  bash -x "$SCRIPT" --preview 'W:rc:1'
+traced "--footer-for (every move and keystroke)" "enter" \
+  bash -x "$SCRIPT" --footer-for 'W:rc:1'
+traced "--footer-for with a query typed" "newproj" \
+  FZF_QUERY=newproj FZF_MATCH_COUNT=2 bash -x "$SCRIPT" --footer-for 'W:rc:1'
+traced "--describe-create (every keystroke with no match)" "newproj" \
+  bash -x "$SCRIPT" --describe-create newproj
+traced "--scope-prompt (ctrl-])" "name" \
+  FZF_NTH=1 bash -x "$SCRIPT" --scope-prompt
+traced "--session-name-for (the ctrl-o picker's badge)" "rc" \
+  bash -x "$SCRIPT" --session-name-for "$(tmux -L "$SOCK" display-message -p -t '=rc:0' '#{pane_current_path}')"
+# The witness is real: a list does reach it.
+env bash -x "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
+if grep -q '^+ AGENT_KNOWN=' "$TMPD/cb.trace" && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
+  report "premise: --list does run the agent layer, and the trace shows it" pass
+else
+  report "premise: --list does run the agent layer, and the trace shows it" fail
+fi
 
 echo
 if [ -n "$ERRORS" ]; then printf '%s' "$ERRORS"; echo; fi
