@@ -392,6 +392,101 @@ still exists, so one stalled mount cannot hold up the list.
   shrinks to 12 cells, and only then the session prefix and, last, the window
   name
 
+### Agents and pane titles
+
+tmux's own tree (`prefix + w`) shows the title a program gave its pane, which
+is how it can say what a Claude or Codex pane is working on. interdimux reads
+the same title — and two better sources of *state* — and puts both in the
+command column, as plain words you can search for:
+
+```
+* ├─ work 0:claude   │ ~/code/app                claude working 2m Project review and suggestions
+  ├─ work 1:codex    │ ~/code/app/src            codex approve Add tests
+  │ ├╴ work 1.0      │ ~/code/app/src            codex working Fix login timeout
+  └─ work 2:shell    │ ~                         zsh
+```
+
+- **Agents are named by what they are.** An npm or pip install runs as
+  `node …/bin/codex` or `python …/bin/aider`; the row says `codex`, `aider`.
+  Recognised: claude, codex, gemini, qwen, opencode, amp, goose, crush,
+  kiro-cli, aider, copilot, cursor-agent — add your own with
+  `@interdimux-agents`.
+- **A state word, with its age:** `approve` (a permission waits — in the
+  danger colour), `input` (a question or dialog is open), `working`, `idle`,
+  `done`, `error`. Type `approve` to find every agent waiting on you.
+- **The description** is the agent's title with its status glyph and
+  boilerplate removed. An agent row that shows a state or a description drops
+  its arguments (`--resume <uuid>` …); the preview still has them.
+
+Where the state comes from, first source that speaks wins:
+
+1. **Claude Code's own session registry** (`~/.claude/sessions/<pid>.json`):
+   busy / waiting (and for what) / idle, with no hooks or setup. The record is
+   believed only while its pid is still that process and runs in that pane.
+   Claude's title cannot say this under tmux: its glyph is always `✳` there.
+2. **Pane options other agent plugins publish** — read in the same single tmux
+   query, no extra process. Built in: interdimux's own `@agent_state` /
+   `@agent_desc`, [tmux-agent-sidebar](https://github.com/hiroppy/tmux-agent-sidebar)
+   (`@pane_status`, `@pane_wait_reason`), tmux-agent-icons (`@claude_state`,
+   `@codex_state`, `@opencode_state`), tmux-claude-status
+   (`@claude_pane_status`), workmux (`@workmux_pane_status`), dmux
+   (`@dmux_attention`). Anything that can run `tmux` can publish one — a
+   hook, or a wrapper around a tool that has no state of its own:
+   ```sh
+   tmux set -p -t "$TMUX_PANE" @agent_state working
+   my-agent "$@"
+   tmux set -p -t "$TMUX_PANE" @agent_state done
+   ```
+   (`@agent_state` takes the words above; `@agent_desc` any text.)
+3. **The title**, by per-app rules (below): codex's `[ ! ] Action Required`
+   is `approve` and its spinner `working`; gemini's `✋` / `✦` / `◇`, qwen's
+   `✳` / `◐`, amp's spinner and `◆` likewise. A title rule is chosen by the
+   app, because the same glyph means different things: `✳` is Claude's
+   constant mark but Qwen asking for approval.
+
+A title nobody wrote a rule for — a shell's `user@host:path`, a preexec hook's
+copy of the command line, tmux's default (the host name) — is not shown, so
+rows do not repeat themselves. `@interdimux-show-title all` shows every title
+that adds something, the way `prefix + w` does.
+
+#### Title rules
+
+Rules are lines of `APPS STATE DESC PATTERN`, in a file
+(`@interdimux-title-rules`, default `~/.config/interdimux/titles`) that is read
+before the built-in ones, so yours win:
+
+```
+# APPS (command names, comma-separated, or *)  STATE  DESC  PATTERN
+lazygit   -        $1   lazygit - *
+myagent   approve  $1   [?] *
+myagent   working  $1   %spin *
+# @OPTION rules read a pane option instead of the title
+@my_state approve  -    blocked
+```
+
+- `PATTERN` is literal text matched against the whole title; each `*`
+  captures, greedily from the left. A leading `%spin` matches one braille
+  spinner character.
+- `STATE` is a word (approve input working idle done error) or `-`.
+- `DESC` is `-` (show nothing), `=` (the whole title) or a template such as
+  `$1` or `$2: $1`.
+- The first title rule that matches decides. Among `@option` rules, the first
+  that gives a state gives it, and the first that gives a description gives
+  that. An `@option` named in your file is added to the tmux query by itself.
+- Window-scoped plugin options are not read by default — tmux resolves them
+  for every pane of the window, so the state would show on the agent's
+  neighbours too. To read them anyway:
+  ```
+  @ccm_prev_state      working  -  BUSY
+  @ccm_prev_state      approve  -  PERMIT
+  @ccm_prev_state      done     -  DONE
+  @agent_status_state  approve  -  blocked
+  @workmux_status      approve  -  💬
+  @codex_attention     done     -  1
+  ```
+
+The built-in rules are `DEFAULT_TITLE_RULES` in `scripts/interdimux.sh`.
+
 ## Checking your setup
 
 **`prefix + g`, then `h`** — the Health entry pages the report in a popup, `^r`
@@ -560,6 +655,33 @@ set -g @interdimux-hydrate 'on'
 
 # Fallback startup command, used when nothing more specific matches
 set -g @interdimux-startup-command 'nvim .'
+
+# Agent rows (see "Agents and pane titles").  Which pane titles to show:
+# 'known' (agents' and those a title rule knows), 'all' (every title that adds
+# something, as prefix+w does) or 'off'  (default: known)
+set -g @interdimux-show-title 'known'
+
+# Longest description shown, in characters (default: 40)
+set -g @interdimux-title-max '40'
+
+# A state word on agent rows, from Claude's registry, plugin options and
+# titles (default: on)
+set -g @interdimux-agent-state 'on'
+
+# Keep an agent row's arguments when it shows a state or description
+# (default: off)
+set -g @interdimux-agent-args 'off'
+
+# More agent names, space-separated, recognised as agents; 'off' recognises
+# none (default: unset)
+set -g @interdimux-agents 'myagent'
+
+# Your title rules file (default: ~/.config/interdimux/titles)
+set -g @interdimux-title-rules '~/.config/interdimux/titles'
+
+# Where Claude Code keeps its config, when not ~/.claude or $CLAUDE_CONFIG_DIR
+# as the tmux server sees it (default: unset)
+set -g @interdimux-claude-dir '~/.claude'
 
 # Build the Rust core in the background when the plugin loads, if cargo is
 # available and the binary is missing or older than its sources (default: on).
