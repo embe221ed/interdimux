@@ -656,8 +656,8 @@ option resolves for every pane of its window, so the state showed on the
 agent's neighbours; not reading them also saves ~1.4 ms per 100 panes. The
 README lists them for users who want them anyway.
 
-**The bash renderer parses rules lazily.** Parsing all ~75 default rules up
-front cost ~18 ms (bash's UTF-8 regex compiles and multibyte substitutions),
+**The bash renderer parses rules lazily.** Parsing all the default rules
+(some 70) up front cost ~18 ms (bash's UTF-8 regex compiles and multibyte substitutions),
 and scanning every rule for every row ~0.7 ms a row. Now the first row that
 needs a rule indexes the rule lines by app (first words only), and a rule is
 split and compiled only when a row reaches it: a list of shells and editors

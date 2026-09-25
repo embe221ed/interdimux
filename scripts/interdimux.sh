@@ -3075,8 +3075,8 @@ state_optfmt_r() {
 # TR_OPT_BY for the option rules, by option), so a row visits only its own
 # app's rules, and only the rules of the options its pane has set --
 # scanning all of them cost ~0.7 ms a row.  A rule is PARSED (tr_parse) only
-# when a row first reaches it: splitting and compiling all ~75 defaults cost
-# ~18 ms, and a list of shells and editors needs none of them.
+# when a row first reaches it: splitting and compiling all the defaults (some
+# 70) cost ~18 ms, and a list of shells and editors needs none of them.
 #
 # Parsing turns PATTERN into an anchored ERE: literals escaped, * -> (.*).
 # POSIX takes the leftmost subexpression longest first, which is the greedy
@@ -3215,8 +3215,9 @@ option_rule_r() {
   set +f
   # Only the rules that name an option this pane has set, still in rule order
   # (an indexed array's keys come back ascending).  A pane sets one or two of
-  # them: walking all ~45 option rules, parsing each, cost every process that
-  # draws such a row -- or counts it, for prefix+g -- ~3 ms a pane.
+  # them: walking all the option rules (some 30 by default), parsing each,
+  # cost every process that draws such a row -- or counts it, for prefix+g --
+  # ~3 ms a pane.
   local -a sel=()
   for (( i = 0; i < ${#ons[@]} && i < ${#vals[@]}; i++ )); do
     if [ -n "${vals[i]}" ]; then
@@ -4261,8 +4262,8 @@ gather_targets() {
   local -a _parts=()
   if [ -n "${INTERDIMUX_DUMP_IN:-}" ]; then
     # Test seam: the four sections from a FILE instead of from tmux, framed
-    # exactly as the batched query below returns them -- which is also the
-    # framing `imux gather2` reads on stdin.  It is what lets the golden corpus
+    # exactly as the batched query below returns them, plus optionally a fifth,
+    # the Claude registry -- the framing `imux gather3` reads on stdin.  It is what lets the golden corpus
     # (rust/tests/corpus/*.dump) reach THIS renderer, the one every install
     # without cargo runs, with no server and no timing:
     # tests/test_corpus_parity.sh.  Same family as INTERDIMUX_NO_BATCH and
