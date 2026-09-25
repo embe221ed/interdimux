@@ -233,10 +233,10 @@ export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
 # $1 = label, $2 = what its output must contain (the callback did its job),
 # then the arguments; env assignments go first, as `env` takes them.
 traced() {
-  local label="$1" want="$2"; shift 2
+  local label="$1" expect="$2"; shift 2   # not `want`: an array of that name is above
   env "$@" > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
-  if ! grep -qF -- "$want" "$TMPD/cb.out"; then
-    report "$label: runs (its output has '$want')" fail
+  if ! grep -qF -- "$expect" "$TMPD/cb.out"; then
+    report "$label: runs (its output has '$expect')" fail
     ERRORS+="      out: $(head -c 300 "$TMPD/cb.out")"$'\n'"      err: $(grep -v '^+' "$TMPD/cb.trace" | head -3)"$'\n'
   elif grep -q '^+ AGENT_KNOWN=' "$TMPD/cb.trace"; then
     report "$label: never reaches the agent layer" fail
