@@ -2789,8 +2789,149 @@ format_command() {
   printf -v REPLY '%s%s%s%s' "$DIM_CMD" "${cmd_base:-$cmd_name}" "$rest" "$RST"
 }
 
-# (The agent layer -- agent_of, the title rules, cmd_field -- is further down,
-# above --action: see "The agent layer sits here".)
+# ---------------------------------------------------------------------------
+# Agents: what an AI coding agent's pane tells tmux, shown in the command field
+# ---------------------------------------------------------------------------
+#
+# tmux's own choose-tree (prefix+w) adds `: "#{pane_title}"` to a pane's row
+# whenever a program has set a title, which is why it can say what a Claude or
+# Codex pane is working on and this list could not.  Three signals, all read in
+# the one batched query or from a file, none of them costing a fork:
+#
+#   * the pane title (OSC 0/2).  Claude Code sets `✳ <session title>`; under
+#     tmux the glyph is ALWAYS ✳, so it says nothing about state.  Codex sets
+#     `<spinner> <thread> | <project>` while working and `[ ! ] Action
+#     Required | …` while it waits for an approval.
+#   * Claude Code's own session registry, ~/.claude/sessions/<pid>.json: its
+#     status (busy / waiting + what for / idle) and the tmux pane it runs in.
+#     See claude_registry_r.
+#   * the command: npm and pip installs run as `node …/bin/codex` or
+#     `python …/bin/aider`, which the row names by the agent (agent_of).
+#
+# The result stays inside field 3, the command, as plain words:
+#
+#   claude working 2m Project review and suggestions
+#
+# so `approve` or a word of the title finds the row under the default search
+# scope, and nothing about the columns changes.  rust/src/agent.rs is the same
+# code; tests/test_agents.sh and the agents corpus hold the two to it.
+
+# Recognised by argv0's basename.  AGENT_SCRIPTS are the ones npm or pip
+# install as a script an interpreter runs, recognised by the script's basename.
+# @interdimux-agents adds names to both lists; `off` empties them.  That stops
+# only the NAMING (`codex` for `node .../codex`, the arguments dropped): title
+# rules are picked by the command's name, Claude's registry by pane, and
+# whether a state shows is @interdimux-agent-state's.  So under `off` a native
+# `codex` still gets its state from its title, after its whole command line
+# (the layout of any row that is not an agent's), while `node .../codex` is
+# node to the rules and gets none.  The rows of old need all three off.
+AGENT_KNOWN=' claude codex gemini qwen opencode amp goose crush kiro-cli kiro-cli-chat aider copilot cursor-agent '
+AGENT_SCRIPTS=' codex gemini qwen copilot crush aider '
+if [ "$AGENT_NAMES" = off ]; then
+  AGENT_KNOWN="" AGENT_SCRIPTS=""
+else
+  set -f
+  for _an in $AGENT_NAMES; do
+    case "$_an" in *[!A-Za-z0-9._-]*) continue ;; esac
+    AGENT_KNOWN+="$_an " AGENT_SCRIPTS+="$_an "
+  done
+  set +f
+  unset _an
+fi
+# Anything to do at all?  The default is yes; everything off is today's rows.
+AGENT_ON=0
+[ "$SHOW_TITLE" != off ] || [ "$AGENT_STATE" = on ] || [ -n "$AGENT_KNOWN" ] && AGENT_ON=1
+
+# The agents view: the navigator the dashboard's Agents entry opens
+# (`--launch agents` sets INTERDIMUX_VIEW=agents for it, and its reloads
+# inherit it).  Its rows are the navigator's, plus a MARK in the gutter where
+# `*` marks the current target: `!` on the row of a pane whose state is
+# `approve`, `?` on one in `input` -- one row per pane (the pane row where a
+# window has them, else the window row; the first session that shows it), so
+# the rows marked are the panes the entry counted.  The view opens with
+# AGENTS_QUERY typed, which matches exactly those rows: `^` anchors a term to
+# the start of a searched field, the gutter starts field 1, and nothing but
+# the renderer writes there.  (Field 3, the other one searched, starts with a
+# command name, which would have to begin with `!` or `?`.)
+#
+# It used to open on `'approve' | 'input'`, which matched the words anywhere in
+# the name and command fields: a description (`Approve button styling`, `Fix
+# input validation`), an argument (`vim input.go`), a window called
+# `input-form`.  fzf's count ran past the entry's, and raw mode's cursor went
+# to the best such match -- a working agent, where Enter then switched (review
+# R03).  fzf cannot search a field it does not show, so the mark has to be
+# drawn; and a highlighted mark, not the state word, leaves `approve` its
+# danger colour and `input` its amber in this view (review R28).  Both
+# renderers draw it (rust/src/main.rs), from the env var bash hands on.
+VIEW=""
+[ "${INTERDIMUX_VIEW:-}" = agents ] && VIEW=agents
+AGENTS_QUERY='^! | ^?'
+
+# Is argv ($1, the resolved command) an agent?  Sets AG_NAME (empty if not) and
+# AG_REST, the arguments after what names it (a leading blank, or empty).
+agent_of() {
+  AG_NAME="" AG_REST=""
+  [ -n "$AGENT_KNOWN" ] || return 0
+  local s="$1" a0 b r1 w1 wb
+  a0="${s%% *}"; b="${a0##*/}"
+  if [ -n "$b" ] && [[ "$AGENT_KNOWN" == *" $b "* ]]; then
+    AG_NAME="$b" AG_REST="${s#"$a0"}"
+    return 0
+  fi
+  # Claude's native build runs from ~/.local/share/claude/versions/<version>.
+  case "$a0" in */claude/versions/*) AG_NAME=claude AG_REST="${s#"$a0"}"; return 0 ;; esac
+  case "$b" in
+    node|nodejs) ;;
+    python*) [[ "${b#python}" == *[!0123456789.]* ]] && return 0 ;;
+    *) return 0 ;;
+  esac
+  r1="${s#"$a0"}"; r1="${r1# }"; w1="${r1%% *}"; wb="${w1##*/}"
+  [[ -z "$wb" || "$w1" == -* ]] && return 0
+  # A package's own file, run by path (`node …/@openai/codex/bin/codex.js`).
+  case "$wb" in *.js|*.mjs|*.cjs) wb="${wb%.*}" ;; esac
+  if [[ "$AGENT_SCRIPTS" == *" $wb "* ]]; then
+    AG_NAME="$wb" AG_REST="${r1#"$w1"}"
+    return 0
+  fi
+  case "$wb" in npx|npx-cli) npx_agent "${r1#"$w1"}" ;; esac
+  return 0
+}
+
+# `npx [options] <package>[@version] [args]` -- gemini's own quick start is
+# `npx @google/gemini-cli`.  npm runs the package's bin as a GRANDCHILD and
+# npx stays the pane's foreground process, so the row's argv is npx's: the
+# package names the agent.  `-p <package> <command>` names it by either.
+# Sets AG_NAME / AG_REST (the arguments after the package) for a known one.
+NPX_AGENTS=' @google/gemini-cli=gemini @openai/codex=codex @anthropic-ai/claude-code=claude @qwen-code/qwen-code=qwen @github/copilot=copilot '
+npx_agent() {
+  local rest="$1" w pkg="" skip=0 m
+  while :; do
+    rest="${rest#"${rest%%[! ]*}"}"
+    [ -n "$rest" ] || return 0
+    w="${rest%% *}"; rest="${rest#"$w"}"
+    if [ "$skip" = 1 ]; then pkg="$w" skip=0; continue; fi
+    case "$w" in
+      -p|--package) skip=1; continue ;;
+      --package=*) pkg="${w#--package=}"; continue ;;
+      -c|--call) return 0 ;;
+      -*) continue ;;
+    esac
+    break
+  done
+  m="${pkg:-$w}"
+  case "$m" in ?*@*) m="${m%@*}" ;; esac
+  if [[ "$NPX_AGENTS" == *" $m="* ]]; then
+    m="${NPX_AGENTS#* "$m"=}"; AG_NAME="${m%% *}" AG_REST="$rest"
+  elif [ -n "$pkg" ] && [[ "$AGENT_KNOWN" == *" $w "* ]]; then
+    AG_NAME="$w" AG_REST="$rest"
+  fi
+  return 0
+}
+
+# (The rest of the agent layer -- the title rules, the Claude registry,
+# cmd_field -- is further down, above --action: see "The agent layer sits
+# here".  These names stay up here because callbacks use them: --preview names
+# an agent's pane with agent_of, and resolve_create_target reads VIEW.)
 
 # ---------------------------------------------------------------------------
 # Display helpers
@@ -5943,146 +6084,9 @@ fi
 # lines below, which cost every one of them ~2 ms (review R15).  So no mode
 # dispatched above this line may run anything that uses it (gather_targets is
 # defined above but only ever run below), and a new callback belongs above it.
-# tests/test_render_cost.sh checks the callbacks with bash's own trace.
-
-# ---------------------------------------------------------------------------
-# Agents: what an AI coding agent's pane tells tmux, shown in the command field
-# ---------------------------------------------------------------------------
-#
-# tmux's own choose-tree (prefix+w) adds `: "#{pane_title}"` to a pane's row
-# whenever a program has set a title, which is why it can say what a Claude or
-# Codex pane is working on and this list could not.  Three signals, all read in
-# the one batched query or from a file, none of them costing a fork:
-#
-#   * the pane title (OSC 0/2).  Claude Code sets `✳ <session title>`; under
-#     tmux the glyph is ALWAYS ✳, so it says nothing about state.  Codex sets
-#     `<spinner> <thread> | <project>` while working and `[ ! ] Action
-#     Required | …` while it waits for an approval.
-#   * Claude Code's own session registry, ~/.claude/sessions/<pid>.json: its
-#     status (busy / waiting + what for / idle) and the tmux pane it runs in.
-#     See claude_registry_r.
-#   * the command: npm and pip installs run as `node …/bin/codex` or
-#     `python …/bin/aider`, which the row names by the agent (agent_of).
-#
-# The result stays inside field 3, the command, as plain words:
-#
-#   claude working 2m Project review and suggestions
-#
-# so `approve` or a word of the title finds the row under the default search
-# scope, and nothing about the columns changes.  rust/src/agent.rs is the same
-# code; tests/test_agents.sh and the agents corpus hold the two to it.
-
-# Recognised by argv0's basename.  AGENT_SCRIPTS are the ones npm or pip
-# install as a script an interpreter runs, recognised by the script's basename.
-# @interdimux-agents adds names to both lists; `off` empties them.  That stops
-# only the NAMING (`codex` for `node .../codex`, the arguments dropped): title
-# rules are picked by the command's name, Claude's registry by pane, and
-# whether a state shows is @interdimux-agent-state's.  So under `off` a native
-# `codex` still gets its state from its title, after its whole command line
-# (the layout of any row that is not an agent's), while `node .../codex` is
-# node to the rules and gets none.  The rows of old need all three off.
-AGENT_KNOWN=' claude codex gemini qwen opencode amp goose crush kiro-cli kiro-cli-chat aider copilot cursor-agent '
-AGENT_SCRIPTS=' codex gemini qwen copilot crush aider '
-if [ "$AGENT_NAMES" = off ]; then
-  AGENT_KNOWN="" AGENT_SCRIPTS=""
-else
-  set -f
-  for _an in $AGENT_NAMES; do
-    case "$_an" in *[!A-Za-z0-9._-]*) continue ;; esac
-    AGENT_KNOWN+="$_an " AGENT_SCRIPTS+="$_an "
-  done
-  set +f
-  unset _an
-fi
-# Anything to do at all?  The default is yes; everything off is today's rows.
-AGENT_ON=0
-[ "$SHOW_TITLE" != off ] || [ "$AGENT_STATE" = on ] || [ -n "$AGENT_KNOWN" ] && AGENT_ON=1
-
-# The agents view: the navigator the dashboard's Agents entry opens
-# (`--launch agents` sets INTERDIMUX_VIEW=agents for it, and its reloads
-# inherit it).  Its rows are the navigator's, plus a MARK in the gutter where
-# `*` marks the current target: `!` on the row of a pane whose state is
-# `approve`, `?` on one in `input` -- one row per pane (the pane row where a
-# window has them, else the window row; the first session that shows it), so
-# the rows marked are the panes the entry counted.  The view opens with
-# AGENTS_QUERY typed, which matches exactly those rows: `^` anchors a term to
-# the start of a searched field, the gutter starts field 1, and nothing but
-# the renderer writes there.  (Field 3, the other one searched, starts with a
-# command name, which would have to begin with `!` or `?`.)
-#
-# It used to open on `'approve' | 'input'`, which matched the words anywhere in
-# the name and command fields: a description (`Approve button styling`, `Fix
-# input validation`), an argument (`vim input.go`), a window called
-# `input-form`.  fzf's count ran past the entry's, and raw mode's cursor went
-# to the best such match -- a working agent, where Enter then switched (review
-# R03).  fzf cannot search a field it does not show, so the mark has to be
-# drawn; and a highlighted mark, not the state word, leaves `approve` its
-# danger colour and `input` its amber in this view (review R28).  Both
-# renderers draw it (rust/src/main.rs), from the env var bash hands on.
-VIEW=""
-[ "${INTERDIMUX_VIEW:-}" = agents ] && VIEW=agents
-AGENTS_QUERY='^! | ^?'
-
-# Is argv ($1, the resolved command) an agent?  Sets AG_NAME (empty if not) and
-# AG_REST, the arguments after what names it (a leading blank, or empty).
-agent_of() {
-  AG_NAME="" AG_REST=""
-  [ -n "$AGENT_KNOWN" ] || return 0
-  local s="$1" a0 b r1 w1 wb
-  a0="${s%% *}"; b="${a0##*/}"
-  if [ -n "$b" ] && [[ "$AGENT_KNOWN" == *" $b "* ]]; then
-    AG_NAME="$b" AG_REST="${s#"$a0"}"
-    return 0
-  fi
-  # Claude's native build runs from ~/.local/share/claude/versions/<version>.
-  case "$a0" in */claude/versions/*) AG_NAME=claude AG_REST="${s#"$a0"}"; return 0 ;; esac
-  case "$b" in
-    node|nodejs) ;;
-    python*) [[ "${b#python}" == *[!0123456789.]* ]] && return 0 ;;
-    *) return 0 ;;
-  esac
-  r1="${s#"$a0"}"; r1="${r1# }"; w1="${r1%% *}"; wb="${w1##*/}"
-  [[ -z "$wb" || "$w1" == -* ]] && return 0
-  # A package's own file, run by path (`node …/@openai/codex/bin/codex.js`).
-  case "$wb" in *.js|*.mjs|*.cjs) wb="${wb%.*}" ;; esac
-  if [[ "$AGENT_SCRIPTS" == *" $wb "* ]]; then
-    AG_NAME="$wb" AG_REST="${r1#"$w1"}"
-    return 0
-  fi
-  case "$wb" in npx|npx-cli) npx_agent "${r1#"$w1"}" ;; esac
-  return 0
-}
-
-# `npx [options] <package>[@version] [args]` -- gemini's own quick start is
-# `npx @google/gemini-cli`.  npm runs the package's bin as a GRANDCHILD and
-# npx stays the pane's foreground process, so the row's argv is npx's: the
-# package names the agent.  `-p <package> <command>` names it by either.
-# Sets AG_NAME / AG_REST (the arguments after the package) for a known one.
-NPX_AGENTS=' @google/gemini-cli=gemini @openai/codex=codex @anthropic-ai/claude-code=claude @qwen-code/qwen-code=qwen @github/copilot=copilot '
-npx_agent() {
-  local rest="$1" w pkg="" skip=0 m
-  while :; do
-    rest="${rest#"${rest%%[! ]*}"}"
-    [ -n "$rest" ] || return 0
-    w="${rest%% *}"; rest="${rest#"$w"}"
-    if [ "$skip" = 1 ]; then pkg="$w" skip=0; continue; fi
-    case "$w" in
-      -p|--package) skip=1; continue ;;
-      --package=*) pkg="${w#--package=}"; continue ;;
-      -c|--call) return 0 ;;
-      -*) continue ;;
-    esac
-    break
-  done
-  m="${pkg:-$w}"
-  case "$m" in ?*@*) m="${m%@*}" ;; esac
-  if [[ "$NPX_AGENTS" == *" $m="* ]]; then
-    m="${NPX_AGENTS#* "$m"=}"; AG_NAME="${m%% *}" AG_REST="$rest"
-  elif [ -n "$pkg" ] && [[ "$AGENT_KNOWN" == *" $w "* ]]; then
-    AG_NAME="$w" AG_REST="$rest"
-  fi
-  return 0
-}
+# The agent NAMES (the tables, agent_of, VIEW) are further up: the preview and
+# the create resolver use them.  tests/test_render_cost.sh checks the
+# callbacks with bash's own trace (the witness: DEFAULT_TITLE_RULES below).
 
 # Rules: how what an app or a plugin tells tmux becomes a state word and a
 # description on the row.  One rule per line, two kinds:

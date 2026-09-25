@@ -15,8 +15,8 @@
 #     agent layer (review R15).  bash parses a script as it runs it, so a
 #     callback that exits above those ~850 lines never parses them, and every
 #     one of them paid ~2 ms to parse code that only a list draws with.  The
-#     witness is bash's own execution trace (-x): the agent layer's first
-#     top-level assignment, AGENT_KNOWN, is in the trace of a --list and must
+#     witness is bash's own execution trace (-x): the heavy agent layer's
+#     first top-level assignment, DEFAULT_TITLE_RULES, is in the trace of a --list and must
 #     not be in a callback's;
 #   * the shortcut cmd_field takes for a row nothing can be added to (no
 #     option published, no registry record, not an agent, no title a rule
@@ -157,7 +157,8 @@ fi
 #   0 make   Claude's registry has a record for its pane (a wrapper script)
 #   1 sleep  @agent_state approve, published for its pane
 #   2 node   running codex by its script path, with codex's title
-#   3 myagent  named by @interdimux-agents, with a title of its own
+#   3 myagent  named by @interdimux-agents, with a title of its own and no
+#              rule for it: no description (review R18), from either path
 #   4 ssh    a title the ssh rules read
 #   5 vim    a title no rule reads: the shortcut, and the command alone
 {
@@ -185,7 +186,7 @@ want=(
   "make -j8 working 6m"
   "sleep 30 approve"
   "codex approve Add tests"
-  "myagent Refactoring the store"
+  "myagent"
   "ssh web1 deploy@web1: ~/src"
   "vim notes"
 )
@@ -238,7 +239,7 @@ traced() {
   if ! grep -qF -- "$expect" "$TMPD/cb.out"; then
     report "$label: runs (its output has '$expect')" fail
     ERRORS+="      out: $(head -c 300 "$TMPD/cb.out")"$'\n'"      err: $(grep -v '^+' "$TMPD/cb.trace" | head -3)"$'\n'
-  elif grep -q '^+ AGENT_KNOWN=' "$TMPD/cb.trace"; then
+  elif grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace"; then
     report "$label: never reaches the agent layer" fail
   else
     report "$label: never reaches the agent layer" pass
@@ -258,7 +259,7 @@ traced "--session-name-for (the ctrl-o picker's badge)" "rc" \
   bash -x "$SCRIPT" --session-name-for "$(tmux -L "$SOCK" display-message -p -t '=rc:0' '#{pane_current_path}')"
 # The witness is real: a list does reach it.
 env bash -x "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
-if grep -q '^+ AGENT_KNOWN=' "$TMPD/cb.trace" && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
+if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
   report "premise: --list does run the agent layer, and the trace shows it" pass
 else
   report "premise: --list does run the agent layer, and the trace shows it" fail

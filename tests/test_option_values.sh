@@ -171,19 +171,21 @@ same "...where 8 (16 deep) does not reach" "$OUT" ""
 # --- 3. --doctor names what the script replaces ------------------------------
 # A dump with one row per option: a codex pane with an argument and an approval
 # title (agent-state, agent-args, title-max), a sleep with a title no rule knows
-# (show-title), and a program named only by @interdimux-agents (agents).
+# (show-title), and a python script named only by @interdimux-agents (agents:
+# named, it reads `myagent --fast`, else `python3 myagent --fast`; its title
+# shows either way no more, having no rule -- review R18).
 {
   printf 'work%s1700080000%s3%sattached%s/home/u\n' "$US" "$US" "$US" "$US"
   printf '%s\n' "$RS"
   printf 'work%s0%scodex%s1%scodex resume%s/home/u%s1%s1001%s000\n' "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US"
   printf 'work%s1%snotes%s0%ssleep%s/home/u%s1%s1002%s000\n' "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US"
-  printf 'work%s2%smine%s0%smyagent%s/home/u%s1%s1003%s000\n' "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US"
+  printf 'work%s2%smine%s0%spython3 /opt/bin/myagent --fast%s/home/u%s1%s1003%s000\n' "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US"
   printf '%s\n' "$RS"
   printf 'work%s0%s0%s1%scodex resume%s/home/u%s1001%s1%s%%1%s[ ! ] Action Required | %s | app%s%s\n' \
     "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$THREAD" "$US" "$OPTS"
   printf 'work%s1%s0%s1%ssleep%s/home/u%s1002%s1%s%%2%sQuarterly numbers%s%s\n' \
     "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$OPTS"
-  printf 'work%s2%s0%s1%smyagent%s/home/u%s1003%s1%s%%3%shello there%s%s\n' \
+  printf 'work%s2%s0%s1%spython3 /opt/bin/myagent --fast%s/home/u%s1003%s1%s%%3%shello there%s%s\n' \
     "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$US" "$OPTS"
   printf '%s\n' "$RS"
   printf 'work%s0%s0%shost%shost\n' "$US" "$US" "$US" "$US"

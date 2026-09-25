@@ -116,11 +116,18 @@ check_text() { # $1 = label, $2 = the whole text as it must be logged
   fi
 }
 
-# --- find-or-create that cannot create anything -------------------------------------
-rc=0; bash "$SCRIPT" --create-from-query '' >/dev/null 2>&1 || rc=$?
-[ "$rc" = 1 ] && report "control: find-or-create on an empty query fails" pass \
-              || report "control: find-or-create on an empty query fails (rc=$rc)" fail
-check_on_a "find-or-create's failure" "interdimux: could not create a session from ''"
+# --- find-or-create whose create fails -----------------------------------------------
+# A query that names nothing creates nothing, quietly (review R05), so the
+# failure has to be a real one: tmux refusing the new session.  Nothing makes
+# tmux's own new-session fail on demand, so a wrapper earlier on PATH does,
+# and passes every other command through.
+mkdir -p "$TMPD/failbin"
+printf '#!/bin/sh\ncase " $* " in *" new-session "*) exit 1 ;; esac\nexec %s "$@"\n' "$(command -v tmux)" > "$TMPD/failbin/tmux"
+chmod +x "$TMPD/failbin/tmux"
+rc=0; PATH="$TMPD/failbin:$PATH" bash "$SCRIPT" --create-from-query 'imuxfailproj' >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] && report "control: find-or-create fails when tmux will not create the session" pass \
+              || report "control: find-or-create fails when tmux will not create the session (rc=$rc)" fail
+check_on_a "find-or-create's failure" "interdimux: could not create a session from 'imuxfailproj'"
 
 # --- the navigator has nowhere to put its scratch files --------------------------------
 # No runtime dir, a TMPDIR and a state dir that cannot exist ('#S' in them, which
