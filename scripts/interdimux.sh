@@ -525,16 +525,33 @@ get_opt TITLE_RULES_FILE  "${INTERDIMUX_TITLE_RULES:-}"      @interdimux-title-r
 case "$RECENT_LIMIT" in ''|*[!0-9]*) RECENT_LIMIT=10 ;; esac
 case "$DIRS_LIMIT"   in ''|*[!0-9]*) DIRS_LIMIT=15   ;; esac
 case "$SCAN_DEPTH"   in ''|*[!0-9]*) SCAN_DEPTH=3    ;; esac
+case "$TITLE_MAX"    in ''|*[!0-9]*) TITLE_MAX=40    ;; esac
+# And DECIMAL, whatever the leading zeros.  `[ -gt ]` reads 08 as eight, but
+# bash arithmetic reads a leading 0 as OCTAL: @interdimux-title-max 08 made the
+# title cut (${desc:0:TITLE_MAX-1}) fail with "value too great for base", which
+# ended gather_targets and left the bash renderer's --list with no rows at all,
+# and 050 cut at forty where the Rust core, which parses decimal, cut at fifty.
+# scan-depth reaches $(( )) in the directory search the same way.  Stripped
+# here, once, so every reader -- [ ], $(( )), find and the binary -- sees the
+# one number the user meant.  Before the clamps, so 0040 is forty, not "more
+# than three digits".
+for _c in RECENT_LIMIT DIRS_LIMIT SCAN_DEPTH TITLE_MAX; do
+  case "${!_c}" in
+    0?*) _v="${!_c}"; _v="${_v#"${_v%%[!0]*}"}"; printf -v "$_c" '%s' "${_v:-0}" ;;
+  esac
+done
+unset _c _v
 # A deep scan is a footgun rather than a preference: `find -maxdepth 40` over
-# $HOME does not return within a popup's lifetime.
-[ "$SCAN_DEPTH" -gt 10 ] && SCAN_DEPTH=10
+# $HOME does not return within a popup's lifetime.  The length first: `[ -gt ]`
+# on a 20-digit number is not false but an error, on stderr.
+{ [ "${#SCAN_DEPTH}" -gt 2 ] || [ "$SCAN_DEPTH" -gt 10 ]; } && SCAN_DEPTH=10
 case "$ORDER" in mru|index) ;; *) ORDER=mru ;; esac
 # The agent options (see "Agents" below).  A title cap under 8 would leave
-# nothing but the ellipsis, and one over 200 is no cap.
+# nothing but the ellipsis, and one over 200 is no cap.  --doctor names every
+# value these replace (_check_value), in the same terms.
 case "$SHOW_TITLE"  in known|all|off) ;; *) SHOW_TITLE=known ;; esac
 case "$AGENT_ARGS"  in on|off) ;; *) AGENT_ARGS=off ;; esac
 case "$AGENT_STATE" in on|off) ;; *) AGENT_STATE=on ;; esac
-case "$TITLE_MAX"   in ''|*[!0-9]*) TITLE_MAX=40 ;; esac
 [ "${#TITLE_MAX}" -gt 3 ] && TITLE_MAX=200
 [ "$TITLE_MAX" -lt 8 ] && TITLE_MAX=8
 [ "$TITLE_MAX" -gt 200 ] && TITLE_MAX=200
@@ -3446,16 +3463,26 @@ claude_registry_r() {
     j=""
     { IFS= read -r -N 65536 j < "$f"; } 2>/dev/null || :
     [[ "$j" == *'}' ]] || continue
-    [[ "$j" =~ \"kind\":\"interactive\" ]] || continue
+    # A glob where nothing is captured, and whether the pid still runs BEFORE
+    # the other fields: bash compiles a [[ =~ ]] regex on every match (~30 µs
+    # each here), and a record whose Claude has gone -- they stay behind after
+    # a crash -- paid for all seven only to be dropped (review R15).  The
+    # waiting reason is read only for a record that is waiting.
+    [[ "$j" == *'"kind":"interactive"'* ]] || continue
     [[ "$j" =~ \"pid\":([0-9]+) ]] && pid="${BASH_REMATCH[1]}" || continue
+    if [ -r /proc/self/stat ]; then
+      [ -e "/proc/$pid/stat" ] || continue
+    else
+      kill -0 "$pid" 2>/dev/null || continue
+    fi
     [[ "$j" =~ \"tmux\":\"[^\"]*(%[0-9]+)\" ]] && pane="${BASH_REMATCH[1]}" || continue
     [[ "$j" =~ \"status\":\"([a-z]+)\" ]] && st="${BASH_REMATCH[1]}" || continue
-    wf=""; [[ "$j" =~ \"waitingFor\":\"([^\"]*)\" ]] && wf="${BASH_REMATCH[1]}"
     upd=0; [[ "$j" =~ \"statusUpdatedAt\":([0-9]+) ]] && upd="${BASH_REMATCH[1]}"
     case "$st" in
       busy) word=working ;;
       idle|shell) word=idle ;;
       waiting)
+        wf=""; [[ "$j" =~ \"waitingFor\":\"([^\"]*)\" ]] && wf="${BASH_REMATCH[1]}"
         case "$wf" in
           'permission prompt'|'worker request'|'sandbox request') word=approve ;;
           *) word=input ;;
@@ -3469,15 +3496,17 @@ claude_registry_r() {
       sf=()
       { IFS=$' \t\n' read -r -d '' -a sf < "/proc/$pid/stat"; } 2>/dev/null || :
       # comm ends at the LAST word holding a ')' (see proc_group_ids): field N
-      # of stat is sf[last + N - 2].
+      # of stat is sf[last + N - 2].  The usual comm (one word) is one test.
       local i last=0
-      for (( i = 1; i <= 9 && i < ${#sf[@]}; i++ )); do
-        case "${sf[i]}" in *')'*) last=$i ;; esac
-      done
+      if [[ "${sf[1]-}" == *')' && "${sf[*]:2:7}" != *')'* ]]; then
+        last=1
+      else
+        for (( i = 1; i <= 9 && i < ${#sf[@]}; i++ )); do
+          case "${sf[i]}" in *')'*) last=$i ;; esac
+        done
+      fi
       [ "$last" -gt 0 ] && [ "${sf[last+20]-}" = "$pst" ] || continue
       sid="${sf[last+4]}"
-    else
-      kill -0 "$pid" 2>/dev/null || continue
     fi
     CLAUDE_REG+="$pane$US$sid$US$word$US$(( upd / 1000 ))"$'\n'
   done
@@ -3622,6 +3651,28 @@ cmd_field() {
   format_command "$raw"
   [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
   local fc="$REPLY" a0 b name state since desc rest r w cw=""
+  # The row nothing can be added to, known in a few tests instead of through
+  # agent_state_r: no option published for the pane, no registry record for
+  # it, not an agent, and no title -- or one that no title rule for the app
+  # can read and show-title does not show anyway.  Most rows (shells, editors,
+  # servers) are that, and in bash the function calls are most of what a row
+  # costs: this is about a third of the way through agent_state_r (review
+  # R09).  Each test is one of agent_state_r's own gates, so what it lets by
+  # draws exactly what that would: keep the two in step.
+  a0="${raw%% *}"; b="${a0##*/}"
+  if [[ "${5-}" != *[!$GS]* ]] \
+     && { [ -z "${3-}" ] || [ "$AGENT_STATE" != on ] || [ -z "${CLAUDE_BY_PANE[$3]-}" ]; }; then
+    case "$b" in node|nodejs|python*) r=1 ;; *) r="" ;; esac   # agent_of reads their script
+    if [ -z "$AGENT_KNOWN" ] || [[ -z "$r" && "$AGENT_KNOWN" != *" $b "* && "$a0" != */claude/versions/* ]]; then
+      [ -n "${4-}" ] || { REPLY="$fc"; return 0; }
+      if [ "$SHOW_TITLE" != all ]; then
+        name="${b#-}"
+        [ "$TR_LOADED" = 1 ] || load_title_rules
+        if [ -n "$name" ] && [[ ${TR_IDX[$name]+x} ]]; then REPLY="${TR_IDX[$name]}"; else title_idx_r "$name"; fi
+        [ -n "$REPLY" ] || { REPLY="$fc"; return 0; }
+      fi
+    fi
+  fi
   agent_state_r "$@" || { REPLY="$fc"; return 0; }
   name="$AS_NAME" state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
   a0="${raw%% *}"; b="${a0##*/}"
@@ -4041,33 +4092,48 @@ MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0
 # the explicit `return 0` keeps the function's own status 0 — the trailing
 # loop would otherwise propagate a false (( … )) and abort a set -e caller
 # of the bare call in gather_targets.
+#
+# Each section is split into lines, and each line into fields, by word
+# splitting under set -f -- as gather_targets groups them -- not by a `while
+# read` over a here-string.  `read` takes a here-string ONE BYTE per read(2)
+# (it is a pipe), so these three loops cost ~30 ms of a 100-pane list, and
+# every character a pane line gained cost more (review R09).  The fields are
+# the ones `read` gave: a line of the grouped sections has exactly these.
 measure_widths() {
   MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0
-  local _sla sname _sw _sa _sn widx wname _wa _wc wpath _wp _wpid wflags _pi _pa _pc ppath _pr il dp nf
-  while IFS="$US" read -r sname _sla _sw _sa; do
-    [ -z "$sname" ] && continue
-    (( ${#sname} > MAX_SESS )) && MAX_SESS=${#sname}
-  done <<< "$sessions_raw"
-  while IFS="$US" read -r _sn widx wname _wa _wc wpath _wp _wpid wflags; do
-    [ -z "$_sn" ] && continue
-    il=$(( ${#widx} + 1 + ${#wname} ))
+  local l wflags il dp nf
+  local -a ls=() f=()
+  set -f
+  IFS=$'\n'; ls=($sessions_raw); unset IFS
+  for l in ${ls[@]+"${ls[@]}"}; do
+    l="${l%%"$US"*}"   # the session name
+    (( ${#l} > MAX_SESS )) && MAX_SESS=${#l}
+  done
+  IFS=$'\n'; ls=($all_windows_raw); unset IFS
+  for l in ${ls[@]+"${ls[@]}"}; do
+    IFS="$US"; f=($l$US); unset IFS   # the appended US: see gather_targets
+    [ -n "${f[0]-}" ] || continue
+    il=$(( ${#f[1]} + 1 + ${#f[2]} ))   # index:name
     (( il > MAX_WIN )) && MAX_WIN=$il
-    dp="${wpath/#$HOME/\~}"
+    dp="${f[5]-}"; dp="${dp/#$HOME/\~}"
     (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
     # Same three positions build_ctx_field reads.  nf=$(( … )), never
     # (( nf++ )): a post-increment from 0 is a false (( … )), and as the last
     # command of an && list it would abort a set -e caller.
-    nf=0
+    wflags="${f[8]-}" nf=0
     [ "${wflags:0:1}" = "1" ] && nf=$(( nf + 1 ))
     [ "${wflags:1:1}" = "1" ] && nf=$(( nf + 1 ))
     [ "${wflags:2:1}" = "1" ] && nf=$(( nf + 1 ))
     (( nf > MAX_FLAGS )) && MAX_FLAGS=$nf
-  done <<< "$all_windows_raw"
-  while IFS="$US" read -r _sn widx _pi _pa _pc ppath _pr; do
-    [ -z "$_sn" ] && continue
-    dp="${ppath/#$HOME/\~}"
+  done
+  IFS=$'\n'; ls=($all_panes_raw); unset IFS
+  for l in ${ls[@]+"${ls[@]}"}; do
+    IFS="$US"; f=($l$US); unset IFS
+    [ -n "${f[0]-}" ] || continue
+    dp="${f[5]-}"; dp="${dp/#$HOME/\~}"
     (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
-  done <<< "$all_panes_raw"
+  done
+  set +f
   return 0
 }
 
@@ -4082,18 +4148,17 @@ measure_widths() {
 # branch.  Windows before panes, as it always was.  The lookups fill
 # get_git_branch's cache, so build_ctx_field's for the same paths cost nothing.
 # Reads gather_targets' dumps through dynamic scope.
+# Split as measure_widths splits, not read: the cwd is field 6 of both.
 _probe_has_branch() {
-  local _sn _wx _wn _wa _wc wpath _wr _pi _pa _pc ppath _pr
-  while IFS="$US" read -r _sn _wx _wn _wa _wc wpath _wr; do
-    [ -n "$_sn" ] || continue
-    get_git_branch "$wpath"
+  local l
+  local -a ls=() f=()
+  set -f; IFS=$'\n'; ls=($all_windows_raw $all_panes_raw); unset IFS; set +f
+  for l in ${ls[@]+"${ls[@]}"}; do
+    set -f; IFS="$US"; f=($l$US); unset IFS; set +f
+    [ -n "${f[0]-}" ] || continue
+    get_git_branch "${f[5]-}"
     [ -n "$REPLY" ] && return 0
-  done <<< "$all_windows_raw"
-  while IFS="$US" read -r _sn _wx _pi _pa _pc ppath _pr; do
-    [ -n "$_sn" ] || continue
-    get_git_branch "$ppath"
-    [ -n "$REPLY" ] && return 0
-  done <<< "$all_panes_raw"
+  done
   return 1
 }
 
@@ -4621,10 +4686,15 @@ gather_targets() {
     # work.  The behaviour therefore depended on where the popup was opened from.
     # set -f for the whole block; the same idiom is used around the RS split in
     # gather_targets.
+    #
+    # The lines by word splitting, not `while read` over a here-string: `read`
+    # takes that a byte per read(2), and a pane line carries its title and its
+    # published options (review R09).
     set -f
     local _hp _hname _hkeep _hout=""
-    while IFS= read -r _hline; do
-      [ -n "$_hline" ] || continue
+    local -a _hls=()
+    IFS=$'\n'; _hls=($sessions_raw); unset IFS
+    for _hline in ${_hls[@]+"${_hls[@]}"}; do
       _hname="${_hline%%"$US"*}"
       _hkeep=1
       if [ "$_hname" != "$current_session" ]; then
@@ -4634,13 +4704,13 @@ gather_targets() {
         done
       fi
       [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
-    done <<< "$sessions_raw"
+    done
     sessions_raw="${_hout%$'\n'}"
 
     # windows and panes carry the session name in field 1 too
     _hout=""
-    while IFS= read -r _hline; do
-      [ -n "$_hline" ] || continue
+    IFS=$'\n'; _hls=($all_windows_raw); unset IFS
+    for _hline in ${_hls[@]+"${_hls[@]}"}; do
       _hname="${_hline%%"$US"*}"
       _hkeep=1
       if [ "$_hname" != "$current_session" ]; then
@@ -4650,12 +4720,12 @@ gather_targets() {
         done
       fi
       [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
-    done <<< "$all_windows_raw"
+    done
     all_windows_raw="${_hout%$'\n'}"
 
     _hout=""
-    while IFS= read -r _hline; do
-      [ -n "$_hline" ] || continue
+    IFS=$'\n'; _hls=($all_panes_raw); unset IFS
+    for _hline in ${_hls[@]+"${_hls[@]}"}; do
       _hname="${_hline%%"$US"*}"
       _hkeep=1
       if [ "$_hname" != "$current_session" ]; then
@@ -4665,7 +4735,7 @@ gather_targets() {
         done
       fi
       [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
-    done <<< "$all_panes_raw"
+    done
     all_panes_raw="${_hout%$'\n'}"
     set +f
   fi
@@ -4891,8 +4961,14 @@ IMUX_SECTIONS
   # any cut line, with what is missing empty.  A pane id that is there and is
   # not %N is not a pane line at all.  Each window's ACTIVE pane lends
   # its id and title to the window row (active_pane).
-  declare -A panes_by_window=() active_pane=()
-  local sn _p3 _p4 _p5 _p6 _p7 _p8 _p9 _p10 _p11
+  #
+  # The id, the title and the options do NOT ride on in the lines this builds:
+  # measure_widths and the pane loop below read those lines with `read`, which
+  # takes a here-string a byte per read(2), and a title is the longest thing on
+  # a pane line.  Each line ends in its number instead, and pane_agent[number]
+  # holds the three (review R09).
+  declare -A panes_by_window=() active_pane=() pane_agent=()
+  local sn _p3 _p4 _p5 _p6 _p7 _p8 _p9 _p10 _p11 _pn=0
   _kept=""
   set -f
   IFS=$'\n'; _glines=($all_panes_raw); unset IFS
@@ -4919,9 +4995,11 @@ IMUX_SECTIONS
         *) continue ;;
       esac
     fi
-    local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8$US$_p9$US$_p10$US$_p11"
+    _pn=$(( _pn + 1 ))
+    local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8$US$_pn"
     _kept+="$key$US$rest"$'\n'
-    [ "$_p4" = 1 ] && active_pane["$key"]="$_p9$US$_p10$US$_p11"   # id, title, options
+    pane_agent[$_pn]="$_p9$US$_p10$US$_p11"   # id, title, options
+    [ "$_p4" = 1 ] && active_pane["$key"]="${pane_agent[$_pn]}"
     if [[ ${panes_by_window[$key]+x} ]]; then
       panes_by_window["$key"]+=$'\n'"$rest"
     else
@@ -4948,7 +5026,7 @@ IMUX_SECTIONS
   local sla sname swins sattach spath marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
-  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts
+  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts _wopt _pline
   local -a _hf=()
   local -A AMARKED=()   # the agents view: panes already marked (agent_mark_r)
 
@@ -5094,8 +5172,13 @@ IMUX_SECTIONS
         pane_count=$(( ${#pane_count} + 1 ))
         pi=0
 
-        while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2 ppane ptitle popts; do
+        while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2 _pline; do
           [ -n "$_wp2" ] || ppid=0   # cut short: never read its pid (see above)
+          # id US title US options, word-split as the window row splits them:
+          # ${x%%"$US"*} past the title is quadratic in the title's length
+          _hline="${pane_agent[${_pline:-0}]-}"
+          set -f; IFS="$US"; _hf=($_hline$US); unset IFS; set +f
+          ppane="${_hf[0]-}" ptitle="${_hf[1]-}" popts="${_hf[2]-}"
           pi=$((pi + 1))
           pglyph='├╴'
           [ "$pi" -eq "$pane_count" ] && pglyph='└╴'
@@ -6243,11 +6326,13 @@ popup_user_style() {
 # zeroes its attributes.  ("none" draws no frame and no title, so no border
 # style can show anything there.)
 danger_style() {
-  local base lines="${1:-}" tok ink=default
+  # `ulines`, not `lines`: shellcheck tracks a name across the whole file, and
+  # the arrays called `lines` further up made this string one a warning.
+  local base ulines="${1:-}" tok ink=default
   local -a toks=()
-  [ -n "$lines" ] || lines=$(popup_user_lines)
+  [ -n "$ulines" ] || ulines=$(popup_user_lines)
   base=$(popup_user_style)
-  if [ "$lines" = padded ]; then
+  if [ "$ulines" = padded ]; then
     IFS=', ' read -r -a toks <<< "$base"
     for tok in ${toks[@]+"${toks[@]}"}; do
       case "$tok" in bg=*) ink="${tok#bg=}" ;; esac
@@ -8453,16 +8538,51 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # A value's domain, by option name.  Empty always means "unset, use default".
   _check_value() { # $1 = name, $2 = value -> prints a complaint, or nothing
-    local n="$1" v="$2"
+    local n="$1" v="$2" _d
     [ -n "$v" ] || return 0
     case "$n" in
       show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw|session-rule|scope-highlight|autobuild)
         case "$v" in on|off) ;; *) printf "expected 'on' or 'off'" ;; esac ;;
       order)
         case "$v" in mru|index) ;; *) printf "expected 'mru' or 'index'" ;; esac ;;
+      # The agent options, in the terms the script replaces a bad value in
+      # (right after the get_opt calls): the default, which for agent-args is
+      # off and for agent-state on -- so a `yes` does the opposite of what it
+      # says for one of them.
+      agent-args)
+        case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays off" ;; esac ;;
+      agent-state)
+        case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays on" ;; esac ;;
+      show-title)
+        case "$v" in known|all|off) ;; *) printf "expected 'known', 'all' or 'off', so it stays known" ;; esac ;;
+      title-max)
+        # Decimal whatever the leading zeros, then clamped to 8..200.
+        case "$v" in
+          *[!0-9]*) printf 'expected a whole number from 8 to 200, so the default, 40, applies' ;;
+          *) _d="${v#"${v%%[!0]*}"}"; _d="${_d:-0}"
+             if [ "${#_d}" -gt 3 ] || [ "$_d" -gt 200 ]; then printf 'the most is 200, so 200 applies'
+             elif [ "$_d" -lt 8 ]; then printf 'the least is 8, so 8 applies'
+             fi ;;
+        esac ;;
+      agents)
+        # `off`, or names: a word with anything but letters, digits, '.', '_'
+        # and '-' is skipped (AGENT_KNOWN), and says nothing where it is.
+        local _w _skip=""
+        if [ "$v" != off ]; then
+          set -f
+          for _w in $v; do
+            case "$_w" in *[!A-Za-z0-9._-]*) _skip+="${_skip:+, }'$_w'" ;; esac
+          done
+          set +f
+          [ -z "$_skip" ] || printf 'skipped: %s (a name is letters, digits, dots, underscores and hyphens)' "$_skip"
+        fi ;;
       recent-limit|dirs-limit|scan-depth)
         case "$v" in ''|*[!0-9]*) printf 'expected a whole number' ;; esac
-        [ "$n" = scan-depth ] && case "$v" in ''|*[!0-9]*) ;; *) [ "$v" -gt 10 ] && printf 'deeper than 10 will not finish inside a popup' ;; esac ;;
+        # Decimal, whatever the leading zeros, as the script reads it; and the
+        # length first, as there: `[ -gt ]` on a 20-digit number is an error.
+        [ "$n" = scan-depth ] && case "$v" in ''|*[!0-9]*) ;; *)
+          _d="${v#"${v%%[!0]*}"}"; _d="${_d:-0}"
+          { [ "${#_d}" -gt 2 ] || [ "$_d" -gt 10 ]; } && printf 'deeper than 10 will not finish inside a popup' ;; esac ;;
       popup-width|popup-height)
         case "$v" in *%) case "${v%\%}" in ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
                      ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;

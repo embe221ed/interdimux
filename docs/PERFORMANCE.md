@@ -676,10 +676,70 @@ End to end, CPU time of `--list` (client tree) and the tmux server:
 
 (before → after; the tmux server figures have 10 ms tick granularity, means
 of 20-30 runs, and were measured with the 14-option set, before the trim to
-10.) The Rust path — every install that has cargo — pays a few ms, most of it
-tmux looking up options. The bash fallback pays ~0.5 ms a row for the agent
-column: most of it is bash's own function-call cost on this machine, and the
-rows that are not agents take the shortest path through it.
+10.) That table UNDERSTATES the cost — see the re-measurement below: it was
+taken on lists with no Claude records and few titles worth reading, and the
++1 ms on the Rust path was noise hiding ~6 ms.
+
+### Re-measured, and what was paid back (reviews R09, R15)
+
+Private tmux 3.7b servers of 30 and 100 panes, two kinds. *Plain*: idle
+shells, sleeps, an editor with a title. *Agent-heavy*: of every six panes one
+codex waiting on an approval (an 80-character title), one ssh with a prompt
+title, one publishing `@agent_state`, plus three Claude panes with live
+registry records and two stale records. CPU of the whole client tree
+(user+sys through `wait4`), median; in brackets the tmux server's own CPU per
+call (mean, 10 ms ticks). Interleaved runs — 40 per cell for Rust, 20 for
+bash — on a 4-core VM that other work was loading, so read ±10%:
+
+| `--list` | main | round2 (agent rows) | after R09/R15 |
+|---|---|---|---|
+| Rust, 30 plain | 40.8 [3.8] | 46.3 [6.5] | 46.8 [4.5] |
+| Rust, 30 agent-heavy | 38.4 [2.3] | 47.8 [6.0] | 46.8 [5.8] |
+| Rust, 100 plain | 52.8 [12.0] | 58.4 [16.8] | 60.2 [16.3] |
+| Rust, 100 agent-heavy | 54.5 [11.8] | 65.3 [17.0] | 63.2 [17.8] |
+| bash, 30 plain | 138 | 170 | 150 |
+| bash, 30 agent-heavy | 124 | 183 | 160 |
+| bash, 100 plain | 285 | 350 | 297 |
+| bash, 100 agent-heavy | 290 | 404 | 363 |
+
+Output is byte-identical between round2 and now on all four servers, in both
+renderers. Where the Rust path's ~6-9 ms goes (`EPOCHREALTIME` stamps, 30
+agent-heavy panes, minimum of 40): parsing the agent layer ~2 ms; reading the
+rules file and building the option format 0.4 ms; the Claude registry ~0.35
+ms a record; the tmux server formatting titles and option slots (1-2 ms at 30
+panes, ~5 ms at 100); and the binary's own rule matching, under 1 ms.
+
+Paid back:
+
+* **Callbacks no longer parse the agent layer** (R15). bash parses a script as
+  it runs it, and the ~850 lines sat above every dispatcher, so each callback
+  fzf runs while you type or move paid ~2-3 ms for code only the lists, the
+  dashboard and --doctor use. They now sit below those callbacks
+  (tests/test_render_cost.sh checks it with bash's own trace). CPU per call,
+  median of 40, round2 → now (main):
+  `--footer-for` 24.4 → 21.2 ms (21.9), `--preview` 35.6 → 32.5 (32.3),
+  `--describe-create` 27.0 → 24.8 (28.3), `--session-name-for` 33.5 → 30.7
+  (29.1), `--scope-prompt` 23.5 → 18.6 (19.3).
+* **The Claude registry** reads a record with two fewer regexes (bash compiles
+  one on every `[[ =~ ]]`, ~30 µs each here) and drops a stale one after the
+  pid, before the rest: 5 records 2.6 → 1.7 ms.
+* **The bash renderer's read loops** (R09). `read` takes a here-string a byte
+  per read(2), and every pane line carried its title and option values through
+  measure_widths and the pane loop: ~2 system calls per title character per
+  list (strace: 400-character titles on 30 panes cost 23,403 more read calls
+  than 10-character ones; now 3). The fields are split in memory instead, and
+  the title and options wait in a side table; measure_widths alone went from
+  ~32 to ~7 ms at 100 panes.
+* **Rows the agent layer cannot change** skip it: cmd_field returns the plain
+  command for a row with no option published, no registry record, not an
+  agent and no title a rule reads, in a few tests instead of agent_state_r
+  (~40-80 µs a row here).
+
+Left as it is, on purpose: `--list` still parses the agent layer (it draws
+with it; splitting off the bash renderer's half would need a second `--list`
+dispatch, for ~1.3 ms), the server-side option formatting (the decision
+above), and an agent row's own ~1 ms on the bash renderer — cleaning its
+title and matching its rules is what the row is for.
 
 **A title is input from anywhere** (review R01, R13). The program in the pane
 sets it — over ssh, from a container, from `cat` of a file — and tmux keeps an

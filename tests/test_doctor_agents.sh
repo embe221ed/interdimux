@@ -189,6 +189,7 @@ chmod 000 "$HOME/.config/interdimux/titles"
 ag
 has "an unreadable rules file is a warning" "$out" "  ⚠ your title rules at ~/.config/interdimux/titles cannot be read — only the built-in ones apply"
 chmod 644 "$HOME/.config/interdimux/titles"
+# shellcheck disable=SC2088  # a literal ~ is the point: tmux does not expand it
 setopt title-rules '~/nowhere/titles'
 ag
 has "@interdimux-title-rules naming no file is a warning" "$out" "  ⚠ @interdimux-title-rules names ~/nowhere/titles, which does not exist — only the built-in rules apply"
@@ -226,7 +227,7 @@ rm -rf "$HOME/.config"
 # --- Claude Code -------------------------------------------------------------------
 mkdir -p "$HOME/.claude"
 ag
-has "~/.claude with no sessions dir: a note, not a warning" "$out" "      Claude Code: no session registry at ~/.claude/sessions — an older Claude writes none, and its rows then show no state"
+has "no sessions dir under ~/.claude: a note, not a warning" "$out" "      Claude Code: no session registry at ~/.claude/sessions — an older Claude writes none, and its rows then show no state"
 has "auto on a TERM auto has no channel for: Claude sends nothing" "$out" "  ⚠ Claude sends no notifications here at all"
 has "...saying why" "$out" "      preferredNotifChannel is not set (auto), and auto has no channel for the panes' TERM, tmux-256color"
 has "...and the bell is the fix" "$out" "      to have it ring the bell, which tmux flags: \"preferredNotifChannel\": \"terminal_bell\" in ~/.claude/settings.json"

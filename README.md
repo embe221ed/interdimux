@@ -636,7 +636,10 @@ only because of it), whether fzf accepts your `$FZF_DEFAULT_OPTS` — one flag i
 does not know stops every picker, while its layout flags are harmless, because
 the pickers reset them — and which of the two dashboards your client is tall
 enough for. Plus every `@interdimux-*` option you have set, with its value
-checked.
+checked: a value the plugin cannot use is replaced, not fatal, and the report
+names what it uses instead (`@interdimux-agent-state 'yes'` stays on,
+`@interdimux-title-max '500'` is 200, a word of `@interdimux-agents` that is
+not a name is skipped).
 
 That last part is the one worth running. tmux user options are free-form, so a
 mistyped name is not an error to tmux — the setting simply never applies, with
@@ -813,7 +816,7 @@ set -g @interdimux-startup-command 'nvim .'
 # that adds something, as prefix+w does) or 'off'  (default: known)
 set -g @interdimux-show-title 'known'
 
-# Longest description shown, in characters (default: 40)
+# Longest description shown, in characters: 8 to 200 (default: 40)
 set -g @interdimux-title-max '40'
 
 # A state word on agent rows, from Claude's registry, plugin options and
