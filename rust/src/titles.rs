@@ -69,23 +69,42 @@ pub fn parse(text: &str) -> Vec<Rule> {
 
 /// Match `t` against the pieces, each star taking as much as it can while the
 /// rest still matches.  Returns the captures.
+///
+/// In linear time: the pattern is literals L0 * L1 * ... * Ln, anchored at
+/// both ends, so L0 is a prefix and Ln a suffix, and the first star is longest
+/// when L1 sits as far right as the pieces after it allow.  Placing the middle
+/// pieces from the right, each at its LAST occurrence that ends before the
+/// piece after it (and starts after L0), gives every piece its rightmost
+/// possible place at once, and the captures are the gaps: what POSIX's
+/// leftmost-longest rule gives bash's ERE, and what a search trying every end
+/// of every star, longest first, finds.  That search was the old code (kept in
+/// the tests, which compare the two), and it backtracked: a title of 1,600
+/// `a:` under the default `*:*:* - "*"*` remote-shell rule took 12 s to fail
+/// (review R01).
 fn capture(parts: &[String], t: &str) -> Option<Vec<String>> {
-    let first = &parts[0];
-    let rest = t.strip_prefix(first.as_str())?;
-    if parts.len() == 1 {
-        return if rest.is_empty() { Some(vec![]) } else { None };
+    let n = parts.len();
+    let first = parts[0].as_str();
+    if n == 1 {
+        return (t == first).then(Vec::new);
     }
-    // candidate ends for this star, longest first, on char boundaries
-    let mut ends: Vec<usize> = rest.char_indices().map(|(i, _)| i).collect();
-    ends.push(rest.len());
-    for &e in ends.iter().rev() {
-        if let Some(mut more) = capture(&parts[1..], &rest[e..]) {
-            let mut caps = vec![rest[..e].to_string()];
-            caps.append(&mut more);
-            return Some(caps);
-        }
+    let last = parts[n - 1].as_str();
+    if !t.starts_with(first) || !t.ends_with(last) || first.len() + last.len() > t.len() {
+        return None;
     }
-    None
+    let lo = first.len();
+    // where each piece starts; all on char boundaries (a match of a str is)
+    let mut at = vec![0; n];
+    at[n - 1] = t.len() - last.len();
+    for j in (1..n - 1).rev() {
+        at[j] = lo + t[lo..at[j + 1]].rfind(parts[j].as_str())?;
+    }
+    let mut caps = Vec::with_capacity(n - 1);
+    let mut from = lo;
+    for j in 1..n {
+        caps.push(t[from..at[j]].to_string());
+        from = at[j] + parts[j].len();
+    }
+    Some(caps)
 }
 
 fn is_spinner(c: char) -> bool {
@@ -254,6 +273,102 @@ mod tests {
         assert_eq!(caps("a\\b(*)", "a\\b(x)"), Some(vec!["x".into()]));
         assert_eq!(caps("a\\b", "ab"), None);
         assert_eq!(caps("^.$|?+{}[]", "^.$|?+{}[]"), Some(vec![]));
+    }
+
+    /// The matcher this replaced: every end of every star, longest first.
+    /// Exponential on a title that almost matches, and the definition the
+    /// linear one has to agree with.
+    fn capture_backtrack(parts: &[String], t: &str) -> Option<Vec<String>> {
+        let rest = t.strip_prefix(parts[0].as_str())?;
+        if parts.len() == 1 {
+            return if rest.is_empty() { Some(vec![]) } else { None };
+        }
+        let mut ends: Vec<usize> = rest.char_indices().map(|(i, _)| i).collect();
+        ends.push(rest.len());
+        for &e in ends.iter().rev() {
+            if let Some(mut more) = capture_backtrack(&parts[1..], &rest[e..]) {
+                let mut caps = vec![rest[..e].to_string()];
+                caps.append(&mut more);
+                return Some(caps);
+            }
+        }
+        None
+    }
+
+    /// xorshift64*: the same cases on every run, no dependency
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn text(&mut self, alphabet: &[&str], max: usize) -> String {
+            let n = self.below(max + 1);
+            (0..n).map(|_| alphabet[self.below(alphabet.len())]).collect()
+        }
+    }
+
+    #[test]
+    fn the_linear_matcher_captures_exactly_what_the_backtracking_one_did() {
+        // A small alphabet, so that pieces recur and overlap in the titles:
+        // that is where a placement can go wrong.  Multibyte on purpose.
+        let alphabet = ["a", "b", ":", " ", "é", "中"];
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let (mut cases, mut hits) = (0, 0);
+        for _ in 0..200_000 {
+            let stars = rng.below(5);
+            let parts: Vec<String> = (0..=stars).map(|_| rng.text(&alphabet, 2)).collect();
+            // half the titles are built from the pattern, so that many match
+            let t = if rng.below(2) == 0 {
+                rng.text(&alphabet, 12)
+            } else {
+                let mut t = String::new();
+                for (i, p) in parts.iter().enumerate() {
+                    if i > 0 {
+                        t.push_str(&rng.text(&alphabet, 4));
+                    }
+                    t.push_str(p);
+                }
+                t
+            };
+            let want = capture_backtrack(&parts, &t);
+            assert_eq!(capture(&parts, &t), want, "pattern {:?} title {:?}", parts.join("*"), t);
+            cases += 1;
+            hits += want.is_some() as usize;
+        }
+        // the comparison is only as good as its matches
+        assert!(hits > cases / 5, "{} matches in {} cases", hits, cases);
+    }
+
+    #[test]
+    fn pieces_at_both_ends_are_anchored_and_never_overlap() {
+        assert_eq!(caps("a*a", "a"), None);
+        assert_eq!(caps("a*a", "aa"), Some(vec!["".into()]));
+        assert_eq!(caps("ab*ba", "aba"), None);
+        assert_eq!(caps("*:*", ":"), Some(vec!["".into(), "".into()]));
+        // two stars in a row: the first takes it all
+        assert_eq!(caps("x**y", "xaby"), Some(vec!["ab".into(), "".into()]));
+        assert_eq!(caps("*a*a*", "aaaa"), Some(vec!["aa".into(), "".into(), "".into()]));
+        assert_eq!(caps("é*中", "é中中"), Some(vec!["中".into()]));
+    }
+
+    #[test]
+    fn a_title_that_almost_matches_costs_linear_time() {
+        // The default remote-shell rule against 1,600 `a:` and no ` - "`: the
+        // backtracking matcher took 12 s on this (release build).
+        let parts: Vec<String> = "*:*:* - \"*\"*".split('*').map(str::to_string).collect();
+        let t = "a:".repeat(1600);
+        let t0 = std::time::Instant::now();
+        assert_eq!(capture(&parts, &t), None);
+        let long = format!("{} - \"{}\"x", "a:".repeat(20_000), "b".repeat(20_000));
+        assert!(capture(&parts, &long).is_some());
+        let spent = t0.elapsed();
+        assert!(spent < std::time::Duration::from_millis(500), "{:?}", spent);
     }
 
     #[test]
