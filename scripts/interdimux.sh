@@ -3053,18 +3053,31 @@ DEFAULT_STATE_OPTS=' agent_state agent_desc pane_status pane_wait_reason claude_
 # STATE_OPTS: the option names the option rules read -- the defaults', and any
 # the user's file adds (valid tmux option names only: they are spliced into
 # the list-panes format).
+#
+# A line of the file that is not valid UTF-8 (is_utf8) is dropped here, and
+# only that line: a Latin-1 comment in an otherwise good file is common, and
+# the Rust core cannot hold such a byte at all -- handed the whole text, it
+# read an EMPTY rule set, every built-in rule gone with it, while bash went on
+# (review R02).  rust/src/agent.rs drops the same lines, should one ever reach
+# it some other way; --doctor names them.  A NUL (a UTF-16 file) ends the
+# text: bash cannot hold one, so what follows it is never read.
 TITLE_RULESET="" STATE_OPTS="" CUR_HOST="" CUR_HOST_SHORT=""
 title_ruleset() {
-  local f="${TITLE_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/titles}" txt="" l o
+  local f="${TITLE_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/titles}" txt="" l o kept=""
   local -a lines=()
   STATE_OPTS="$DEFAULT_STATE_OPTS"
   if [ -f "$f" ] && [ -r "$f" ]; then
     { IFS= read -r -d '' txt < "$f"; } 2>/dev/null || :
   fi
+  if ! is_utf8 "$txt"; then
+    set -f; IFS=$'\n'; lines=($txt); unset IFS; set +f
+    for l in ${lines[@]+"${lines[@]}"}; do is_utf8 "$l" && kept+="$l"$'\n'; done
+    txt="$kept"
+  fi
   TITLE_RULESET="$txt"$'\n'"$DEFAULT_TITLE_RULES"
   [[ "$txt" == *@* ]] || return 0
   set -f; IFS=$'\n'; lines=($txt); unset IFS; set +f
-  for l in "${lines[@]}"; do
+  for l in ${lines[@]+"${lines[@]}"}; do
     [[ "$l" == *@* ]] || continue
     rule_fields "$l" || continue
     [[ "$RULE_A" == @* ]] || continue
@@ -8338,15 +8351,23 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # Your title rules, read before the built-in ones.  A line that is not a rule
   # is skipped by both renderers without a word, so say which: rule_fields is
-  # their own split.
+  # their own split.  The text is what title_ruleset reads -- up to a NUL, if
+  # the file holds one (UTF-16) -- and a line that is not UTF-8 is one it
+  # drops (review R02).
   _trf="${TITLE_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/titles}"
   _tl "$_trf"; _trf_d="$REPLY"
   if [ -f "$_trf" ] && [ -r "$_trf" ]; then
-    _nr=0 _ln=0 _trn=() _re_skip='^ *(#|$)'
+    _nr=0 _ln=0 _trn=() _re_skip='^ *(#|$)' _trt="" _trnul=0
+    { IFS= read -r -d '' _trt < "$_trf"; } 2>/dev/null && _trnul=1
+    [ "$_trnul" = 1 ] && _trn+=("it holds a NUL byte (is it UTF-16?): nothing after the first one is read")
     while IFS= read -r _l || [ -n "$_l" ]; do
       _ln=$((_ln + 1))
       _l="${_l//[$'\t\r']/ }"
       [[ "$_l" =~ $_re_skip ]] && continue
+      if ! is_utf8 "$_l"; then
+        _trn+=("line $_ln is not UTF-8, so it is skipped: save the file as UTF-8")
+        continue
+      fi
       if ! rule_fields "$_l"; then
         _trn+=("line $_ln is not a rule (APPS STATE DESC PATTERN), so it is skipped")
         continue
@@ -8367,7 +8388,7 @@ if [ "${1:-}" = "--doctor" ]; then
           *[!A-Za-z0-9_-]*) _trn+=("line $_ln: @$_o is not an option name tmux can be asked for, so it is never read"); break ;;
         esac
       done
-    done 2>/dev/null < "$_trf"
+    done 2>/dev/null <<< "$_trt"
     _nof "$_nr" rule
     _ok "your title rules: $_trf_d holds $REPLY, read before the built-in ones"
     for (( _i = 0; _i < ${#_trn[@]} && _i < 5; _i++ )); do _note "${_trn[_i]}"; done

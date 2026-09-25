@@ -3,8 +3,6 @@
 //! A configured value is a hex `#rrggbb`, a 256-colour index, or `-1`/`default`
 //! (inherit the terminal, rendered as no escape at all).
 
-use std::env;
-
 pub const RST: &str = "\x1b[0m";
 pub const DIM: &str = "\x1b[2m";
 pub const BOLD: &str = "\x1b[1m";
@@ -37,8 +35,8 @@ fn escb(v: &str) -> String {
 }
 
 fn opt(name: &str, default: &str) -> String {
-    match env::var(name) {
-        Ok(v) if !v.is_empty() => v,
+    match crate::env_text(name) {
+        v if !v.is_empty() => v,
         _ => default.to_string(),
     }
 }

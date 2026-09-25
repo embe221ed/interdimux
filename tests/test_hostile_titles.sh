@@ -19,6 +19,10 @@
 #     control-character loop and blank trims were quadratic: minutes)
 #   * prefix+g's count, which always runs in bash, with a codex pane whose
 #     title is 5,000 é and a U+0085: it took 4.3 s, live
+#   * a rules file with a line that is not UTF-8 (review R02): only that line
+#     is dropped, in both renderers -- the Rust core used to get an EMPTY rule
+#     set, every built-in rule gone -- and the core drops such a line itself
+#     if one reaches it; --doctor names the line, and a NUL (UTF-16)
 #
 # Expected rows are written out, not computed by either renderer; where the
 # case is random the two renderers are each other's oracle -- bash matches with
@@ -292,6 +296,71 @@ EOF_FZF
 else
   echo "  (skipped the live count: no /proc)"
 fi
+
+# --- 7. a rules file that is not all UTF-8 -------------------------------------
+# A Latin-1 comment, a good rule of the user's, and a Latin-1 rule.  The
+# built-in rules stay (codex's approval, ssh's prompt), the good line stays,
+# and the Latin-1 rule alone is gone: bar's title is then no rule's, so hidden.
+printf '# caf\xe9 rules\nfoo  -  =  *\nbar  -  caf\xe9:$1  x*\n' > "$TMPD/home/titles"
+mkdump "$TMPD/latin1.dump" "codex|[ ! ] Action Required | Add tests | app" \
+  "ssh web1|deploy@web1: ~/app" "foo|hello" "bar|xyz"
+L1_EXPECT=('codex approve Add tests' 'ssh web1 deploy@web1: ~/app' 'foo hello' 'bar')
+for r in $RENDERERS; do
+  render "$r" "$TMPD/latin1.dump" 20
+  if [ "${GOT[*]-}" = "${L1_EXPECT[*]}" ]; then
+    report "$(label "$r"): a Latin-1 line in the rules file drops that line, and only it" pass
+  else
+    report "$(label "$r"): a Latin-1 line in the rules file drops that line, and only it" fail
+    ERRORS+="     got:  $(printf '[%s] ' "${GOT[@]}")"$'\n'"     want: $(printf '[%s] ' "${L1_EXPECT[@]}")"$'\n'
+  fi
+done
+# In a C locale too, where bash's own regexes would take the Latin-1 rule
+# whole (in UTF-8 they happen to fail on the byte): the row is the Rust
+# core's in every locale.
+render off "$TMPD/latin1.dump" 20 LANG=C LC_ALL=C
+[ "${GOT[3]-}" = "bar" ] \
+  && report "bash: ...in a C locale too" pass \
+  || report "bash: ...in a C locale too (got: '${GOT[3]-}')" fail
+# The core's own guard: the rule text handed to it directly, a Latin-1 line in
+# front of the built-in rules, as nothing in bash would pass it any more.
+if [ -x "$BIN" ]; then
+  defaults=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; next } on && /^'\$/ { exit } on" "$SCRIPT")
+  proto=$(sed -n 's/^IMUX_PROTO=//p' "$SCRIPT")
+  got=$(env -i INTERDIMUX_TITLE_RULESET="$(printf 'bar  -  caf\xe9:$1  x*')"$'\n'"$defaults" \
+          INTERDIMUX_STATE_OPTS="$(printf '%s ' "${OPT_NAMES[@]}")" INTERDIMUX_COLS=200 \
+          "$BIN" "$proto" < "$TMPD/latin1.dump" 2>/dev/null \
+        | awk -F'\t' '$4 ~ /^W:/ { print $3 }' | sed 's/\x1b\[[0-9;]*m//g' | head -2 | tr '\n' '|')
+  [ "$got" = "codex approve Add tests|ssh web1 deploy@web1: ~/app|" ] \
+    && report "rust: the core itself drops a rule line that is not UTF-8, and keeps the rest" pass \
+    || report "rust: the core itself drops a rule line that is not UTF-8, and keeps the rest (got: '$got')" fail
+fi
+# --doctor, on a private server: the Latin-1 rule is named by its line, the
+# comment is not (dropping it changes nothing), and one rule is counted.
+unset TMUX TMUX_PANE
+tmux -f /dev/null -L "$SOCK" new-session -d -s doc -x 120 -y 30 -c "$TMPD" 'exec sleep 990'
+doctor_agents() {
+  env TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0" \
+    TMUX_PANE="$(tmux -L "$SOCK" display-message -p -t '=doc:' '#{pane_id}')" \
+    HOME="$TMPD/home" XDG_CONFIG_HOME="$TMPD/xdg" XDG_STATE_HOME="$TMPD/state" XDG_DATA_HOME="$TMPD/data" \
+    INTERDIMUX_CLAUDE_DIR="$TMPD/noclaude" INTERDIMUX_TITLE_RULES="$1" INTERDIMUX_AT_DAEMON=up \
+    timeout 60 bash "$SCRIPT" --doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
+    | awk '/^agents / { f = 1; next } /^[^ ]/ { f = 0 } f'
+}
+out=$(doctor_agents "$TMPD/home/titles") || :   # --doctor exits 1 on any ✗ elsewhere
+case "$out" in *"line 3 is not UTF-8"*) report "--doctor names the rule line that is not UTF-8" pass ;;
+  *) report "--doctor names the rule line that is not UTF-8" fail; ERRORS+="$(printf '%s\n' "$out" | grep -i -A3 'title rules' | head -6)"$'\n' ;; esac
+case "$out" in *"line 1 is not"*) report "...and not the comment (dropping it changes nothing)" fail ;;
+  *) report "...and not the comment (dropping it changes nothing)" pass ;; esac
+case "$out" in *"holds 1 rule,"*) report "...and counts the one rule that is read" pass ;;
+  *) report "...and counts the one rule that is read" fail ;; esac
+# UTF-16 (little-endian, with its BOM): bash reads up to the first NUL.
+printf '\xff\xfef\0o\0o\0 \0-\0 \0=\0 \0*\0\n\0' > "$TMPD/utf16"
+out=$(doctor_agents "$TMPD/utf16") || :
+case "$out" in *"holds a NUL byte"*"line 1 is not UTF-8"*|*"line 1 is not UTF-8"*"holds a NUL byte"*)
+    report "--doctor says a UTF-16 file holds a NUL, and that what is read of it is not UTF-8" pass ;;
+  *) report "--doctor says a UTF-16 file holds a NUL, and that what is read of it is not UTF-8" fail
+     ERRORS+="$(printf '%s\n' "$out" | grep -i -A3 'title rules' | head -6)"$'\n' ;; esac
+tmux -L "$SOCK" kill-server 2>/dev/null || true
 
 echo
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"

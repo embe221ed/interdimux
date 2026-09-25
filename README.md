@@ -510,6 +510,8 @@ myagent   working  $1   %spin *
 - `PATTERN` is literal text matched against the whole title; each `*`
   captures, greedily from the left. A leading `%spin` matches one braille
   spinner character.
+- The file is UTF-8. A line that is not (a Latin-1 `é`, say) is skipped, and
+  only that line; `--doctor` names it.
 - A rule sees a title's first 256 characters. The program in a pane chooses
   its title (tmux keeps one of up to a megabyte), and a row shows at most 200
   characters of it, so a longer one is cut there before anything reads it.
@@ -632,7 +634,8 @@ settings; Claude Code's session registry (how many records parse, and which are
 live sessions in a pane here); `preferredNotifChannel` and `hooks` in
 `~/.claude/settings.json`; the `[tui]` notification keys in
 `~/.codex/config.toml`; which agent plugins publish state, on how many panes;
-and your title rules file, naming any line that is not a rule. An agent that is
+and your title rules file, naming any line that is not a rule or not UTF-8
+(and a NUL, which ends what is read of a UTF-16 file). An agent that is
 not installed is one dim line. It only reads: no agent is started, no option
 value is shown, and no credential file (`~/.codex/auth.json`,
 `~/.claude/.credentials*`, the registry's `.key` files) is opened. A config it
