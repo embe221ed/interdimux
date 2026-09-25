@@ -12,6 +12,8 @@
   [38;5;240m  ├╴[0m [2mnpx 0.[0m1      	[38;5;245m│[0m [38;5;180m~/proj[0m                         	[38;5;173mcodex[0m [1;38;5;167mapprove[0m [38;5;150mAdd tests[0m	P:npx:0:1
   [38;5;240m  ├╴[0m [2mnpx 0.[0m2      	[38;5;245m│[0m [38;5;180m~/proj[0m                         	[38;5;173mgemini[0m [38;5;240mworking[0m	P:npx:0:2
   [38;5;240m  └╴[0m [2mnpx 0.[0m3      	[38;5;245m│[0m [38;5;180m~/proj[0m                         	[38;5;173mgemini[0m [38;5;240mworking[0m [38;5;150mReading the parser[0m	P:npx:0:3
+  [38;5;240m▸[0m [1mnative[0m [38;5;240m─────────────────────────────────────────[0m  	[2m1 win[0m [2m10h[0m		S:native
+  [38;5;240m└─[0m [2mnative[0m 0:cl    	[38;5;245m│[0m [38;5;180m~[0m                              	[38;5;173mclaude[0m [38;5;150mTidy the parser[0m	W:native:0
 [1;38;5;173m*[0m [38;5;240m▸[0m [1mwork[0m [38;5;240m───────────────────────────────────────────[0m  	[2m3 win[0m [38;5;150m●[0m [2m1h[0m		S:work
 [1;38;5;173m*[0m [38;5;240m├─[0m [2mwork[0m 0:claude  	[38;5;245m│[0m [38;5;180m~/code/app[0m                     	[38;5;173mclaude[0m [38;5;240mworking[0m [38;5;240m6m[0m [38;5;150mProject review and suggestions[0m	W:work:0
   [38;5;240m├─[0m [2mwork[0m 1:codex   	[38;5;245m│[0m [38;5;180m~/code/app/src[0m                 	[38;5;173mcodex[0m [38;5;240mworking[0m [38;5;150mFix login timeout[0m	W:work:1

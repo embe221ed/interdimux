@@ -1,6 +1,7 @@
 work17000800003attached/home/u/code/app
 misc17000700003/home/u
 npx17000600001/home/u/proj
+native17000500001/home/u
 
 work0claude1claude/home/u/code/app11001000
 work1codex0codex/home/u/code/app/src31002000
@@ -9,6 +10,7 @@ misc0edit1nvim/home/u/x11004000
 misc1other0claude/home/u21005000
 misc2hooks0opencode/home/u21006000
 npx0agents1node /home/u/.nvm/versions/node/v22/bin/npx @google/gemini-cli --yolo/home/u/proj41101000
+native0cl1/home/u/.local/share/claude/versions/2.0.1 --resume/home/u11201000
 
 work001claude/home/u/code/app10011%1✳ Project review and suggestions
 work101codex/home/u/code/app/src10023%2⠋ Fix login timeout | app
@@ -24,6 +26,7 @@ npx001node /home/u/.nvm/versions/node/v22/bin/npx @google/gemini-cli --yolo
 npx010node /home/u/.local/share/pnpm/global/5/node_modules/@openai/codex/bin/codex.js/home/u/proj11024%22[ ! ] Action Required | Add tests | proj
 npx020gemini/home/u/proj11034%23✦  Working… (proj)                                                              
 npx030gemini/home/u/proj11044%24✦  Reading the parser (proj)                                                    
+native001/home/u/.local/share/claude/versions/2.0.1 --resume/home/u12011%31✳ Tidy the parser
 
 work00host.example.comhost
 

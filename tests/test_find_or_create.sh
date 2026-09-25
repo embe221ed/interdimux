@@ -269,6 +269,10 @@ agents_names_nothing "with a trailing space"      '^! | ^? '
 agents_names_nothing "with a word typed after it" '^! | ^? qqq'
 agents_names_nothing "with the OR taken out"      '^! qqq'
 agents_names_nothing "with one mark left"         '^?'
+# one fzf term that still matches the marks: the blanks around the OR deleted,
+# a word typed straight after a mark (they named `|^?` and `?qqq`)
+agents_names_nothing "with the blanks around the OR deleted" '^!|^?'
+agents_names_nothing "with a word glued to a mark"          '^?qqq'
 # ...and once the marks are gone it is an ordinary query again.
 if [ "$(INTERDIMUX_VIEW=agents announced_name 'agq')" = agq ]; then
   report "agents view: a query without its marks names a session as usual" pass

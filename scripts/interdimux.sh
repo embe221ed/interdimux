@@ -4824,7 +4824,10 @@ resolve_create_target() {
   # every caller, the bar's create-key entry and alt-enter too, not only Enter.
   # (Its `|` alone covers most edits; this covers the rest.)
   if [ -n "$VIEW" ]; then
-    case " $1 " in *' ^! '*|*' ^? '*) QW_WHY=mark; return 1 ;; esac
+    # Anywhere, not only as a term of its own: with both blanks around the
+    # `|` deleted, `^!|^?` is ONE fzf term that still matches the marks, and
+    # it named a session `|^?` (the G2 checker).
+    case "$1" in *'^!'*|*'^?'*) QW_WHY=mark; return 1 ;; esac
   fi
   query_words_r "$1"; query="$REPLY"
   [ "$QW_OR" = 1 ] && QW_WHY=or
@@ -6255,8 +6258,14 @@ tmux  -  $1  * - "*"*
 # the dashboard's count clean and match it.  256 because a row shows at most
 # 200 characters of a description (@interdimux-title-max), and every built-in
 # rule shows the title from its start (=) or its first capture ($1, after a
-# prefix of at most 26 characters): the 200 that can show, and the separator
-# after them, are in the first 256.  tmux's own #{=256:pane_title} was not the
+# prefix of at most 26 characters).  The cut is not free: a rule with literal
+# text AFTER its capture (codex's ` | <project>`, amp's ` - amp - <cwd>`) no
+# longer matches a title whose capture runs past ~230 characters, so such a
+# row loses its state and description -- in both renderers alike, and agents'
+# titles are far shorter.  And under an explicit LC_ALL=C or LC_CTYPE=C bash
+# counts the 256 in BYTES (utf8_ctype_r respects a locale the user chose), so
+# there a long multibyte title is cut sooner than Rust cuts it.  tmux's own
+# #{=256:pane_title} was not the
 # cut: it counts cells, so a title of zero-width characters (combining marks,
 # U+200B, U+0085) passes it whole, and it rewrites what it keeps -- `###`
 # comes back as `####`, and an unclosed `#[` drops the rest (tmux 3.7b,
