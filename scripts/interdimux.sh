@@ -2801,8 +2801,13 @@ format_command() {
 
 # Recognised by argv0's basename.  AGENT_SCRIPTS are the ones npm or pip
 # install as a script an interpreter runs, recognised by the script's basename.
-# @interdimux-agents adds names to both lists; `off` empties them, and with
-# them every agent rule (the title shows only on agent rows by default).
+# @interdimux-agents adds names to both lists; `off` empties them.  That stops
+# only the NAMING (`codex` for `node .../codex`, the arguments dropped): title
+# rules are picked by the command's name, Claude's registry by pane, and
+# whether a state shows is @interdimux-agent-state's.  So under `off` a native
+# `codex` still gets its state from its title, after its whole command line
+# (the layout of any row that is not an agent's), while `node .../codex` is
+# node to the rules and gets none.  The rows of old need all three off.
 AGENT_KNOWN=' claude codex gemini qwen opencode amp goose crush kiro-cli kiro-cli-chat aider copilot cursor-agent '
 AGENT_SCRIPTS=' codex gemini qwen copilot crush aider '
 if [ "$AGENT_NAMES" = off ]; then
@@ -2886,7 +2891,7 @@ agent_of() {
 #          @claude_state, ...), and so can your own hooks: `tmux set -p -t
 #          "$TMUX_PANE" @agent_state approve` needs no rule at all.
 # STATE    the state word it asserts (approve input working idle done error),
-#          or - for none.
+#          or - for none.  Any other word is taken for - (tr_parse).
 # DESC     - for none, = for the whole title (or value), anything else a
 #          template in which $1..$9 are PATTERN's captures.
 # PATTERN  the rest of the line: literal text, anchored at both ends, in which
@@ -2901,9 +2906,12 @@ agent_of() {
 #
 # Lines of @interdimux-title-rules (a file, default
 # ~/.config/interdimux/titles) come before these, so they override them.  A
-# row that no title rule knows shows its title only under
-# @interdimux-show-title all, or when it is an agent's.  rust/src/titles.rs
-# applies the same text: bash hands it over whole.
+# title no rule knows shows only under @interdimux-show-title all -- on an
+# agent's row too: a shell that sets no title leaves the last program's title
+# in the pane, and an agent that sets none (aider) would show that as its
+# task.  So every agent whose own title should show has a rule here that
+# matches it, even a bare `=  *`.  rust/src/titles.rs applies the same text:
+# bash hands it over whole.
 DEFAULT_TITLE_RULES='
 # --- agents: titles ------------------------------------------------------
 # Claude Code: `✳ <title>`; ◐/◑ or a spinner while busy outside a multiplexer
@@ -2912,6 +2920,7 @@ claude          -        -   Claude Code
 claude          working  $1  ◐ *
 claude          working  $1  ◑ *
 claude          working  $1  %spin *
+claude          -        $1  ✳ *
 # Codex: `<spinner> <thread> | <project>`; `[ ! ] Action Required | ...`
 # blinking to `[ . ]` while an approval waits.  No spinner is not idle: the
 # activity item can be switched off.
@@ -2945,7 +2954,9 @@ amp             idle     $1  * - amp - *
 # opencode, Cursor, goose, crush, GitHub Copilot
 opencode        -        $1  OC | *
 opencode        -        -   OpenCode
+# Cursor: its chat name, which has no mark of its own
 cursor-agent    -        -   Cursor Agent
+cursor-agent    -        =   *
 goose           -        -   🪿*
 crush           -        -   crush *
 copilot         -        $1  * - GitHub Copilot
@@ -3174,8 +3185,8 @@ state_optfmt_r() {
 # TR_OPT_BY for the option rules, by option), so a row visits only its own
 # app's rules, and only the rules of the options its pane has set --
 # scanning all of them cost ~0.7 ms a row.  A rule is PARSED (tr_parse) only
-# when a row first reaches it: splitting and compiling all ~75 defaults cost
-# ~18 ms, and a list of shells and editors needs none of them.
+# when a row first reaches it: splitting and compiling all the defaults (some
+# 70) cost ~18 ms, and a list of shells and editors needs none of them.
 #
 # Parsing turns PATTERN into an anchored ERE: literals escaped, * -> (.*).
 # POSIX takes the leftmost subexpression longest first, which is the greedy
@@ -3215,10 +3226,13 @@ load_title_rules() {
 }
 
 # Parse rule $1 (once): its fields and its ERE.  TR_OK[$1]=0 for a line that is
-# not a rule after all (no pattern), which every lookup then skips.
+# not a rule after all (no pattern), which every lookup then skips.  A STATE
+# that is not one of the words is `-`: the rule still matches, and still
+# gives its DESC, but no state (--doctor names such a line).
 tr_parse() {
   local re c
   if ! rule_fields "${TR_LINE[$1]}"; then TR_OK[$1]=0; return 0; fi
+  case "$RULE_S" in approve|input|working|idle|done|error) ;; *) RULE_S=- ;; esac
   TR_STATE[$1]="$RULE_S" TR_DESC[$1]="$RULE_D" re="$RULE_P" c=0
   if [[ "$re" == %spin* ]]; then c=1; re="${re#%spin}"; fi
   TR_SPIN[$1]="$c"
@@ -3311,8 +3325,9 @@ option_rule_r() {
   set +f
   # Only the rules that name an option this pane has set, still in rule order
   # (an indexed array's keys come back ascending).  A pane sets one or two of
-  # them: walking all ~45 option rules, parsing each, cost every process that
-  # draws such a row -- or counts it, for prefix+g -- ~3 ms a pane.
+  # them: walking all the option rules (some 30 by default), parsing each,
+  # cost every process that draws such a row -- or counts it, for prefix+g --
+  # ~3 ms a pane.
   local -a sel=()
   for (( i = 0; i < ${#ons[@]} && i < ${#vals[@]}; i++ )); do
     if [ -n "${vals[i]}" ]; then
@@ -3364,7 +3379,11 @@ option_rule_r() {
 #     (field 6) is the pane's shell, and the renderers accept the record for a
 #     row only when that equals the row's #{pane_pid} -- which also rejects a
 #     %N that belongs to another tmux server.  Without /proc (macOS) it is only
-#     `kill -0`, and the sid is left empty: unchecked.
+#     `kill -0`, and the sid is left empty: unchecked, so a reused pid or
+#     another server's %N is believed there (README says so).  The record's
+#     `tmux` field is `session:@window.%pane`, with no socket in it to check.
+#     INTERDIMUX_REGISTRY_NO_PROC=1 takes that path on Linux too: a test seam
+#     (tests/test_agent_readme.sh), so the fallback runs where CI does.
 #
 # Never touched: `claude agents --json` (a 226 MB binary and a telemetry
 # event per call) and .fleetview-heartbeat (it turns on classifier calls).
@@ -3407,7 +3426,7 @@ claude_registry_r() {
       *) continue ;;
     esac
     sid=""
-    if [ -r /proc/self/stat ]; then
+    if [ -r /proc/self/stat ] && [ "${INTERDIMUX_REGISTRY_NO_PROC:-}" != 1 ]; then
       pst=""; [[ "$j" =~ \"procStart\":\"?([0-9]+) ]] && pst="${BASH_REMATCH[1]}"
       [ -n "$pst" ] || continue
       sf=()
@@ -3441,6 +3460,7 @@ claude_registry_r() {
 #   AS_STATE  a state word, or empty (and AS_SINCE, the registry's epoch)
 #   AS_DESC   the description, before cmd_field trims it for the row
 #   AS_KNOWN  1 when a rule knew the description
+#   AS_PUBD   1 when the description was published (an option), not a title
 #   AS_AGENT  1 when the row is an agent's
 #
 # and AG_NAME / AG_REST (agent_of).  Returns 1, with all of them empty, for a
@@ -3453,10 +3473,10 @@ claude_registry_r() {
 # The description is not worked out; the state is the same as a row's.
 AS_STATE_ONLY=""
 agent_state_r() {
-  AS_NAME="" AS_STATE="" AS_SINCE="" AS_DESC="" AS_KNOWN=0 AS_AGENT=0 AG_NAME="" AG_REST=""
+  AS_NAME="" AS_STATE="" AS_SINCE="" AS_DESC="" AS_KNOWN=0 AS_PUBD=0 AS_AGENT=0 AG_NAME="" AG_REST=""
   local raw="$1" pid="$2" pane="$3" title="$4" opts="${5-}"
   [ -n "$raw" ] || return 1
-  local a0 b name state="" since="" desc="" agent_row=0 known=0 r v w
+  local a0 b name state="" since="" desc="" agent_row=0 known=0 pubd=0 r v w
   a0="${raw%% *}"; b="${a0##*/}"
   # An idle shell is nobody's agent: whatever state or title it had went with
   # the program that set it.
@@ -3509,13 +3529,13 @@ agent_state_r() {
     fi
   fi
   if [ -n "$odesc" ]; then
-    desc="$odesc" known=1
+    desc="$odesc" known=1 pubd=1
   elif [ -n "$title" ]; then
-    # A title nothing can use -- not an agent's, no rule for the app, and not
-    # `all` -- is not even cleaned: most rows are shells and editors.
+    # A title nothing can use -- no rule for the app, and not `all` -- is not
+    # even cleaned: most rows are shells and editors.
     [ "$TR_LOADED" = 1 ] || load_title_rules
     if [ -n "$name" ] && [[ ${TR_IDX[$name]+x} ]]; then REPLY="${TR_IDX[$name]}"; else title_idx_r "$name"; fi
-    if [ -n "$REPLY" ] || [ "$agent_row" = 1 ] || [ "$SHOW_TITLE" = all ]; then
+    if [ -n "$REPLY" ] || [ "$SHOW_TITLE" = all ]; then
       [ "${#title}" -le "$TITLE_CAP" ] || title="${title:0:TITLE_CAP}"
       title_text_r "$title"; w="$REPLY"
       title_rule_r "$name" "$w"
@@ -3530,7 +3550,7 @@ agent_state_r() {
       title_glyph_r "$desc"; desc="$REPLY"
     fi
   fi
-  AS_NAME="$name" AS_STATE="$state" AS_SINCE="$since" AS_DESC="$desc" AS_KNOWN="$known" AS_AGENT="$agent_row"
+  AS_NAME="$name" AS_STATE="$state" AS_SINCE="$since" AS_DESC="$desc" AS_KNOWN="$known" AS_PUBD="$pubd" AS_AGENT="$agent_row"
   return 0
 }
 
@@ -3557,22 +3577,29 @@ agent_mark_r() {
 # An agent row is headed by the agent (`codex`, not `node codex`); when it
 # shows a state or a title its arguments go, unless @interdimux-agent-args is
 # on (they are still in the preview).  Any other row is exactly what
-# format_command draws, with the title after it when a rule knows its app
+# format_command draws.  Either kind shows its title only when a rule knows it
 # (or always, under @interdimux-show-title all).
 cmd_field() {
   local raw="$1"
   AS_STATE=""   # the row's state, for the agents view's mark (agent_mark_r)
   format_command "$raw"
   [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
-  local fc="$REPLY" a0 b name state since desc rest r w
+  local fc="$REPLY" a0 b name state since desc rest r w cw=""
   agent_state_r "$@" || { REPLY="$fc"; return 0; }
   name="$AS_NAME" state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
   a0="${raw%% *}"; b="${a0##*/}"
   case "$SHOW_TITLE" in
     off)   desc="" ;;
-    known) [ "$AS_KNOWN" = 1 ] || [ "$AS_AGENT" = 1 ] || desc="" ;;
+    known) [ "$AS_KNOWN" = 1 ] || desc="" ;;
   esac
-  if [ -n "$desc" ]; then
+  if [ -n "$desc" ] && [ "$AS_PUBD" = 1 ]; then
+    # Published text (@agent_desc, a plugin's option, an @option rule's DESC)
+    # is what its publisher meant to say: it is no stale title and no copy of
+    # the command line, so it is shown as it is -- only a bare repeat of the
+    # name goes.
+    [ "$desc" = "$name" ] && desc=""
+    if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
+  elif [ -n "$desc" ]; then
     # What only repeats the row: the app's own name, tmux's default title (the
     # host name), a prompt of this host and, from a preexec hook, the command
     # line itself.
@@ -3583,7 +3610,10 @@ cmd_field() {
     #     cut to 10 characters (fish_title).
     #   * a command line: its first word, past VAR=x and sudo-like prefixes, is
     #     argv0 -- or, for an interpreter, the script it runs.  A prefix that
-    #     is itself argv0 counts: `sudo docker run ...` on a sudo row.
+    #     is itself argv0 counts: `sudo docker run ...` on a sudo row.  A word
+    #     with a ':' before its last '/' is no command path but a prompt
+    #     (`deploy@web1:/etc/ssh`, `host:~/ssh`): its last directory is not
+    #     argv0 however it is spelled.
     r="$CUR_HOST_SHORT"
     if [ "$desc" = "$name" ] || [ "$desc" = "$CUR_HOST" ] || [ "$desc" = "$r" ] \
        || { [ -n "$r" ] && [[ "$desc" == *"@$r" || "$desc" == *"@$r"[!A-Za-z0-9_-]* \
@@ -3592,7 +3622,8 @@ cmd_field() {
     else
       set -f
       for w in $desc; do
-        [ "${w##*/}" = "${b#-}" ] && break
+        cw="${w##*/}"; [[ "$w" == *:*/* ]] && cw=""
+        [ -n "$cw" ] && [ "$cw" = "${b#-}" ] && break
         case "$w" in *=*|sudo|env|nohup|exec|time|command|builtin|noglob|nice) continue ;; esac
         break
       done
@@ -3605,7 +3636,9 @@ cmd_field() {
       esac
       [[ "$SHELL_NAMES" == *" ${b#-} "* ]] && r=1
       if [ -n "$r" ]; then r="${raw#"$a0"}"; r="${r# }"; r="${r%% *}"; fi
-      [ "${w##*/}" = "${b#-}" ] || { [ -n "$r" ] && [ "${w##*/}" = "${r##*/}" ]; } && desc=""
+      if [ -n "$cw" ] && { [ "$cw" = "${b#-}" ] || { [ -n "$r" ] && [ "$cw" = "${r##*/}" ]; }; }; then
+        desc=""
+      fi
     fi
     if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
   fi
@@ -4449,8 +4482,8 @@ gather_targets() {
   local -a _parts=()
   if [ -n "${INTERDIMUX_DUMP_IN:-}" ]; then
     # Test seam: the four sections from a FILE instead of from tmux, framed
-    # exactly as the batched query below returns them -- which is also the
-    # framing `imux gather2` reads on stdin.  It is what lets the golden corpus
+    # exactly as the batched query below returns them, plus optionally a fifth,
+    # the Claude registry -- the framing `imux gather3` reads on stdin.  It is what lets the golden corpus
     # (rust/tests/corpus/*.dump) reach THIS renderer, the one every install
     # without cargo runs, with no server and no timing:
     # tests/test_corpus_parity.sh.  Same family as INTERDIMUX_NO_BATCH and
@@ -5116,6 +5149,19 @@ preview_rule() {
   fi
 }
 
+# Text $1, dim, cut into lines as wide as the preview's rule (the preview
+# window does not wrap): an agent's command line under the header.
+preview_wrapped() {
+  local w="${FZF_PREVIEW_COLUMNS:-60}" t="$1"
+  [[ "$w" =~ ^[0-9]+$ ]] || w=60
+  [ "$w" -gt 2 ] && w=$(( w - 2 ))
+  [ "$w" -ge 1 ] || w=60
+  while [ -n "$t" ]; do
+    printf "${DIM}%s${RST}\n" "${t:0:w}"
+    t="${t:w}"
+  done
+}
+
 # Print captured pane content with trailing blank lines removed
 print_capture() {
   local content="$1" last
@@ -5176,12 +5222,33 @@ if [ "${1:-}" = "--preview" ]; then
       # Checked by index as well (spec_at): a stale row must not preview the
       # window that merely took its number as a NAME.  Captured by the IDs the
       # check found, so tmux resolves the row once.
-      p_cmd="" p_path=""
-      if spec_at "$target" "#{pane_current_command}${US}#{pane_current_path}"; then
-        IFS="$US" read -r p_cmd p_path <<< "$REPLY"
+      p_pid="" p_cmd="" p_path="" p_look="" p_args=""
+      if spec_at "$target" "#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"; then
+        IFS="$US" read -r p_pid p_cmd p_path <<< "$REPLY"
         target="$SPEC_AT"
       else
         target="$NO_SUCH_TARGET"
+      fi
+      # An agent's row is headed by the agent and, once it shows a state or a
+      # description, drops its arguments (cmd_field).  The header names it the
+      # same way (`codex`, not tmux's `node`), and the line under it is its
+      # command line with them (`codex resume <id>`).  Only an interpreter or
+      # an agent's own name can be an agent, so no other pane pays for the
+      # lookup (a /proc read; one ps without /proc).
+      if [ -n "$AGENT_KNOWN" ] && [ -n "$p_pid" ]; then
+        case "$p_cmd" in
+          node|nodejs|python*) p_look=1 ;;
+          *) [[ "$AGENT_KNOWN" == *" $p_cmd "* ]] && p_look=1 ;;
+        esac
+        if [ -n "$p_look" ]; then
+          [ "$SHOW_FULL_COMMAND" = on ] && build_process_table
+          resolve_command "$p_cmd" "$p_pid"
+          agent_of "$REPLY"
+          if [ -n "$AG_NAME" ]; then
+            p_cmd="$AG_NAME"
+            [ -n "$AG_REST" ] && p_args="$AG_NAME$AG_REST"
+          fi
+        fi
       fi
       p_path="${p_path/#$HOME/\~}"
       if [ "$SPEC_TYPE" = "W" ]; then
@@ -5191,6 +5258,7 @@ if [ "${1:-}" = "--preview" ]; then
       fi
       printf "  ${DIM_CMD}%s${RST} ${DIM}·${RST} ${DIM_PATH}%s${RST}\n" \
         "${p_cmd:-?}" "${p_path:-?}"
+      [ -n "$p_args" ] && preview_wrapped "$p_args"
       preview_rule
       print_capture "$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)" || echo "(cannot capture pane)"
       ;;
@@ -8608,7 +8676,7 @@ if [ "${1:-}" = "--doctor" ]; then
       _nr=$((_nr + 1))
       case "$RULE_S" in
         -|approve|input|working|idle|done|error) ;;
-        *) _trn+=("line $_ln: its STATE is not one of approve input working idle done error, or -") ;;
+        *) _trn+=("line $_ln: its STATE is not one of approve input working idle done error, or -, so the rule gives none") ;;
       esac
       [[ "$RULE_A" == @* ]] || continue
       # The names an option rule reads go into the list's tmux query, so one

@@ -11,7 +11,8 @@
 #   * Claude's registry record gives the state and its age -- but only while
 #     its pid is still that process (procStart) and its session is the pane's
 #     shell (a record for a dead pid, or naming another pane, is not believed)
-#   * a registry key file is never opened (chmod 000: no error either)
+#   * a registry key file is never opened: it is a FIFO here, and opening one
+#     blocks until a writer comes, so a list that opened it would hang
 #   * an option a plugin set (@pane_status) gives a state to any row
 #   * a title no rule knows shows only under @interdimux-show-title all
 #   * the host name, tmux's default title, is never shown
@@ -123,16 +124,20 @@ record() { # $1 pid, $2 procStart, $3 pane, $4 status, $5 waitingFor, $6 seconds
 record "$CL_PID" "$CL_START" "$CL_PANE" waiting "permission prompt" 300 > "$REG/$CL_PID.json"
 # a dead pid claiming the codex pane: must not be believed
 record 999999 1 "$CX_PANE" busy "" 10 > "$REG/999999.json"
-# the key file Claude keeps next to each record: never opened
-printf 'secret' > "$REG/$CL_PID.0123456789abcdef.key"
-chmod 000 "$REG/$CL_PID.0123456789abcdef.key"
+# the key file Claude keeps next to each record: never opened.  A FIFO, so an
+# open(2) of it would block (no writer ever comes) and the list would hang --
+# an unreadable file was no test, since the registry read swallows its error.
+mkfifo "$REG/$CL_PID.0123456789abcdef.key"
 
 # $1 = on|off (the Rust core), rest = extra env; prints "window<TAB>command"
-# with colours stripped, window rows only
+# with colours stripped, window rows only.  Under a timeout: a list that hung
+# (on the key file) leaves $TMPD/hung.<on|off>.
 rows() {
-  local rust="$1"; shift
-  env INTERDIMUX_USE_RUST="$rust" "$@" bash "$SCRIPT" --list 2> "$TMPD/err.$rust" \
-    | awk -F'\t' '$4 ~ /^W:/ { sub(/^W:t:/, "", $4); print $4 "\t" $3 }' \
+  local rust="$1" rc=0; shift
+  timeout 20 env INTERDIMUX_USE_RUST="$rust" "$@" bash "$SCRIPT" --list \
+    > "$TMPD/out.$rust" 2> "$TMPD/err.$rust" || rc=$?
+  [ "$rc" != 124 ] || : > "$TMPD/hung.$rust"
+  awk -F'\t' '$4 ~ /^W:/ { sub(/^W:t:/, "", $4); print $4 "\t" $3 }' "$TMPD/out.$rust" \
     | sed 's/\x1b\[[0-9;]*m//g'
 }
 cmd_of() { printf '%s\n' "$1" | awk -F'\t' -v w="$2" '$1 == w { print $2 }'; }
@@ -177,8 +182,11 @@ for rust in off on; do
   [ "$got" = "node codex resume" ] \
     && report "$label: with every agent option off the row is what it always was" pass \
     || report "$label: with every agent option off the row is what it always was (got: $got)" fail
+  [ ! -e "$TMPD/hung.$rust" ] && [ "$(printf '%s\n' "$OUT" | wc -l)" -eq 5 ] \
+    && report "$label: every list finished with its rows (the key file, a FIFO, was never opened)" pass \
+    || report "$label: every list finished with its rows (the key file, a FIFO, was never opened)" fail
   [ ! -s "$TMPD/err.$rust" ] \
-    && report "$label: nothing on stderr (the unreadable key file was never opened)" pass \
+    && report "$label: nothing on stderr" pass \
     || { report "$label: nothing on stderr" fail; ERRORS+="$(head -3 "$TMPD/err.$rust")"$'\n'; }
 done
 

@@ -24,7 +24,7 @@ const SCRIPTS: &[&str] = &["codex", "gemini", "qwen", "copilot", "crush", "aider
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum ShowTitle {
-    /// titles of agents and of apps a rule knows
+    /// titles a rule knows (an agent's too: see DEFAULT_TITLE_RULES)
     Known,
     All,
     Off,
@@ -202,6 +202,17 @@ fn this_host_prompt(desc: &str, hs: &str) -> bool {
     desc == tag || desc.strip_prefix(tag.as_str()).is_some_and(|r| r.starts_with(' '))
 }
 
+/// The command a title's word would name: its basename -- or nothing, for a
+/// word with a ':' before its last '/', which is a prompt
+/// (`deploy@web1:/etc/ssh`, `host:~/ssh`) and no command path, whatever its
+/// last directory is called (bash cmd_field's `*:*/*`).
+fn cmd_base(w: &str) -> &str {
+    match (w.find(':'), w.rfind('/')) {
+        (Some(c), Some(s)) if c < s => "",
+        _ => basename(w),
+    }
+}
+
 /// A description that only repeats the row: the app's own name, tmux's
 /// default title (the host name), a prompt of this host, or -- from a preexec
 /// hook -- the command line itself.
@@ -216,7 +227,7 @@ fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
     for x in desc.split(' ').filter(|x| !x.is_empty()) {
         w = x;
         // a prefix that is itself argv0: `sudo docker run ...` on a sudo row
-        if basename(x) == b {
+        if !cmd_base(x).is_empty() && cmd_base(x) == b {
             break;
         }
         if x.contains('=')
@@ -236,7 +247,8 @@ fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
     } else {
         ""
     };
-    basename(w) == b || (!r.is_empty() && basename(w) == basename(r))
+    let cw = cmd_base(w);
+    !cw.is_empty() && (cw == b || (!r.is_empty() && cw == basename(r)))
 }
 
 fn cap(s: String, max: usize) -> String {
@@ -289,6 +301,8 @@ pub fn command_field(
     }
     let mut desc = String::new();
     let mut known = false;
+    // published (an option), not a title: bash AS_PUBD
+    let mut pubd = false;
     // then what a plugin or a hook published, then the title
     let mut odesc = String::new();
     if opts.chars().any(|c| c != '\u{1d}') {
@@ -305,6 +319,7 @@ pub fn command_field(
     if !odesc.is_empty() {
         desc = odesc;
         known = true;
+        pubd = true;
     } else if !title.is_empty() {
         let t = titles::text(titles::head(title));
         match titles::apply(&cfg.rules, name, &t) {
@@ -322,11 +337,14 @@ pub fn command_field(
     }
     match cfg.show_title {
         ShowTitle::Off => desc.clear(),
-        ShowTitle::Known if !known && !agent_row => desc.clear(),
+        ShowTitle::Known if !known => desc.clear(),
         _ => {}
     }
     if !desc.is_empty() {
-        if repeats_row(&desc, name, raw, cfg) {
+        // published text is shown as published: only a bare repeat of the
+        // name goes (a title can be stale, or a copy of the command line)
+        let repeat = if pubd { desc == name } else { repeats_row(&desc, name, raw, cfg) };
+        if repeat {
             desc.clear();
         }
         desc = cap(desc, cfg.title_max);
@@ -491,6 +509,19 @@ mod tests {
         assert!(titles::apply(&rules, "codex", "x").is_some());
         assert!(titles::apply(&rules, "bar", "xy").is_none());
         assert_eq!(utf8_lines(b"caf\xc3\xa9"), "caf\u{e9}");
+    }
+
+    #[test]
+    fn a_prompt_whose_directory_is_named_like_the_app_is_no_command_line() {
+        let c = cfg();
+        // Fedora, Arch and oh-my-zsh put no blank after the colon
+        assert!(!repeats_row("deploy@web1:/etc/ssh", "ssh", "ssh web1", &c));
+        assert!(!repeats_row("deploy@web1:~/ssh", "ssh", "ssh web1", &c));
+        assert!(!repeats_row("web1:/srv/ssh", "ssh", "ssh web1", &c));
+        assert!(!repeats_row("root@3f2a9c1b:/var/lib/docker", "docker", "docker exec -it 3f2a bash", &c));
+        // a command path is still one, and so is a colon after its last '/'
+        assert!(repeats_row("/usr/bin/ssh web1", "ssh", "ssh web1", &c));
+        assert!(repeats_row("ssh web1:/etc", "ssh", "ssh web1", &c));
     }
 
     #[test]

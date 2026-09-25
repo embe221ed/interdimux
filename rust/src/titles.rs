@@ -51,6 +51,11 @@ pub fn parse(text: &str) -> Vec<Rule> {
         if pat.is_empty() || apps.starts_with('#') {
             continue;
         }
+        // not a state word: no state (bash tr_parse); the rule still matches
+        let state = match state {
+            "approve" | "input" | "working" | "idle" | "done" | "error" => state,
+            _ => "-",
+        };
         let (spin, pat) = match pat.strip_prefix("%spin") {
             Some(p) => (true, p),
             None => (false, pat),
@@ -431,6 +436,15 @@ mod tests {
         assert_eq!(apply_options(&rules, &names, "running\u{1d}"), ("working".into(), "".into()));
         // a title rule never reads options, and an option rule never a title
         assert!(apply(&rules, "pane_status", "running").is_none());
+    }
+
+    #[test]
+    fn a_state_that_is_not_a_state_word_is_none() {
+        let rules = parse("x waiting $1 [?] *\nx Approve = !! *\nx done - ok\n");
+        let a = |t: &str| apply(&rules, "x", t).map(|h| (h.state, h.desc));
+        assert_eq!(a("[?] Pick one"), Some(("".into(), "Pick one".into())));
+        assert_eq!(a("!! Now"), Some(("".into(), "!! Now".into())));
+        assert_eq!(a("ok"), Some(("done".into(), "".into())));
     }
 
     #[test]

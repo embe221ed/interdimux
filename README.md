@@ -422,7 +422,13 @@ command column, as plain words you can search for:
   `node …/bin/codex` or `python …/bin/aider`; the row says `codex`, `aider`.
   Recognised: claude, codex, gemini, qwen, opencode, amp, goose, crush,
   kiro-cli, aider, copilot, cursor-agent — add your own with
-  `@interdimux-agents`.
+  `@interdimux-agents`. `@interdimux-agents off` turns the naming off, and
+  only that: rows keep their whole command line, and a state or description
+  still follows it (`codex 2400 approve Fix the build`). Title rules go by the
+  command's name, so a native `codex` keeps its state while
+  `node …/bin/codex` — `node` to the rules — has none. With
+  `@interdimux-agent-state` and `@interdimux-show-title` off as well, rows are
+  what they were before any of this.
 - **A state word, with its age** (from a minute on): `approve` (a permission
   waits — in the danger colour), `input` (a question or dialog is open),
   `working`, `idle`, `done`, `error`. Typing `approve` finds those rows — and
@@ -440,14 +446,20 @@ command column, as plain words you can search for:
   none waiting the entry is greyed out.
 - **The description** is the agent's title with its status glyph and
   boilerplate removed. An agent row that shows a state or a description drops
-  its arguments (`--resume <uuid>` …); the preview still has them.
+  its arguments (`--resume <uuid>` …); the preview (`Ctrl-/`) names the agent
+  the same way and has them on the line under its header
+  (`codex resume 0199…`). `@interdimux-agent-args on` keeps them on the row.
 
 Where the state comes from, first source that speaks wins:
 
 1. **Claude Code's own session registry** (`~/.claude/sessions/<pid>.json`):
-   busy / waiting (and for what) / idle, with no hooks or setup. The record is
-   believed only while its pid is still that process and runs in that pane.
-   Claude's title cannot say this under tmux: its glyph is always `✳` there.
+   busy / waiting (and for what) / idle, with no hooks or setup. On Linux the
+   record is believed only while its pid is still that process (its start
+   time) and runs in that pane. Without `/proc` (macOS) only that its pid is
+   alive is checked, so a record whose pid was reused, or one for the same
+   pane id on another tmux server, can put a state on a row there (not on a
+   shell at its prompt). Claude's title cannot say this under tmux: its glyph
+   is always `✳` there.
 2. **Pane options other agent plugins publish** — read in the same single tmux
    query, no extra process. Built in: interdimux's own `@agent_state` /
    `@agent_desc`, [tmux-agent-sidebar](https://github.com/hiroppy/tmux-agent-sidebar)
@@ -457,11 +469,25 @@ Where the state comes from, first source that speaks wins:
    (`@dmux_attention`). Anything that can run `tmux` can publish one — a
    hook, or a wrapper around a tool that has no state of its own:
    ```sh
+   #!/bin/sh
+   # my-agent, saying so in its pane; the state goes however it ends
+   trap 'tmux set -pu -t "$TMUX_PANE" @agent_state' EXIT
+   trap 'exit 130' INT TERM HUP
    tmux set -p -t "$TMUX_PANE" @agent_state working
    my-agent "$@"
-   tmux set -p -t "$TMUX_PANE" @agent_state done
    ```
-   (`@agent_state` takes the words above; `@agent_desc` any text.)
+   tmux keeps a pane option until something unsets it, and a state shows on
+   whatever runs in the pane next (only a shell at its prompt shows none):
+   a `set … done` at the end would be seen only on the *next* program, as
+   would a `working` that Ctrl-C left behind. So the wrapper unsets it on
+   the way out, and the second `trap` is what makes the first one run on
+   Ctrl-C too (dash, the `sh` of Debian and Ubuntu, skips an EXIT trap when
+   a signal kills it). A hook that publishes a state should clear it the
+   same way when its agent ends.
+   (`@agent_state` takes the words above; `@agent_desc` any text, shown as
+   it is: the filters below are for titles, which can be stale or a copy of
+   the command line, and only a description that is just the app's name is
+   left out.)
 3. **The title**, by per-app rules (below): codex's `[ ! ] Action Required`
    is `approve` and its spinner `working`; gemini's `✋` / `✦` / `◇`, qwen's
    `✳` / `◐`, amp's spinner and `◆` likewise. A title rule is chosen by the
@@ -491,18 +517,33 @@ pass on says where — which neither the command (`ssh web1`) nor the directory
 - `screen` — a prompt from another host that it passes on; `tmux` — a nested
   client's `session:index:window`, when its server has `set-titles on`.
 
-Only those shapes are read, because a title outlives the program that set it
-when your shell sets none (plain bash under `tmux-256color`): the next row
-would show a container that has gone. Most other apps set no title (htop, less,
-lazygit, ranger, python…), editors set one only with `set title` (and it names
-the file the row already shows), and yazi's or mc's is the directory, which
-they change to, so the directory column already has it.
+Only these apps, and only those shapes, are read, because a title outlives the
+program that set it when your shell sets none (plain bash under
+`tmux-256color`). That keeps a gone container's prompt off the rows of other
+apps (htop, vim…), and vim's or a preexec hook's leftovers off these. It
+cannot keep a leftover *prompt* off the next ssh or docker row, though: until
+the new host or container titles the pane, that row shows the one that has
+gone. A shell that titles its own prompt fixes it — oh-my-zsh and fish do;
+for bash, the line Debian's bashrc uses for `xterm*` terminals:
 
-A title no rule knows is not shown, and neither is one that repeats the row:
-tmux's default (the host name), a prompt of *this* host (`user@thishost:…`,
-fish's `[thishost] …`) and a preexec hook's copy of the command line.
-`@interdimux-show-title all` shows every other title, the way `prefix + w`
-does.
+```sh
+PS1="\[\e]0;\u@\h: \w\a\]$PS1"
+```
+
+That title is a prompt of *this* host, which no row shows (below). Most other
+apps set no title (htop, less, lazygit, ranger, python…), editors set one only
+with `set title` (and it names the file the row already shows), and yazi's or
+mc's is the directory, which they change to, so the directory column already
+has it.
+
+A title no rule knows is not shown — on an agent's row too: an agent that
+sets no title (aider, or one you add with `@interdimux-agents`) would show
+whatever the last program left in the pane as its task. The agents that title
+themselves have rules; for your own, add one (`myagent - = *` shows its whole
+title). Nor is a title shown that repeats the row: tmux's default (the host
+name), a prompt of *this* host (`user@thishost:…`, fish's `[thishost] …`) and
+a preexec hook's copy of the command line. `@interdimux-show-title all` shows
+every other title, the way `prefix + w` does.
 
 #### Title rules
 
@@ -527,7 +568,9 @@ myagent   working  $1   %spin *
 - A rule sees a title's first 256 characters. The program in a pane chooses
   its title (tmux keeps one of up to a megabyte), and a row shows at most 200
   characters of it, so a longer one is cut there before anything reads it.
-- `STATE` is a word (approve input working idle done error) or `-`.
+- `STATE` is a word (approve input working idle done error) or `-`. Any
+  other word, `Approve` included, counts as `-`: the rule still matches and
+  still gives its `DESC`, but no state (`--doctor` names such lines).
 - `DESC` is `-` (show nothing), `=` (the whole title) or a template such as
   `$1` or `$2: $1`.
 - The first title rule that matches decides. Among `@option` rules, the first
@@ -761,8 +804,8 @@ set -g @interdimux-hydrate 'on'
 set -g @interdimux-startup-command 'nvim .'
 
 # Agent rows (see "Agents and pane titles").  Which pane titles to show:
-# 'known' (agents' and those a title rule knows), 'all' (every title that adds
-# something, as prefix+w does) or 'off'  (default: known)
+# 'known' (those a title rule knows, an agent's included), 'all' (every title
+# that adds something, as prefix+w does) or 'off'  (default: known)
 set -g @interdimux-show-title 'known'
 
 # Longest description shown, in characters (default: 40)
@@ -776,8 +819,10 @@ set -g @interdimux-agent-state 'on'
 # (default: off)
 set -g @interdimux-agent-args 'off'
 
-# More agent names, space-separated, recognised as agents; 'off' recognises
-# none (default: unset)
+# More agent names, space-separated, recognised as agents (their titles show
+# only with a title rule for them); 'off' recognises none, so rows keep their
+# whole command -- states still show, see "Agents and pane titles"
+# (default: unset)
 set -g @interdimux-agents 'myagent'
 
 # Your title rules file (default: ~/.config/interdimux/titles)

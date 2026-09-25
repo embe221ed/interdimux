@@ -40,14 +40,30 @@ which binary it was and how to rebuild it.
 
 **bash owns tmux and config. The binary owns rendering.**
 
-bash performs the single batched tmux query, resolves every option
-(env → tmux option → built-in default), and pipes the raw dumps in on stdin
-separated by RS (`\x1e`), in the order sessions / windows / panes /
-current-target. Every option is passed explicitly — the binary must never
-re-derive a default, or it will disagree with the bash fallback whenever an
-option is unset.
+bash performs the single batched tmux query, reads Claude Code's session
+registry, resolves every option (env → tmux option → built-in default), and
+pipes five sections in on stdin separated by RS (`\x1e`) lines, in the order
+sessions / windows / panes / current-target / Claude registry:
 
-The subcommand is the protocol's version: `imux gather2` (`PROTOCOL` in
+* the first four are the tmux query. A pane line ends in `#{pane_id}`,
+  `#{pane_title}` and the values of the pane options agent plugins publish —
+  one per name in `INTERDIMUX_STATE_OPTS`, in order, each ended by GS
+  (`\x1d`), an unset option an empty value. They are last, so a line tmux
+  cut short keeps its row;
+* the fifth is the registry as `claude_registry_r` read it, one live session
+  per line: `<%pane>US<sid>US<word>US<since>` (the pane's shell pid, empty
+  when unchecked; a state word; epoch seconds). The binary never opens
+  `~/.claude` itself.
+
+Every option is passed explicitly, as `INTERDIMUX_*` variables — the binary
+must never re-derive a default, or it will disagree with the bash fallback
+whenever an option is unset. Two of them are data, not settings:
+`INTERDIMUX_TITLE_RULESET`, the whole rule text (the user's
+`@interdimux-title-rules` file, then `DEFAULT_TITLE_RULES`), which `src/titles.rs`
+parses exactly as bash does; and `INTERDIMUX_STATE_OPTS`, the option names
+whose values the pane lines carry.
+
+The subcommand is the protocol's version: `imux gather3` (`PROTOCOL` in
 `src/main.rs`, `IMUX_PROTO` in the script). Bump both with any change to the
 framing or to the position of a field. A binary that does not know the name
 exits 2 with nothing on stdout — an extra argument or an environment variable
