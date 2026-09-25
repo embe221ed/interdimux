@@ -494,8 +494,10 @@ fn shipped_state_opts() -> String {
 #[test]
 fn agent_titles_states_and_the_registry() {
     let rules = shipped_title_rules();
-    // the first rule and the last: the whole block was read
-    assert!(rules.contains("✳ Claude Code") && rules.contains("@dmux_attention "),
+    // the first rule, the last option rule and the last rule: the whole block
+    // was read
+    assert!(rules.contains("✳ Claude Code") && rules.contains("@dmux_attention ")
+            && rules.contains("\ntmux  -  $1  * - \"*\"*"),
         "the rules were not found whole in the script");
     let opts = shipped_state_opts();
     assert!(opts.contains("pane_status"), "DEFAULT_STATE_OPTS was not found");

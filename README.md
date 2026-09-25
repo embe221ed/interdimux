@@ -456,10 +456,41 @@ Where the state comes from, first source that speaks wins:
    app, because the same glyph means different things: `✳` is Claude's
    constant mark but Qwen asking for approval.
 
-A title nobody wrote a rule for — a shell's `user@host:path`, a preexec hook's
-copy of the command line, tmux's default (the host name) — is not shown, so
-rows do not repeat themselves. `@interdimux-show-title all` shows every title
-that adds something, the way `prefix + w` does.
+**Other apps.** A few apps are a terminal *somewhere else*, and the title they
+pass on says where — which neither the command (`ssh web1`) nor the directory
+(where you started it) can. These show it by default:
+
+```
+  ├─ ops 0:web1      │ ~                         ssh deploy@web1: ~/app
+  ├─ ops 1:db        │ ~/code/app                docker root@3f2a9c1b: /var/lib
+  └─ ops 2:inner     │ ~                         tmux inner:0:edit
+```
+
+- `ssh`, `autossh`, `et` — the remote prompt: `user@host: ~/path` (the
+  Debian and Ubuntu bashrc), `user@host:~/path` (Fedora, Arch, oh-my-zsh),
+  fish's `[host] ~/p/dir`, or a remote tmux with `set-titles on`. `mosh-client`
+  — the same, without mosh's `[mosh]`. ssh passes on your pane's `TERM`, and
+  the Debian, Ubuntu and Fedora bashrc title only `xterm*` ones: with tmux's
+  default `tmux-256color`, those hosts set no title.
+- `docker`, `podman`, `nerdctl`, `kubectl`, `oc`, `lxc`, `incus`,
+  `machinectl`, `toolbox`, `multipass` — the container's prompt
+  (`docker run -it` gives the container `TERM=xterm`, so a stock Ubuntu image
+  titles itself).
+- `screen` — a prompt from another host that it passes on; `tmux` — a nested
+  client's `session:index:window`, when its server has `set-titles on`.
+
+Only those shapes are read, because a title outlives the program that set it
+when your shell sets none (plain bash under `tmux-256color`): the next row
+would show a container that has gone. Most other apps set no title (htop, less,
+lazygit, ranger, python…), editors set one only with `set title` (and it names
+the file the row already shows), and yazi's or mc's is the directory, which
+they change to, so the directory column already has it.
+
+A title no rule knows is not shown, and neither is one that repeats the row:
+tmux's default (the host name), a prompt of *this* host (`user@thishost:…`,
+fish's `[thishost] …`) and a preexec hook's copy of the command line.
+`@interdimux-show-title all` shows every other title, the way `prefix + w`
+does.
 
 #### Title rules
 
@@ -469,7 +500,7 @@ before the built-in ones, so yours win:
 
 ```
 # APPS (command names, comma-separated, or *)  STATE  DESC  PATTERN
-lazygit   -        $1   lazygit - *
+nvim      -        $1   * - Nvim
 myagent   approve  $1   [?] *
 myagent   working  $1   %spin *
 # @OPTION rules read a pane option instead of the title
@@ -497,7 +528,21 @@ myagent   working  $1   %spin *
   @codex_attention     done     -  1
   ```
 
-The built-in rules are `DEFAULT_TITLE_RULES` in `scripts/interdimux.sh`.
+The built-in rules are `DEFAULT_TITLE_RULES` in `scripts/interdimux.sh`. Some
+that are not, because they help only some setups:
+
+```
+# nvim / vim with `set title`: the buffer and its directory
+nvim            -  $1  * - Nvim
+vim,vi          -  $1  * - VIM
+# zellij: its session name, then | the focused pane's title
+zellij          -  =   *
+# fish in a container (no SSH_TTY): the path alone
+docker,podman   -  =   /*
+docker,podman   -  =   ~*
+# `sudo docker ...`: the row is sudo
+sudo            -  =   *@*:*
+```
 
 ## Checking your setup
 

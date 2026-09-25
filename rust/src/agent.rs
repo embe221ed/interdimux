@@ -163,20 +163,47 @@ pub fn agent_of<'a>(s: &'a str, cfg: &Config) -> Option<(String, &'a str)> {
     None
 }
 
+/// A prompt of this host (the same test in bash cmd_field): `@host`
+/// where the name ends -- at the end or at a character a host name cannot
+/// hold, so `web` is not `web-7d4b9c` -- or fish's `[host]` head, the name cut
+/// to 10 characters, on its prompt and command lines alike.
+fn this_host_prompt(desc: &str, hs: &str) -> bool {
+    if hs.is_empty() {
+        return false;
+    }
+    let at = format!("@{}", hs);
+    let mut from = 0;
+    while let Some(k) = desc[from..].find(&at) {
+        let end = from + k + at.len();
+        match desc[end..].chars().next() {
+            None => return true,
+            Some(c) if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') => return true,
+            _ => {}
+        }
+        // past this '@' (one byte, so still a char boundary)
+        from += k + 1;
+    }
+    let tag = format!("[{}]", hs.chars().take(10).collect::<String>());
+    desc == tag || desc.strip_prefix(tag.as_str()).is_some_and(|r| r.starts_with(' '))
+}
+
 /// A description that only repeats the row: the app's own name, tmux's
-/// default title (the host name), a local prompt (`user@host:path`), or --
-/// from a preexec hook -- the command line itself.
+/// default title (the host name), a prompt of this host, or -- from a preexec
+/// hook -- the command line itself.
 fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
-    if desc == name
-        || desc == cfg.host
-        || desc == cfg.host_short
-        || (!cfg.host_short.is_empty() && desc.contains(&format!("@{}", cfg.host_short)))
-    {
+    if desc == name || desc == cfg.host || desc == cfg.host_short || this_host_prompt(desc, &cfg.host_short) {
         return true;
     }
+    let a0 = raw.split(' ').next().unwrap_or("");
+    let b = basename(a0);
+    let b = b.strip_prefix('-').unwrap_or(b);
     let mut w = "";
     for x in desc.split(' ').filter(|x| !x.is_empty()) {
         w = x;
+        // a prefix that is itself argv0: `sudo docker run ...` on a sudo row
+        if basename(x) == b {
+            break;
+        }
         if x.contains('=')
             || matches!(
                 x,
@@ -187,9 +214,6 @@ fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
         }
         break;
     }
-    let a0 = raw.split(' ').next().unwrap_or("");
-    let b = basename(a0);
-    let b = b.strip_prefix('-').unwrap_or(b);
     let after = &raw[a0.len()..];
     // unstripped, as bash's `case "$b"` sees it: `-node` is no interpreter
     let r = if crate::format::is_interpreter(basename(a0)) {
@@ -371,6 +395,50 @@ mod tests {
         assert!(repeats_row("FOO=1 sudo make -j8", "", "make -j8", &c));
         assert!(repeats_row("python3 ./manage.py runserver", "", "/usr/bin/python3 /h/manage.py runserver", &c));
         assert!(!repeats_row("notes.md - NVIM", "", "nvim notes.md", &c));
+    }
+
+    #[test]
+    fn a_prompt_of_this_host_is_where_the_host_name_ends() {
+        // host_short is "box"
+        let c = cfg();
+        let r = |d: &str, raw: &str| repeats_row(d, "", raw, &c);
+        // this host: bash skel, Fedora/oh-my-zsh, a domain, mc's [user@host]
+        assert!(r("u@box: ~/x", "ssh web1"));
+        assert!(r("u@box:~/x", "ssh web1"));
+        assert!(r("u@box.example.com:~", "ssh web1"));
+        assert!(r("mc [u@box]:/work", "screen"));
+        assert!(r("u@box", "ssh web1"));
+        // another host whose name starts with this one's
+        assert!(!r("root@box-7d4b9c: /app", "kubectl"));
+        assert!(!r("u@box2:~", "ssh box2"));
+        assert!(!r("u@boxer_1:~", "docker"));
+        // ...unless this host's prompt is in there as well, after it
+        assert!(r("root@box-2: /x - \"u@box:/tmp\"", "tmux"));
+        // fish over ssh heads prompts and command lines with [host], cut to 10
+        assert!(r("[box] ~/x", "ssh web1"));
+        assert!(r("[box] ssh web1 ~/x", "ssh web1"));
+        assert!(!r("[web1] ~/x", "ssh web1"));
+        assert!(!r("[boxer] ~/x", "ssh boxer"));
+        let mut long = cfg();
+        long.host_short = "krootabulon".into();
+        assert!(repeats_row("[krootabulo] ssh me@remote ~", "", "ssh me@remote", &long));
+        assert!(!repeats_row("[krootabulon] ~", "", "ssh me@remote", &long));
+        // no host name known: nothing is this host's
+        let mut none = cfg();
+        none.host_short.clear();
+        assert!(!repeats_row("u@:~", "", "ssh web1", &none));
+        assert!(!repeats_row("[] ~", "", "ssh web1", &none));
+    }
+
+    #[test]
+    fn a_command_line_is_recognised_when_its_prefix_is_argv0() {
+        let c = cfg();
+        // the row is sudo itself: its preexec line starts with it
+        assert!(repeats_row("sudo docker run --rm -it ubuntu bash", "", "sudo docker run --rm -it ubuntu bash", &c));
+        assert!(repeats_row("time make -j8", "", "/usr/bin/time make -j8", &c));
+        // a prefix that is not argv0 is still skipped
+        assert!(repeats_row("sudo docker run -v /a:/b img@sha256:ab bash", "", "docker run", &c));
+        assert!(!repeats_row("sudo root@3f2a: /", "", "docker exec -it 3f2a bash", &c));
     }
 
     #[test]
