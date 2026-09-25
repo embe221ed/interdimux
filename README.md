@@ -162,10 +162,12 @@ There are two entry points:
 ### Dashboard (`prefix + g`)
 
 A menu that provides access to all features — rendered as a native tmux
-menu on tmux >= 3.4 (one keypress per action: `s`, `n`, `r`, `i`, `w`,
+menu on tmux >= 3.4 (one keypress per action: `s`, `e`, `n`, `r`, `i`, `w`,
 `z`, `d`, `t`, `a`, `o`, `h`), or as a compact fzf menu on older tmux:
 
 - **Switch** (`s`) — Navigate & jump to target
+- **Agents** (`e`) — The agents waiting on you, e.g. `Agents (2 need you)`:
+  the navigator, opened on them (see [Agents and pane titles](#agents-and-pane-titles))
 - **New session** (`n`) — Create session from directory
 - **Rename** (`r`) — Rename a session or window
 - **Kill** (`i`) — Remove sessions, windows, or panes
@@ -179,8 +181,8 @@ menu on tmux >= 3.4 (one keypress per action: `s`, `n`, `r`, `i`, `w`,
 
 `Kill` is drawn in the danger colour, and on tmux >= 3.4 an entry that cannot do
 anything is greyed out and loses its key rather than opening a popup to say so:
-`Jobs` when nothing is queued (it shows the count when something is), and both
-scheduling entries when `at` is not installed.
+`Agents` when no agent needs you and `Jobs` when nothing is queued (each shows
+its count otherwise), and both scheduling entries when `at` is not installed.
 
 Select an action to launch the corresponding tool. Action modes open the navigator with a modified prompt — `Enter` performs the action on the selected target, and the list reloads in place so you can repeat. Press `Esc` when done.
 
@@ -418,6 +420,12 @@ command column, as plain words you can search for:
 - **A state word, with its age:** `approve` (a permission waits — in the
   danger colour), `input` (a question or dialog is open), `working`, `idle`,
   `done`, `error`. Type `approve` to find every agent waiting on you.
+- **The dashboard counts them.** `prefix + g` shows `Agents (2 need you)` —
+  the panes in `approve` or `input`, by the same rules as the rows — and its
+  `e` opens the navigator with `'approve' | 'input'` already typed: the cursor
+  starts on the first of them, raw mode keeps the rest of the tree on screen,
+  and editing the query searches as usual. With none waiting the entry is
+  greyed out.
 - **The description** is the agent's title with its status glyph and
   boilerplate removed. An agent row that shows a state or a description drops
   its arguments (`--resume <uuid>` …); the preview still has them.

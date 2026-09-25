@@ -217,7 +217,7 @@ fi
 # The same shape as the MENU_ROWS check, and for the same reason: the entry added
 # LAST is the one a too-short popup scrolls off, so the constant has to move with
 # the list.  The 5 is measured — border(2) + prompt + the rule under it + the
-# hint bar — and confirmed by rendering: 11 entries fit at -h 16 and not at 15.
+# hint bar — and confirmed by rendering: 12 entries fit at -h 17 and not at 16.
 items_block=$(awk '/^  items=\$\(printf/,/\)$/' "$SCRIPT")
 fb_entries=$(printf '%s\n' "$items_block" | grep -cE '^ +"[a-z]+" +"' || true)
 fb_have=$(grep -oE '_pop_w=[0-9]+ _pop_h=[0-9]+' "$SCRIPT" | grep -oE '_pop_h=[0-9]+' | grep -oE '[0-9]+' || true)
@@ -297,7 +297,7 @@ else
   report "tmux < 3.4 takes the fzf dashboard even on a tall client" fail
 fi
 missing=""
-for entry in Switch 'New session' Rename Kill Swap Zoom Detach 'Send keys' Schedule Jobs Health; do
+for entry in Switch Agents 'New session' Rename Kill Swap Zoom Detach 'Send keys' Schedule Jobs Health; do
   printf '%s\n' "$cap" | grep -q "$entry" || missing+=" $entry"
 done
 if [ -z "$missing" ]; then
