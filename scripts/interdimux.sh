@@ -171,7 +171,7 @@ opens one (the plugin binds it), and so does `--launch switch`.
   --sched-list               list what --send-at / --send-in have queued
   --sched-cancel ID          cancel one of those
   --launch MODE              open a picker in a popup: switch kill rename zoom
-                             swap detach send dirs schedule jobs doctor
+                             swap detach send dirs schedule jobs doctor agents
   --dashboard-launch         open the dashboard (what prefix+g runs)
   --bind-keys                install the key bindings (the plugin does this)
   --version                  print the version
@@ -3019,9 +3019,22 @@ title_ruleset() {
   done
 }
 
+# The list-panes format that reads the published options, in REPLY: one value
+# per name in STATE_OPTS, in order, each ended by GS, with a GS, RS, US or
+# newline of its own rewritten to '?' and capped at 128 (an option can hold
+# anything).  Shared by the navigator's batched query and the dashboard's count.
+state_optfmt_r() {
+  local on nl=$'\n' rs=$'\x1e'
+  REPLY=""
+  for on in $STATE_OPTS; do
+    REPLY+="#{=128;s/[${GS}${rs}${US}${nl}]/?/:@$on}$GS"
+  done
+}
+
 # TITLE_RULESET indexed, for the bash renderer only, on the first row that
 # needs it: each rule line by the apps it names (TR_BY_APP, TR_STAR for `*`,
-# TR_OPTIDX for the option rules), so a row visits only its own app's rules --
+# TR_OPT_BY for the option rules, by option), so a row visits only its own
+# app's rules, and only the rules of the options its pane has set --
 # scanning all of them cost ~0.7 ms a row.  A rule is PARSED (tr_parse) only
 # when a row first reaches it: splitting and compiling all ~75 defaults cost
 # ~18 ms, and a list of shells and editors needs none of them.
@@ -3031,7 +3044,7 @@ title_ruleset() {
 # left-to-right capture rust/src/titles.rs implements.
 TR_LOADED=0 TR_STAR="" TR_OPTIDX=""
 declare -a TR_LINE=() TR_APPS=() TR_STATE=() TR_DESC=() TR_RE=() TR_SPIN=() TR_OK=()
-declare -A TR_BY_APP=() TR_IDX=()
+declare -A TR_BY_APP=() TR_IDX=() TR_OPT_BY=()
 _ERE_SPECIAL=( '\' '.' '[' ']' '(' ')' '{' '}' '+' '?' '|' '^' '$' )
 load_title_rules() {
   TR_LOADED=1
@@ -3046,7 +3059,10 @@ load_title_rules() {
     a="${l%% *}"
     TR_LINE[n]="$l" TR_APPS[n]="$a"
     case "$a" in
-      @*) TR_OPTIDX+="$n " ;;
+      @*)
+        TR_OPTIDX+="$n "
+        set -f; IFS=,; apps=($a); unset IFS; set +f
+        for a in ${apps[@]+"${apps[@]}"}; do a="${a#@}"; [ -n "$a" ] && TR_OPT_BY["$a"]+="$n "; done ;;
       '*') TR_STAR+="$n " ;;
       *,*)
         set -f; IFS=,; apps=($a); unset IFS; set +f
@@ -3155,10 +3171,18 @@ option_rule_r() {
   IFS="$GS"; vals=($1$GS); unset IFS
   ons=($STATE_OPTS)
   set +f
+  # Only the rules that name an option this pane has set, still in rule order
+  # (an indexed array's keys come back ascending).  A pane sets one or two of
+  # them: walking all ~45 option rules, parsing each, cost every process that
+  # draws such a row -- or counts it, for prefix+g -- ~3 ms a pane.
+  local -a sel=()
   for (( i = 0; i < ${#ons[@]} && i < ${#vals[@]}; i++ )); do
-    [ -n "${vals[i]}" ] && val["${ons[i]}"]="${vals[i]}"
+    if [ -n "${vals[i]}" ]; then
+      val["${ons[i]}"]="${vals[i]}"
+      for o in ${TR_OPT_BY[${ons[i]}]-}; do sel[o]=1; done
+    fi
   done
-  for i in $TR_OPTIDX; do
+  for i in "${!sel[@]}"; do
     [ -n "${TR_OK[i]-}" ] || tr_parse "$i"
     [ "${TR_OK[i]}" = 1 ] || continue
     set -f; IFS=,; names=(${TR_APPS[i]}); unset IFS; set +f
@@ -3263,30 +3287,33 @@ claude_registry_r() {
   return 0
 }
 
-# The command field of a window or pane row, in REPLY.  $1 the resolved
-# command, $2 the pane pid, $3 the pane id, $4 its title, $5 the values of the
-# options agent plugins publish (see option_rule_r).  Reads
-# CLAUDE_BY_PANE and CUR_HOST/CUR_HOST_SHORT from gather_targets.
+# What a window or pane row knows about its agent, from the three sources in
+# order: Claude's registry, the options plugins publish, the title.  The ONE
+# place the state is decided -- cmd_field draws it, and the dashboard counts
+# it (agents_waiting_r), so the count is always what the rows say.  $1 the
+# resolved command, $2 the pane pid, $3 the pane id, $4 its title, $5 the
+# values of the options agent plugins publish (see option_rule_r).  Reads
+# CLAUDE_BY_PANE.  Sets
 #
-#   <agent> [<state> [<age>]] [<title>] [<args>]
+#   AS_NAME   the app its title rules are picked by: the agent, else argv0
+#   AS_STATE  a state word, or empty (and AS_SINCE, the registry's epoch)
+#   AS_DESC   the description, before cmd_field trims it for the row
+#   AS_KNOWN  1 when a rule knew the description
+#   AS_AGENT  1 when the row is an agent's
 #
-# An agent row is headed by the agent (`codex`, not `node codex`); when it
-# shows a state or a title its arguments go, unless @interdimux-agent-args is
-# on (they are still in the preview).  Any other row is exactly what
-# format_command draws, with the title after it when a rule knows its app
-# (or always, under @interdimux-show-title all).
-cmd_field() {
+# and AG_NAME / AG_REST (agent_of).  Returns 1, with all of them empty, for a
+# row that can have none of it: no command, or an idle shell.
+agent_state_r() {
+  AS_NAME="" AS_STATE="" AS_SINCE="" AS_DESC="" AS_KNOWN=0 AS_AGENT=0 AG_NAME="" AG_REST=""
   local raw="$1" pid="$2" pane="$3" title="$4" opts="${5-}"
-  format_command "$raw"
-  [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
-  local fc="$REPLY" a0 b name state="" since="" desc="" rest agent_row=0 known=0 r v w
+  [ -n "$raw" ] || return 1
+  local a0 b name state="" since="" desc="" agent_row=0 known=0 r v w
   a0="${raw%% *}"; b="${a0##*/}"
   # An idle shell is nobody's agent: whatever state or title it had went with
   # the program that set it.
-  [[ "$SHELL_NAMES" == *" ${b#-} "* ]] && only_options "${raw#"$a0"}" && return 0
+  [[ "$SHELL_NAMES" == *" ${b#-} "* ]] && only_options "${raw#"$a0"}" && return 1
   # agent_of only for what could be an agent: most rows are not, and in bash a
   # function call is the expensive part of a row.
-  AG_NAME="" AG_REST=""
   if [ -n "$AGENT_KNOWN" ]; then
     case "$b" in
       node|nodejs|python*) agent_of "$raw" ;;
@@ -3336,9 +3363,31 @@ cmd_field() {
       title_glyph_r "$desc"; desc="$REPLY"
     fi
   fi
+  AS_NAME="$name" AS_STATE="$state" AS_SINCE="$since" AS_DESC="$desc" AS_KNOWN="$known" AS_AGENT="$agent_row"
+  return 0
+}
+
+# The command field of a window or pane row, in REPLY.  The arguments are
+# agent_state_r's; it also reads CUR_HOST/CUR_HOST_SHORT from gather_targets.
+#
+#   <agent> [<state> [<age>]] [<title>] [<args>]
+#
+# An agent row is headed by the agent (`codex`, not `node codex`); when it
+# shows a state or a title its arguments go, unless @interdimux-agent-args is
+# on (they are still in the preview).  Any other row is exactly what
+# format_command draws, with the title after it when a rule knows its app
+# (or always, under @interdimux-show-title all).
+cmd_field() {
+  local raw="$1"
+  format_command "$raw"
+  [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
+  local fc="$REPLY" a0 b name state since desc rest r w
+  agent_state_r "$@" || { REPLY="$fc"; return 0; }
+  name="$AS_NAME" state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
+  a0="${raw%% *}"; b="${a0##*/}"
   case "$SHOW_TITLE" in
     off)   desc="" ;;
-    known) [ "$known" = 1 ] || [ "$agent_row" = 1 ] || desc="" ;;
+    known) [ "$AS_KNOWN" = 1 ] || [ "$AS_AGENT" = 1 ] || desc="" ;;
   esac
   if [ -n "$desc" ]; then
     # What only repeats the row: the app's own name, tmux's default title (the
@@ -3367,7 +3416,7 @@ cmd_field() {
     fi
     if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
   fi
-  if [ "$agent_row" = 0 ] && [ -z "$desc" ]; then REPLY="$fc"; return 0; fi
+  if [ "$AS_AGENT" = 0 ] && [ -z "$desc" ]; then REPLY="$fc"; return 0; fi
   local extra=""
   if [ -n "$state" ]; then
     case "$state" in
@@ -3392,6 +3441,109 @@ cmd_field() {
   else
     REPLY="${DIM_CMD}${AG_NAME}${RST}${extra}"
   fi
+}
+
+# How many agents need you -- a pane whose state is `approve` or `input` -- in
+# REPLY: the dashboard's Agents entry.  Counted per PANE, so an agent counts
+# once however many rows show it (a window row repeats its active pane's).
+#
+# The state is agent_state_r's, the function the rows are drawn with, over the
+# inputs the navigator's batched query gives them.  Only those, for prefix+g's
+# sake: ONE tmux call (a list-panes of id, pid, current command, title and the
+# published options), the registry read, and no rendering.  The command is
+# resolved as the rows resolve it (resolve_command) only where the state can
+# depend on it:
+#   * an interpreter (node, nodejs, python*), because the agent is named by
+#     the script it runs: `node .../bin/codex` is codex, and codex titles say
+#     `approve`;
+#   * a pane Claude's registry or a published option speaks for, because that
+#     state shows only on a row that is not an idle shell -- and a wrapper
+#     script (`sh ./my-agent`, see the README) is a shell to tmux's
+#     #{pane_current_command}.
+# Anywhere else #{pane_current_command} stands in: it is argv0's basename,
+# which is what names the row.  (The one difference left is a stopped agent in
+# the background of a shell at its prompt, whose last title the row reads.)
+#
+# Sessions @interdimux-hide keeps out of the navigator are left out here too,
+# so the entry never promises an agent the navigator will not show.
+#
+# The same call also answers, last, where the pressing client is: AW_CLIENT is
+# "<height> <width> <session>" -- the session for the hide rule (the current
+# one is never hidden), the size for the dashboard, which would otherwise have
+# spent a round-trip of its own on it.  Empty when that lookup failed (a stale
+# target: the one command here that can, hence last) or was never made.
+AW_CLIENT=""
+agents_waiting_r() {
+  REPLY=0 AW_CLIENT=""
+  [ "$AGENT_ON" = 1 ] && [ "$AGENT_STATE" = on ] || return 0
+  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e'
+  local -a f=() lines=()
+  local -A CLAUDE_BY_PANE=()
+  title_ruleset
+  state_optfmt_r
+  fmt="#{session_name}${US}#{pane_id}${US}#{pane_pid}${US}#{pane_current_command}${US}#{pane_title}${US}$REPLY"
+  all=$(tmux list-panes -a -F "$fmt" \; display-message -p "$rs" \; \
+          display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} \
+          '#{client_height} #{client_width} #S' 2>/dev/null)
+  # Cut at the LAST RS (a command name may hold one), from the end: a
+  # ${x#*pat} would be quadratic in its offset.
+  rest="${all%"$rs"*}"
+  if [ "$rest" != "$all" ]; then
+    AW_CLIENT="${all:${#rest}+1}"; AW_CLIENT="${AW_CLIENT#$'\n'}"; all="$rest"
+    if [[ "$AW_CLIENT" =~ ^([0-9]*)\ ([0-9]*)\ (.*)$ ]]; then
+      cur="${BASH_REMATCH[3]}"   # a session with no client has no size, but has a name
+      [ -n "${BASH_REMATCH[1]}" ] && [ -n "${BASH_REMATCH[2]}" ] || AW_CLIENT=""
+    else
+      AW_CLIENT=""
+    fi
+  fi
+  [ -n "$all" ] || return 0
+  claude_registry_r
+  if [ -n "$CLAUDE_REG" ]; then
+    while IFS= read -r line; do
+      [[ "$line" == %*"$US"* ]] && CLAUDE_BY_PANE["${line%%"$US"*}"]="${line#*"$US"}"
+    done <<< "$CLAUDE_REG"
+  fi
+  set -f; IFS=$'\n'; lines=($all); unset IFS; set +f
+  for line in ${lines[@]+"${lines[@]}"}; do
+    # set -f per line: agent_state_r's option rules turn it back off.
+    set -f; IFS="$US"; f=($line$US); unset IFS; set +f   # the appended US: see gather_targets
+    pane="${f[1]-}"
+    case "$pane" in %[0-9]*) ;; *) continue ;; esac
+    case "$pane" in %*[!0-9]*) continue ;; esac
+    if [ -n "${HIDE_PATTERNS:-}" ] && [ "${f[0]}" != "$cur" ]; then
+      set -f
+      for hp in $HIDE_PATTERNS; do
+        # shellcheck disable=SC2254  # the pattern is a glob by design
+        case "${f[0]}" in $hp) set +f; continue 2 ;; esac
+      done
+      set +f
+    fi
+    # A line tmux cut short (see gather_targets) keeps its row, but its pid is
+    # never read.
+    pid="${f[2]-}"; [ "${#f[@]}" -eq 6 ] || pid=""
+    pcc="${f[3]-}" raw="${f[3]-}" res=0
+    case "$pcc" in
+      ''|node|nodejs|python*) res=1 ;;
+      *) if [ -n "${CLAUDE_BY_PANE[$pane]-}" ] || [[ "${f[5]-}" == *[!$GS]* ]]; then res=1; fi ;;
+    esac
+    if [ "$res" = 1 ]; then
+      [ "$pt" = 1 ] || { [ "$SHOW_FULL_COMMAND" = on ] && build_process_table; pt=1; }
+      resolve_command "$pcc" "$pid"; raw="$REPLY"
+    else
+      # Neither a record nor an option: only the title can give it a state, and
+      # only through a title rule for its app.  Most panes (shells, editors)
+      # have none, and are passed over here, before the call -- a bash function
+      # call is most of what a pane costs.
+      [ -n "${f[4]-}" ] || continue
+      [ "$TR_LOADED" = 1 ] || load_title_rules
+      if [[ ${TR_IDX[$pcc]+x} ]]; then REPLY="${TR_IDX[$pcc]}"; else title_idx_r "$pcc"; fi
+      [ -n "$REPLY" ] || continue
+    fi
+    agent_state_r "$raw" "$pid" "$pane" "${f[4]-}" "${f[5]-}" || continue
+    case "$AS_STATE" in approve|input) n=$(( n + 1 )) ;; esac
+  done
+  REPLY="$n"
 }
 
 # ---------------------------------------------------------------------------
@@ -3504,13 +3656,23 @@ client_dim() {
   REPLY="$v"
 }
 
+# Both, in one round-trip: REPLY="<height> <width>", each 0 when unknown.  The
+# same targeted-then-untargeted lookup as client_dim.
+client_dims() {
+  local fmt='#{client_height} #{client_width}' v
+  v=$(tmux display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} "$fmt" 2>/dev/null)
+  [[ "$v" =~ ^[0-9]+\ [0-9]+$ ]] || v=$(tmux display-message -p "$fmt" 2>/dev/null)
+  [[ "$v" =~ ^[0-9]+\ [0-9]+$ ]] || v="0 0"
+  REPLY="$v"
+}
+
 # How many rows the dashboard's native menu needs: its items plus two borders.
 # display-menu SILENTLY draws nothing and exits 0 when it does not fit — no
 # message, no error, prefix+g simply becomes a dead key — so the number has to
 # be kept in step with the menu by hand.  tests/test_dashboard.sh parses the menu
 # and fails if this disagrees with it, and --doctor reports which of the two
 # dashboards the current client is going to get.
-MENU_ROWS=17
+MENU_ROWS=18
 
 # Column widths for the navigator tree.  Sized to the ACTUAL content
 # (longest session name / window name / path) so the important window
@@ -4009,12 +4171,10 @@ gather_targets() {
   # three from its active pane's line, so the window format is unchanged.  The
   # host names are what a pane's title is when no program set one (see
   # cmd_field).
-  local _optfmt="" _on
+  local _optfmt=""
   if [ "$AGENT_ON" = 1 ]; then
     title_ruleset
-    for _on in $STATE_OPTS; do
-      _optfmt+="#{=128;s/[${GS}${_rs}${US}${_nl}]/?/:@$_on}$GS"
-    done
+    state_optfmt_r; _optfmt="$REPLY"
   fi
   _pfmt="#{session_name}${US}#{window_index}${US}#{pane_index}${US}#{pane_active}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{pane_pid}${US}#{window_panes}${US}#{pane_id}${US}#{pane_title}${US}${_optfmt}"
   _curfmt="#S${US}#I${US}#P${US}#{host}${US}#{host_short}"
@@ -5147,9 +5307,15 @@ resolve_create_target() {
 }
 
 # Sets REPLY to the session name; prints nothing.
+#
+# The query a launcher opened the navigator with (INTERDIMUX_QUERY, the
+# dashboard's Agents entry) is a filter, not a name: when it matches nothing
+# -- no agent waits any more -- Enter creates nothing (REPLY stays empty), and
+# the bar says so (describe_create).
 create_from_query() {
   local query="$1"
   REPLY=""
+  [ -n "${INTERDIMUX_QUERY:-}" ] && [ "$query" = "$INTERDIMUX_QUERY" ] && return 0
   resolve_create_target "$query" || return 1
   # session_id_of, not has-session "=name": the same exact match connect_dir
   # uses, so a query like "$0" is not mistaken for session ID 0.
@@ -5168,6 +5334,10 @@ create_from_query() {
 describe_create() {
   local query="$1" verb
   REPLY=""
+  if [ -n "${INTERDIMUX_QUERY:-}" ] && [ "$query" = "$INTERDIMUX_QUERY" ]; then
+    hint_r '∅' 'nothing matches the query this opened with' esc quit
+    return 0
+  fi
   resolve_create_target "$query" || return 0
   # "switch to", not "create", when the name already exists -- that is what
   # connect_dir does, and promising a new session it will not make is the same
@@ -8073,7 +8243,18 @@ if [ "${1:-}" = "--launch" ]; then
     schedule) title=' interdimux · schedule ' ;;
     jobs)     title=' interdimux · scheduled jobs ' ;;
     doctor)   title=' interdimux · health ' ;;
+    agents)   title=' interdimux · agents ' ;;
   esac
+
+  # `agents` is the navigator, opened on the two state words that need you
+  # (the dashboard's Agents entry).  As a QUERY, typed for the user, rather
+  # than a filtered list: raw mode dims the other rows so the tree keeps its
+  # shape, the cursor lands on the first match, and a keystroke widens it.
+  # Quoted at both ends it is fzf's exact-BOUNDARY match (0.55+), so a title
+  # saying `inputs` or `approved` does not count.  Before 0.55 the closing
+  # quote is a literal character and matches nothing, so there it is a plain
+  # exact match.
+  if fzf_ge 55; then _agents_q="'approve' | 'input'"; else _agents_q="'approve | 'input"; fi
 
   sp="$SQ_SCRIPT"
   chrome=()
@@ -8105,6 +8286,7 @@ if [ "${1:-}" = "--launch" ]; then
       jobs)   cmd="bash '$sp' --jobs" ;;
       doctor) cmd="bash '$sp' --doctor-view" ;;
       switch) cmd="bash '$sp'" ;;
+      agents) chrome+=(-e "INTERDIMUX_QUERY=$_agents_q"); cmd="bash '$sp'" ;;
       *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="bash '$sp'" ;;
     esac
   else
@@ -8114,6 +8296,7 @@ if [ "${1:-}" = "--launch" ]; then
       jobs)   cmd="$env_fwd bash '$sp' --jobs" ;;
       doctor) cmd="$env_fwd bash '$sp' --doctor-view" ;;
       switch) cmd="$env_fwd bash '$sp'" ;;
+      agents) shq "INTERDIMUX_QUERY=$_agents_q"; cmd="$env_fwd $REPLY bash '$sp'" ;;
       *)      cmd="$env_fwd INTERDIMUX_MODE=$mode bash '$sp'" ;;
     esac
   fi
@@ -8269,8 +8452,18 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
   #
   # The fzf fallback below has no such ceiling: its list scrolls.  So the tmux
   # version is not the only thing that decides which one to draw.
-  client_dim '#{client_height}'; _cli_h="$REPLY"
-  client_dim '#{client_width}';  _cli_w="$REPLY"
+  #
+  # The Agents entry's count asks tmux for the panes and, in the same
+  # round-trip, for the client's size (AW_CLIENT); only without it is the size
+  # a round-trip of its own.  No native menu below 3.4, so no count there: the
+  # fzf fallback counts for itself.
+  _n_agents=0 AW_CLIENT=""
+  if tmux_ge 304 && [ "$AGENT_STATE" = on ]; then agents_waiting_r; _n_agents="$REPLY"; fi
+  if [ -n "$AW_CLIENT" ]; then
+    _cli_h="${AW_CLIENT%% *}" _cli_w="${AW_CLIENT#* }"; _cli_w="${_cli_w%% *}"
+  else
+    client_dims; _cli_h="${REPLY% *}" _cli_w="${REPLY#* }"
+  fi
   # Unknown height takes the fallback, not the menu: a popup where a menu would
   # have done is cosmetic, and a dead prefix+g is not.
   if tmux_ge 304 && [ "$_cli_h" -ge "$MENU_ROWS" ]; then
@@ -8304,6 +8497,17 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       _m_sched='-Schedule (needs at)'
       _m_jobs='-Jobs (needs at)'
     fi
+    # Agents that wait on you (approve / input), counted above by the rows' own
+    # state logic (agents_waiting_r).  Greyed out when there are none, like
+    # Jobs -- a filter that finds nothing is a wasted keypress.  The key is `e`:
+    # display-menu spends g/G (and j/k, q) on moving about.
+    if [ "$AGENT_STATE" != on ]; then
+      _m_agents='-Agents (agent-state off)'
+    elif [ "$_n_agents" = 0 ]; then
+      _m_agents='-Agents'
+    else
+      _m_agents="Agents ($_n_agents need you)"
+    fi
     # Item names are FORMATS, so #[...] styles them.  Kill is the only entry here
     # that destroys something; give it the same danger colour as the frame it
     # turns red.
@@ -8311,6 +8515,7 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       -T '#[align=centre,bold] interdimux ' \
       -H "bg=${MENU_SEL_BG},fg=${MENU_SEL_FG},bold" \
       'Switch'      s "run-shell -b \"$_mp switch\"" \
+      "$_m_agents"  e "run-shell -b \"$_mp agents\"" \
       'New session' n "run-shell -b \"$_mp dirs\"" \
       '' \
       'Rename'      r "run-shell -b \"$_mp rename\"" \
@@ -8337,10 +8542,11 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       cmd="bash '$sp' --dashboard"
     fi
     # Entries + 5: two border rows, the prompt, the rule under it, and the hint
-    # bar.  MEASURED rather than guessed — 11 entries show fully at -h 16, ten of
-    # them at 15, nine at 14 — because the number that was here before was slack
-    # nothing could distinguish from any other slack, and the entry added last is
-    # the one a too-short popup scrolls away.  tests/test_dashboard.sh derives it
+    # bar.  MEASURED rather than guessed — the 12 entries show fully at -h 17,
+    # and at 16 the last one scrolls away (as 11 did at 15, before Agents) —
+    # because the number that was here before was slack nothing could
+    # distinguish from any other slack, and the entry added last is the one a
+    # too-short popup scrolls away.  tests/test_dashboard.sh derives it
     # from the item list and fails if the two drift, exactly as it does for
     # MENU_ROWS.
     #
@@ -8349,7 +8555,7 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     # succeeds and `-h 15` errors, so the limit is exactly the client's size.  A
     # fixed 64x19 made this the same dead key as an oversized menu, reached by the
     # other path.  fzf's list scrolls, so a short popup is merely cramped.
-    _pop_w=64 _pop_h=16
+    _pop_w=64 _pop_h=17
     [ "$_cli_w" -gt 0 ] && [ "$_cli_w" -lt "$_pop_w" ] && _pop_w="$_cli_w"
     [ "$_cli_h" -gt 0 ] && [ "$_cli_h" -lt "$_pop_h" ] && _pop_h="$_cli_h"
     tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
@@ -8362,8 +8568,21 @@ fi
 if [ "${1:-}" = "--dashboard" ]; then
   set +e
 
+  # Agents: no disabled state in an fzf list, so the count goes in the
+  # description (the native menu greys the entry out instead).
+  if [ "$AGENT_STATE" != on ]; then
+    _fb_agents="Agents waiting on you (@interdimux-agent-state is off)"
+  else
+    agents_waiting_r
+    case "$REPLY" in
+      0) _fb_agents="No agent needs you now" ;;
+      1) _fb_agents="1 agent needs you (approve or input)" ;;
+      *) _fb_agents="$REPLY agents need you (approve or input)" ;;
+    esac
+  fi
   items=$(printf "%s\t  ${BOLD_AMBER}%-14s${RST} ${DIM}%s${RST}\n" \
     "switch" "Switch"       "Navigate & jump to target" \
+    "agents" "Agents"       "$_fb_agents" \
     "dirs"   "New session"  "Create session from directory" \
     "rename" "Rename"       "Rename a session or window" \
     "kill"   "Kill"         "Remove sessions, windows, or panes" \
@@ -8745,6 +8964,8 @@ while true; do
       # 0.40-0.45 -- Ubuntu 24.04 ships 0.44.1.  Below 0.46 a resized popup
       # keeps its old column widths until ^r, which is the whole loss.
       fzf_ge 46 && fzf_opts+=(--bind="resize:reload-sync($LIST_CMD)$_refit")
+      # The query a launcher opens it with (`--launch agents`), as if typed.
+      [ -n "${INTERDIMUX_QUERY:-}" ] && fzf_opts+=(--query="$INTERDIMUX_QUERY")
       # An empty bar means nothing fits at this width.  Passing --footer='' still
       # costs a row (measured — the section is drawn, blank), so omit the flag
       # entirely; a transform that emits nothing later removes the section again
