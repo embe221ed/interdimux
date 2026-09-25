@@ -74,7 +74,12 @@ A portal gun for your tmux sessions.
   older one is refused with a one-line error — on the status line, too, when
   tmux runs it — rather than failing somewhere inside.
 - A UTF-8 locale. The tree glyphs are multibyte and every column width is
-  counted in cells; under `LC_ALL=C` the columns misalign. `--doctor` says so.
+  counted in cells. The Rust core counts cells in any locale. The list's bash
+  renderer picks `C.UTF-8` (or another UTF-8 locale that is installed) by
+  itself when nothing names one, as for a tmux server started with no
+  `LANG`, but keeps an `LC_ALL` or `LC_CTYPE` you set. Anywhere else — the
+  dialogs, the dashboard — bash counts bytes in a locale that is not UTF-8,
+  and columns misalign. `--doctor` says so.
 - `fd` or `find` (for directory picker)
 - `at` (optional — the Schedule and Jobs entries; needs its job-runner enabled)
 - `zoxide` (optional — feeds the recent tier and find-or-create)

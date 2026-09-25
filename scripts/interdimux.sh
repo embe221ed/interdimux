@@ -1330,6 +1330,34 @@ is_utf8() {
   [[ "$1" =~ $_UTF8_SEQ ]]
 }
 
+# The character type the bash renderer and the dashboard's count run under,
+# in REPLY: a UTF-8 locale name when bash would otherwise count BYTES and
+# nothing in the environment chose that -- no LC_ALL, no LC_CTYPE, only a
+# LANG that is C, missing or not installed, which is what a popup gets from a
+# tmux server started without one.  "" when none is needed, or none works.
+# The caller makes it `local LC_CTYPE`: not exported (none was), so the ps,
+# sort and fzf it starts keep the environment's, and only bash's own ${#},
+# ${s:0:n} and pattern matching change.  Under it the bash rows are the Rust
+# core's -- widths, the 256-character title cut, the @interdimux-title-max
+# cut, which counted bytes and could split a character (review R14).  An
+# LC_ALL or LC_CTYPE the user set is left alone.  Tried once per process,
+# fork-free: an assignment to LC_CTYPE is a setlocale(3) in bash.
+_UTF8_CT=unset
+utf8_ctype_r() {
+  if [ "$_UTF8_CT" = unset ]; then
+    _UTF8_CT=""
+    local probe=$'\xe2\x94\x82' l
+    if [ "${#probe}" != 1 ] && [ -z "${LC_ALL:-}" ] && [ -z "${LC_CTYPE:-}" ]; then
+      for l in C.UTF-8 C.utf8 en_US.UTF-8 UTF-8; do
+        { LC_CTYPE="$l"; } 2>/dev/null
+        if [ "${#probe}" = 1 ]; then _UTF8_CT="$l"; break; fi
+      done
+      unset LC_CTYPE
+    fi
+  fi
+  REPLY="$_UTF8_CT"
+}
+
 # A directory whose name is not valid UTF-8 is skipped (is_utf8), in both
 # renderers.  Listing it is worse than useless: fzf hands a selection back with
 # every invalid byte replaced by U+FFFD, so the row names a directory that does
@@ -2302,18 +2330,20 @@ build_process_table() {
 # core's rule was Cc only, so a cwd or a branch holding one rendered differently
 # in the two renderers, and on a libc whose class leaves them out bash would
 # pass them through too.  Both renderers now list them explicitly (rust/src/
-# proc.rs sanitize), as bytes, so the test is the same in any locale.
-_LSEP=$'\xe2\x80\xa8' _PSEP=$'\xe2\x80\xa9'
+# proc.rs sanitize), as bytes, so the test is the same in any locale.  So are
+# the C1 controls (U+0080-009F, _C1): in a C locale [[:cntrl:]] is bytes and
+# never sees one (review R14).
+_LSEP=$'\xe2\x80\xa8' _PSEP=$'\xe2\x80\xa9' _C1=$'\xc2'[$'\x80'-$'\x9f']
 sanitize_args() {
   REPLY="$1"
   case "$REPLY" in
-    *[[:cntrl:]]*|*"$_LSEP"*|*"$_PSEP"*) ;;
+    *[[:cntrl:]]*|*"$_LSEP"*|*"$_PSEP"*|*$_C1*) ;;
     *) return 0 ;;
   esac
   REPLY="${REPLY//$'\n'/ }"
   REPLY="${REPLY//"$_LSEP"/?}"
   REPLY="${REPLY//"$_PSEP"/?}"
-  case "$REPLY" in *[[:cntrl:]]*) ;; *) return 0 ;; esac
+  case "$REPLY" in *[[:cntrl:]]*|*$_C1*) ;; *) return 0 ;; esac
   _sanitize_cntrl
   return 0
 }
@@ -2328,7 +2358,7 @@ sanitize_args() {
 _sanitize_cntrl() {
   local LC_ALL=C
   REPLY="${REPLY//[[:cntrl:]]/?}"
-  REPLY="${REPLY//$'\xc2'[$'\x80'-$'\x9f']/?}"
+  REPLY="${REPLY//$_C1/?}"
 }
 
 # Space-joined argv of a pid, ps-style.  REPLY is empty when the process is
@@ -3013,21 +3043,31 @@ trim_blanks_r() {
 
 # A description as the row shows it: one leading status glyph dropped, with
 # the variation selector and blanks around it.  The glyphs agents lead with:
-# braille spinners (U+2800-28FF), ✳ (U+2733), ◐◑◒◓ (U+25D0-25D3).  Compared
-# by code point, as the Rust core does.
+# braille spinners (U+2800-28FF), ✳ (U+2733), ◐◑◒◓ (U+25D0-25D3).
+#
+# Matched as BYTES, the same code points the Rust core compares: a spinner is
+# \xe2, one of \xa0-\xa3, then a continuation byte.  ${t:0:1} and printf's
+# code point read the first BYTE in a C locale (what a popup gets from a tmux
+# server started with no LANG), so codex and claude lost `working`, amp said
+# `idle` while it worked, and the glyphs stayed in the text (review R14).  A
+# pattern of partial characters matches byte by byte in any locale, bash 3.2
+# to 5.2 alike.
+_SPIN=$'\xe2'[$'\xa0'-$'\xa3'][$'\x80'-$'\xbf']
+_HALF=$'\xe2\x97'[$'\x90'-$'\x93']                 # ◐◑◒◓
+_STAR=$'\xe2\x9c\xb3'                               # ✳
+_VS=$'\xef\xb8'[$'\x8e'$'\x8f']                     # U+FE0E, U+FE0F
 title_glyph_r() {
-  local t cp
+  local t
   trim_blanks_r "$1"; t="$REPLY"
-  case "${t:0:1}" in $'\xef\xb8\x8e'|$'\xef\xb8\x8f') trim_blanks_r "${t:1}"; t="$REPLY" ;; esac
-  if [ -n "$t" ]; then
-    printf -v cp '%d' "'${t:0:1}" 2>/dev/null || cp=0
-    if (( (cp >= 0x2800 && cp <= 0x28ff) || cp == 0x2733 || (cp >= 0x25d0 && cp <= 0x25d3) )); then
-      t="${t:1}"
-      case "${t:0:1}" in $'\xef\xb8\x8e'|$'\xef\xb8\x8f') t="${t:1}" ;; esac
-      trim_blanks_r "$t"; t="$REPLY"
-    fi
-  fi
-  REPLY="$t"
+  case "$t" in $_VS*) trim_blanks_r "${t#$_VS}"; t="$REPLY" ;; esac
+  case "$t" in
+    $_SPIN*) t="${t#$_SPIN}" ;;
+    $_STAR*) t="${t#$_STAR}" ;;
+    $_HALF*) t="${t#$_HALF}" ;;
+    *) REPLY="$t"; return 0 ;;
+  esac
+  t="${t#$_VS}"
+  trim_blanks_r "$t"
 }
 
 # One rule line split into its four fields (RULE_A RULE_S RULE_D RULE_P), the
@@ -3206,17 +3246,14 @@ _rule_desc() {
 # one does.
 title_rule_r() {
   TR_HIT=0 TR_S="" TR_D=""
-  local name="$1" t="$2" s i cp
+  local name="$1" t="$2" s i
   title_idx_r "$name"
   for i in $REPLY; do
     [ -n "${TR_OK[i]-}" ] || tr_parse "$i"
     [ "${TR_OK[i]}" = 1 ] || continue
     s="$t"
-    if [ "${TR_SPIN[i]}" = 1 ]; then
-      [ -n "$s" ] || continue
-      printf -v cp '%d' "'${s:0:1}" 2>/dev/null || cp=0
-      (( cp >= 0x2800 && cp <= 0x28ff )) || continue
-      s="${s:1}"
+    if [ "${TR_SPIN[i]}" = 1 ]; then   # a spinner, as bytes: see title_glyph_r
+      case "$s" in $_SPIN*) s="${s#$_SPIN}" ;; *) continue ;; esac
     fi
     [[ "$s" =~ ${TR_RE[i]} ]] || continue
     TR_HIT=1
@@ -3237,7 +3274,7 @@ option_rule_r() {
   [[ "$1" == *[!$GS]* ]] || return 0
   [ "$TR_LOADED" = 1 ] || load_title_rules
   local -A val=()
-  local i o v cp
+  local i o v
   local -a vals=() names=() ons=()
   set -f
   IFS="$GS"; vals=($1$GS); unset IFS
@@ -3263,9 +3300,7 @@ option_rule_r() {
       [ -n "$o" ] && [[ ${val[$o]+x} ]] || continue
       v="${val[$o]}"
       if [ "${TR_SPIN[i]}" = 1 ]; then
-        printf -v cp '%d' "'${v:0:1}" 2>/dev/null || cp=0
-        (( cp >= 0x2800 && cp <= 0x28ff )) || continue
-        v="${v:1}"
+        case "$v" in $_SPIN*) v="${v#$_SPIN}" ;; *) continue ;; esac
       fi
       [[ "$v" =~ ${TR_RE[i]} ]] || continue
       [ -z "$OR_S" ] && [ "${TR_STATE[i]}" != - ] && OR_S="${TR_STATE[i]}"
@@ -3559,6 +3594,9 @@ AW_CLIENT=""
 agents_waiting_r() {
   REPLY=0 AW_CLIENT=""
   [ "$AGENT_ON" = 1 ] && [ "$AGENT_STATE" = on ] || return 0
+  utf8_ctype_r   # the rows' character type (see gather_targets)
+  [ -z "$REPLY" ] || local LC_CTYPE="$REPLY"
+  REPLY=0
   local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e'
   local -a f=() lines=()
   local -A CLAUDE_BY_PANE=()
@@ -4516,6 +4554,11 @@ IMUX_SECTIONS
   # bash renderer will do the work, and IT needs the ps process table (the binary
   # built its own).  On Linux this is a no-op (the /proc backend needs no table);
   # elsewhere it is the one ps fork, paid only when there is no working binary.
+  #
+  # And it counts characters, as the Rust core does, even where the popup's
+  # locale is C (utf8_ctype_r).
+  utf8_ctype_r
+  [ -z "$REPLY" ] || local LC_CTYPE="$REPLY"
   [ "$SHOW_FULL_COMMAND" = "on" ] && build_process_table
 
   # MRU ordering: most recently attended sessions first (last-attached,

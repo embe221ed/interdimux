@@ -23,6 +23,10 @@
 #     is dropped, in both renderers -- the Rust core used to get an EMPTY rule
 #     set, every built-in rule gone -- and the core drops such a line itself
 #     if one reaches it; --doctor names the line, and a NUL (UTF-16)
+#   * a popup whose locale is C (review R14): the bash renderer still reads a
+#     spinner as `working` and drops a status glyph -- with LC_ALL=C set on
+#     purpose, and, where nothing names a locale, its whole list is the Rust
+#     core's byte for byte; prefix+g counts a %spin approval under LC_ALL=C
 #
 # Expected rows are written out, not computed by either renderer; where the
 # case is random the two renderers are each other's oracle -- bash matches with
@@ -153,7 +157,7 @@ if [ -x "$BIN" ]; then
     report "the Rust matcher captures what bash's ERE does, in $NCASE random cases ($hits match)" pass
   else
     report "the Rust matcher captures what bash's ERE does, in $NCASE random cases" fail
-    ERRORS+="$(diff "$TMPD/random.bash" "$TMPD/random.rust" | head -6)"$'\n'
+    ERRORS+="$(diff "$TMPD/random.bash" "$TMPD/random.rust" | head -6 || :)"$'\n'
     ERRORS+="     (rows: bash $nb, rust $nr, of $NCASE)"$'\n'
   fi
   # the comparison is only as good as its matches
@@ -290,7 +294,7 @@ EOF_FZF
     report "prefix+g counts a codex pane with a 5,000-character title within 3 s" pass
   else
     report "prefix+g counts a codex pane with a 5,000-character title within 3 s (rc $RC)" fail
-    ERRORS+="$(grep -a -o 'gents[^\t]*' "$TMPD/menu" 2>/dev/null | head -2)"$'\n'
+    ERRORS+="$(grep -a -o 'gents[^\t]*' "$TMPD/menu" 2>/dev/null | head -2 || :)"$'\n'
   fi
   tmux -L "$SOCK" kill-server 2>/dev/null || true
 else
@@ -348,7 +352,7 @@ doctor_agents() {
 }
 out=$(doctor_agents "$TMPD/home/titles") || :   # --doctor exits 1 on any ✗ elsewhere
 case "$out" in *"line 3 is not UTF-8"*) report "--doctor names the rule line that is not UTF-8" pass ;;
-  *) report "--doctor names the rule line that is not UTF-8" fail; ERRORS+="$(printf '%s\n' "$out" | grep -i -A3 'title rules' | head -6)"$'\n' ;; esac
+  *) report "--doctor names the rule line that is not UTF-8" fail; ERRORS+="$(printf '%s\n' "$out" | grep -i -A3 'title rules' | head -6 || :)"$'\n' ;; esac
 case "$out" in *"line 1 is not"*) report "...and not the comment (dropping it changes nothing)" fail ;;
   *) report "...and not the comment (dropping it changes nothing)" pass ;; esac
 case "$out" in *"holds 1 rule,"*) report "...and counts the one rule that is read" pass ;;
@@ -359,8 +363,84 @@ out=$(doctor_agents "$TMPD/utf16") || :
 case "$out" in *"holds a NUL byte"*"line 1 is not UTF-8"*|*"line 1 is not UTF-8"*"holds a NUL byte"*)
     report "--doctor says a UTF-16 file holds a NUL, and that what is read of it is not UTF-8" pass ;;
   *) report "--doctor says a UTF-16 file holds a NUL, and that what is read of it is not UTF-8" fail
-     ERRORS+="$(printf '%s\n' "$out" | grep -i -A3 'title rules' | head -6)"$'\n' ;; esac
+     ERRORS+="$(printf '%s\n' "$out" | grep -i -A3 'title rules' | head -6 || :)"$'\n' ;; esac
 tmux -L "$SOCK" kill-server 2>/dev/null || true
+
+# --- 8. a popup whose locale is C ---------------------------------------------
+# What a popup gets from a tmux server started with no LANG.  The glyphs are
+# compared as bytes, so an explicit LC_ALL=C still reads them; the cut at
+# @interdimux-title-max still counts bytes there (the row is 40 BYTES), which
+# is the one thing left that needs a UTF-8 locale.
+: > "$TMPD/home/titles"
+long="déploy@web1: ~/$(rep ä 60)"
+mkdump "$TMPD/c.dump" "codex|⠋ Fix login | proj" "codex|⠋ Fix login" \
+  "amp|⠋ Fix x - amp - proj" "claude|✳ Project review" "qwen|✳️ approve?" \
+  "qwen|◐︎ task" "codex|⠋ Fix$(printf '\xc2\x85')login | proj" "ssh web1|$long"
+C_EXPECT=('codex working Fix login' 'codex working' 'amp working Fix x'
+          'claude Project review' 'qwen approve approve?' 'qwen working task'
+          'codex working Fix?login')
+C_WHAT=("a braille spinner is codex's working" "...with no description too"
+        "...and amp's (not idle)" "Claude's ✳ is dropped" "Qwen's ✳ and U+FE0F are dropped"
+        "Qwen's ◐ and U+FE0E are dropped" "a C1 control is '?'")
+for r in $RENDERERS; do
+  render "$r" "$TMPD/c.dump" 20 LANG=C LC_ALL=C
+  for i in "${!C_EXPECT[@]}"; do
+    [ "${GOT[i]-}" = "${C_EXPECT[i]}" ] && report "$(label "$r"), LC_ALL=C: ${C_WHAT[i]}" pass \
+      || report "$(label "$r"), LC_ALL=C: ${C_WHAT[i]} (got: '${GOT[i]-}')" fail
+  done
+done
+# No locale at all, or LANG=C alone: nothing chose one, so the bash renderer
+# counts characters -- the whole list, widths and cuts, is the Rust core's.
+if [ -x "$BIN" ]; then
+  fulllist() { # $1 on|off, then env; the whole --list
+    local r="$1"; shift
+    env -i HOME="$TMPD/home" PATH="$TMPD/stub:$PATH" TMUX="$TMPD/no-server,1,0" \
+      INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
+      INTERDIMUX_NOW=1700086400 INTERDIMUX_SHOW_FULL_COMMAND=off INTERDIMUX_SHOW_GIT_BRANCH=off \
+      INTERDIMUX_SHOW_DIRS=off INTERDIMUX_ORDER=index INTERDIMUX_USE_RUST="$r" \
+      INTERDIMUX_TITLE_RULES='~/titles' INTERDIMUX_DUMP_IN="$TMPD/c.dump" "$@" \
+      bash "$SCRIPT" --list 2>/dev/null
+  }
+  fulllist on LANG=C.UTF-8 > "$TMPD/c.rust"
+  for how in "" "LANG=C"; do
+    # shellcheck disable=SC2086  # $how is one assignment or none
+    fulllist off $how > "$TMPD/c.bash"
+    if [ -s "$TMPD/c.rust" ] && cmp -s "$TMPD/c.rust" "$TMPD/c.bash"; then
+      report "bash, ${how:-no locale}: the whole list is the Rust core's, byte for byte" pass
+    else
+      report "bash, ${how:-no locale}: the whole list is the Rust core's, byte for byte" fail
+      ERRORS+="$(diff <(sed 's/\x1b\[[0-9;]*m//g' "$TMPD/c.rust") <(sed 's/\x1b\[[0-9;]*m//g' "$TMPD/c.bash") | head -4 | cat -v || :)"$'\n'
+    fi
+  done
+fi
+# prefix+g's count under LC_ALL=C: a rule of the user's whose approval is a
+# spinner, on a pane that sets it by OSC 2.
+if [ -r /proc/self/stat ]; then
+  printf '%s\n' 'myagent  approve  $1  %spin *' > "$TMPD/myrules"
+  cat > "$TMPD/myagent" <<'EOF_AGENT'
+#!/usr/bin/env bash
+printf '\033]2;\342\240\213 deploy?\007'
+exec -a myagent timeout 989 sleep 989
+EOF_AGENT
+  chmod +x "$TMPD/myagent"
+  unset TMUX TMUX_PANE
+  tmux -f /dev/null -L "$SOCK" new-session -d -s c -x 120 -y 30 -c "$TMPD" "exec '$TMPD/myagent'"
+  for _ in $(seq 1 100); do
+    case "$(tmux -L "$SOCK" display-message -p -t '=c:' '#{pane_title}')" in *deploy*) break ;; esac
+    sleep 0.05
+  done
+  : > "$TMPD/menu"
+  env TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0" \
+    TMUX_PANE="$(tmux -L "$SOCK" display-message -p -t '=c:' '#{pane_id}')" \
+    HOME="$TMPD/home" XDG_CONFIG_HOME="$TMPD/xdg" XDG_STATE_HOME="$TMPD/state" \
+    INTERDIMUX_CLAUDE_DIR="$TMPD/noclaude" INTERDIMUX_TITLE_RULES="$TMPD/myrules" \
+    LANG=C LC_ALL=C FZF_IN="$TMPD/menu" PATH="$TMPD/bin:$PATH" \
+    timeout 20 bash "$SCRIPT" --dashboard > /dev/null 2>&1 || :
+  grep -q '1 agent needs you' "$TMPD/menu" \
+    && report "LC_ALL=C: prefix+g counts a spinner a rule calls an approval" pass \
+    || report "LC_ALL=C: prefix+g counts a spinner a rule calls an approval" fail
+  tmux -L "$SOCK" kill-server 2>/dev/null || true
+fi
 
 echo
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"
