@@ -396,10 +396,10 @@ got_s=$(INTERDIMUX_BIN="$silent" INTERDIMUX_SHOW_DIRS=off bash "$SCRIPT" --list 
 
 # A pane cwd is arbitrary bytes on Linux; invalid UTF-8 must degrade one path,
 # not blank the whole list.
-# (`gather2`: the protocol the script speaks, IMUX_PROTO.  Under any other name
+# (`gather3`: the protocol the script speaks, IMUX_PROTO.  Under any other name
 # the binary renders nothing, and 0 = 0 would pass -- hence the -ge 1.)
-bad=$(printf 'a\x1fb\x1f1\x1f\n\x1e\n\x1e\n\x1e\n' | "$BIN" gather2 2>/dev/null | wc -l)
-badu=$(printf 'a\x1fb\x1f1\x1f\xff\xfe\n\x1e\n\x1e\n\x1e\n' | "$BIN" gather2 2>/dev/null | wc -l)
+bad=$(printf 'a\x1fb\x1f1\x1f\n\x1e\n\x1e\n\x1e\n\x1e\n' | "$BIN" gather3 2>/dev/null | wc -l)
+badu=$(printf 'a\x1fb\x1f1\x1f\xff\xfe\n\x1e\n\x1e\n\x1e\n\x1e\n' | "$BIN" gather3 2>/dev/null | wc -l)
 [ "$bad" -ge 1 ] && [ "$badu" = "$bad" ] && report "invalid UTF-8 input still renders its row" pass \
                      || report "invalid UTF-8 input still renders its row (got $badu, want $bad >= 1)" fail
 

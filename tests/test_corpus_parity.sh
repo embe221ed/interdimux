@@ -5,7 +5,7 @@
 # rust/tests/corpus/*.dump are recorded tmux dumps -- hostile names, bad ages,
 # every window flag, indexes at tmux's ceilings, an empty server -- and until
 # this suite only the Rust core ever saw them (rust/tests/golden.rs feeds them to
-# `imux gather2` on stdin).  The bash renderer is the one every install without
+# `imux gather3` on stdin).  The bash renderer is the one every install without
 # cargo runs, and it had no way to read a dump: its sections came straight from
 # tmux.  INTERDIMUX_DUMP_IN=<file> is that way in, at gather_targets' fetch site.
 #
@@ -100,11 +100,16 @@ render_script() {
       INTERDIMUX_USE_RUST="$rust" INTERDIMUX_DUMP_IN="$dump" "$@" \
       bash "$SCRIPT" --list
 }
+# The title rules the script ships, which it hands the binary itself -- read
+# out of the script exactly as golden.rs reads them.
+RULESET=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; sub(/^DEFAULT_TITLE_RULES='/, \"\"); print; next }
+               on && /^'\$/ { exit } on { print }" "$SCRIPT")
+STATE_OPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\\(.*\\)'\$/\\1/p" "$SCRIPT")
 # the binary alone, exactly as golden.rs runs it
 render_bin() {
   local dump="$1" cols="$2" rule="$3"
   env -i "${GENV[@]}" INTERDIMUX_COLS="$cols" INTERDIMUX_SESSION_RULE="$rule" \
-      "$BIN" gather2 < "$dump"
+      INTERDIMUX_TITLE_RULESET="$RULESET" INTERDIMUX_STATE_OPTS="$STATE_OPTS" "$BIN" gather3 < "$dump"
 }
 
 # every row has exactly four tab-separated fields and a known spec kind
@@ -225,9 +230,9 @@ fi
 # A dump with a stray RS (a cwd containing \x1e) is mis-framed.  Live, bash would
 # re-query tmux section by section; a dump has no second source, so it must
 # render NOTHING and say why -- never a shifted list, never a live server's.
-printf 's\x1f1700000000\x1f1\x1f\n\x1e\ns\x1f0\x1fw\x1f1\x1fsh\x1f/tmp/a\x1eb\x1f1\x1f0\x1f000\n\x1e\n\x1e\ns\x1f0\x1f0\n' > "$TMPD/stray.dump"
+printf 's\x1f1700000000\x1f1\x1f\n\x1e\ns\x1f0\x1fw\x1f1\x1fsh\x1f/tmp/a\x1eb\x1f1\x1f0\x1f000\n\x1e\n\x1e\ns\x1f0\x1f0\n\x1e\n' > "$TMPD/stray.dump"
 render_script "$TMPD/stray.dump" 120 on off > "$TMPD/out" 2> "$TMPD/err" || true
-if [ ! -s "$TMPD/out" ] && grep -q 'expected 4 sections, got 5' "$TMPD/err"; then
+if [ ! -s "$TMPD/out" ] && grep -q 'expected 4 or 5 sections, got 6' "$TMPD/err"; then
   report "a mis-framed dump renders nothing and says so" pass
 else
   report "a mis-framed dump renders nothing and says so" fail

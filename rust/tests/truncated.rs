@@ -18,7 +18,7 @@ const US: &str = "\u{1f}";
 
 fn render(dump: &str, extra: &[(&str, &str)]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_imux"));
-    cmd.arg("gather2")
+    cmd.arg("gather3")
         .env_clear()
         .env("HOME", "/home/u")
         .env("PATH", "/usr/bin:/bin")
@@ -47,10 +47,11 @@ fn line(fields: &[&str]) -> String {
     fields.join(US)
 }
 
-/// sessions / windows / panes / current, framed exactly as bash sends them
+/// sessions / windows / panes / current / (no) registry, framed exactly as
+/// bash sends them
 fn dump(sessions: &[String], windows: &[String], panes: &[String]) -> String {
     format!(
-        "{}\n\u{1e}\n{}\n\u{1e}\n{}\n\u{1e}\ncur{US}9{US}9\n",
+        "{}\n\u{1e}\n{}\n\u{1e}\n{}\n\u{1e}\ncur{US}9{US}9\n\u{1e}\n",
         sessions.join("\n"),
         windows.join("\n"),
         panes.join("\n"),

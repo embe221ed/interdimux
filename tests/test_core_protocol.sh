@@ -10,7 +10,7 @@
 # the timestamp as the name: every session drawn as `S:1790254646`, no window or
 # pane (they are grouped by the real name), and exit 0, so that WAS the picker.
 #
-# The subcommand is now the protocol's version (IMUX_PROTO / PROTOCOL, `gather2`)
+# The subcommand is now the protocol's version (IMUX_PROTO / PROTOCOL, `gather3`)
 # and an old binary exits 2 on a name it does not know.  Checked here with a
 # stand-in for such a binary -- one that knows only `gather` and reads the name
 # from field 2, as the old parser did:
@@ -138,7 +138,7 @@ list_in_pane() {
 # the display-messages the inner server logged that name the binary $1
 notices() {
   tmux -L "$SOCK" show-messages 2>/dev/null | grep -F 'command: display-message' \
-    | grep -F -- "$1" | grep -c 'does not speak gather2' || true
+    | grep -F -- "$1" | grep -c 'does not speak gather3' || true
 }
 
 # --- 1. a binary installed elsewhere (INTERDIMUX_BIN) ---------------------------

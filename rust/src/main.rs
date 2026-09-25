@@ -4,11 +4,12 @@
 //! the part that was 181ms of in-process bash: parsing the tmux dumps, sizing
 //! the columns, resolving commands and git branches, and rendering the rows.
 //!
-//! Contract: `imux gather2` writes exactly what `interdimux.sh --list` writes.
+//! Contract: `imux gather3` writes exactly what `interdimux.sh --list` writes.
 //! bash falls back to its own implementation when this binary is absent, so the
 //! two must stay in step — tests/test_rust_parity.sh enforces that.  The
 //! subcommand's name is the stdin protocol's version: see PROTOCOL.
 
+mod agent;
 mod dirs;
 mod format;
 mod git;
@@ -18,6 +19,7 @@ mod palette;
 mod proc;
 mod render;
 mod text;
+mod titles;
 mod widths;
 
 use std::io::{self, Write};
@@ -45,7 +47,7 @@ const US: char = '\u{1f}';
 /// know, and an extra argument or an environment variable would only have been
 /// ignored.  So a mismatch in either direction fails closed: bash falls back to
 /// its own renderer and says, once, that the binary needs rebuilding.
-const PROTOCOL: &str = "gather2";
+const PROTOCOL: &str = "gather3";
 
 fn env_is(name: &str, want: &str) -> bool {
     std::env::var(name).map(|v| v == want).unwrap_or(false)
@@ -83,9 +85,16 @@ struct Pane {
     session: String,
     widx: String,
     idx: String,
+    active: bool,
     cmd: String,
     path: String,
     pid: u32,
+    /// #{pane_id} (`%N`), #{pane_title} and the values of the options agent
+    /// plugins publish (one per INTERDIMUX_STATE_OPTS name, each ended by GS):
+    /// empty on a line cut before them.
+    id: String,
+    title: String,
+    opts: String,
 }
 
 fn main() {
@@ -110,10 +119,12 @@ fn main() {
     }
 }
 
-/// Read the three tmux sections from stdin, separated by RS (\x1e) lines, in the
-/// order sessions / windows / panes / current-target.  bash already performs the
-/// single batched query, so this binary never shells out to tmux itself — which
-/// keeps it testable and keeps the socket plumbing in one place.
+/// Read the five sections from stdin, separated by RS (\x1e) lines, in the
+/// order sessions / windows / panes / current-target / Claude registry.  The
+/// first four are bash's single batched tmux query and the fifth is what bash
+/// read from ~/.claude/sessions (claude_registry_r), so this binary never
+/// shells out to tmux or reads agent files itself — which keeps it testable
+/// and keeps the socket plumbing in one place.
 fn read_sections() -> Vec<String> {
     // Read BYTES, not a String.  A pane's cwd is arbitrary bytes on Linux, so
     // read_to_string() errors on the first non-UTF-8 path — and swallowing that
@@ -127,14 +138,14 @@ fn read_sections() -> Vec<String> {
         .split('\u{1e}')
         .map(|s| s.trim_matches('\n').to_string())
         .collect();
-    // EXACTLY four sections, or the framing is not what we think it is.  A pane
+    // EXACTLY five sections, or the framing is not what we think it is.  A pane
     // cwd may legally contain RS (tmux only rejects control bytes in session and
     // window NAMES), and one stray RS renumbers every later section: windows and
     // panes vanish and the current-row marker is lost — silently, with a
     // successful exit.  bash has the same guard on its side; exiting non-zero
     // here makes it fall back to its own renderer instead of showing a wrong list.
-    if parts.len() != 4 {
-        eprintln!("imux: expected 4 input sections, got {}", parts.len());
+    if parts.len() != 5 {
+        eprintln!("imux: expected 5 input sections, got {}", parts.len());
         std::process::exit(3);
     }
     parts
@@ -146,6 +157,7 @@ fn gather() {
     let windows_raw = sections.get(1).cloned().unwrap_or_default();
     let panes_raw = sections.get(2).cloned().unwrap_or_default();
     let cur_raw = sections.get(3).cloned().unwrap_or_default();
+    let registry = agent::parse_registry(sections.get(4).map(String::as_str).unwrap_or(""));
 
     let home = env_or("HOME", "");
     let p = Palette::from_env();
@@ -157,10 +169,13 @@ fn gather() {
     let session_rule = env_is("INTERDIMUX_SESSION_RULE", "on");
     let now: i64 = env_or("INTERDIMUX_NOW", "0").parse().unwrap_or(0);
 
-    let mut cur = cur_raw.splitn(3, US);
+    let mut cur = cur_raw.splitn(5, US);
     let current_session = cur.next().unwrap_or("").to_string();
     let current_window = cur.next().unwrap_or("").to_string();
     let current_pane = cur.next().unwrap_or("").to_string();
+    let host = cur.next().unwrap_or("").to_string();
+    let host_short = cur.next().unwrap_or("").to_string();
+    let acfg = agent::Config::from_env(&host, &host_short);
 
     // ---- parse -------------------------------------------------------------
     //
@@ -255,10 +270,22 @@ fn gather() {
         .filter(|l| !l.is_empty())
         .filter_map(|l| {
             let f: Vec<&str> = l.split(US).collect();
-            if f.len() > 8 || f[0].is_empty() {
+            if f.len() > 11 || f[0].is_empty() {
                 return None;
             }
-            let whole = f.len() == 8 && !f[7].is_empty();
+            // #{pane_id}, #{pane_title} and the options follow #{window_panes}
+            // (gather3).  A
+            // pane id that is there and is not %N: not a pane line at all.
+            if let Some(id) = f.get(8) {
+                if !id.is_empty() && !is_pane_id(id) {
+                    return None;
+                }
+            }
+            // Whole means all eleven fields.  Fewer ending in US is a line cut
+            // in its tail -- or a US inside the cwd of one cut before
+            // #{window_panes}, whose "pid" is whatever followed the stray
+            // separator.  Either way it is a cut line: never read its pid.
+            let whole = f.len() == 11 && !f[7].is_empty();
             // A cut pane line is kept on the same terms as a window line.  Here
             // the trailing separator is the ONLY difference between a line cut
             // before #{pane_active} (`s^_0^_1^_`) and the tail of a line split
@@ -275,9 +302,13 @@ fn gather() {
                 session: f[0].into(),
                 widx: f[1].into(),
                 idx: f[2].into(),
+                active: f.get(3) == Some(&"1"),
                 cmd: f.get(4).unwrap_or(&"").to_string(),
                 path: f.get(5).unwrap_or(&"").to_string(),
                 pid: if whole { f[6].parse().unwrap_or(0) } else { 0 },
+                id: f.get(8).unwrap_or(&"").to_string(),
+                title: f.get(9).unwrap_or(&"").to_string(),
+                opts: f.get(10).unwrap_or(&"").to_string(),
             })
         })
         .collect();
@@ -332,9 +363,11 @@ fn gather() {
     let mut out = io::BufWriter::new(stdout.lock());
     let mut session_dirs: std::collections::HashSet<String> = Default::default();
 
-    let cmd_field = |cmd: &str, pid: u32, r: &mut Resolver| -> String {
+    let cmd_field = |cmd: &str, pid: u32, pn: Option<&&Pane>, r: &mut Resolver| -> String {
         let raw = if show_full { r.full_command(pid, cmd) } else { cmd.replace('\t', " ") };
-        format::format_command(&raw, &p).0
+        let (id, opts, title) =
+            pn.map(|x| (x.id.as_str(), x.opts.as_str(), x.title.as_str())).unwrap_or(("", "", ""));
+        agent::command_field(&raw, pid, id, title, opts, &acfg, &registry, &p, now)
     };
 
     for s in &sessions {
@@ -370,7 +403,11 @@ fn gather() {
             let ctx = render::ctx_field(
                 &x.path, x.zoomed, x.bell, x.activity, &w, &p, &home, &mut git, show_git,
             );
-            let cmd = cmd_field(&x.cmd, x.pid, &mut res);
+            // the window row speaks for its active pane: its id, options, title
+            let ap = panes_by_win
+                .get(&(x.session.as_str(), x.idx.as_str()))
+                .and_then(|ps| ps.iter().rev().find(|pn| pn.active));
+            let cmd = cmd_field(&x.cmd, x.pid, ap, &mut res);
             writeln!(out, "{}\t{}\t{}\tW:{}:{}", ident, ctx, cmd, x.session, x.idx).ok();
 
             if x.panes > 1 {
@@ -383,7 +420,7 @@ fn gather() {
                         let ctx = render::ctx_field(
                             &pn.path, false, false, false, &w, &p, &home, &mut git, show_git,
                         );
-                        let cmd = cmd_field(&pn.cmd, pn.pid, &mut res);
+                        let cmd = cmd_field(&pn.cmd, pn.pid, Some(pn), &mut res);
                         writeln!(
                             out, "{}\t{}\t{}\tP:{}:{}:{}",
                             ident, ctx, cmd, pn.session, pn.widx, pn.idx
@@ -437,6 +474,11 @@ fn gather() {
 /// A tmux window or pane index: present, and nothing but ASCII digits.
 fn is_index(f: Option<&&str>) -> bool {
     matches!(f, Some(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A tmux pane id: `%` and ASCII digits.
+fn is_pane_id(s: &str) -> bool {
+    s.len() > 1 && s.starts_with('%') && s[1..].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// window_active / pane_active on a line that is not whole: 0 or 1 -- or

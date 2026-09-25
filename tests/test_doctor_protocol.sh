@@ -81,7 +81,7 @@ for b in old newer; do
   senv INTERDIMUX_BIN "$TMPD/$b"
   out=$(doctor)
   has "the $b build the list refuses is a problem, before any list is drawn" "$out" \
-    "✗ $TMPD/$b is from another version of interdimux (it does not speak gather2)"
+    "✗ $TMPD/$b is from another version of interdimux (it does not speak gather3)"
   hasnt "...not a green tick" "$out" "✓ imux 0.1.0"
   has "...and it says how to get one that does" "$out" "rebuild it, or point INTERDIMUX_BIN at a build of this version"
   [ "$(doctor_rc)" = 1 ] && report "...and --doctor exits 1 for it" pass \
@@ -92,7 +92,7 @@ done
 senv INTERDIMUX_BIN "$TMPD/old"
 rm -f "$XDG_STATE_HOME/interdimux/errors.log"
 INTERDIMUX_BIN="$TMPD/old" INTERDIMUX_USE_RUST=on bash "$SCRIPT" --list >/dev/null 2>&1 || true
-if grep -q 'does not speak gather2' "$XDG_STATE_HOME/interdimux/errors.log" 2>/dev/null; then
+if grep -q 'does not speak gather3' "$XDG_STATE_HOME/interdimux/errors.log" 2>/dev/null; then
   report "premise: the list refuses that binary" pass
 else
   report "premise: the list refuses that binary" fail

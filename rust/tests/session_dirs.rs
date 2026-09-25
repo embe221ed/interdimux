@@ -23,7 +23,7 @@ fn d_rows(root: &PathBuf, dump: &str, recent: &[&str]) -> Vec<String> {
     std::fs::create_dir_all(data.join("interdimux")).unwrap();
     std::fs::write(data.join("interdimux/recent_dirs"), recent.join("\n") + "\n").unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
-        .arg("gather2")
+        .arg("gather3")
         .env_clear()
         .env("HOME", "/home/u")
         .env("PATH", "/usr/bin:/bin")
@@ -59,7 +59,7 @@ fn a_sessions_start_directory_is_not_offered_again_after_a_cd() {
     // session `web` was started in web/ and its only pane has since cd'd to src/
     let dump = format!(
         "web{US}1700000000{US}1{US}{US}{web}\n\u{1e}\n\
-         web{US}0{US}bash{US}1{US}bash{US}{web}/src{US}1{US}0{US}000\n\u{1e}\n\u{1e}\nx{US}0{US}0\n"
+         web{US}0{US}bash{US}1{US}bash{US}{web}/src{US}1{US}0{US}000\n\u{1e}\n\u{1e}\nx{US}0{US}0\n\u{1e}\n"
     );
     let got = d_rows(&root, &dump, &[web, other]);
     assert_eq!(got, vec![other.to_string()], "web was re-offered after a cd");
@@ -73,7 +73,7 @@ fn a_unit_separator_inside_the_start_directory_stays_in_it() {
     std::fs::create_dir_all(&odd).unwrap();
     let odd = odd.to_str().unwrap();
     let dump = format!(
-        "odd{US}1700000000{US}1{US}{US}{odd}\n\u{1e}\n\u{1e}\n\u{1e}\nx{US}0{US}0\n"
+        "odd{US}1700000000{US}1{US}{US}{odd}\n\u{1e}\n\u{1e}\n\u{1e}\nx{US}0{US}0\n\u{1e}\n"
     );
     let got = d_rows(&root, &dump, &[odd]);
     assert!(got.is_empty(), "the session's own directory was offered: {:?}", got);

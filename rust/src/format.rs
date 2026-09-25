@@ -32,7 +32,7 @@ fn is_editor(base: &str) -> bool {
 /// run: python and lua, each with an optional version of ASCII digits and
 /// dots, node nodejs ruby perl php, and the shells.  Mirrors the `case` in bash
 /// `format_command`.
-fn is_interpreter(base: &str) -> bool {
+pub fn is_interpreter(base: &str) -> bool {
     let versioned = |stem: &str| {
         base.strip_prefix(stem)
             .is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))

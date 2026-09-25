@@ -28,7 +28,7 @@ fn corpus_dir() -> PathBuf {
 /// renderer itself. Everything time-, host-, or config-dependent is fixed here.
 fn render(dump: &str, extra: &[(&str, &str)]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_imux"));
-    cmd.arg("gather2")
+    cmd.arg("gather3")
         .env_clear()
         .env("HOME", "/home/u")
         .env("PATH", "/usr/bin:/bin")
@@ -72,11 +72,11 @@ fn render(dump: &str, extra: &[(&str, &str)]) -> String {
 }
 
 /// Like `render`, but tolerates a deliberate rejection: the binary exits 3 when
-/// the input framing is not exactly four RS-separated sections, so that bash
+/// the input framing is not exactly five RS-separated sections, so that bash
 /// falls back to its own renderer rather than showing a mis-framed list.
 fn try_render(dump: &str) -> (Option<i32>, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
-        .arg("gather2")
+        .arg("gather3")
         .env_clear()
         .env("HOME", "/home/u")
         .env("PATH", "/usr/bin:/bin")
@@ -424,13 +424,13 @@ fn identity_columns_all_have_equal_display_width() {
 /// directory. The binary must REFUSE rather than render a mis-framed list.
 #[test]
 fn a_stray_record_separator_is_rejected_not_misparsed() {
-    let good = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let good = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n\u{1e}\n";
     let (code, out) = try_render(good);
     assert_eq!(code, Some(0), "the well-formed control case must render");
     assert!(!out.is_empty());
 
     // the same dump with an extra RS, as a cwd containing \x1e would produce
-    let bad = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/we\u{1e}ird\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let bad = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/we\u{1e}ird\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n\u{1e}\n";
     let (code, out) = try_render(bad);
     assert_eq!(code, Some(3), "a stray RS must be rejected, not rendered");
     assert!(out.is_empty(), "a rejected input must print nothing");
@@ -441,7 +441,7 @@ fn a_stray_record_separator_is_rejected_not_misparsed() {
 #[test]
 fn a_stray_unit_separator_drops_the_row_rather_than_shifting_fields() {
     // 10 fields where 9 are expected, because the path contains one US
-    let bad = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/x\u{1f}1\u{1f}1\u{1f}4242\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let bad = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/x\u{1f}1\u{1f}1\u{1f}4242\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n\u{1e}\n";
     let (code, out) = try_render(bad);
     assert_eq!(code, Some(0));
     // the session row survives; the malformed window row is dropped, not
@@ -457,10 +457,47 @@ fn a_stray_unit_separator_drops_the_row_rather_than_shifting_fields() {
 /// escape sequence into the popup and silently broke the column maths.
 #[test]
 fn control_bytes_in_a_path_are_neutralised() {
-    let dump = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/e\u{1b}[31mvil\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n";
+    let dump = "s\u{1f}1700000000\u{1f}1\u{1f}\n\u{1e}\ns\u{1f}0\u{1f}w\u{1f}1\u{1f}zsh\u{1f}/home/u/e\u{1b}[31mvil\u{1f}1\u{1f}0\u{1f}000\n\u{1e}\n\u{1e}\ns\u{1f}0\u{1f}0\n\u{1e}\n";
     let (code, out) = try_render(dump);
     assert_eq!(code, Some(0));
     // the only ESCs left must be our own SGR colours, never one from the path
     assert!(!out.contains("\u{1b}[31m"), "a path injected its own escape: {:?}", out);
     assert!(!out.contains('\r'), "a CR in a path would redraw the row over itself");
+}
+
+/// The title rules the script ships (DEFAULT_TITLE_RULES).  bash owns them and
+/// hands them over as INTERDIMUX_TITLE_RULESET, so they are read from the
+/// script rather than copied here.
+fn shipped_title_rules() -> String {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/interdimux.sh");
+    let s = std::fs::read_to_string(script).expect("read the script");
+    let start = s.find("DEFAULT_TITLE_RULES='").expect("DEFAULT_TITLE_RULES") + "DEFAULT_TITLE_RULES='".len();
+    let end = start + s[start..].find("\n'").expect("the closing quote");
+    s[start..end].to_string()
+}
+
+/// The option names whose values the script puts on each pane line
+/// (DEFAULT_STATE_OPTS), in order.
+fn shipped_state_opts() -> String {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/interdimux.sh");
+    let s = std::fs::read_to_string(script).expect("read the script");
+    let start = s.find("\nDEFAULT_STATE_OPTS='").expect("DEFAULT_STATE_OPTS") + "\nDEFAULT_STATE_OPTS='".len();
+    let end = start + s[start..].find('\'').expect("the closing quote");
+    s[start..end].to_string()
+}
+
+/// Agent rows: Claude's registry (the fifth section) with a pane pid that
+/// matches and one that does not, codex's title states, a title that only
+/// names the project, an idle shell's prompt title, and titles of apps no rule
+/// knows -- shown only under @interdimux-show-title all -- and state an agent
+/// plugin published as a pane option (positional values, see DEFAULT_STATE_OPTS).
+#[test]
+fn agent_titles_states_and_the_registry() {
+    let rules = shipped_title_rules();
+    // the first rule and the last: the whole block was read
+    assert!(rules.contains("✳ Claude Code") && rules.contains("@dmux_attention "),
+        "the rules were not found whole in the script");
+    let opts = shipped_state_opts();
+    assert!(opts.contains("pane_status"), "DEFAULT_STATE_OPTS was not found");
+    check("agents", &[("INTERDIMUX_TITLE_RULESET", &rules), ("INTERDIMUX_STATE_OPTS", &opts)]);
 }
