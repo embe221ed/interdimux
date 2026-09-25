@@ -186,14 +186,25 @@ for m in "${MODES[@]}"; do
     report "[$label] a further fruitless keystroke re-describes the new query" fail
     ERRORS+="    bar: $(printf '%s\n' "$s" | grep -E 'create|enter|switch' | head -1 | sed 's/^ *//')"$'\n'
   fi
-  # ...and the row hints come back with the matches.
+  # ...and the row hints come back with the matches, the zero-match
+  # announcement ("create bet in <dir>") gone.  From fzf 0.63 the bar also
+  # names what alt-enter would make while a query is typed ("M-⏎ create bet",
+  # review UX-54: no " in <dir>"); below that it must not appear at all.
   keys BSpace BSpace
   wait_query 'bet' ' [1-9][0-9]*/' || true
   s=$(settle)
-  if printf '%s' "$s" | grep -qF 'enter switch' && ! printf '%s' "$s" | grep -qF 'create bet'; then
+  case "$env_line" in
+    *FZF_MINOR=5[0-9]*|*FZF_MINOR=6[0-2]*)
+      printf '%s' "$s" | grep -qF 'enter switch' && ! printf '%s' "$s" | grep -qF 'create bet' ;;
+    *)
+      printf '%s' "$s" | grep -qF 'enter switch' && printf '%s' "$s" | grep -qF 'M-⏎ create bet' \
+        && ! printf '%s' "$s" | grep -qF 'create bet in' ;;
+  esac && ok=1 || ok=0
+  if [ "$ok" = 1 ]; then
     report "[$label] the row hints return with the matches" pass
   else
     report "[$label] the row hints return with the matches" fail
+    ERRORS+="    bar: $(printf '%s\n' "$s" | grep -E 'create|enter|switch' | tail -1 | sed 's/^ *//')"$'\n'
   fi
   tmux -L "$OUTER" kill-server 2>/dev/null || true
 done

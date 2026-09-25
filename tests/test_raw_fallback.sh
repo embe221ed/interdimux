@@ -8,12 +8,17 @@
 #   the cost   - that bind used to run, per keystroke, a synchronous
 #                `<user shell> -c "sh -c '<guard>'"` (two shells) and then an
 #                unconditional background --footer-for, although `focus`
-#                already rewrites the bar whenever the row changes.  Only the
-#                zero-match state needs `result` to touch the bar (the cursor
-#                sits on a dimmed row and focus does not fire), so the guard
-#                now asks for --footer-for itself, only at zero matches and on
-#                the keystroke that leaves them; and it runs in the user's
-#                shell directly when that is a POSIX-family shell.
+#                already rewrites the bar whenever the row changes.  So the
+#                guard asks for --footer-for itself, only where focus is blind
+#                and the bar has something new to say; and it runs in the
+#                user's shell directly when that is a POSIX-family shell.
+#                Where focus is blind: at zero matches (the cursor sits on a
+#                dimmed row), on the keystroke that leaves them, and after a
+#                reload.  What is new: since review UX-54 the bar names what
+#                alt-enter would create while a query is typed, and that name
+#                changes with every keystroke -- so a keystroke under an
+#                unmoved cursor does re-exec --footer-for now, ONCE, in the
+#                background, where it used to re-exec none.
 #   the result - with those re-execs gone, the bar must still announce the
 #                create at zero matches, re-describe each fruitless keystroke,
 #                and bring the row hints back with the matches -- in bash, in
@@ -170,9 +175,13 @@ FOOTER='index($5, "--footer-for") > 0'
 # --- the cost of a keystroke that keeps matching --------------------------------
 # The cursor starts on row 1, alpha, and `a l p` narrow the query onto alpha:
 # change:first and the guard's `best` both leave the cursor where it is, so
-# `focus` never fires and nothing about the bar changes.  Any --footer-for in
-# that stretch is the `result` bind's own.  Then Down, whose focus
-# --footer-for is the marker that everything before it has been started.
+# `focus` never fires.  Any --footer-for in that stretch is the `result`
+# bind's own, and the only thing about the bar that changes is the create
+# key's name (review UX-54): one re-exec per keystroke, no more.  Counted where
+# the user's shell starts it (the `-c` process), which fzf does at once --
+# the script's own bash can be cut short by the next keystroke's bg-cancel.
+# Then Down, whose focus --footer-for is the marker that everything before it
+# has been started.
 if launch 'bash -c'; then
   settle > /dev/null
   mark=$(wc -l < "$LOG")
@@ -187,11 +196,11 @@ if launch 'bash -c'; then
   else
     keys Down
     if wait_log "$mark" "$FOOTER && \$2 == \"down\""; then
-      n=$(log_after "$mark" "$FOOTER && \$2 != \"down\"" | wc -l)
-      if [ "$n" = 0 ]; then
-        report "a keystroke that keeps matching re-execs no --footer-for" pass
+      n=$(log_after "$mark" "$FOOTER && \$2 != \"down\" && index(\$5, \"-c \") == 1" | wc -l)
+      if [ "$n" = 3 ]; then
+        report "a keystroke that keeps matching re-execs --footer-for once, for the create key's name" pass
       else
-        report "a keystroke that keeps matching re-execs no --footer-for ($n processes for 3 keys)" fail
+        report "a keystroke that keeps matching re-execs --footer-for once, for the create key's name ($n for 3 keys)" fail
       fi
       n=$(log_after "$mark" "\$1 == \"sh\" && $GUARD" | wc -l)
       if [ "$n" = 0 ]; then
@@ -246,13 +255,17 @@ for ws in "${SHELLS[@]}"; do
   else
     report "[$ws] a further fruitless keystroke re-describes the new query" fail
   fi
+  # The zero-match announcement ("create bet in <dir>") goes; the create key's
+  # entry ("M-⏎ create bet", review UX-54) is there while a query is typed.
   keys BSpace BSpace
   wait_query 'bet' ' [1-9][0-9]*/' || true
   s=$(settle)
-  if printf '%s' "$s" | grep -qF 'enter switch' && ! printf '%s' "$s" | grep -qF 'create bet'; then
+  if printf '%s' "$s" | grep -qF 'enter switch' && printf '%s' "$s" | grep -qF 'M-⏎ create bet' \
+     && ! printf '%s' "$s" | grep -qF 'create bet in'; then
     report "[$ws] the row hints return with the matches" pass
   else
     report "[$ws] the row hints return with the matches" fail
+    ERRORS+="    bar: $(printf '%s\n' "$s" | grep -E 'create|enter|switch' | tail -1 | sed 's/^ *//')"$'\n'
   fi
   # The same round trip with the cursor never moving: on row 1, under a query
   # whose best match is row 1, change:first and `best` both leave it there, so
@@ -270,7 +283,7 @@ for ws in "${SHELLS[@]}"; do
     wait_query 'alp' ' [1-9][0-9]*/' || true
     s=$(settle)
     if [[ "$(cur_row)" == *'▸ alpha'* ]] && printf '%s' "$s" | grep -qF 'enter switch' \
-       && ! printf '%s' "$s" | grep -qF 'create alp'; then
+       && printf '%s' "$s" | grep -qF 'M-⏎ create alp' && ! printf '%s' "$s" | grep -qF 'create alp in'; then
       report "[$ws] the row hints return under an unmoved cursor" pass
     else
       report "[$ws] the row hints return under an unmoved cursor" fail
