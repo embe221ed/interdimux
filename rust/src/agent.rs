@@ -157,8 +157,77 @@ pub fn agent_of<'a>(s: &'a str, cfg: &Config) -> Option<(String, &'a str)> {
     if wb.is_empty() || w1.starts_with('-') {
         return None;
     }
+    // a package's own file, run by path (`node …/codex/bin/codex.js`)
+    let wb = [".js", ".mjs", ".cjs"]
+        .iter()
+        .find_map(|e| wb.strip_suffix(e))
+        .unwrap_or(wb);
     if cfg.scripts.iter().any(|k| k == wb) {
         return Some((wb.to_string(), &r1[w1.len()..]));
+    }
+    if wb == "npx" || wb == "npx-cli" {
+        return npx_agent(&r1[w1.len()..], cfg);
+    }
+    None
+}
+
+/// Packages npx runs an agent from (bash NPX_AGENTS).
+const NPX_AGENTS: &[(&str, &str)] = &[
+    ("@google/gemini-cli", "gemini"),
+    ("@openai/codex", "codex"),
+    ("@anthropic-ai/claude-code", "claude"),
+    ("@qwen-code/qwen-code", "qwen"),
+    ("@github/copilot", "copilot"),
+];
+
+/// `npx [options] <package>[@version] [args]`: npm runs the package's bin as
+/// a grandchild, so the row is npx's argv and the package names the agent
+/// (bash npx_agent).
+fn npx_agent<'a>(rest: &'a str, cfg: &Config) -> Option<(String, &'a str)> {
+    let mut pos = 0;
+    let mut pkg: Option<&str> = None;
+    let mut skip = false;
+    let w = loop {
+        let r = &rest[pos..];
+        let t = r.trim_start_matches(' ');
+        if t.is_empty() {
+            return None;
+        }
+        let w = t.split(' ').next().unwrap_or("");
+        pos += r.len() - t.len() + w.len();
+        if skip {
+            pkg = Some(w);
+            skip = false;
+            continue;
+        }
+        match w {
+            "-p" | "--package" => {
+                skip = true;
+                continue;
+            }
+            "-c" | "--call" => return None,
+            _ => {}
+        }
+        if let Some(p) = w.strip_prefix("--package=") {
+            pkg = Some(p);
+            continue;
+        }
+        if w.starts_with('-') {
+            continue;
+        }
+        break w;
+    };
+    let spec = pkg.unwrap_or(w);
+    // `pkg@version`: from the last '@' that is not the scope's leading one
+    let name = match spec.get(1..).and_then(|s| s.rfind('@')) {
+        Some(i) => &spec[..i + 1],
+        None => spec,
+    };
+    if let Some((_, a)) = NPX_AGENTS.iter().find(|(p, _)| *p == name) {
+        return Some((a.to_string(), &rest[pos..]));
+    }
+    if pkg.is_some() && cfg.known.iter().any(|k| k == w) {
+        return Some((w.to_string(), &rest[pos..]));
     }
     None
 }
@@ -378,6 +447,16 @@ mod tests {
         assert_eq!(n("node --inspect /x/codex"), None);
         assert_eq!(n("node /x/server.js"), None);
         assert_eq!(n("pythonw /x/aider"), None);
+        // a package's file run by path; npx and the package it runs
+        assert_eq!(n("node /p/node_modules/@openai/codex/bin/codex.js resume"), Some(("codex".into(), " resume".into())));
+        assert_eq!(n("node /u/bin/npx @google/gemini-cli --yolo"), Some(("gemini".into(), " --yolo".into())));
+        assert_eq!(n("node /u/bin/npx -y @google/gemini-cli@latest"), Some(("gemini".into(), "".into())));
+        assert_eq!(n("node /u/bin/npx --package=@openai/codex codex exec x"), Some(("codex".into(), " exec x".into())));
+        assert_eq!(n("node /u/bin/npx -p @qwen-code/qwen-code qwen"), Some(("qwen".into(), "".into())));
+        assert_eq!(n("node /u/bin/npx -p something claude"), Some(("claude".into(), "".into())));
+        assert_eq!(n("node /u/bin/npx cowsay hi"), None);
+        assert_eq!(n("node /u/bin/npx -c 'gemini'"), None);
+        assert_eq!(n("node /u/bin/npx"), None);
         assert_eq!(n("vim codex"), None);
         // `off` recognises nothing
         let mut off = cfg();

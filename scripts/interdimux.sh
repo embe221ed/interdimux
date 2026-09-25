@@ -2805,8 +2805,43 @@ agent_of() {
   esac
   r1="${s#"$a0"}"; r1="${r1# }"; w1="${r1%% *}"; wb="${w1##*/}"
   [[ -z "$wb" || "$w1" == -* ]] && return 0
+  # A package's own file, run by path (`node …/@openai/codex/bin/codex.js`).
+  case "$wb" in *.js|*.mjs|*.cjs) wb="${wb%.*}" ;; esac
   if [[ "$AGENT_SCRIPTS" == *" $wb "* ]]; then
     AG_NAME="$wb" AG_REST="${r1#"$w1"}"
+    return 0
+  fi
+  case "$wb" in npx|npx-cli) npx_agent "${r1#"$w1"}" ;; esac
+  return 0
+}
+
+# `npx [options] <package>[@version] [args]` -- gemini's own quick start is
+# `npx @google/gemini-cli`.  npm runs the package's bin as a GRANDCHILD and
+# npx stays the pane's foreground process, so the row's argv is npx's: the
+# package names the agent.  `-p <package> <command>` names it by either.
+# Sets AG_NAME / AG_REST (the arguments after the package) for a known one.
+NPX_AGENTS=' @google/gemini-cli=gemini @openai/codex=codex @anthropic-ai/claude-code=claude @qwen-code/qwen-code=qwen @github/copilot=copilot '
+npx_agent() {
+  local rest="$1" w pkg="" skip=0 m
+  while :; do
+    rest="${rest#"${rest%%[! ]*}"}"
+    [ -n "$rest" ] || return 0
+    w="${rest%% *}"; rest="${rest#"$w"}"
+    if [ "$skip" = 1 ]; then pkg="$w" skip=0; continue; fi
+    case "$w" in
+      -p|--package) skip=1; continue ;;
+      --package=*) pkg="${w#--package=}"; continue ;;
+      -c|--call) return 0 ;;
+      -*) continue ;;
+    esac
+    break
+  done
+  m="${pkg:-$w}"
+  case "$m" in ?*@*) m="${m%@*}" ;; esac
+  if [[ "$NPX_AGENTS" == *" $m="* ]]; then
+    m="${NPX_AGENTS#* "$m"=}"; AG_NAME="${m%% *}" AG_REST="$rest"
+  elif [ -n "$pkg" ] && [[ "$AGENT_KNOWN" == *" $w "* ]]; then
+    AG_NAME="$w" AG_REST="$rest"
   fi
   return 0
 }
@@ -2867,9 +2902,11 @@ codex           working  $1  %spin * | *
 codex           working  -   %spin *
 codex           -        $1  * | *
 codex           -        -   *
-# gemini-cli: a glyph and a word, then (folder), padded to 80 columns
+# gemini-cli (windowTitle.ts): a glyph, TWO spaces, a word, then (folder),
+# padded to 80 columns; a thought, when shown, then (folder) if it fits
 gemini          approve  -   ✋*
-gemini          working  -   ✦ Working…*
+gemini          working  -   ✦  Working…*
+gemini          working  $1  ✦  * (*)
 gemini          working  $1  ✦ *
 gemini          working  -   ⏲*
 gemini          idle     -   ◇*
