@@ -2314,16 +2314,21 @@ sanitize_args() {
   REPLY="${REPLY//"$_LSEP"/?}"
   REPLY="${REPLY//"$_PSEP"/?}"
   case "$REPLY" in *[[:cntrl:]]*) ;; *) return 0 ;; esac
-  local out="" i ch
-  for (( i = 0; i < ${#REPLY}; i++ )); do
-    ch="${REPLY:i:1}"
-    case "$ch" in
-      [[:cntrl:]]) out+='?' ;;
-      *)           out+="$ch" ;;
-    esac
-  done
-  REPLY="$out"
+  _sanitize_cntrl
   return 0
+}
+# Every control left in REPLY made '?', in two substitutions over the BYTES: a
+# C0 control or DEL is one byte, a C1 control (U+0080-009F) is \xc2 and one of
+# \x80-\x9f -- \xc2 only ever leads a sequence, so that pair is always one
+# character.  The class the Rust core names (char::is_control), in every
+# locale.  It was a loop of ${REPLY:i:1}, which costs O(i) per character in a
+# UTF-8 locale: a title of 8,000 characters with one U+0085 in it (tmux keeps
+# C1 controls in titles) took 8 s (review R13).  A function, for the local
+# LC_ALL.
+_sanitize_cntrl() {
+  local LC_ALL=C
+  REPLY="${REPLY//[[:cntrl:]]/?}"
+  REPLY="${REPLY//$'\xc2'[$'\x80'-$'\x9f']/?}"
 }
 
 # Space-joined argv of a pid, ps-style.  REPLY is empty when the process is
@@ -2991,8 +2996,19 @@ title_text_r() {
   case "$t" in
     *$'\xe2\x80'*|*$'\xe2\x81'*) for _b in "${_BIDI_CHARS[@]}"; do t="${t//"$_b"/}"; done ;;
   esac
-  t="${t#"${t%%[! ]*}"}"
-  REPLY="${t%"${t##*[! ]}"}"
+  trim_blanks_r "$t"
+}
+
+# $1 without its leading and trailing blanks, in REPLY.  Each run is measured
+# with an anchored regex and cut by its length: the ${t#"${t%%[! ]*}"} and
+# ${t%"${t##*[! ]}"} idiom is quadratic in the run (16,000 trailing blanks
+# cost 2.2 s, review R13), and ONE regex over the whole text, ^ *(.*[^ ]) *$,
+# does not match at all once the text holds a byte that is not UTF-8.
+trim_blanks_r() {
+  REPLY="$1"
+  case "$REPLY" in ' '*) [[ "$REPLY" =~ ^\ + ]] && REPLY="${REPLY:${#BASH_REMATCH[0]}}" ;; esac
+  case "$REPLY" in *' ') [[ "$REPLY" =~ \ +$ ]] && REPLY="${REPLY:0:${#REPLY}-${#BASH_REMATCH[0]}}" ;; esac
+  return 0
 }
 
 # A description as the row shows it: one leading status glyph dropped, with
@@ -3000,18 +3016,18 @@ title_text_r() {
 # braille spinners (U+2800-28FF), ✳ (U+2733), ◐◑◒◓ (U+25D0-25D3).  Compared
 # by code point, as the Rust core does.
 title_glyph_r() {
-  local t="$1" cp
-  t="${t#"${t%%[! ]*}"}"
-  case "${t:0:1}" in $'\xef\xb8\x8e'|$'\xef\xb8\x8f') t="${t:1}"; t="${t#"${t%%[! ]*}"}" ;; esac
+  local t cp
+  trim_blanks_r "$1"; t="$REPLY"
+  case "${t:0:1}" in $'\xef\xb8\x8e'|$'\xef\xb8\x8f') trim_blanks_r "${t:1}"; t="$REPLY" ;; esac
   if [ -n "$t" ]; then
     printf -v cp '%d' "'${t:0:1}" 2>/dev/null || cp=0
     if (( (cp >= 0x2800 && cp <= 0x28ff) || cp == 0x2733 || (cp >= 0x25d0 && cp <= 0x25d3) )); then
       t="${t:1}"
       case "${t:0:1}" in $'\xef\xb8\x8e'|$'\xef\xb8\x8f') t="${t:1}" ;; esac
-      t="${t#"${t%%[! ]*}"}"
+      trim_blanks_r "$t"; t="$REPLY"
     fi
   fi
-  REPLY="${t%"${t##*[! ]}"}"
+  REPLY="$t"
 }
 
 # One rule line split into its four fields (RULE_A RULE_S RULE_D RULE_P), the

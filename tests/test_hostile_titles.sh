@@ -14,23 +14,30 @@
 #     characters are counted too
 #   * a 100,000-character title costs the bash renderer well under its budget
 #     (the window row split it with ${x#*"$US"}: quadratic, 90 s at 1 MB)
+#   * cleaning is linear too: a description of 20,000 C1 controls, or padded
+#     with 30,000 blanks each side, renders within its budget (the bash
+#     control-character loop and blank trims were quadratic: minutes)
+#   * prefix+g's count, which always runs in bash, with a codex pane whose
+#     title is 5,000 é and a U+0085: it took 4.3 s, live
 #
 # Expected rows are written out, not computed by either renderer; where the
 # case is random the two renderers are each other's oracle -- bash matches with
-# glibc's ERE, the Rust core with its own code.  Everything goes through the
-# dump seam (INTERDIMUX_DUMP_IN): no server, no timing but the budgets.
+# glibc's ERE, the Rust core with its own code.  Everything but the last case
+# goes through the dump seam (INTERDIMUX_DUMP_IN): no server, no timing but the
+# budgets.  The last runs on a private server, never the user's.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 BIN="$SCRIPT_DIR/rust/target/release/imux"
+SOCK="interdimux-hostile-test-$$"
 TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-hostile.XXXXXX")" && pwd -P)"
 PASS=0
 FAIL=0
 ERRORS=""
 
-cleanup() { rm -rf "$TMPD"; }
+cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$TMPD"; }
 trap cleanup EXIT
 
 report() {
@@ -206,6 +213,85 @@ for r in $RENDERERS; do
     && report "$(label "$r"): a 100,000-character title renders within 3 s" pass \
     || report "$(label "$r"): a 100,000-character title renders within 3 s (rc $RC, got: '${GOT[0]-}')" fail
 done
+
+# --- 5. cleaning a description is linear ---------------------------------------
+# Through a published option, which carries what a title carries and is not
+# cut at 256: tmux caps an option value at 128 CELLS, so zero-width
+# characters -- a C1 control is one -- pass it in any number.  The row's
+# description is the value with each control made '?' and its blanks trimmed.
+: > "$TMPD/home/titles"
+read -r -a OPT_NAMES <<< "$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$SCRIPT")"
+opt_values() { # name=value ...; OPTS
+  local n kv v
+  OPTS=""
+  for n in "${OPT_NAMES[@]}"; do
+    v=""
+    for kv in "$@"; do [ "${kv%%=*}" = "$n" ] && v="${kv#*=}"; done
+    OPTS+="$v$GS"
+  done
+}
+opt_values "agent_desc=Fix$(rep $'\xc2\x85' 20000)it"
+mkdump "$TMPD/c1.dump" "sleep|"
+opt_values "agent_desc=$(rep ' ' 30000)Fix it$(rep ' ' 30000)"
+mkdump "$TMPD/pad.dump" "sleep|"
+OPTS=""
+want_c1="sleep Fix$(rep '?' 196)…"
+got0() { local g="${GOT[0]-}"; printf '%s' "${g:0:40}"; }
+for r in $RENDERERS; do
+  render "$r" "$TMPD/c1.dump" 3
+  [ "$RC" = 0 ] && [ "${GOT[0]-}" = "$want_c1" ] \
+    && report "$(label "$r"): 20,000 C1 controls in a description are made '?' within 3 s" pass \
+    || report "$(label "$r"): 20,000 C1 controls in a description are made '?' within 3 s (rc $RC, got: '$(got0)')" fail
+  render "$r" "$TMPD/pad.dump" 3
+  [ "$RC" = 0 ] && [ "${GOT[0]-}" = "sleep Fix it" ] \
+    && report "$(label "$r"): 30,000 blanks either side of a description are trimmed within 3 s" pass \
+    || report "$(label "$r"): 30,000 blanks either side of a description are trimmed within 3 s (rc $RC, got: '$(got0)')" fail
+done
+
+# --- 6. prefix+g's count, live ------------------------------------------------
+# The count always runs in bash, whichever renderer draws the rows.  A codex
+# pane titles itself by OSC 2, as codex does, with an approval waiting and a
+# thread name of 5,000 é and a U+0085.  No client is attached, so the
+# dashboard takes its fzf fallback; the fzf here is a stand-in that keeps the
+# menu it is given.
+if [ -r /proc/self/stat ]; then
+  cat > "$TMPD/codex" <<'EOF_AGENT'
+#!/usr/bin/env bash
+t=$(printf 'é%.0s' $(seq 5000))
+printf '\033]2;[ ! ] Action Required | %s\302\205 | proj\007' "$t"
+exec -a codex timeout 991 sleep 991
+EOF_AGENT
+  mkdir -p "$TMPD/bin"
+  cat > "$TMPD/bin/fzf" <<'EOF_FZF'
+#!/bin/sh
+case "$1" in --version) echo "0.74.0 (stand-in)"; exit 0 ;; esac
+cat > "$FZF_IN"
+exit 130
+EOF_FZF
+  chmod +x "$TMPD/codex" "$TMPD/bin/fzf"
+  unset TMUX TMUX_PANE
+  tmux -f /dev/null -L "$SOCK" new-session -d -s agents -x 120 -y 30 -c "$TMPD" "exec '$TMPD/codex'"
+  for _ in $(seq 1 100); do
+    case "$(tmux -L "$SOCK" display-message -p -t '=agents:' '#{pane_title}')" in '[ ! ]'*) break ;; esac
+    sleep 0.05
+  done
+  RC=0
+  env TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0" \
+    TMUX_PANE="$(tmux -L "$SOCK" display-message -p -t '=agents:' '#{pane_id}')" \
+    HOME="$TMPD/home" XDG_CONFIG_HOME="$TMPD/xdg" XDG_STATE_HOME="$TMPD/state" \
+    INTERDIMUX_CLAUDE_DIR="$TMPD/noclaude" INTERDIMUX_TITLE_RULES="$TMPD/none" \
+    FZF_IN="$TMPD/menu" PATH="$TMPD/bin:$PATH" \
+    timeout 3 bash "$SCRIPT" --dashboard > /dev/null 2>&1 || RC=$?
+  if [ "$RC" != 124 ] && grep -q '1 agent needs you' "$TMPD/menu" 2>/dev/null; then
+    report "prefix+g counts a codex pane with a 5,000-character title within 3 s" pass
+  else
+    report "prefix+g counts a codex pane with a 5,000-character title within 3 s (rc $RC)" fail
+    ERRORS+="$(grep -a -o 'gents[^\t]*' "$TMPD/menu" 2>/dev/null | head -2)"$'\n'
+  fi
+  tmux -L "$SOCK" kill-server 2>/dev/null || true
+else
+  echo "  (skipped the live count: no /proc)"
+fi
 
 echo
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"

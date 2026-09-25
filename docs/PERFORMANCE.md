@@ -704,6 +704,14 @@ counts cells — a title of zero-width characters passes it whole — and it
 rewrites `###` as `####`. What is left at 1 MB is bash copying the line a
 dozen times on its way to the cut.
 
+The bash cleaning a title or a published description goes through was
+quadratic as well, and a description is not cut at 256 (tmux caps an option
+at 128 *cells*, and a C1 control is zero cells wide): the control-character
+loop read `${s:i:1}`, O(i) per character in a UTF-8 locale, and the blank
+trims were the `${t#"${t%%[! ]*}"}` idiom. Now two byte-wise substitutions
+and two anchored regexes. prefix+g's count — always bash — with one codex
+pane titled 5,000 × é and a U+0085: 4.3 s → 0.09 s.
+
 ## Suggested rollout
 
 1. **Tier 0 (0.1 + 0.2 + 0.3)** in one pass — pure fork removal, no gate, test-covered. This
