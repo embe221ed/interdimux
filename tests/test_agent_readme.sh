@@ -3,10 +3,14 @@
 # What README "Agents and pane titles" promises, run as it is written, on a
 # private tmux server, in BOTH renderers where rows are involved:
 #
-#   1. the wrapper recipe (taken out of the README itself, not copied here):
-#      `working` while the tool runs; at the prompt, after the tool ends --
-#      normally or by Ctrl-C -- the pane option is gone, so a later program
-#      in the same pane shows no state
+#   1, 2. the wrapper recipe (taken out of the README itself, not copied
+#      here): `working` while the tool runs; at the prompt, after the tool
+#      ends -- normally (1) or by Ctrl-C (2) -- the pane option is gone, so a
+#      later program in the same pane shows no state
+#   3. stale titles: under a shell that sets no title, the next docker row
+#      shows the prompt of a container that has gone (the README says it
+#      cannot help that); under one that titles its prompt with the README's
+#      PS1 line (taken out of the README), it does not
 #
 # Expected rows are written out here, not computed by either renderer; the
 # authority for the option is tmux's own `show -pv`.
@@ -143,6 +147,41 @@ wait_for 200 is_cmd wr sleep
 rows_all "a later program after a Ctrl-C shows no state" wr "sleep 301"
 tm send-keys -t '=t:wr' C-c
 wait_for 200 is_cmd wr bash
+
+# --- 3. a gone container's prompt, and the PS1 line that keeps it off ------------
+awk '/^```sh$/ { inb = 1; buf = ""; next }
+     inb && /^```$/ { if (buf ~ /PS1=/) { printf "%s", buf; found = 1; exit } inb = 0; next }
+     inb { buf = buf $0 "\n" }
+     END { exit !found }' "$SCRIPT_DIR/README.md" > "$TMPD/rc" \
+  && report "the README has the PS1 line" pass \
+  || report "the README has the PS1 line" fail
+tm new-window -d -t '=t:' -n plain -c "$TMPD" "env -u PROMPT_COMMAND PS1='\$ ' bash --norc --noprofile -i"
+tm new-window -d -t '=t:' -n titled -c "$TMPD" "env -u PROMPT_COMMAND PS1='\$ ' bash --rcfile '$TMPD/rc' --noprofile -i"
+wait_for 200 is_cmd plain bash; wait_for 200 is_cmd titled bash
+title() { tmux -L "$SOCK" display-message -p -t "=t:$1" '#{pane_title}'; }
+is_title() { [ "$(title "$1")" = "$2" ]; }
+fired() { [ -e "$TMPD/fired.$1" ]; }
+GONE='root@96fecc5c832f: /srv/app'
+# bash's \u@\h: \w -- \w with the home directory as ~
+LOCAL_W="$TMPD"; case "$LOCAL_W" in "$HOME"/*) LOCAL_W="~${LOCAL_W#"$HOME"}" ;; esac
+LOCAL="$(id -un)@${HOSTNAME%%.*}: $LOCAL_W"
+for w in plain titled; do
+  # what a container's shell leaves in the title when it exits, then the
+  # shell's prompt again
+  tm send-keys -t "=t:$w" -l "printf '\\033]0;%s\\007' '$GONE'; : > '$TMPD/fired.$w'"
+  tm send-keys -t "=t:$w" Enter
+  wait_for 200 fired "$w"
+done
+wait_for 200 is_title plain "$GONE"; wait_for 200 is_title titled "$LOCAL"
+same "plain bash keeps the container's title" "$(title plain)" "$GONE"
+same "the README's PS1 line titles the pane with this host's prompt" "$(title titled)" "$LOCAL"
+for w in plain titled; do
+  tm send-keys -t "=t:$w" -l "(exec -a docker sleep 302)"; tm send-keys -t "=t:$w" Enter
+done
+wait_for 200 is_cmd plain docker; wait_for 200 is_cmd titled docker
+rows_all "plain bash: the next docker row shows the gone container (the documented limit)" plain "docker 302 $GONE"
+rows_all "the PS1 line: the next docker row does not" titled "docker 302"
+tm send-keys -t '=t:plain' C-c; tm send-keys -t '=t:titled' C-c
 
 for rust in $RENDERERS; do
   label="bash"; [ "$rust" = on ] && label="rust"

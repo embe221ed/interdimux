@@ -499,12 +499,24 @@ pass on says where — which neither the command (`ssh web1`) nor the directory
 - `screen` — a prompt from another host that it passes on; `tmux` — a nested
   client's `session:index:window`, when its server has `set-titles on`.
 
-Only those shapes are read, because a title outlives the program that set it
-when your shell sets none (plain bash under `tmux-256color`): the next row
-would show a container that has gone. Most other apps set no title (htop, less,
-lazygit, ranger, python…), editors set one only with `set title` (and it names
-the file the row already shows), and yazi's or mc's is the directory, which
-they change to, so the directory column already has it.
+Only these apps, and only those shapes, are read, because a title outlives the
+program that set it when your shell sets none (plain bash under
+`tmux-256color`). That keeps a gone container's prompt off the rows of other
+apps (htop, vim…), and vim's or a preexec hook's leftovers off these. It
+cannot keep a leftover *prompt* off the next ssh or docker row, though: until
+the new host or container titles the pane, that row shows the one that has
+gone. A shell that titles its own prompt fixes it — oh-my-zsh and fish do;
+for bash, the line Debian's bashrc uses for `xterm*` terminals:
+
+```sh
+PS1="\[\e]0;\u@\h: \w\a\]$PS1"
+```
+
+That title is a prompt of *this* host, which no row shows (below). Most other
+apps set no title (htop, less, lazygit, ranger, python…), editors set one only
+with `set title` (and it names the file the row already shows), and yazi's or
+mc's is the directory, which they change to, so the directory column already
+has it.
 
 A title no rule knows is not shown — on an agent's row too: an agent that
 sets no title (aider, or one you add with `@interdimux-agents`) would show
