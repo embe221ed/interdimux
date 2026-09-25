@@ -421,11 +421,11 @@ command column, as plain words you can search for:
   danger colour), `input` (a question or dialog is open), `working`, `idle`,
   `done`, `error`. Type `approve` to find every agent waiting on you.
 - **The dashboard counts them.** `prefix + g` shows `Agents (2 need you)` —
-  the panes in `approve` or `input`, by the same rules as the rows — and its
-  `e` opens the navigator with `'approve' | 'input'` already typed: the cursor
-  starts on the first of them, raw mode keeps the rest of the tree on screen,
-  and editing the query searches as usual. With none waiting the entry is
-  greyed out.
+  the panes in `approve` or `input`, by the same rules as the rows, each pane
+  once however many sessions show it — and its `e` opens the navigator with
+  `'approve' | 'input'` already typed: the cursor starts on the first of them,
+  raw mode keeps the rest of the tree on screen, and editing the query
+  searches as usual. With none waiting the entry is greyed out.
 - **The description** is the agent's title with its status glyph and
   boilerplate removed. An agent row that shows a state or a description drops
   its arguments (`--resume <uuid>` …); the preview still has them.

@@ -3022,7 +3022,7 @@ DEFAULT_STATE_OPTS=' agent_state agent_desc pane_status pane_wait_reason claude_
 # STATE_OPTS: the option names the option rules read -- the defaults', and any
 # the user's file adds (valid tmux option names only: they are spliced into
 # the list-panes format).
-TITLE_RULESET="" STATE_OPTS="" CUR_HOST="" CUR_HOST_SHORT=""
+TITLE_RULESET="" STATE_OPTS="" CUR_HOST="" CUR_HOST_SHORT="" TITLE_RULES_USER=""
 title_ruleset() {
   local f="${TITLE_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/titles}" txt="" l o
   local -a lines=()
@@ -3030,6 +3030,7 @@ title_ruleset() {
   if [ -f "$f" ] && [ -r "$f" ]; then
     { IFS= read -r -d '' txt < "$f"; } 2>/dev/null || :
   fi
+  TITLE_RULES_USER="$txt"   # the user's part alone (aw_can_r)
   TITLE_RULESET="$txt"$'\n'"$DEFAULT_TITLE_RULES"
   [[ "$txt" == *@* ]] || return 0
   set -f; IFS=$'\n'; lines=($txt); unset IFS; set +f
@@ -3080,7 +3081,10 @@ load_title_rules() {
   local -a lines=() apps=()
   set -f; IFS=$'\n'; lines=($TITLE_RULESET); unset IFS; set +f
   for l in ${lines[@]+"${lines[@]}"}; do
-    l="${l//[$'\t\r']/ }"
+    # Guarded: the substitution costs even when there is nothing to replace
+    # (a multibyte scan of every line), and the shipped rules hold no tab:
+    # ~40% of this function, measured for prefix+g's count (review R08).
+    case "$l" in *[$'\t\r']*) l="${l//[$'\t\r']/ }" ;; esac
     case "$l" in ' '*) l="${l#"${l%%[! ]*}"}" ;; esac
     [ -n "$l" ] || continue
     case "$l" in '#'*) continue ;; esac
@@ -3331,6 +3335,13 @@ claude_registry_r() {
 #
 # and AG_NAME / AG_REST (agent_of).  Returns 1, with all of them empty, for a
 # row that can have none of it: no command, or an idle shell.
+#
+# AS_STATE_ONLY (agents_waiting_r sets it, as a local): only AS_STATE is
+# wanted.  A source that gave a state is then final -- the ones after it are
+# asked only while the state is empty -- so the rest is skipped, and a title is
+# matched only when a rule for its app can say approve or input (AW_CAN).
+# The description is not worked out; the state is the same as a row's.
+AS_STATE_ONLY=""
 agent_state_r() {
   AS_NAME="" AS_STATE="" AS_SINCE="" AS_DESC="" AS_KNOWN=0 AS_AGENT=0 AG_NAME="" AG_REST=""
   local raw="$1" pid="$2" pane="$3" title="$4" opts="${5-}"
@@ -3359,6 +3370,10 @@ agent_state_r() {
       fi
     fi
   fi
+  if [ -n "$AS_STATE_ONLY" ] && [ -n "$state" ]; then
+    AS_NAME="$name" AS_STATE="$state" AS_SINCE="$since" AS_AGENT=1
+    return 0
+  fi
   # Then what a plugin or a hook published (for any row: the options are the
   # pane's), then the title.
   local odesc=""
@@ -3369,6 +3384,19 @@ agent_state_r() {
     fi
     title_text_r "$OR_D"; odesc="$REPLY"
     [ -n "$odesc" ] && agent_row=1
+  fi
+  if [ -n "$AS_STATE_ONLY" ]; then
+    # With a state, or a described option (the title is not read then), the
+    # title has nothing left to say about the state.
+    if [ -n "$state" ] || [ -n "$odesc" ] || [ -z "$title" ]; then
+      AS_NAME="$name" AS_STATE="$state" AS_SINCE="$since" AS_AGENT="$agent_row"
+      return 0
+    fi
+    [ -n "$AW_CAN" ] || aw_can_r
+    if [[ "$AW_CAN" != *" $name "* && "$AW_CAN" != *" * "* ]]; then
+      AS_NAME="$name" AS_AGENT="$agent_row"
+      return 0
+    fi
   fi
   if [ -n "$odesc" ]; then
     desc="$odesc" known=1
@@ -3481,9 +3509,39 @@ cmd_field() {
   fi
 }
 
+# The apps a TITLE rule can put in `approve` or `input`, in AW_CAN as
+# " app app ... " (with " * " when a `*` rule can: then any app can).  For
+# agents_waiting_r, which skips a pane whose title could never make it wait.
+# Option rules (@...) are the pane's options, not its title, and do not count
+# here.  The default rules' apps are spelled out (DEFAULT_AW_CAN), as
+# DEFAULT_STATE_OPTS is: reading them off the ~75 default rules costs about
+# what load_title_rules' index does (5-8 ms of bash UTF-8 pattern matching),
+# which is the cost this exists to skip.  tests/test_dashboard_count.sh holds
+# it to the rules.  Only the user's own rules (TITLE_RULES_USER) are read.
+DEFAULT_AW_CAN=' codex gemini qwen amp '
+AW_CAN=""
+aw_can_r() {
+  local l a
+  local -a lines=() apps=()
+  AW_CAN="$DEFAULT_AW_CAN"
+  [ -n "$TITLE_RULES_USER" ] || return 0
+  set -f; IFS=$'\n'; lines=($TITLE_RULES_USER); unset IFS; set +f
+  for l in ${lines[@]+"${lines[@]}"}; do
+    case "$l" in *approve*|*input*) ;; *) continue ;; esac
+    rule_fields "$l" || continue
+    case "$RULE_S" in approve|input) ;; *) continue ;; esac
+    case "$RULE_A" in @*) continue ;; esac
+    set -f; IFS=,; apps=($RULE_A); unset IFS; set +f
+    for a in ${apps[@]+"${apps[@]}"}; do [ -n "$a" ] && AW_CAN+="$a "; done
+  done
+}
+
 # How many agents need you -- a pane whose state is `approve` or `input` -- in
 # REPLY: the dashboard's Agents entry.  Counted per PANE, so an agent counts
-# once however many rows show it (a window row repeats its active pane's).
+# once however many rows show it: a window row repeats its active pane's, and
+# `list-panes -a` prints a pane once for every session that holds its window
+# -- a session group (`tmux new -t work`) or a linked window counted one agent
+# two or three times (review R06).
 #
 # The state is agent_state_r's, the function the rows are drawn with, over the
 # inputs the navigator's batched query gives them.  Only those, for prefix+g's
@@ -3498,12 +3556,30 @@ cmd_field() {
 #     state shows only on a row that is not an idle shell -- and a wrapper
 #     script (`sh ./my-agent`, see the README) is a shell to tmux's
 #     #{pane_current_command}.
-# Anywhere else #{pane_current_command} stands in: it is argv0's basename,
-# which is what names the row.  (The one difference left is a stopped agent in
-# the background of a shell at its prompt, whose last title the row reads.)
+# Anywhere else #{pane_current_command} stands in, by its basename: argv0's
+# basename is what names the row, and tmux strips the directory only from an
+# argv0 that starts with `/` -- `./codex` and `target/release/codex` came
+# through whole, found no rules, and a waiting agent went uncounted (review
+# R12).  (The one difference left is a stopped agent in the background of a
+# shell at its prompt, whose last title the row reads.)
+#
+# Most panes are decided before agent_state_r, the expensive part (review R08:
+# prefix+g opened 30-47 ms later on a server of ssh panes):
+#   * a registry record that applies and says anything but approve or input:
+#     the registry is the first source that speaks, so nothing else can make
+#     that pane wait;
+#   * a pane with neither a record nor an option: only a title RULE can give
+#     it a state, so only an app one of whose rules says approve or input is
+#     looked at (AW_CAN).  ssh, docker, kubectl and the other remote shells
+#     have title rules, none with a state, and Claude's say only `working`:
+#     they used to cost a full title parse each, for a count they could never
+#     reach.  AW_CAN needs no rule index (DEFAULT_AW_CAN, and the user's own
+#     rules), so a list of shells and remote panes never loads the rules.
 #
 # Sessions @interdimux-hide keeps out of the navigator are left out here too,
-# so the entry never promises an agent the navigator will not show.
+# so the entry never promises an agent the navigator will not show.  The
+# per-pane dedupe comes after that filter, so a pane linked into a hidden and
+# a visible session still counts, from its visible line.
 #
 # The same call also answers, last, where the pressing client is: AW_CLIENT is
 # "<height> <width> <session>" -- the session for the hide rule (the current
@@ -3514,9 +3590,10 @@ AW_CLIENT=""
 agents_waiting_r() {
   REPLY=0 AW_CLIENT=""
   [ "$AGENT_ON" = 1 ] && [ "$AGENT_STATE" = on ] || return 0
-  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e'
+  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e' a0 b v
   local -a f=() lines=()
-  local -A CLAUDE_BY_PANE=()
+  local -A CLAUDE_BY_PANE=() aw_seen=()
+  local AS_STATE_ONLY=1   # see agent_state_r: the count wants the state alone
   title_ruleset
   state_optfmt_r
   fmt="#{session_name}${US}#{pane_id}${US}#{pane_pid}${US}#{pane_current_command}${US}#{pane_title}${US}$REPLY"
@@ -3557,11 +3634,22 @@ agents_waiting_r() {
       done
       set +f
     fi
+    # One pane, one count, however many sessions show it.
+    [[ ${aw_seen[$pane]+x} ]] && continue
+    aw_seen[$pane]=1
     # A line tmux cut short (see gather_targets) keeps its row, but its pid is
     # never read.
     pid="${f[2]-}"; [ "${#f[@]}" -eq 6 ] || pid=""
     pcc="${f[3]-}" raw="${f[3]-}" res=0
-    case "$pcc" in
+    a0="${pcc%% *}"; b="${a0##*/}"
+    # A record that applies (agent_state_r's test) and says anything but
+    # approve or input decides it: the registry speaks first.
+    v="${CLAUDE_BY_PANE[$pane]-}"
+    if [ -n "$v" ] && { [ -z "${v%%"$US"*}" ] || [ "${v%%"$US"*}" = "$pid" ]; }; then
+      v="${v#*"$US"}"
+      case "${v%%"$US"*}" in approve|input) ;; *) continue ;; esac
+    fi
+    case "$b" in
       ''|node|nodejs|python*) res=1 ;;
       *) if [ -n "${CLAUDE_BY_PANE[$pane]-}" ] || [[ "${f[5]-}" == *[!$GS]* ]]; then res=1; fi ;;
     esac
@@ -3570,13 +3658,13 @@ agents_waiting_r() {
       resolve_command "$pcc" "$pid"; raw="$REPLY"
     else
       # Neither a record nor an option: only the title can give it a state, and
-      # only through a title rule for its app.  Most panes (shells, editors)
-      # have none, and are passed over here, before the call -- a bash function
-      # call is most of what a pane costs.
+      # only through a title rule for its app that says approve or input.  Most
+      # panes (shells, editors, remote shells) have none, and are passed over
+      # here, before the call -- a bash function call is most of what a pane
+      # costs.  The app is named as agent_state_r names it: argv0's basename.
       [ -n "${f[4]-}" ] || continue
-      [ "$TR_LOADED" = 1 ] || load_title_rules
-      if [[ ${TR_IDX[$pcc]+x} ]]; then REPLY="${TR_IDX[$pcc]}"; else title_idx_r "$pcc"; fi
-      [ -n "$REPLY" ] || continue
+      [ -n "$AW_CAN" ] || aw_can_r
+      [[ "$AW_CAN" == *" ${b#-} "* || "$AW_CAN" == *" * "* ]] || continue
     fi
     agent_state_r "$raw" "$pid" "$pane" "${f[4]-}" "${f[5]-}" || continue
     case "$AS_STATE" in approve|input) n=$(( n + 1 )) ;; esac
@@ -9071,6 +9159,8 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       _m_agents='-Agents (agent-state off)'
     elif [ "$_n_agents" = 0 ]; then
       _m_agents='-Agents'
+    elif [ "$_n_agents" = 1 ]; then
+      _m_agents='Agents (1 needs you)'
     else
       _m_agents="Agents ($_n_agents need you)"
     fi
