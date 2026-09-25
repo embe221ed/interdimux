@@ -7948,6 +7948,447 @@ if [ "${1:-}" = "--doctor" ]; then
     set +f
   fi
 
+  # --- agents -----------------------------------------------------------------
+  # Which of the signals a coding agent sends reach tmux, and the one setting
+  # that fixes a missing one: until now the way to find out was to miss an
+  # approval prompt (review AGENT-14).  Read off the installed binaries (Claude
+  # Code 2.1.280-282, Codex 0.155) and reproduced on a private tmux 3.7b:
+  #
+  #   * a title (OSC 0/2) lands in #{pane_title} unless allow-set-title is off;
+  #   * a bare BEL sets #{window_bell_flag}, the row's '!', unless monitor-bell
+  #     is off.  bell-action none does not stop the flag (measured), only the
+  #     bell tmux would pass on to the terminal;
+  #   * a desktop notification (OSC 9/99/777) is wrapped in tmux's DCS
+  #     passthrough, which no format sees.  Under allow-passthrough `on` it is
+  #     forwarded only for a pane on screen, so a background agent's alert --
+  #     the one that matters -- is dropped; under `off` every one is.
+  #
+  # Advisory, all of it: nothing here stops the picker working, so nothing here
+  # is a ✗ or moves the exit status, which a health check reads as "interdimux
+  # is broken".  An agent that is not installed is one dim line.  A config that
+  # cannot be read, or holds a value this does not know, is "unknown", never
+  # wrong: agent configs drift between versions, and drift is not the user's
+  # mistake.  Read-only: no agent is started, and the only files opened are the
+  # title rules, settings.json, config.toml and sessions/<digits>.json, each by
+  # name -- never a credential (~/.codex/auth.json, ~/.claude/.credentials*,
+  # the sessions/<pid>.<hash>.key files).
+  _sec agents
+  # A path with ~ for $HOME, in REPLY: they are long, and the notes quote them.
+  _tl() {
+    if [ -n "$HOME" ] && [ "$HOME" != / ] && [[ "$1" == "$HOME"/* ]]; then REPLY="~${1#"$HOME"}"
+    else REPLY="$1"
+    fi
+  }
+  # "1 pane", "2 panes", in REPLY.
+  _nof() { if [ "$1" = 1 ]; then REPLY="1 $2"; else REPLY="$1 ${2}s"; fi; }
+
+  # One round-trip for every tmux option below, as it applies to this pane (a
+  # pane, window or session override counts, as it would for an agent here).
+  # Flags come back 1/0, allow-passthrough as off/on/all.  default-terminal is
+  # the TERM a pane starts with, which is what an agent picks its alerts by.
+  _ag=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} \
+          '#{allow-set-title}|#{monitor-bell}|#{bell-action}|#{allow-passthrough}|#{focus-events}|#{default-terminal}' 2>/dev/null)
+  IFS='|' read -r _ag_title _ag_mbell _ag_bact _ag_pass _ag_focus _ag_term <<< "$_ag"
+  case "$_ag_title" in
+    1) _ok "tmux takes the titles programs set (allow-set-title on): what an agent says it is doing" ;;
+    0) _warn "allow-set-title is off — the titles agents set (what they are working on) never reach tmux"
+       _note "set -g allow-set-title on" ;;
+    *) _note "allow-set-title could not be read — unknown" ;;
+  esac
+  case "$_ag_mbell" in
+    1) _ok "a bell flags its window with ! (monitor-bell on): the one alert any agent can hand tmux"
+       [ "$_ag_bact" = none ] \
+         && _note "bell-action is none: the ! still appears, but tmux passes no bell on to your terminal" ;;
+    0) _warn "monitor-bell is off — an agent's bell never flags its window, so no row shows it waits on you"
+       _note "setw -g monitor-bell on" ;;
+    *) _note "monitor-bell could not be read — unknown" ;;
+  esac
+
+  # Your title rules, read before the built-in ones.  A line that is not a rule
+  # is skipped by both renderers without a word, so say which: rule_fields is
+  # their own split.
+  _trf="${TITLE_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/interdimux/titles}"
+  _tl "$_trf"; _trf_d="$REPLY"
+  if [ -f "$_trf" ] && [ -r "$_trf" ]; then
+    _nr=0 _ln=0 _trn=() _re_skip='^ *(#|$)'
+    while IFS= read -r _l || [ -n "$_l" ]; do
+      _ln=$((_ln + 1))
+      _l="${_l//[$'\t\r']/ }"
+      [[ "$_l" =~ $_re_skip ]] && continue
+      if ! rule_fields "$_l"; then
+        _trn+=("line $_ln is not a rule (APPS STATE DESC PATTERN), so it is skipped")
+        continue
+      fi
+      _nr=$((_nr + 1))
+      case "$RULE_S" in
+        -|approve|input|working|idle|done|error) ;;
+        *) _trn+=("line $_ln: its STATE is not one of approve input working idle done error, or -") ;;
+      esac
+      [[ "$RULE_A" == @* ]] || continue
+      # The names an option rule reads go into the list's tmux query, so one
+      # that is not a plain option name is left out of it: never read.
+      _tro=()
+      IFS=, read -r -a _tro <<< "$RULE_A"
+      for _o in ${_tro[@]+"${_tro[@]}"}; do
+        _o="${_o#@}"
+        case "$_o" in
+          *[!A-Za-z0-9_-]*) _trn+=("line $_ln: @$_o is not an option name tmux can be asked for, so it is never read"); break ;;
+        esac
+      done
+    done 2>/dev/null < "$_trf"
+    _nof "$_nr" rule
+    _ok "your title rules: $_trf_d holds $REPLY, read before the built-in ones"
+    for (( _i = 0; _i < ${#_trn[@]} && _i < 5; _i++ )); do _note "${_trn[_i]}"; done
+    [ "${#_trn[@]}" -gt 5 ] && _note "… and $(( ${#_trn[@]} - 5 )) more"
+  elif [ -e "$_trf" ]; then
+    _warn "your title rules at $_trf_d cannot be read — only the built-in ones apply"
+  elif [ -n "$TITLE_RULES_FILE" ]; then
+    _warn "@interdimux-title-rules names $_trf_d, which does not exist — only the built-in rules apply"
+  else
+    _note "title rules: none of your own ($_trf_d) — the built-in ones apply"
+  fi
+
+  # What agent plugins, or your own hooks, publish as pane options: the names
+  # the list reads in its one list-panes (the built-in rules' and any your file
+  # adds), each asked only whether it is set -- no value is shown.  The same
+  # query gives every pane's pid, which Claude's registry is checked against
+  # below.  A pane in two sessions is counted once.
+  title_ruleset
+  _pon=() _pfmt='#{pane_id} #{pane_pid} '
+  for _o in $STATE_OPTS; do _pon+=("$_o"); _pfmt+="#{!=:#{@$_o},}"; done
+  declare -A _ppid=() _pwho_n=() _pwho_o=()
+  _pwho=() _npub=0
+  _ag_who() {
+    case "$1" in
+      agent_state|agent_desc)                  REPLY='your hooks' ;;
+      pane_status|pane_wait_reason)            REPLY=tmux-agent-sidebar ;;
+      claude_state|codex_state|opencode_state) REPLY=tmux-agent-icons ;;
+      claude_pane_status)                      REPLY=tmux-claude-status ;;
+      workmux_pane_status)                     REPLY=workmux ;;
+      dmux_attention)                          REPLY=dmux ;;
+      *)                                       REPLY='your title rules' ;;
+    esac
+  }
+  while IFS=' ' read -r _pid _ppd _bits; do
+    [ -n "$_pid" ] && [ -z "${_ppid[$_pid]+x}" ] || continue
+    _ppid[$_pid]="$_ppd"
+    [[ "$_bits" == *1* ]] || continue
+    _npub=$((_npub + 1))
+    declare -A _pw=()
+    for (( _i = 0; _i < ${#_pon[@]}; _i++ )); do
+      [ "${_bits:_i:1}" = 1 ] || continue
+      _ag_who "${_pon[_i]}"
+      if [ -z "${_pwho_n[$REPLY]+x}" ]; then _pwho+=("$REPLY"); _pwho_n[$REPLY]=0; _pwho_o[$REPLY]=""; fi
+      [[ " ${_pwho_o[$REPLY]} " == *" @${_pon[_i]} "* ]] || _pwho_o[$REPLY]+="${_pwho_o[$REPLY]:+ }@${_pon[_i]}"
+      if [ -z "${_pw[$REPLY]+x}" ]; then
+        _pw[$REPLY]=1 _n="${_pwho_n[$REPLY]}"
+        _pwho_n[$REPLY]=$(( _n + 1 ))
+      fi
+    done
+    unset _pw
+  done <<< "$(tmux list-panes -a -F "$_pfmt" 2>/dev/null)"
+  if [ "$_npub" -gt 0 ]; then
+    _nof "$_npub" pane
+    _ok "agent state is published on $REPLY, as options the list reads"
+    for _w in ${_pwho[@]+"${_pwho[@]}"}; do
+      _nof "${_pwho_n[$_w]}" pane; _o="${_pwho_o[$_w]// /, }"
+      case "$_w" in
+        'your hooks')       _note "your hooks publish $_o on $REPLY" ;;
+        'your title rules') _note "$_o, which your title rules read, is set on $REPLY" ;;
+        *)                  _note "$_w publishes $_o on $REPLY" ;;
+      esac
+    done
+    [ "$AGENT_STATE" = on ] \
+      || _note "@interdimux-agent-state is off, so no row shows any of it as a state"
+  else
+    _note "plugin options: no pane publishes an agent's state (@agent_state, @pane_status, …) right now"
+  fi
+
+  # An agent's alerts sent as an OSC wrapped for passthrough: where they end up.
+  # $1 the agent, $2 the terminal they are meant for, $3 how they come to be
+  # sent that way (a note), $4 the setting that makes them a bell instead.
+  _ag_passthrough() {
+    if [ "$_ag_pass" = all ]; then
+      _ok "$1's notifications reach $2 from every pane (allow-passthrough all), but tmux never sees them"
+      _note "$3"
+      _note "no row gets a ! for them; $4 would give it one"
+    else
+      _warn "$1's notifications go to $2 through tmux passthrough — tmux never sees them"
+      _note "$3"
+      case "$_ag_pass" in
+        on)  _note "allow-passthrough is on: only a pane on screen gets through — a background agent's alert is dropped" ;;
+        off) _note "allow-passthrough is off: tmux drops every one of them" ;;
+        *)   _note "allow-passthrough could not be read — whether any get through is unknown" ;;
+      esac
+      _note "to have tmux flag the window instead: $4"
+      _note "or: set -g allow-passthrough all — but then any hidden pane can write to your terminal"
+    fi
+  }
+
+  # Claude Code, in the directory the list reads it from: @interdimux-claude-dir,
+  # else $CLAUDE_CONFIG_DIR as the tmux server has it (the environment popups
+  # and new panes start from), else ~/.claude.
+  _cdir="$CLAUDE_DIR"
+  if [ -z "$_cdir" ]; then
+    _cdir="$HOME/.claude"
+    _srv_env CLAUDE_CONFIG_DIR && [ -n "$REPLY" ] && _cdir="$REPLY"
+  fi
+  _tl "$_cdir"; _cdir_d="$REPLY"
+  # A CLAUDE_CONFIG_DIR that only this shell has is one the popups never see.
+  _ccfg_note=""
+  if [ -z "$CLAUDE_DIR" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ "${CLAUDE_CONFIG_DIR%/}" != "${_cdir%/}" ]; then
+    _tl "$CLAUDE_CONFIG_DIR"
+    _ccfg_note="this shell's CLAUDE_CONFIG_DIR is $REPLY, which the popups do not see: set -g @interdimux-claude-dir '$REPLY'"
+  fi
+  _tl "$_cdir/settings.json"; _cset_d="$REPLY"
+  _tl "$_cdir/sessions"; _csd_d="$REPLY"
+  if [ ! -d "$_cdir" ]; then
+    _note "Claude Code: no $_cdir_d — skipped"
+    [ -z "$_ccfg_note" ] || _note "$_ccfg_note"
+  else
+    # settings.json (the user's), read whole without a fork and only ever
+    # matched against the few keys below: JSON is not parsed, and no value but
+    # those is shown.  Absent is fine (every key at its default); present but
+    # unreadable, or not a JSON object, is unknown.
+    _cset="$_cdir/settings.json" _cs="" _cs_ok=1
+    if [ -e "$_cset" ]; then
+      _cs_ok=0
+      if [ -f "$_cset" ] && [ -r "$_cset" ]; then
+        { IFS= read -r -d '' _cs; } 2>/dev/null < "$_cset"
+        [[ "$_cs" =~ ^[[:space:]]*\{ ]] && _cs_ok=1
+      fi
+    fi
+
+    # CLAUDE_CODE_DISABLE_TERMINAL_TITLE, where Claude gets it: the environment
+    # its pane starts with (tmux's), or settings.json's "env".  A boolean to
+    # Claude (1, true, yes or on, any case; so "0" is off), and it stops every
+    # title write AND the request that names the session.
+    _truthy() {
+      local v="${1,,}"
+      v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+      case "$v" in 1|true|yes|on) return 0 ;; esac
+      return 1
+    }
+    _re='"CLAUDE_CODE_DISABLE_TERMINAL_TITLE"[[:space:]]*:[[:space:]]*"?([^",}]*)'
+    if _srv_env CLAUDE_CODE_DISABLE_TERMINAL_TITLE && _truthy "$REPLY"; then
+      _warn "CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set in tmux's environment — Claude sets no title, and names no session"
+      if [ "${_senv_sc[CLAUDE_CODE_DISABLE_TERMINAL_TITLE]:-g}" = s ]; then
+        _note "tmux set-environment -u CLAUDE_CODE_DISABLE_TERMINAL_TITLE, and drop it where it is exported"
+      else
+        _note "tmux set-environment -gu CLAUDE_CODE_DISABLE_TERMINAL_TITLE, and drop it where it is exported"
+      fi
+      _note "the list strips Claude's ✳ itself: the title is worth keeping"
+    elif [ "$_cs_ok" = 1 ] && [[ "$_cs" =~ $_re ]] && _truthy "${BASH_REMATCH[1]}"; then
+      _warn "CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set in $_cset_d — Claude sets no title, and names no session"
+      _note "remove it from that file's \"env\"; the list strips Claude's ✳ itself"
+    fi
+
+    # The session registry, the list's first source of Claude's state: one
+    # sessions/<pid>.json per live interactive session.  Only <digits>.json is
+    # opened -- the <pid>.<hash>.key files beside them are secrets.  A record
+    # "parses" when it has what the list reads: a whole object, a pid and a
+    # status.  Which of them the list believes (the process is still that one,
+    # and it runs in a pane here) is claude_registry_r's own answer.
+    _csd="$_cdir/sessions"
+    if [ -d "$_csd" ] && ! { [ -r "$_csd" ] && [ -x "$_csd" ]; }; then
+      # A glob over it would come back empty, i.e. "no session is running".
+      _note "Claude Code: its session registry at $_csd_d could not be read — unknown"
+    elif [ -d "$_csd" ]; then
+      _nrec=0 _nodd=0 _nunr=0
+      for _f in "$_csd"/*.json; do
+        [[ "${_f##*/}" =~ ^[0-9]+\.json$ ]] || continue
+        if ! { [ -f "$_f" ] && [ -r "$_f" ]; }; then _nunr=$((_nunr + 1)); continue; fi
+        _j=""
+        { IFS= read -r -d '' _j; } 2>/dev/null < "$_f"
+        if [[ "$_j" == *'}' && "$_j" =~ \"pid\":[0-9]+ && "$_j" =~ \"status\":\"[a-z]+\" ]]; then
+          _nrec=$((_nrec + 1))
+        else
+          _nodd=$((_nodd + 1))
+        fi
+      done
+      if [ $(( _nrec + _nodd + _nunr )) = 0 ]; then
+        _ok "Claude's session registry is at $_csd_d — no session is running now"
+      elif [ "$_nrec" = 1 ]; then
+        _ok "Claude's session registry is at $_csd_d — 1 record parses"
+      else
+        _ok "Claude's session registry is at $_csd_d — $_nrec records parse"
+      fi
+      if [ "$AGENT_STATE" != on ]; then
+        _note "@interdimux-agent-state is off, so the list does not read it"
+      elif [ "$_nrec" -gt 0 ]; then
+        _nshow=0
+        CLAUDE_DIR="$_cdir" claude_registry_r
+        while IFS="$US" read -r _rp _rsid _ _; do
+          [ -n "$_rp" ] && [ -n "${_ppid[$_rp]+x}" ] || continue
+          [ -z "$_rsid" ] || [ "$_rsid" = "${_ppid[$_rp]}" ] || continue
+          _nshow=$((_nshow + 1))
+        done <<< "$CLAUDE_REG"
+        case "$_nshow:$_nrec" in
+          0:1) _note "it is not a live session in a pane of this tmux server" ;;
+          0:*) _note "none of them is a live session in a pane of this tmux server" ;;
+          1:*) _note "1 is a live session in a pane here, whose row shows Claude's state" ;;
+          *)   _note "$_nshow are live sessions in panes here, whose rows show Claude's state" ;;
+        esac
+      fi
+      case "$_nodd" in
+        0) ;;
+        1) _note "1 record there lacks what the list reads (a pid, a status) — unknown: the format may have changed" ;;
+        *) _note "$_nodd records there lack what the list reads (a pid, a status) — unknown: the format may have changed" ;;
+      esac
+      case "$_nunr" in
+        0) ;;
+        1) _note "1 record there could not be read — unknown" ;;
+        *) _note "$_nunr records there could not be read — unknown" ;;
+      esac
+    else
+      _note "Claude Code: no session registry at $_csd_d — an older Claude writes none, and its rows then show no state"
+    fi
+    [ -z "$_ccfg_note" ] || _note "$_ccfg_note"
+
+    # Where Claude's alerts go: preferredNotifChannel, default auto (a project's
+    # settings, or a value an older Claude kept in ~/.claude.json, can
+    # override it; neither is read here).  auto picks by TERM, which in a pane
+    # is tmux's default-terminal: ghostty for xterm-ghostty, kitty for a *kitty*
+    # one, and NOTHING for any other (TERM_PROGRAM is tmux's there, which names
+    # no channel).  Every channel but the bell is an OSC wrapped for
+    # passthrough.  The values are the installed binaries' own list.
+    if [ "$_cs_ok" = 0 ]; then
+      _note "Claude Code: $_cset_d could not be read — where its notifications go is unknown"
+    else
+      _cnc="" _re='"preferredNotifChannel"[[:space:]]*:[[:space:]]*"([^"]*)"'
+      if [[ "$_cs" =~ $_re ]]; then _cnc="${BASH_REMATCH[1]}"
+      elif [[ "$_cs" == *'"preferredNotifChannel"'* ]]; then _cnc='?'
+      fi
+      _cnc_how="preferredNotifChannel is \"$_cnc\""
+      [ -n "$_cnc" ] || _cnc_how="preferredNotifChannel is not set (auto)"
+      _cbell="\"preferredNotifChannel\": \"terminal_bell\" in $_cset_d"
+      _via="" _osc=""
+      case "${_cnc:-auto}" in
+        auto)
+          case "$_ag_term" in
+            xterm-ghostty) _via=Ghostty _osc='OSC 777' ;;
+            *kitty*)       _via=kitty   _osc='OSC 99' ;;
+            '') _note "Claude Code: the panes' TERM (default-terminal) could not be read — where its notifications go is unknown" ;;
+            *)  _warn "Claude sends no notifications here at all"
+                _note "$_cnc_how, and auto has no channel for the panes' TERM, $_ag_term"
+                _note "to have it ring the bell, which tmux flags: $_cbell" ;;
+          esac ;;
+        ghostty) _via=Ghostty _osc='OSC 777' ;;
+        kitty)   _via=kitty   _osc='OSC 99' ;;
+        iterm2)  _via=iTerm2  _osc='OSC 9' ;;
+        terminal_bell|iterm2_with_bell)
+          _ok "Claude rings the bell when it needs you ($_cnc_how) — tmux flags its window" ;;
+        notifications_disabled)
+          _note "Claude Code: its notifications are turned off ($_cnc_how)" ;;
+        *) _note "Claude Code: preferredNotifChannel in $_cset_d holds a value this check does not know — unknown" ;;
+      esac
+      if [ -n "$_via" ]; then
+        if [ -z "$_cnc" ]; then
+          _ag_passthrough Claude "$_via" "$_cnc_how and the panes' TERM is $_ag_term, so Claude sends $_osc wrapped for passthrough" "$_cbell"
+        else
+          _ag_passthrough Claude "$_via" "$_cnc_how, so Claude sends $_osc wrapped for passthrough" "$_cbell"
+        fi
+      fi
+      [[ "$_cs" =~ \"hooks\"[[:space:]]*: ]] \
+        && _note "$_cset_d defines hooks (not inspected here), which may deliver alerts of their own"
+    fi
+  fi
+
+  # Codex.  Only config.toml, and only three keys of [tui] (a dotted `tui.key =`
+  # at the top level counts too): never auth.json.  Names and defaults are
+  # codex-rs config/src/types.rs (0.155): notifications (true), notification_
+  # method (auto), notification_condition (unfocused).  "unfocused" is why it
+  # is silent in tmux: Codex starts out believing it has focus, and without
+  # focus-events tmux never tells it otherwise (reproduced).
+  _xdir="$HOME/.codex"
+  _srv_env CODEX_HOME && [ -n "$REPLY" ] && _xdir="$REPLY"
+  _tl "$_xdir"; _xdir_d="$REPLY"
+  _tl "$_xdir/config.toml"; _xcfg_d="$REPLY"
+  if [ ! -d "$_xdir" ]; then
+    _note "Codex: no $_xdir_d — skipped"
+  else
+    _xcfg="$_xdir/config.toml" _xcond="" _xmeth="" _xnotif="" _x_ok=1
+    if [ -e "$_xcfg" ]; then
+      _x_ok=0
+      if [ -f "$_xcfg" ] && [ -r "$_xcfg" ]; then
+        _x_ok=1 _xsec=""
+        _re='^(tui\.)?(notification_condition|notification_method|notifications)[[:space:]]*=[[:space:]]*(.*)$'
+        while IFS= read -r _l || [ -n "$_l" ]; do
+          _l="${_l#"${_l%%[![:space:]]*}"}"
+          case "$_l" in
+            '['*) _xsec="${_l#[}"; _xsec="${_xsec%%]*}"; _xsec="${_xsec//[[:space:]]/}"; continue ;;
+          esac
+          [[ "$_l" =~ $_re ]] || continue
+          if [ -n "${BASH_REMATCH[1]}" ]; then [ -z "$_xsec" ] || continue
+          else [ "$_xsec" = tui ] || continue
+          fi
+          _v="${BASH_REMATCH[3]%%#*}"; _v="${_v%"${_v##*[![:space:]]}"}"
+          _v="${_v#[\"\']}"; _v="${_v%[\"\']}"
+          case "${BASH_REMATCH[2]}" in
+            notification_condition) _xcond="$_v" ;;
+            notification_method)    _xmeth="$_v" ;;
+            notifications)          _xnotif="$_v" ;;
+          esac
+        done 2>/dev/null < "$_xcfg"
+      fi
+    fi
+    # When it notifies at all: $_xwhy says why, empty for never or unknown.
+    _xwhy=""
+    if [ "$_x_ok" = 0 ]; then
+      _note "Codex: $_xcfg_d could not be read — whether it notifies is unknown"
+    elif [ "$_xnotif" = false ]; then
+      _note "Codex: its notifications are turned off ([tui] notifications = false)"
+    elif [ "$_xcond" = always ]; then
+      _xwhy='notification_condition "always"'
+    elif [ -n "$_xcond" ] && [ "$_xcond" != unfocused ]; then
+      _note "Codex: notification_condition in $_xcfg_d holds a value this check does not know — unknown"
+    elif [ "$_ag_focus" = 1 ]; then
+      _xwhy='focus-events on'
+    elif [ "$_ag_focus" = 0 ]; then
+      _warn "Codex never notifies inside tmux — focus-events is off, so it never hears that its pane lost focus"
+      _note "it notifies only when unfocused (notification_condition, default \"unfocused\")"
+      _note "set -g focus-events on — or in $_xcfg_d, under [tui]: notification_condition = \"always\""
+    else
+      _note "Codex: focus-events could not be read — whether it notifies is unknown"
+    fi
+    # How: a bell reaches tmux; OSC 9 is wrapped for passthrough, like Claude's.
+    # auto picks OSC 9 for Ghostty, iTerm2, kitty, Warp and WezTerm, found as
+    # codex-rs terminal-detection finds them under tmux (whose TERM_PROGRAM it
+    # skips): these variables in the pane's environment first, then TERM.
+    if [ -n "$_xwhy" ]; then
+      _xterm=""
+      case "${_xmeth:-auto}" in
+        bel) ;;
+        osc9) _xterm="your terminal" ;;
+        auto)
+          if _srv_env GHOSTTY_RESOURCES_DIR && [ -n "$REPLY" ]; then _xterm=Ghostty
+          elif _srv_env WEZTERM_VERSION; then _xterm=WezTerm
+          elif _srv_env ITERM_SESSION_ID || _srv_env ITERM_PROFILE || _srv_env ITERM_PROFILE_NAME; then _xterm=iTerm2
+          elif _srv_env TERM_SESSION_ID; then :                     # Apple Terminal: a bell
+          elif _srv_env KITTY_WINDOW_ID || [[ "$_ag_term" == *kitty* ]]; then _xterm=kitty
+          elif _srv_env ALACRITTY_SOCKET || [ "$_ag_term" = alacritty ] || _srv_env KONSOLE_VERSION \
+               || _srv_env GNOME_TERMINAL_SCREEN || _srv_env VTE_VERSION || _srv_env WT_SESSION; then :
+          else
+            case "$_ag_term" in
+              xterm-ghostty)      _xterm=Ghostty ;;
+              wezterm|wezterm-mux) _xterm=WezTerm ;;
+            esac
+          fi ;;
+        *) _xterm='?' ;;
+      esac
+      if [ "$_xterm" = '?' ]; then
+        _note "Codex: notification_method in $_xcfg_d holds a value this check does not know — unknown"
+      elif [ -z "$_xterm" ]; then
+        _ok "Codex rings the bell when it needs you ($_xwhy) — tmux flags its window"
+      else
+        _xmhow="notification_method is \"$_xmeth\""
+        [ -n "$_xmeth" ] || _xmhow="notification_method is not set (auto)"
+        _ag_passthrough Codex "$_xterm" "$_xmhow, so Codex sends OSC 9 wrapped for passthrough" \
+          "notification_method = \"bel\" under [tui] in $_xcfg_d"
+      fi
+    fi
+  fi
+
   # Stop diverting before anything is printed, and report what was caught.
   if [ -n "$_derr" ]; then
     exec 2>&3 3>&-

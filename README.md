@@ -551,6 +551,35 @@ is doing nothing. `@interdimux-hide` is free-form, so a typo in it looks exactly
 like a pattern whose session simply is not running: the list looks normal either
 way.
 
+The **agents** section says which of the signals a coding agent sends actually
+reach tmux, and the one setting that fixes a missing one. Otherwise the way to
+find out is to miss an approval prompt:
+
+```
+⚠ Claude's notifications go to Ghostty through tmux passthrough — tmux never sees them
+    preferredNotifChannel is not set (auto) and the panes' TERM is xterm-ghostty, so Claude sends OSC 777 wrapped for passthrough
+    allow-passthrough is on: only a pane on screen gets through — a background agent's alert is dropped
+    to have tmux flag the window instead: "preferredNotifChannel": "terminal_bell" in ~/.claude/settings.json
+    or: set -g allow-passthrough all — but then any hidden pane can write to your terminal
+⚠ Codex never notifies inside tmux — focus-events is off, so it never hears that its pane lost focus
+    set -g focus-events on — or in ~/.codex/config.toml, under [tui]: notification_condition = "always"
+```
+
+It looks at tmux's `allow-set-title` (titles), `monitor-bell` (the `!` a bell
+leaves on a row), `allow-passthrough`, `focus-events` and `default-terminal`;
+`CLAUDE_CODE_DISABLE_TERMINAL_TITLE` in tmux's environment or Claude's
+settings; Claude Code's session registry (how many records parse, and which are
+live sessions in a pane here); `preferredNotifChannel` and `hooks` in
+`~/.claude/settings.json`; the `[tui]` notification keys in
+`~/.codex/config.toml`; which agent plugins publish state, on how many panes;
+and your title rules file, naming any line that is not a rule. An agent that is
+not installed is one dim line. It only reads: no agent is started, no option
+value is shown, and no credential file (`~/.codex/auth.json`,
+`~/.claude/.credentials*`, the registry's `.key` files) is opened. A config it
+cannot read, or a value it does not know, is reported as unknown, never as
+wrong, since agents change their settings between versions. These checks are
+advice: they warn, and never change the exit status.
+
 ## Configuration
 
 All options are set via tmux options in `~/.tmux.conf`:
