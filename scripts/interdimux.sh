@@ -3427,6 +3427,28 @@ cmd_field() {
   format_command "$raw"
   [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
   local fc="$REPLY" a0 b name state since desc rest r w
+  # The row nothing can be added to, known in a few tests instead of through
+  # agent_state_r: no option published for the pane, no registry record for
+  # it, not an agent, and no title -- or one that no title rule for the app
+  # can read and show-title does not show anyway.  Most rows (shells, editors,
+  # servers) are that, and in bash the function calls are most of what a row
+  # costs: this is about a third of the way through agent_state_r (review
+  # R09).  Each test is one of agent_state_r's own gates, so what it lets by
+  # draws exactly what that would: keep the two in step.
+  a0="${raw%% *}"; b="${a0##*/}"
+  if [[ "${5-}" != *[!$GS]* ]] \
+     && { [ -z "${3-}" ] || [ "$AGENT_STATE" != on ] || [ -z "${CLAUDE_BY_PANE[$3]-}" ]; }; then
+    case "$b" in node|nodejs|python*) r=1 ;; *) r="" ;; esac   # agent_of reads their script
+    if [ -z "$AGENT_KNOWN" ] || [[ -z "$r" && "$AGENT_KNOWN" != *" $b "* && "$a0" != */claude/versions/* ]]; then
+      [ -n "${4-}" ] || { REPLY="$fc"; return 0; }
+      if [ "$SHOW_TITLE" != all ]; then
+        name="${b#-}"
+        [ "$TR_LOADED" = 1 ] || load_title_rules
+        if [ -n "$name" ] && [[ ${TR_IDX[$name]+x} ]]; then REPLY="${TR_IDX[$name]}"; else title_idx_r "$name"; fi
+        [ -n "$REPLY" ] || { REPLY="$fc"; return 0; }
+      fi
+    fi
+  fi
   agent_state_r "$@" || { REPLY="$fc"; return 0; }
   name="$AS_NAME" state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
   a0="${raw%% *}"; b="${a0##*/}"
@@ -3768,33 +3790,48 @@ MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0
 # the explicit `return 0` keeps the function's own status 0 — the trailing
 # loop would otherwise propagate a false (( … )) and abort a set -e caller
 # of the bare call in gather_targets.
+#
+# Each section is split into lines, and each line into fields, by word
+# splitting under set -f -- as gather_targets groups them -- not by a `while
+# read` over a here-string.  `read` takes a here-string ONE BYTE per read(2)
+# (it is a pipe), so these three loops cost ~30 ms of a 100-pane list, and
+# every character a pane line gained cost more (review R09).  The fields are
+# the ones `read` gave: a line of the grouped sections has exactly these.
 measure_widths() {
   MAX_SESS=0 MAX_WIN=0 MAX_PATH=0 MAX_FLAGS=0
-  local _sla sname _sw _sa _sn widx wname _wa _wc wpath _wp _wpid wflags _pi _pa _pc ppath _pr il dp nf
-  while IFS="$US" read -r sname _sla _sw _sa; do
-    [ -z "$sname" ] && continue
-    (( ${#sname} > MAX_SESS )) && MAX_SESS=${#sname}
-  done <<< "$sessions_raw"
-  while IFS="$US" read -r _sn widx wname _wa _wc wpath _wp _wpid wflags; do
-    [ -z "$_sn" ] && continue
-    il=$(( ${#widx} + 1 + ${#wname} ))
+  local l wflags il dp nf
+  local -a ls=() f=()
+  set -f
+  IFS=$'\n'; ls=($sessions_raw); unset IFS
+  for l in ${ls[@]+"${ls[@]}"}; do
+    l="${l%%"$US"*}"   # the session name
+    (( ${#l} > MAX_SESS )) && MAX_SESS=${#l}
+  done
+  IFS=$'\n'; ls=($all_windows_raw); unset IFS
+  for l in ${ls[@]+"${ls[@]}"}; do
+    IFS="$US"; f=($l$US); unset IFS   # the appended US: see gather_targets
+    [ -n "${f[0]-}" ] || continue
+    il=$(( ${#f[1]} + 1 + ${#f[2]} ))   # index:name
     (( il > MAX_WIN )) && MAX_WIN=$il
-    dp="${wpath/#$HOME/\~}"
+    dp="${f[5]-}"; dp="${dp/#$HOME/\~}"
     (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
     # Same three positions build_ctx_field reads.  nf=$(( … )), never
     # (( nf++ )): a post-increment from 0 is a false (( … )), and as the last
     # command of an && list it would abort a set -e caller.
-    nf=0
+    wflags="${f[8]-}" nf=0
     [ "${wflags:0:1}" = "1" ] && nf=$(( nf + 1 ))
     [ "${wflags:1:1}" = "1" ] && nf=$(( nf + 1 ))
     [ "${wflags:2:1}" = "1" ] && nf=$(( nf + 1 ))
     (( nf > MAX_FLAGS )) && MAX_FLAGS=$nf
-  done <<< "$all_windows_raw"
-  while IFS="$US" read -r _sn widx _pi _pa _pc ppath _pr; do
-    [ -z "$_sn" ] && continue
-    dp="${ppath/#$HOME/\~}"
+  done
+  IFS=$'\n'; ls=($all_panes_raw); unset IFS
+  for l in ${ls[@]+"${ls[@]}"}; do
+    IFS="$US"; f=($l$US); unset IFS
+    [ -n "${f[0]-}" ] || continue
+    dp="${f[5]-}"; dp="${dp/#$HOME/\~}"
     (( ${#dp} > MAX_PATH )) && MAX_PATH=${#dp}
-  done <<< "$all_panes_raw"
+  done
+  set +f
   return 0
 }
 
@@ -3809,18 +3846,17 @@ measure_widths() {
 # branch.  Windows before panes, as it always was.  The lookups fill
 # get_git_branch's cache, so build_ctx_field's for the same paths cost nothing.
 # Reads gather_targets' dumps through dynamic scope.
+# Split as measure_widths splits, not read: the cwd is field 6 of both.
 _probe_has_branch() {
-  local _sn _wx _wn _wa _wc wpath _wr _pi _pa _pc ppath _pr
-  while IFS="$US" read -r _sn _wx _wn _wa _wc wpath _wr; do
-    [ -n "$_sn" ] || continue
-    get_git_branch "$wpath"
+  local l
+  local -a ls=() f=()
+  set -f; IFS=$'\n'; ls=($all_windows_raw $all_panes_raw); unset IFS; set +f
+  for l in ${ls[@]+"${ls[@]}"}; do
+    set -f; IFS="$US"; f=($l$US); unset IFS; set +f
+    [ -n "${f[0]-}" ] || continue
+    get_git_branch "${f[5]-}"
     [ -n "$REPLY" ] && return 0
-  done <<< "$all_windows_raw"
-  while IFS="$US" read -r _sn _wx _pi _pa _pc ppath _pr; do
-    [ -n "$_sn" ] || continue
-    get_git_branch "$ppath"
-    [ -n "$REPLY" ] && return 0
-  done <<< "$all_panes_raw"
+  done
   return 1
 }
 
@@ -4348,10 +4384,15 @@ gather_targets() {
     # work.  The behaviour therefore depended on where the popup was opened from.
     # set -f for the whole block; the same idiom is used around the RS split in
     # gather_targets.
+    #
+    # The lines by word splitting, not `while read` over a here-string: `read`
+    # takes that a byte per read(2), and a pane line carries its title and its
+    # published options (review R09).
     set -f
     local _hp _hname _hkeep _hout=""
-    while IFS= read -r _hline; do
-      [ -n "$_hline" ] || continue
+    local -a _hls=()
+    IFS=$'\n'; _hls=($sessions_raw); unset IFS
+    for _hline in ${_hls[@]+"${_hls[@]}"}; do
       _hname="${_hline%%"$US"*}"
       _hkeep=1
       if [ "$_hname" != "$current_session" ]; then
@@ -4361,13 +4402,13 @@ gather_targets() {
         done
       fi
       [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
-    done <<< "$sessions_raw"
+    done
     sessions_raw="${_hout%$'\n'}"
 
     # windows and panes carry the session name in field 1 too
     _hout=""
-    while IFS= read -r _hline; do
-      [ -n "$_hline" ] || continue
+    IFS=$'\n'; _hls=($all_windows_raw); unset IFS
+    for _hline in ${_hls[@]+"${_hls[@]}"}; do
       _hname="${_hline%%"$US"*}"
       _hkeep=1
       if [ "$_hname" != "$current_session" ]; then
@@ -4377,12 +4418,12 @@ gather_targets() {
         done
       fi
       [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
-    done <<< "$all_windows_raw"
+    done
     all_windows_raw="${_hout%$'\n'}"
 
     _hout=""
-    while IFS= read -r _hline; do
-      [ -n "$_hline" ] || continue
+    IFS=$'\n'; _hls=($all_panes_raw); unset IFS
+    for _hline in ${_hls[@]+"${_hls[@]}"}; do
       _hname="${_hline%%"$US"*}"
       _hkeep=1
       if [ "$_hname" != "$current_session" ]; then
@@ -4392,7 +4433,7 @@ gather_targets() {
         done
       fi
       [ "$_hkeep" = 1 ] && _hout+="$_hline"$'\n'
-    done <<< "$all_panes_raw"
+    done
     all_panes_raw="${_hout%$'\n'}"
     set +f
   fi
@@ -4612,8 +4653,14 @@ IMUX_SECTIONS
   # any cut line, with what is missing empty.  A pane id that is there and is
   # not %N is not a pane line at all.  Each window's ACTIVE pane lends
   # its id and title to the window row (active_pane).
-  declare -A panes_by_window=() active_pane=()
-  local sn _p3 _p4 _p5 _p6 _p7 _p8 _p9 _p10 _p11
+  #
+  # The id, the title and the options do NOT ride on in the lines this builds:
+  # measure_widths and the pane loop below read those lines with `read`, which
+  # takes a here-string a byte per read(2), and a title is the longest thing on
+  # a pane line.  Each line ends in its number instead, and pane_agent[number]
+  # holds the three (review R09).
+  declare -A panes_by_window=() active_pane=() pane_agent=()
+  local sn _p3 _p4 _p5 _p6 _p7 _p8 _p9 _p10 _p11 _pn=0
   _kept=""
   set -f
   IFS=$'\n'; _glines=($all_panes_raw); unset IFS
@@ -4640,9 +4687,11 @@ IMUX_SECTIONS
         *) continue ;;
       esac
     fi
-    local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8$US$_p9$US$_p10$US$_p11"
+    _pn=$(( _pn + 1 ))
+    local key="${sn}${US}${widx}" rest="$_p3$US$_p4$US$_p5$US$_p6$US$_p7$US$_p8$US$_pn"
     _kept+="$key$US$rest"$'\n'
-    [ "$_p4" = 1 ] && active_pane["$key"]="$_p9$US$_p10$US$_p11"   # id, title, options
+    pane_agent[$_pn]="$_p9$US$_p10$US$_p11"   # id, title, options
+    [ "$_p4" = 1 ] && active_pane["$key"]="${pane_agent[$_pn]}"
     if [[ ${panes_by_window[$key]+x} ]]; then
       panes_by_window["$key"]+=$'\n'"$rest"
     else
@@ -4669,7 +4718,7 @@ IMUX_SECTIONS
   local sla sname swins sattach spath marker meta age sdisp rule_n rule_run rule_ok
   local session_windows win_count wi branch_glyph cont idname maxid ident ctx
   local wmarker raw_cmd cmd_formatted wflags
-  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts _wopt
+  local pane_data pane_count pi pglyph pmarker pprefix pdisp pover pid_disp pmax ppane ptitle popts _wopt _pline
 
   while IFS="$US" read -r sname sla swins sattach spath; do
     [ -z "$sname" ] && continue
@@ -4802,8 +4851,11 @@ IMUX_SECTIONS
         pane_count=$(( ${#pane_count} + 1 ))
         pi=0
 
-        while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2 ppane ptitle popts; do
+        while IFS="$US" read -r pidx _pact pcmd ppath ppid _wp2 _pline; do
           [ -n "$_wp2" ] || ppid=0   # cut short: never read its pid (see above)
+          _hline="${pane_agent[${_pline:-0}]-}"   # id US title US options
+          ppane="${_hline%%"$US"*}" _hline="${_hline#*"$US"}"
+          ptitle="${_hline%%"$US"*}" popts="${_hline#*"$US"}"
           pi=$((pi + 1))
           pglyph='├╴'
           [ "$pi" -eq "$pane_count" ] && pglyph='└╴'

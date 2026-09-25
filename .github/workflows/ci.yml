@@ -100,8 +100,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            fd-find at gawk locales \
+            fd-find at gawk locales strace \
             build-essential libevent-dev libncurses-dev bison pkg-config
+          # strace: tests/test_render_cost.sh counts the bash renderer's
+          # read(2) calls, the one measure of its cost a loaded runner cannot
+          # blur.  Without it those cases skip.
           # A SECOND locale, whose collation differs from C's.  The parity suite
           # guards a real bug with it — the MRU sort used to order tied
           # timestamps by collation, so the two renderers disagreed on any
