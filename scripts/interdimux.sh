@@ -8084,16 +8084,51 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # A value's domain, by option name.  Empty always means "unset, use default".
   _check_value() { # $1 = name, $2 = value -> prints a complaint, or nothing
-    local n="$1" v="$2"
+    local n="$1" v="$2" _d
     [ -n "$v" ] || return 0
     case "$n" in
       show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw|session-rule|scope-highlight|autobuild)
         case "$v" in on|off) ;; *) printf "expected 'on' or 'off'" ;; esac ;;
       order)
         case "$v" in mru|index) ;; *) printf "expected 'mru' or 'index'" ;; esac ;;
+      # The agent options, in the terms the script replaces a bad value in
+      # (right after the get_opt calls): the default, which for agent-args is
+      # off and for agent-state on -- so a `yes` does the opposite of what it
+      # says for one of them.
+      agent-args)
+        case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays off" ;; esac ;;
+      agent-state)
+        case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays on" ;; esac ;;
+      show-title)
+        case "$v" in known|all|off) ;; *) printf "expected 'known', 'all' or 'off', so it stays known" ;; esac ;;
+      title-max)
+        # Decimal whatever the leading zeros, then clamped to 8..200.
+        case "$v" in
+          *[!0-9]*) printf 'expected a whole number from 8 to 200, so the default, 40, applies' ;;
+          *) _d="${v#"${v%%[!0]*}"}"; _d="${_d:-0}"
+             if [ "${#_d}" -gt 3 ] || [ "$_d" -gt 200 ]; then printf 'the most is 200, so 200 applies'
+             elif [ "$_d" -lt 8 ]; then printf 'the least is 8, so 8 applies'
+             fi ;;
+        esac ;;
+      agents)
+        # `off`, or names: a word with anything but letters, digits, '.', '_'
+        # and '-' is skipped (AGENT_KNOWN), and says nothing where it is.
+        local _w _skip=""
+        if [ "$v" != off ]; then
+          set -f
+          for _w in $v; do
+            case "$_w" in *[!A-Za-z0-9._-]*) _skip+="${_skip:+, }'$_w'" ;; esac
+          done
+          set +f
+          [ -z "$_skip" ] || printf 'skipped: %s (a name is letters, digits, dots, underscores and hyphens)' "$_skip"
+        fi ;;
       recent-limit|dirs-limit|scan-depth)
         case "$v" in ''|*[!0-9]*) printf 'expected a whole number' ;; esac
-        [ "$n" = scan-depth ] && case "$v" in ''|*[!0-9]*) ;; *) [ "$v" -gt 10 ] && printf 'deeper than 10 will not finish inside a popup' ;; esac ;;
+        # Decimal, whatever the leading zeros, as the script reads it; and the
+        # length first, as there: `[ -gt ]` on a 20-digit number is an error.
+        [ "$n" = scan-depth ] && case "$v" in ''|*[!0-9]*) ;; *)
+          _d="${v#"${v%%[!0]*}"}"; _d="${_d:-0}"
+          { [ "${#_d}" -gt 2 ] || [ "$_d" -gt 10 ]; } && printf 'deeper than 10 will not finish inside a popup' ;; esac ;;
       popup-width|popup-height)
         case "$v" in *%) case "${v%\%}" in ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
                      ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
