@@ -451,10 +451,21 @@ Where the state comes from, first source that speaks wins:
    (`@dmux_attention`). Anything that can run `tmux` can publish one — a
    hook, or a wrapper around a tool that has no state of its own:
    ```sh
+   #!/bin/sh
+   # my-agent, saying so in its pane; the state goes however it ends
+   trap 'tmux set -pu -t "$TMUX_PANE" @agent_state' EXIT
+   trap 'exit 130' INT TERM HUP
    tmux set -p -t "$TMUX_PANE" @agent_state working
    my-agent "$@"
-   tmux set -p -t "$TMUX_PANE" @agent_state done
    ```
+   tmux keeps a pane option until something unsets it, and a state shows on
+   whatever runs in the pane next (only a shell at its prompt shows none):
+   a `set … done` at the end would be seen only on the *next* program, as
+   would a `working` that Ctrl-C left behind. So the wrapper unsets it on
+   the way out, and the second `trap` is what makes the first one run on
+   Ctrl-C too (dash, the `sh` of Debian and Ubuntu, skips an EXIT trap when
+   a signal kills it). A hook that
+   publishes a state should clear it the same way when its agent ends.
    (`@agent_state` takes the words above; `@agent_desc` any text, shown as
    it is: the filters below are for titles, which can be stale or a copy of
    the command line, and only a description that is just the app's name is
