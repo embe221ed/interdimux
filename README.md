@@ -516,7 +516,9 @@ myagent   working  $1   %spin *
 - `PATTERN` is literal text matched against the whole title; each `*`
   captures, greedily from the left. A leading `%spin` matches one braille
   spinner character.
-- `STATE` is a word (approve input working idle done error) or `-`.
+- `STATE` is a word (approve input working idle done error) or `-`. Any
+  other word, `Approve` included, counts as `-`: the rule still matches and
+  still gives its `DESC`, but no state (`--doctor` names such lines).
 - `DESC` is `-` (show nothing), `=` (the whole title) or a template such as
   `$1` or `$2: $1`.
 - The first title rule that matches decides. Among `@option` rules, the first

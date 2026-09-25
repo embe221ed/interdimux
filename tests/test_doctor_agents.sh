@@ -180,7 +180,7 @@ EOF
 ag
 has "your rules file: counted" "$out" "  ✓ your title rules: ~/.config/interdimux/titles holds 4 rules, read before the built-in ones"
 has "a line that is not a rule is named by its number" "$out" "      line 4 is not a rule (APPS STATE DESC PATTERN), so it is skipped"
-has "a STATE that is not a state word is named" "$out" "      line 5: its STATE is not one of approve input working idle done error, or -"
+has "a STATE that is not a state word is named" "$out" "      line 5: its STATE is not one of approve input working idle done error, or -, so the rule gives none"
 has "an option name tmux cannot be asked for is named" "$out" "      line 6: @bad.name is not an option name tmux can be asked for, so it is never read"
 hasnt "the comment and the blank line are not flagged" "$out" "line 1"
 hasnt "...(nor the blank line)" "$out" "line 2"

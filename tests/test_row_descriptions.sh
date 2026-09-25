@@ -13,6 +13,8 @@
 #      row: a title the last program left in the pane (a shell that sets none
 #      keeps it) is not an agent's task.  The agents that title themselves
 #      have rules, so their own titles still show.
+#   4. a rule whose STATE is not one of the six words gives no state (README
+#      "Title rules"), though it still matches and gives its DESC
 #
 # Expected rows are written out here, not computed by either renderer.
 
@@ -237,6 +239,39 @@ EXPECT=('aider Refactor auth middleware' 'myagent Thanks for flying Vim')
 WHAT=("aider's leftover title" "a user-added agent's leftover title")
 check_dump "agent titles"
 SHOW=known EXTRA=()
+
+# --- 4. a STATE that is not a state word gives none -----------------------------
+printf '%s\n' \
+  'myagent   waiting  -   [?] *' \
+  'myagent   Approve  $1  !! *' \
+  'myagent   input    -   ?? *' \
+  'sleep     blocked  =   *' \
+  '@agent_desc  waiting  =  *' > "$TMPD/home/titles"
+EXTRA=(INTERDIMUX_AGENTS=myagent)
+CASES=(
+  'myagent|[?] Pick one'
+  'myagent|!! Now'
+  'myagent|?? Which file'
+  'sleep 883|t'
+  'sleep 5|§agent_desc=Build'
+)
+EXPECT=(
+  'myagent'
+  'myagent Now'
+  'myagent input'
+  'sleep 883 t'
+  'sleep 5 Build'
+)
+WHAT=(
+  "a made-up word: no state, and the rule still decides (DESC -)"
+  "a state word in capitals is no state word; its DESC stays"
+  "a state word is a state"
+  "a made-up word on another app: the whole title, no state"
+  "an @option rule with a made-up word: its DESC, no state"
+)
+check_dump "state words"
+rm -f "$TMPD/home/titles"
+EXTRA=()
 
 echo
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"

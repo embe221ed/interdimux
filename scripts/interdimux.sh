@@ -2826,7 +2826,7 @@ agent_of() {
 #          @claude_state, ...), and so can your own hooks: `tmux set -p -t
 #          "$TMUX_PANE" @agent_state approve` needs no rule at all.
 # STATE    the state word it asserts (approve input working idle done error),
-#          or - for none.
+#          or - for none.  Any other word is taken for - (tr_parse).
 # DESC     - for none, = for the whole title (or value), anything else a
 #          template in which $1..$9 are PATTERN's captures.
 # PATTERN  the rest of the line: literal text, anchored at both ends, in which
@@ -3108,10 +3108,13 @@ load_title_rules() {
 }
 
 # Parse rule $1 (once): its fields and its ERE.  TR_OK[$1]=0 for a line that is
-# not a rule after all (no pattern), which every lookup then skips.
+# not a rule after all (no pattern), which every lookup then skips.  A STATE
+# that is not one of the words is `-`: the rule still matches, and still
+# gives its DESC, but no state (--doctor names such a line).
 tr_parse() {
   local re c
   if ! rule_fields "${TR_LINE[$1]}"; then TR_OK[$1]=0; return 0; fi
+  case "$RULE_S" in approve|input|working|idle|done|error) ;; *) RULE_S=- ;; esac
   TR_STATE[$1]="$RULE_S" TR_DESC[$1]="$RULE_D" re="$RULE_P" c=0
   if [[ "$re" == %spin* ]]; then c=1; re="${re#%spin}"; fi
   TR_SPIN[$1]="$c"
@@ -8337,7 +8340,7 @@ if [ "${1:-}" = "--doctor" ]; then
       _nr=$((_nr + 1))
       case "$RULE_S" in
         -|approve|input|working|idle|done|error) ;;
-        *) _trn+=("line $_ln: its STATE is not one of approve input working idle done error, or -") ;;
+        *) _trn+=("line $_ln: its STATE is not one of approve input working idle done error, or -, so the rule gives none") ;;
       esac
       [[ "$RULE_A" == @* ]] || continue
       # The names an option rule reads go into the list's tmux query, so one
