@@ -2933,6 +2933,34 @@ copilot         -        -   GitHub Copilot
 # workmux, @codex_attention of codex-tmux-notify) would show on the panes
 # next to the agent too, and each option read costs every list ~0.35 ms per
 # 100 panes.  The README has their rules, to add to your own file.
+
+# --- apps that are a terminal somewhere else -----------------------------
+# A shell on another host or in a container titles the pane with where it is,
+# and nothing else on the row can say so: the directory is where the client
+# was started, the command is `ssh web1` or `docker exec -it 3f2a bash`.  Only
+# the shapes such titles have are read, so what an earlier program left in the
+# title (a shell that sets none leaves it there) shows only if it has one, and
+# a prompt of THIS host never shows (cmd_field drops it).
+#
+# mosh-client (the mosh script execs it) puts [mosh] before whatever the remote
+# sets, and pops its own title on exit
+mosh-client  -  $1  [mosh] *
+# a prompt.  user@host: ~/path from the Debian and Ubuntu bashrc (TERM xterm*),
+# user@host:~/path from Fedora /etc/bashrc (xterm*), Arch /etc/bash.bashrc
+# (xterm*, tmux*) and oh-my-zsh (any TERM).  docker -t gives the container
+# TERM=xterm but no USER, which Fedora and Arch print: @3f2a9c1b:/app.  screen
+# passes its window title on.
+ssh,autossh,et,docker,docker-compose,podman,nerdctl,kubectl,oc,lxc,incus,machinectl,toolbox,multipass,screen  -  =  *@*:*
+# fish over ssh (fish_title, when SSH_TTY is set): [host] ~/p/dir, and
+# [host] make ~/p/dir while a command runs
+ssh,autossh,et  -  =  [*] *
+# tmux there, with set-titles on and the default set-titles-string
+# (#S:#I:#W - "#T"): session:index:window - "its pane title"
+ssh,autossh,et,docker,docker-compose,podman,nerdctl,kubectl,oc,lxc,incus,machinectl,toolbox,multipass  -  =  *:*:* - "*"*
+# a client of another tmux server here (tmux -L other attach), with set-titles
+# on: its session:index:window.  The pane title after it is usually a prompt
+# of this host, which would hide the whole title.
+tmux  -  $1  * - "*"*
 '
 
 # A title's text before any rule sees it, in REPLY: control characters made
