@@ -470,8 +470,8 @@ Where the state comes from, first source that speaks wins:
    would a `working` that Ctrl-C left behind. So the wrapper unsets it on
    the way out, and the second `trap` is what makes the first one run on
    Ctrl-C too (dash, the `sh` of Debian and Ubuntu, skips an EXIT trap when
-   a signal kills it). A hook that
-   publishes a state should clear it the same way when its agent ends.
+   a signal kills it). A hook that publishes a state should clear it the
+   same way when its agent ends.
    (`@agent_state` takes the words above; `@agent_desc` any text, shown as
    it is: the filters below are for titles, which can be stale or a copy of
    the command line, and only a description that is just the app's name is
