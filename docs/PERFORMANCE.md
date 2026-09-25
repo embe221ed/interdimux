@@ -619,6 +619,68 @@ every width and re-tiers on `^/` and on a resize with **no** process per cursor
 move — which is the property Tier 2 spent its whole budget acquiring, so
 spending a process here would have been the wrong trade.
 
+## Tier 9 — what agent rows cost (gather3, 2026-09-25)
+
+Agent rows (README "Agents and pane titles") put three new things on every
+pane line of the batched query — `#{pane_id}`, `#{pane_title}`, and the values
+of the pane options agent plugins publish — and a registry read and a rule
+engine in front of the renderers. Measured on a private tmux 3.7b server, 97
+panes unless said otherwise, on a noisy VM: wall times swung by ±10 ms between
+runs, so the numbers that decided anything are interleaved medians of
+`list-panes` alone (40 rounds) and CPU time (bash `time`, plus the tmux
+server's own utime+stime from `/proc`).
+
+```
+list-panes -a, the old pane format                      10.3 ms
+  + #{pane_id} #{pane_title}                            11.8 ms
+  + 2 options, conditional #{?@x,x=#{s/…/:@x},}         12.6 ms
+  + 4 options, conditional                              14.3 ms
+  + 14 options, conditional                             20.7 ms   0.7 ms / option
+  + 14 options, positional #{=128;s/…/:@x}              16.7 ms   0.35 ms / option
+  + 14 options, raw #{@x}                               13.6 ms   (unsanitised: rejected)
+  + a separate `list-panes -f '#{||:…}'` for options    32.7 ms   (rejected)
+```
+
+Three decisions came out of it.
+
+**Positional values, sanitised, last on the line.** A conditional per option
+cost twice the unconditional form: tmux parses and skips the branch text of a
+`#{?…}` on every pane. So each option is one `#{=128;s/[GS RS US NL]/?/:@x}`
+and a GS, in the order of `STATE_OPTS`, which both renderers know; an unset
+option is an empty value. Unsanitised values were cheaper still but let a
+newline in any plugin's option forge a pane line. The field is the last on the
+line, so nothing in it can move another.
+
+**Only pane-scoped plugin options by default** (10 names). A window-scoped
+option resolves for every pane of its window, so the state showed on the
+agent's neighbours; not reading them also saves ~1.4 ms per 100 panes. The
+README lists them for users who want them anyway.
+
+**The bash renderer parses rules lazily.** Parsing all ~75 default rules up
+front cost ~18 ms (bash's UTF-8 regex compiles and multibyte substitutions),
+and scanning every rule for every row ~0.7 ms a row. Now the first row that
+needs a rule indexes the rule lines by app (first words only), and a rule is
+split and compiled only when a row reaches it: a list of shells and editors
+parses none. A title that cannot change its row (not an agent's, no rule for
+the app, not `@interdimux-show-title all`) is not even cleaned.
+`DEFAULT_STATE_OPTS` is spelled out, not derived from the rules on every list
+(~5 ms of bash); tests/test_title_rules.sh keeps it in step with the rules.
+
+End to end, CPU time of `--list` (client tree) and the tmux server:
+
+| | 29 panes | 97 panes |
+|---|---|---|
+| Rust core, client | 63 → 64 ms | 59 → 66 ms |
+| Rust core, tmux server | 2.3 → 3.7 ms | 4.0 → 11.0 ms |
+| bash renderer, client | 100 → 124 ms | 174 → 222 ms |
+
+(before → after; the tmux server figures have 10 ms tick granularity, means
+of 20-30 runs, and were measured with the 14-option set, before the trim to
+10.) The Rust path — every install that has cargo — pays a few ms, most of it
+tmux looking up options. The bash fallback pays ~0.5 ms a row for the agent
+column: most of it is bash's own function-call cost on this machine, and the
+rows that are not agents take the shortest path through it.
+
 ## Suggested rollout
 
 1. **Tier 0 (0.1 + 0.2 + 0.3)** in one pass — pure fork removal, no gate, test-covered. This
