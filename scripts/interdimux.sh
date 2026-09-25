@@ -3323,6 +3323,11 @@ option_rule_r() {
 #
 #   * only `<digits>.json`.  The directory also holds `<pid>.<hash>.key`
 #     files, which are never opened;
+#   * only a regular file (or a link to one), and only its first 65,536
+#     characters: a FIFO there blocked the open(2) until a writer came --
+#     every list, reload and prefix+g, in both renderers, hung (review R24).
+#     A record is a few hundred bytes; a longer one fails the closing-brace
+#     test below;
 #   * written by truncating and rewriting, so a read can catch it empty or
 #     half written: no closing brace, or a key missing, skips it for this paint;
 #   * the pid must still be that process: /proc/<pid>/stat's start time equals
@@ -3352,8 +3357,9 @@ claude_registry_r() {
   for f in ${files[@]+"${files[@]}"}; do
     stem="${f##*/}"; stem="${stem%.json}"
     case "$stem" in ''|*[!0-9]*) continue ;; esac
+    [ -f "$f" ] || continue
     j=""
-    { IFS= read -r -d '' j < "$f"; } 2>/dev/null || :
+    { IFS= read -r -N 65536 j < "$f"; } 2>/dev/null || :
     [[ "$j" == *'}' ]] || continue
     [[ "$j" =~ \"kind\":\"interactive\" ]] || continue
     [[ "$j" =~ \"pid\":([0-9]+) ]] && pid="${BASH_REMATCH[1]}" || continue
@@ -8595,7 +8601,7 @@ if [ "${1:-}" = "--doctor" ]; then
         [[ "${_f##*/}" =~ ^[0-9]+\.json$ ]] || continue
         if ! { [ -f "$_f" ] && [ -r "$_f" ]; }; then _nunr=$((_nunr + 1)); continue; fi
         _j=""
-        { IFS= read -r -d '' _j; } 2>/dev/null < "$_f"
+        { IFS= read -r -N 65536 _j; } 2>/dev/null < "$_f"   # as claude_registry_r
         if [[ "$_j" == *'}' && "$_j" =~ \"pid\":[0-9]+ && "$_j" =~ \"status\":\"[a-z]+\" ]]; then
           _nrec=$((_nrec + 1))
         else
