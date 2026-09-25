@@ -143,10 +143,10 @@ CASES=(
   'ssh|ssh web1:/etc'
 )
 EXPECT=(
-  'ssh deploy@web1:/etc/ssh'
-  'ssh deploy@web1:~/ssh'
-  'docker root@3f2a9c1b:/var/lib/docker'
-  'ssh deploy@web1: /etc/ssh'
+  'ssh ∣ deploy@web1:/etc/ssh'
+  'ssh ∣ deploy@web1:~/ssh'
+  'docker ∣ root@3f2a9c1b:/var/lib/docker'
+  'ssh ∣ deploy@web1: /etc/ssh'
   'ssh'
   'ssh'
 )
@@ -172,13 +172,13 @@ CASES=(
   'claude|§agent_state=working;agent_desc=claude'
 )
 EXPECT=(
-  'claude working claude reviewing PR 42'
-  'sleep 100 working sleep until the build finishes'
-  'make build make is running'
-  'vim foo web'
-  'sleep 30 deploy@web: /srv'
-  'sh my-agent working my-agent step 2 of 5'
-  'claude working'
+  'claude ∣ working ∣ claude reviewing PR 42'
+  'sleep 100 ∣ working ∣ sleep until the build finishes'
+  'make build ∣ make is running'
+  'vim foo ∣ web'
+  'sleep 30 ∣ deploy@web: /srv'
+  'sh my-agent ∣ working ∣ my-agent step 2 of 5'
+  'claude ∣ working'
 )
 WHAT=(
   "one that starts with the agent's name"
@@ -212,14 +212,14 @@ EXPECT=(
   'aider'
   'myagent'
   'kiro-cli'
-  'sh my-agent working'
+  'sh my-agent ∣ working'
   'claude'
-  'claude Fix the parser'
+  'claude ∣ Fix the parser'
   'claude'
-  'cursor-agent Refactor the store'
+  'cursor-agent ∣ Refactor the store'
   'cursor-agent'
-  'codex Fix login'
-  'gemini working Planning the refactor'
+  'codex ∣ Fix login'
+  'gemini ∣ working ∣ Planning the refactor'
 )
 WHAT=(
   "not: a leftover title on aider, which sets none"
@@ -239,7 +239,7 @@ check_dump "agent titles"
 # ...and under `all`, every title shows, as it did
 SHOW=all
 CASES=('aider --model sonnet|✳ Refactor auth middleware' 'myagent|Thanks for flying Vim')
-EXPECT=('aider Refactor auth middleware' 'myagent Thanks for flying Vim')
+EXPECT=('aider ∣ Refactor auth middleware' 'myagent ∣ Thanks for flying Vim')
 WHAT=("aider's leftover title" "a user-added agent's leftover title")
 check_dump "agent titles"
 SHOW=known EXTRA=()
@@ -261,10 +261,10 @@ CASES=(
 )
 EXPECT=(
   'myagent'
-  'myagent Now'
-  'myagent input'
-  'sleep 883 t'
-  'sleep 5 Build'
+  'myagent ∣ Now'
+  'myagent ∣ input'
+  'sleep 883 ∣ t'
+  'sleep 5 ∣ Build'
 )
 WHAT=(
   "a made-up word: no state, and the rule still decides (DESC -)"
@@ -288,9 +288,9 @@ CASES=(
 )
 EXTRA=()
 EXPECT=(
-  'claude working 5m Validate user input on signup'
-  'codex approve Fix the build'
-  'codex approve Fix the build'
+  'claude ∣ working 5m ∣ Validate user input on signup'
+  'codex ∣ approve ∣ Fix the build'
+  'codex ∣ approve ∣ Fix the build'
 )
 WHAT=(
   "claude, named and its arguments dropped"
@@ -300,8 +300,8 @@ WHAT=(
 check_dump "agents on"
 EXTRA=(INTERDIMUX_AGENTS=off)
 EXPECT=(
-  'claude 2400 working 5m Validate user input on signup'
-  'codex 2400 approve Fix the build'
+  'claude 2400 ∣ working 5m ∣ Validate user input on signup'
+  'codex 2400 ∣ approve ∣ Fix the build'
   'node codex resume 0199a1b2-aaaa'
 )
 WHAT=(

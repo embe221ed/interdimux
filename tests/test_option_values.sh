@@ -98,15 +98,15 @@ if [ -x "$BIN" ]; then renderers+=(on); else echo "  (rust binary not built: the
 
 # value | what the row must say
 cases=(
-  "8|codex approve Fix the…"
-  "08|codex approve Fix the…"
-  "09|codex approve Fix the …"
-  "000|codex approve Fix the…"
-  "40|codex approve Fix the login timeout that users hit af…"
-  "040|codex approve Fix the login timeout that users hit af…"
-  "0040|codex approve Fix the login timeout that users hit af…"
-  "050|codex approve Fix the login timeout that users hit after a long…"
-  "0000000000000000000050|codex approve Fix the login timeout that users hit after a long…"
+  "8|codex ∣ approve ∣ Fix the…"
+  "08|codex ∣ approve ∣ Fix the…"
+  "09|codex ∣ approve ∣ Fix the …"
+  "000|codex ∣ approve ∣ Fix the…"
+  "40|codex ∣ approve ∣ Fix the login timeout that users hit af…"
+  "040|codex ∣ approve ∣ Fix the login timeout that users hit af…"
+  "0040|codex ∣ approve ∣ Fix the login timeout that users hit af…"
+  "050|codex ∣ approve ∣ Fix the login timeout that users hit after a long…"
+  "0000000000000000000050|codex ∣ approve ∣ Fix the login timeout that users hit after a long…"
 )
 for r in "${renderers[@]}"; do
   label=bash; [ "$r" = on ] && label=rust
@@ -128,8 +128,8 @@ if [ -x "$BIN" ]; then
   RULESET=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; sub(/^DEFAULT_TITLE_RULES='/, \"\"); print; next }
                  on && /^'\$/ { exit } on { print }" "$SCRIPT")
   STATE_OPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\\(.*\\)'\$/\\1/p" "$SCRIPT")
-  for c in "0040|codex approve Fix the login timeout that users hit af…" \
-           "99999999999999999999999|codex approve $THREAD"; do
+  for c in "0040|codex ∣ approve ∣ Fix the login timeout that users hit af…" \
+           "99999999999999999999999|codex ∣ approve ∣ $THREAD"; do
     v="${c%%|*}" want="${c#*|}"
     got=$(env -i HOME=/home/u LANG=C.UTF-8 LC_ALL=C.UTF-8 INTERDIMUX_NOW=1700086400 \
             INTERDIMUX_COLS=200 INTERDIMUX_SHOW_FULL_COMMAND=off INTERDIMUX_SHOW_GIT_BRANCH=off \
@@ -230,6 +230,7 @@ bad=(
   "title-max|5|8|the least is 8, so 8 applies|40"
   "title-max|4O|40|expected a whole number from 8 to 200, so the default, 40, applies|200"
   "agents|my/agent myagent|myagent|skipped: 'my/agent' (a name is letters, digits, dots, underscores and hyphens)|"
+  "agent-separator|::::|∣|at most 3 characters, so the default, ∣, applies|off"
 )
 for c in "${bad[@]}"; do
   IFS='|' read -r o v eff why other <<< "$c"

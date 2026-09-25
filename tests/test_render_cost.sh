@@ -183,11 +183,11 @@ fi
   printf '%%20%s3000%sworking%s1700086000\n' "$US" "$US" "$US"
 } > "$TMPD/gates.dump"
 want=(
-  "make -j8 working 6m"
-  "sleep 30 approve"
-  "codex approve Add tests"
+  "make -j8 ∣ working 6m"
+  "sleep 30 ∣ approve"
+  "codex ∣ approve ∣ Add tests"
   "myagent"
-  "ssh web1 deploy@web1: ~/src"
+  "ssh web1 ∣ deploy@web1: ~/src"
   "vim notes"
 )
 BIN="$SCRIPT_DIR/rust/target/release/imux"

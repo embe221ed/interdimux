@@ -151,11 +151,11 @@ for rust in off on; do
   OUT=$(rows "$rust")
   idx() { tmux -L "$SOCK" display-message -p -t "=t:$1" '#{window_index}'; }
   got=$(cmd_of "$OUT" "$(idx cl)")
-  [ "$got" = "claude approve 5m Fix the parser" ] \
+  [ "$got" = "claude ∣ approve 5m ∣ Fix the parser" ] \
     && report "$label: claude reads its registry state, age and title (and drops its args)" pass \
     || { report "$label: claude reads its registry state, age and title (got: $got)" fail; }
   got=$(cmd_of "$OUT" "$(idx cx)")
-  [ "$got" = "codex approve Add tests" ] \
+  [ "$got" = "codex ∣ approve ∣ Add tests" ] \
     && report "$label: an npm codex is named codex, its title says approve" pass \
     || report "$label: an npm codex is named codex, its title says approve (got: $got)" fail
   got=$(cmd_of "$OUT" "$(idx gm)")
@@ -163,7 +163,7 @@ for rust in off on; do
     && report "$label: an npm gemini with no title is named gemini, the host name title unshown" pass \
     || report "$label: an npm gemini with no title is named gemini (got: $got)" fail
   got=$(cmd_of "$OUT" "$(idx op)")
-  [ "$got" = "sleep 993 working" ] \
+  [ "$got" = "sleep 993 ∣ working" ] \
     && report "$label: a plugin's @pane_status gives any row its state" pass \
     || report "$label: a plugin's @pane_status gives any row its state (got: $got)" fail
   got=$(cmd_of "$OUT" "$(idx ti)")
@@ -171,11 +171,11 @@ for rust in off on; do
     && report "$label: a title no rule knows is not shown by default" pass \
     || report "$label: a title no rule knows is not shown by default (got: $got)" fail
   got=$(cmd_of "$(rows "$rust" INTERDIMUX_SHOW_TITLE=all)" "$(idx ti)")
-  [ "$got" = "sleep 994 Quarterly numbers" ] \
+  [ "$got" = "sleep 994 ∣ Quarterly numbers" ] \
     && report "$label: ...and is under @interdimux-show-title all" pass \
     || report "$label: ...and is under @interdimux-show-title all (got: $got)" fail
   got=$(cmd_of "$(rows "$rust" INTERDIMUX_AGENT_ARGS=on)" "$(idx cx)")
-  [ "$got" = "codex approve Add tests resume" ] \
+  [ "$got" = "codex resume ∣ approve ∣ Add tests" ] \
     && report "$label: @interdimux-agent-args on keeps the arguments" pass \
     || report "$label: @interdimux-agent-args on keeps the arguments (got: $got)" fail
   got=$(cmd_of "$(rows "$rust" INTERDIMUX_AGENT_STATE=off INTERDIMUX_SHOW_TITLE=off INTERDIMUX_AGENTS=off)" "$(idx cx)")
@@ -200,12 +200,12 @@ for rust in off $([ "$HAVE_RUST" = on ] && echo on); do
   label="bash"; [ "$rust" = on ] && label="rust"
   record "$CL_PID" "$(( CL_START + 1 ))" "$CL_PANE" waiting "permission prompt" 300 > "$REG/$CL_PID.json"
   got=$(cmd_of "$(rows "$rust")" "$CL_IDX")
-  [ "$got" = "claude Fix the parser" ] \
+  [ "$got" = "claude ∣ Fix the parser" ] \
     && report "$label: a record whose procStart is not the process's is not believed" pass \
     || report "$label: a record whose procStart is not the process's is not believed (got: $got)" fail
   record "$CL_PID" "$CL_START" "$CX_PANE" busy "" 10 > "$REG/$CL_PID.json"
   got=$(cmd_of "$(rows "$rust")" "$CX_IDX")
-  [ "$got" = "codex approve Add tests" ] \
+  [ "$got" = "codex ∣ approve ∣ Add tests" ] \
     && report "$label: a record naming another pane than its own is not believed there" pass \
     || report "$label: a record naming another pane than its own is not believed there (got: $got)" fail
 done

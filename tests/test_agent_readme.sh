@@ -124,7 +124,7 @@ same "the shell is at its prompt" "$(pcc wr)" bash
 tm send-keys -t '=t:wr' -l "sh $TMPD/wrap-agent"; tm send-keys -t '=t:wr' Enter
 wait_for 200 is_state working; wait_for 200 tool_runs
 same "while the tool runs, the pane says working" "$(state)" working
-rows_all "while the tool runs, the row says so" wr "sh wrap-agent working"
+rows_all "while the tool runs, the row says so" wr "sh wrap-agent ∣ working"
 tm send-keys -t '=t:wr' -l "done"; tm send-keys -t '=t:wr' Enter
 wait_for 200 tool_gone; wait_for 200 is_cmd wr bash; wait_for 200 is_state ""
 same "the tool answered and gone: the option is unset" "$(state)" ""
@@ -179,7 +179,7 @@ for w in plain titled; do
   tm send-keys -t "=t:$w" -l "(exec -a docker sleep 302)"; tm send-keys -t "=t:$w" Enter
 done
 wait_for 200 is_cmd plain docker; wait_for 200 is_cmd titled docker
-rows_all "plain bash: the next docker row shows the gone container (the documented limit)" plain "docker 302 $GONE"
+rows_all "plain bash: the next docker row shows the gone container (the documented limit)" plain "docker 302 ∣ $GONE"
 rows_all "the PS1 line: the next docker row does not" titled "docker 302"
 tm send-keys -t '=t:plain' C-c; tm send-keys -t '=t:titled' C-c
 
@@ -249,7 +249,7 @@ if [ -r /proc/self/stat ]; then
   rows_all "/proc: a record whose pid is gone is not believed" sl "sleep 994"
 fi
 export INTERDIMUX_REGISTRY_NO_PROC=1
-rows_all "no /proc: a live pid is all it takes (README)" np "sleep 993 approve 5m"
+rows_all "no /proc: a live pid is all it takes (README)" np "sleep 993 ∣ approve 5m"
 rows_all "no /proc: a record whose pid is gone is still not believed" sl "sleep 994"
 unset INTERDIMUX_REGISTRY_NO_PROC INTERDIMUX_NOW
 

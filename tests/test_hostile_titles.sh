@@ -173,7 +173,7 @@ colons=$(printf 'a:%.0s' $(seq 2000))
 mkdump "$TMPD/colons.dump" "ssh web1|$colons" "ssh web2|deploy@web2: ~/app"
 for r in $RENDERERS; do
   render "$r" "$TMPD/colons.dump" 10
-  if [ "$RC" = 0 ] && [ "${GOT[0]-}" = "ssh web1" ] && [ "${GOT[1]-}" = "ssh web2 deploy@web2: ~/app" ]; then
+  if [ "$RC" = 0 ] && [ "${GOT[0]-}" = "ssh web1" ] && [ "${GOT[1]-}" = "ssh web2 ∣ deploy@web2: ~/app" ]; then
     report "$(label "$r"): 2,000 colons against the remote-shell rule render within 10 s" pass
   else
     report "$(label "$r"): 2,000 colons against the remote-shell rule render within 10 s (rc $RC, got: '${GOT[0]-}' / '${GOT[1]-}')" fail
@@ -191,7 +191,7 @@ mkdump "$TMPD/cap.dump" \
   "capt|$(rep $'\xe2\x80\x8b' 255)Z" \
   "capt|$(rep $'\xe2\x80\x8b' 256)Z" \
   "capz|Z$(rep $'\xe2\x80\x8b' 5000) tail"
-CAP_EXPECT=('capt hit' 'capt' 'capt hit' 'capt hit' 'capt hit' 'capt' 'capz hit')
+CAP_EXPECT=('capt ∣ hit' 'capt' 'capt ∣ hit' 'capt ∣ hit' 'capt ∣ hit' 'capt' 'capz ∣ hit')
 CAP_WHAT=(
   "the 256th character is read"
   "...the 257th is not"
@@ -217,7 +217,7 @@ printf '%s\n' 'capz  -  hit  Z*' > "$TMPD/home/titles"
 mkdump "$TMPD/long.dump" "capz|Z$(rep $'\xe2\x80\x8b' 100000)"
 for r in $RENDERERS; do
   render "$r" "$TMPD/long.dump" 3
-  [ "$RC" = 0 ] && [ "${GOT[0]-}" = "capz hit" ] \
+  [ "$RC" = 0 ] && [ "${GOT[0]-}" = "capz ∣ hit" ] \
     && report "$(label "$r"): a 100,000-character title renders within 3 s" pass \
     || report "$(label "$r"): a 100,000-character title renders within 3 s (rc $RC, got: '${GOT[0]-}')" fail
 done
@@ -243,7 +243,7 @@ mkdump "$TMPD/c1.dump" "sleep|"
 opt_values "agent_desc=$(rep ' ' 30000)Fix it$(rep ' ' 30000)"
 mkdump "$TMPD/pad.dump" "sleep|"
 OPTS=""
-want_c1="sleep Fix$(rep '?' 196)…"
+want_c1="sleep ∣ Fix$(rep '?' 196)…"
 got0() { local g="${GOT[0]-}"; printf '%s' "${g:0:40}"; }
 for r in $RENDERERS; do
   render "$r" "$TMPD/c1.dump" 3
@@ -251,7 +251,7 @@ for r in $RENDERERS; do
     && report "$(label "$r"): 20,000 C1 controls in a description are made '?' within 3 s" pass \
     || report "$(label "$r"): 20,000 C1 controls in a description are made '?' within 3 s (rc $RC, got: '$(got0)')" fail
   render "$r" "$TMPD/pad.dump" 3
-  [ "$RC" = 0 ] && [ "${GOT[0]-}" = "sleep Fix it" ] \
+  [ "$RC" = 0 ] && [ "${GOT[0]-}" = "sleep ∣ Fix it" ] \
     && report "$(label "$r"): 30,000 blanks either side of a description are trimmed within 3 s" pass \
     || report "$(label "$r"): 30,000 blanks either side of a description are trimmed within 3 s (rc $RC, got: '$(got0)')" fail
 done
@@ -308,7 +308,7 @@ fi
 printf '# caf\xe9 rules\nfoo  -  =  *\nbar  -  caf\xe9:$1  x*\n' > "$TMPD/home/titles"
 mkdump "$TMPD/latin1.dump" "codex|[ ! ] Action Required | Add tests | app" \
   "ssh web1|deploy@web1: ~/app" "foo|hello" "bar|xyz"
-L1_EXPECT=('codex approve Add tests' 'ssh web1 deploy@web1: ~/app' 'foo hello' 'bar')
+L1_EXPECT=('codex ∣ approve ∣ Add tests' 'ssh web1 ∣ deploy@web1: ~/app' 'foo ∣ hello' 'bar')
 for r in $RENDERERS; do
   render "$r" "$TMPD/latin1.dump" 20
   if [ "${GOT[*]-}" = "${L1_EXPECT[*]}" ]; then
@@ -334,7 +334,7 @@ if [ -x "$BIN" ]; then
           INTERDIMUX_STATE_OPTS="$(printf '%s ' "${OPT_NAMES[@]}")" INTERDIMUX_COLS=200 \
           "$BIN" "$proto" < "$TMPD/latin1.dump" 2>/dev/null \
         | awk -F'\t' '$4 ~ /^W:/ { print $3 }' | sed 's/\x1b\[[0-9;]*m//g' | head -2 | tr '\n' '|')
-  [ "$got" = "codex approve Add tests|ssh web1 deploy@web1: ~/app|" ] \
+  [ "$got" = "codex ∣ approve ∣ Add tests|ssh web1 ∣ deploy@web1: ~/app|" ] \
     && report "rust: the core itself drops a rule line that is not UTF-8, and keeps the rest" pass \
     || report "rust: the core itself drops a rule line that is not UTF-8, and keeps the rest (got: '$got')" fail
 fi
@@ -376,9 +376,9 @@ long="déploy@web1: ~/$(rep ä 60)"
 mkdump "$TMPD/c.dump" "codex|⠋ Fix login | proj" "codex|⠋ Fix login" \
   "amp|⠋ Fix x - amp - proj" "claude|✳ Project review" "qwen|✳️ approve?" \
   "qwen|◐︎ task" "codex|⠋ Fix$(printf '\xc2\x85')login | proj" "ssh web1|$long"
-C_EXPECT=('codex working Fix login' 'codex working' 'amp working Fix x'
-          'claude Project review' 'qwen approve approve?' 'qwen working task'
-          'codex working Fix?login')
+C_EXPECT=('codex ∣ working ∣ Fix login' 'codex ∣ working' 'amp ∣ working ∣ Fix x'
+          'claude ∣ Project review' 'qwen ∣ approve ∣ approve?' 'qwen ∣ working ∣ task'
+          'codex ∣ working ∣ Fix?login')
 C_WHAT=("a braille spinner is codex's working" "...with no description too"
         "...and amp's (not idle)" "Claude's ✳ is dropped" "Qwen's ✳ and U+FE0F are dropped"
         "Qwen's ◐ and U+FE0E are dropped" "a C1 control is '?'")

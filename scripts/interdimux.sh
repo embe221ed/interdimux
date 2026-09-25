@@ -131,7 +131,7 @@ OPT_MAP=(
   "show-title:SHOW_TITLE"            "title-max:TITLE_MAX"
   "agents:AGENTS"                    "agent-args:AGENT_ARGS"
   "agent-state:AGENT_STATE"          "claude-dir:CLAUDE_DIR"
-  "title-rules:TITLE_RULES"
+  "title-rules:TITLE_RULES"          "agent-separator:AGENT_SEPARATOR"
 )
 OPT_NAMES=()
 for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
@@ -508,6 +508,7 @@ get_opt AGENT_ARGS        "${INTERDIMUX_AGENT_ARGS:-}"       @interdimux-agent-a
 get_opt AGENT_STATE       "${INTERDIMUX_AGENT_STATE:-}"      @interdimux-agent-state       on
 get_opt CLAUDE_DIR        "${INTERDIMUX_CLAUDE_DIR:-}"       @interdimux-claude-dir        ""
 get_opt TITLE_RULES_FILE  "${INTERDIMUX_TITLE_RULES:-}"      @interdimux-title-rules       ""
+get_opt AGENT_SEPARATOR   "${INTERDIMUX_AGENT_SEPARATOR:-}"  @interdimux-agent-separator   "∣"
 
 # Numeric options reach `[ -ge ]`, `find -maxdepth` and arithmetic, so a junk
 # value is not a harmless no-op.  Verified: a non-numeric @interdimux-recent-limit
@@ -555,6 +556,17 @@ case "$AGENT_STATE" in on|off) ;; *) AGENT_STATE=on ;; esac
 [ "${#TITLE_MAX}" -gt 3 ] && TITLE_MAX=200
 [ "$TITLE_MAX" -lt 8 ] && TITLE_MAX=8
 [ "$TITLE_MAX" -gt 200 ] && TITLE_MAX=200
+# What sets the parts of an agent row apart (cmd_field): at most three
+# characters and no control character, as it lands inside a row; `off` joins
+# them with a blank alone.  The default is ∣ (U+2223): a short bar in the
+# font's own weight -- JetBrains Mono (Ghostty's built-in font), Maple Mono,
+# Hack, DejaVu Sans Mono, Iosevka and Noto Sans Mono all draw it -- that a
+# full-height column rule cannot be mistaken for.  ❘ (U+2758) looks the same
+# but is in none of the first three, so a terminal draws it from a fallback
+# font, heavier and off-centre; `·` is in every font.  All three are one cell
+# wide in glibc, tmux and fzf.
+case "$AGENT_SEPARATOR" in off) ;; *[[:cntrl:]]*) AGENT_SEPARATOR='∣' ;; esac
+[ "${#AGENT_SEPARATOR}" -le 3 ] || AGENT_SEPARATOR='∣'
 # The two path options may start with ~ (a tmux option is not expanded).
 case "$TITLE_RULES_FILE" in \~|\~/*) TITLE_RULES_FILE="$HOME${TITLE_RULES_FILE#\~}" ;; esac
 case "$CLAUDE_DIR"       in \~|\~/*) CLAUDE_DIR="$HOME${CLAUDE_DIR#\~}" ;; esac
@@ -733,6 +745,10 @@ set_palette() {
   esc  "$COLOR_DANGER";            RED="$REPLY"
   escb "$COLOR_DANGER";            BOLD_RED="$REPLY"
   SEP="${DIM_SEP}│${RST}"
+  # Between the parts of an agent row's command field, in the column rule's
+  # colour: a lighter bar than the rule itself (cmd_field).
+  if [ "$AGENT_SEPARATOR" = off ]; then AGENT_SEP_S=" "
+  else AGENT_SEP_S=" ${DIM_SEP}${AGENT_SEPARATOR}${RST} "; fi
   tmux_color "$COLOR_DANGER";      POPUP_BORDER_DANGER="$REPLY"
   tmux_color "$COLOR_ACCENT";      MENU_SEL_BG="$REPLY"
   tmux_color "$COLOR_MENU_SEL_FG"; MENU_SEL_FG="$REPLY"
@@ -3802,6 +3818,7 @@ gather_targets() {
       INTERDIMUX_AGENTS="$AGENT_NAMES" \
       INTERDIMUX_AGENT_ARGS="$AGENT_ARGS" \
       INTERDIMUX_AGENT_STATE="$AGENT_STATE" \
+      INTERDIMUX_AGENT_SEPARATOR="$AGENT_SEPARATOR" \
       INTERDIMUX_TITLE_RULESET="$TITLE_RULESET" \
       INTERDIMUX_STATE_OPTS="$STATE_OPTS" \
       INTERDIMUX_VIEW="$VIEW" \
@@ -6900,32 +6917,34 @@ cmd_field() {
     if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
   fi
   if [ "$AS_AGENT" = 0 ] && [ -z "$desc" ]; then REPLY="$fc"; return 0; fi
-  local extra=""
+  # The parts -- the command, the state with its age, the description -- each
+  # set off by AGENT_SEP_S (@interdimux-agent-separator, ∣ in the separator
+  # colour), so that the words of one do not run into the next:
+  #   claude ∣ working 2m ∣ Project review and suggestions
+  # An agent's arguments, when kept, stay with its name, where a command's
+  # arguments are.
+  local st="" dsc=""
   if [ -n "$state" ]; then
     case "$state" in
-      approve|error) extra+=" ${BOLD_RED}${state}${RST}" ;;
-      input)         extra+=" ${BOLD_AMBER}${state}${RST}" ;;
-      *)             extra+=" ${DIM_TREE}${state}${RST}" ;;
+      approve|error) st="${BOLD_RED}${state}${RST}" ;;
+      input)         st="${BOLD_AMBER}${state}${RST}" ;;
+      *)             st="${DIM_TREE}${state}${RST}" ;;
     esac
     # No age under a minute: `approve now Fix the parser` read as an order
     # (review R28).  Here, not in age_of, which session ages share.
     age_of "$since"
-    [ -n "$REPLY" ] && [ "$REPLY" != now ] && extra+=" ${DIM_TREE}${REPLY}${RST}"
+    [ -n "$REPLY" ] && [ "$REPLY" != now ] && st+=" ${DIM_TREE}${REPLY}${RST}"
   fi
-  [ -n "$desc" ] && extra+=" ${DIM_EDIT}${desc}${RST}"
+  [ -n "$desc" ] && dsc="${DIM_EDIT}${desc}${RST}"
   if [ -z "$AG_NAME" ]; then
-    REPLY="$fc$extra"
-    return 0
-  fi
-  rest="$AG_REST"
-  [ -n "$extra" ] && [ "$AGENT_ARGS" = off ] && rest=""
-  if [ -z "$extra" ]; then
-    REPLY="${DIM_CMD}${AG_NAME}${rest}${RST}"
-  elif [ -n "$rest" ]; then
-    REPLY="${DIM_CMD}${AG_NAME}${RST}${extra}${DIM_CMD}${rest}${RST}"
+    REPLY="$fc"
   else
-    REPLY="${DIM_CMD}${AG_NAME}${RST}${extra}"
+    rest="$AG_REST"
+    [ -n "$st$dsc" ] && [ "$AGENT_ARGS" = off ] && rest=""
+    REPLY="${DIM_CMD}${AG_NAME}${rest}${RST}"
   fi
+  [ -n "$st" ] && REPLY+="$AGENT_SEP_S$st"
+  [ -n "$dsc" ] && REPLY+="$AGENT_SEP_S$dsc"
 }
 
 # The apps a TITLE rule can put in `approve` or `input`, in AW_CAN as
@@ -7855,6 +7874,7 @@ env_fwd_vars() {
     "INTERDIMUX_AGENT_STATE=$AGENT_STATE"
     "INTERDIMUX_CLAUDE_DIR=$CLAUDE_DIR"
     "INTERDIMUX_TITLE_RULES=$TITLE_RULES_FILE"
+    "INTERDIMUX_AGENT_SEPARATOR=$AGENT_SEPARATOR"
     "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
     "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
     "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
@@ -8579,6 +8599,12 @@ if [ "${1:-}" = "--doctor" ]; then
         case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays off" ;; esac ;;
       agent-state)
         case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays on" ;; esac ;;
+      agent-separator)
+        case "$v" in
+          off) ;;
+          *[[:cntrl:]]*) printf "holds a control character, so the default, ∣, applies" ;;
+          *) [ "${#v}" -le 3 ] || printf 'at most 3 characters, so the default, ∣, applies' ;;
+        esac ;;
       show-title)
         case "$v" in known|all|off) ;; *) printf "expected 'known', 'all' or 'off', so it stays known" ;; esac ;;
       title-max)

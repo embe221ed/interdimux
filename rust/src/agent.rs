@@ -42,6 +42,9 @@ pub struct Config {
     pub rules: Vec<titles::Rule>,
     /// the option names whose values a pane line carries, in order
     pub state_opts: Vec<String>,
+    /// what sets the parts of an agent row apart (bash already normalised
+    /// @interdimux-agent-separator); None is `off`, a blank alone
+    pub separator: Option<String>,
 }
 
 /// One registry record: the pane shell's pid (empty: unchecked), the state
@@ -111,6 +114,11 @@ impl Config {
                 .filter(|w| !w.is_empty())
                 .map(str::to_string)
                 .collect(),
+            separator: match var("INTERDIMUX_AGENT_SEPARATOR").as_str() {
+                "off" => None,
+                "" => Some("∣".to_string()),
+                v => Some(v.to_string()),
+            },
         }
     }
 
@@ -438,35 +446,41 @@ pub fn command_field(
         // agent_row is set wherever a state is, so there is none here
         return (fc, String::new());
     }
-    let mut extra = String::new();
+    // The parts -- the command, the state with its age, the description --
+    // each set off by the separator (bash cmd_field): `claude ∣ working 2m ∣
+    // Project review`.  An agent's kept arguments stay with its name.
+    let mut st = String::new();
     if !state.is_empty() {
         let col = match state.as_str() {
             "approve" | "error" => &p.bold_red,
             "input" => &p.bold_amber,
             _ => &p.dim_tree,
         };
-        extra.push_str(&format!(" {}{}{}", col, &state, RST));
+        st = format!("{}{}{}", col, &state, RST);
         // no age under a minute: `approve now Fix the parser` read as an order
         let age = age_of(since, now);
         if !age.is_empty() && age != "now" {
-            extra.push_str(&format!(" {}{}{}", p.dim_tree, age, RST));
+            st.push_str(&format!(" {}{}{}", p.dim_tree, age, RST));
         }
     }
-    if !desc.is_empty() {
-        extra.push_str(&format!(" {}{}{}", p.dim_edit, desc, RST));
+    let dsc = if desc.is_empty() { String::new() } else { format!("{}{}{}", p.dim_edit, desc, RST) };
+    let mut field = match &agent {
+        None => fc,
+        Some((n, r)) => {
+            let rest = if (!st.is_empty() || !dsc.is_empty()) && !cfg.keep_args { "" } else { *r };
+            format!("{}{}{}{}", p.dim_cmd, n, rest, RST)
+        }
+    };
+    let bar = match &cfg.separator {
+        Some(g) => format!(" {}{}{} ", p.sep_col, g, RST),
+        None => " ".to_string(),
+    };
+    for part in [&st, &dsc] {
+        if !part.is_empty() {
+            field.push_str(&bar);
+            field.push_str(part);
+        }
     }
-    let (name, rest) = match &agent {
-        None => return (format!("{}{}", fc, extra), state),
-        Some((n, r)) => (n.as_str(), *r),
-    };
-    let rest = if !extra.is_empty() && !cfg.keep_args { "" } else { rest };
-    let field = if extra.is_empty() {
-        format!("{}{}{}{}", p.dim_cmd, name, rest, RST)
-    } else if !rest.is_empty() {
-        format!("{}{}{}{}{}{}{}", p.dim_cmd, name, RST, extra, p.dim_cmd, rest, RST)
-    } else {
-        format!("{}{}{}{}", p.dim_cmd, name, RST, extra)
-    };
     (field, state)
 }
 
@@ -507,6 +521,7 @@ mod tests {
             host_short: "box".into(),
             rules: vec![],
             state_opts: vec![],
+            separator: Some("∣".to_string()),
         }
     }
 

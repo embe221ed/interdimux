@@ -412,11 +412,22 @@ the same title — and two better sources of *state* — and puts both in the
 command column, as plain words you can search for:
 
 ```
-* ├─ work 0:claude   │ ~/code/app                claude working 2m Project review and suggestions
-  ├─ work 1:codex    │ ~/code/app/src            codex approve Add tests
-  │ ├╴ work 1.0      │ ~/code/app/src            codex working Fix login timeout
-  └─ work 2:shell    │ ~                         zsh
+* ├─ work 0:claude   │ ~/code/app                claude ∣ working 2m ∣ Project review and suggestions
+  ├─ work 1:codex    │ ~/code/app/src            codex ∣ approve ∣ Add tests
+  │ ├╴ work 1.0      │ ~/code/app/src            codex ∣ working ∣ Fix login timeout
+  ├─ work 2:prod     │ ~                         ssh web1 ∣ deploy@web1: ~/src
+  └─ work 3:shell    │ ~                         zsh
 ```
+
+The parts — the command, the state with its age, the description — are set
+off by a short bar in the separator colour, and a part that is not there takes
+its bar with it. The bar is `∣` (U+2223): your font draws it in its own weight
+(JetBrains Mono, Ghostty's built-in font, does, as do Maple Mono, Hack,
+DejaVu Sans Mono and Iosevka), and it is shorter than the `│` column rule.
+`@interdimux-agent-separator` takes any other, up to three characters:
+`❘` (U+2758) looks much the same but is missing from most coding fonts, so
+the terminal borrows it from a fallback font, heavier and off-centre; `·` is
+in every font; `off` leaves a blank alone.
 
 - **Agents are named by what they are.** An npm or pip install runs as
   `node …/bin/codex` or `python …/bin/aider`, a package's own file as
@@ -428,7 +439,7 @@ command column, as plain words you can search for:
   `@interdimux-show-full-command 'off'` an npm-installed agent is just `node`,
   with no state from its title. `@interdimux-agents off` turns the naming off, and
   only that: rows keep their whole command line, and a state or description
-  still follows it (`codex 2400 approve Fix the build`). Title rules go by the
+  still follows it (`codex 2400 ∣ approve ∣ Fix the build`). Title rules go by the
   command's name, so a native `codex` keeps its state while
   `node …/bin/codex` — `node` to the rules — has none. With
   `@interdimux-agent-state` and `@interdimux-show-title` off as well, rows are
@@ -826,9 +837,13 @@ set -g @interdimux-title-max '40'
 # titles (default: on)
 set -g @interdimux-agent-state 'on'
 
-# Keep an agent row's arguments when it shows a state or description
-# (default: off)
+# Keep an agent row's arguments when it shows a state or description; they
+# stay with its name, `codex resume ∣ approve ∣ Add tests` (default: off)
 set -g @interdimux-agent-args 'off'
+
+# What sets an agent row's parts apart, up to three characters, or 'off' for
+# a blank alone (default: ∣)
+set -g @interdimux-agent-separator '∣'
 
 # More agent names, space-separated, recognised as agents (their titles show
 # only with a title rule for them); 'off' recognises none, so rows keep their

@@ -154,20 +154,20 @@ CASES=(
   'tmux|tmux -L other attach'
 )
 EXPECT=(
-  'docker root@96fecc5c832f: /'
-  'docker @8b85756b3f26:/'
-  'docker ubuntu@tc2svc: ~'
-  'docker @tchost:/work/sub'
-  'docker remote:0:top - "tchost"'
-  'kubectl root@web-7d4b9c: /app'
-  'screen root@tchost: /work/sub'
-  'ssh me@remote: ~/src'
-  'ssh me@remote:~/src'
-  'ssh [tchost] /w/s/deeper'
-  'ssh [tchost] sleep 5 /w/s/deeper'
-  'ssh remote:0:sh - "tchost"'
-  'mosh-client root@tchost: /work/sub'
-  'tmux inner:0:zsh'
+  'docker ∣ root@96fecc5c832f: /'
+  'docker ∣ @8b85756b3f26:/'
+  'docker ∣ ubuntu@tc2svc: ~'
+  'docker ∣ @tchost:/work/sub'
+  'docker ∣ remote:0:top - "tchost"'
+  'kubectl ∣ root@web-7d4b9c: /app'
+  'screen ∣ root@tchost: /work/sub'
+  'ssh ∣ me@remote: ~/src'
+  'ssh ∣ me@remote:~/src'
+  'ssh ∣ [tchost] /w/s/deeper'
+  'ssh ∣ [tchost] sleep 5 /w/s/deeper'
+  'ssh ∣ remote:0:sh - "tchost"'
+  'mosh-client ∣ root@tchost: /work/sub'
+  'tmux ∣ inner:0:zsh'
   'docker'
   'docker'
   'docker'
@@ -225,8 +225,8 @@ EXPECT=(
   'ssh'
   'ssh'
   'htop'
-  'ssh me@webserver: ~'
-  'ssh [webserver] ~'
+  'ssh ∣ me@webserver: ~'
+  'ssh ∣ [webserver] ~'
 )
 WHAT=(
   "a sudo row: its own preexec line, sudo first"
@@ -247,7 +247,7 @@ CASES=(
 )
 EXPECT=(
   'ssh'
-  'ssh me@krootabulon-2:~'
+  'ssh ∣ me@krootabulon-2:~'
   'ssh'
 )
 WHAT=(
@@ -271,10 +271,10 @@ CASES=(
   'sudo|sudo docker run -v /a:/b img@sha256:abc bash'
 )
 EXPECT=(
-  'nvim file.txt (/w/sandbox)'
-  'zellij wise-diplodocus'
-  'docker /work'
-  'sudo root@3f2a9c1b: /'
+  'nvim ∣ file.txt (/w/sandbox)'
+  'zellij ∣ wise-diplodocus'
+  'docker ∣ /work'
+  'sudo ∣ root@3f2a9c1b: /'
   'sudo'
 )
 WHAT=(
@@ -364,15 +364,15 @@ for rust in $RENDERERS; do
   label="bash"; [ "$rust" = on ] && label="rust"
   OUT=$(live "$rust")
   got=$(row_of "$OUT" dk)
-  [ "$got" = 'docker root@3f2a9c1b: /usr/share' ] \
+  [ "$got" = 'docker ∣ root@3f2a9c1b: /usr/share' ] \
     && report "$label: live docker row shows the container prompt" pass \
     || report "$label: live docker row shows the container prompt (got: '$got')" fail
   got=$(row_of "$OUT" sh1)
-  [ "$got" = 'ssh [web1] make /h/m/src' ] \
+  [ "$got" = 'ssh ∣ [web1] make /h/m/src' ] \
     && report "$label: live ssh row shows the remote fish title" pass \
     || report "$label: live ssh row shows the remote fish title (got: '$got')" fail
   got=$(row_of "$OUT" mo)
-  [ "$got" = 'mosh-client deploy@web1: ~/app' ] \
+  [ "$got" = 'mosh-client ∣ deploy@web1: ~/app' ] \
     && report "$label: live mosh-client row shows the remote title" pass \
     || report "$label: live mosh-client row shows the remote title (got: '$got')" fail
   got=$(row_of "$OUT" sh2)
@@ -380,12 +380,12 @@ for rust in $RENDERERS; do
     && report "$label: live ssh row hides the preexec line" pass \
     || report "$label: live ssh row hides the preexec line (got: '$got')" fail
   got=$(row_of "$OUT" nest)
-  [ "$got" = 'tmux inner:0:edit' ] \
+  [ "$got" = 'tmux ∣ inner:0:edit' ] \
     && report "$label: a real nested tmux client (set-titles on) shows session:index:window" pass \
     || report "$label: a real nested tmux client (set-titles on) shows session:index:window (got: '$got')" fail
   if [ "$DOCKER" = 1 ]; then
     got=$(row_of "$OUT" ctr)
-    [ "$got" = 'docker root@tchost: /usr/share' ] \
+    [ "$got" = 'docker ∣ root@tchost: /usr/share' ] \
       && report "$label: a real ubuntu:24.04 container shell shows its prompt" pass \
       || report "$label: a real ubuntu:24.04 container shell shows its prompt (got: '$got')" fail
   fi

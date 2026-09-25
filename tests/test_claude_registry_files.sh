@@ -86,7 +86,7 @@ for r in $RENDERERS; do
   INTERDIMUX_USE_RUST="$r" timeout 5 bash "$SCRIPT" --list > "$TMPD/list" 2>/dev/null || RC=$?
   rows=$(awk -F'\t' '$4 ~ /^W:reg:/ { print $3 }' "$TMPD/list" | sed 's/\x1b\[[0-9;]*m//g')
   row_a=$(printf '%s\n' "$rows" | sed -n 1p) row_b=$(printf '%s\n' "$rows" | sed -n 2p)
-  [ "$RC" = 0 ] && [[ "$row_a" == "claude approve"* ]] \
+  [ "$RC" = 0 ] && [[ "$row_a" == "claude ∣ approve"* ]] \
     && report "$label: a FIFO named like a record does not stop the list, and the record is read" pass \
     || report "$label: a FIFO named like a record does not stop the list, and the record is read (rc $RC, row '$row_a')" fail
   [ "$RC" = 0 ] && [ "$row_b" = "claude 987 sleep 987" ] \

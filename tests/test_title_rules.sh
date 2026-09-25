@@ -132,18 +132,18 @@ render_dump() { # $1 = on|off
     | awk -F'\t' '$4 ~ /^W:/ { print $3 }' | sed 's/\x1b\[[0-9;]*m//g'
 }
 EXPECT=(
-  'tool [x]'
+  'tool ∣ [x]'
   'tool'
-  'tool working'
-  'tool <one | two>'
-  'star star:star'
-  'tool T:early'
-  'tool working spinning'
+  'tool ∣ working'
+  'tool ∣ <one | two>'
+  'star ∣ star:star'
+  'tool ∣ T:early'
+  'tool ∣ working ∣ spinning'
   'tool'
-  'other kept whole'
+  'other ∣ kept whole'
   'other'
-  'codex input OVR:Fix login'
-  'codex approve Add tests'
+  'codex ∣ input ∣ OVR:Fix login'
+  'codex ∣ approve ∣ Add tests'
 )
 WHAT=(
   "a backslash and parens match themselves"
@@ -198,13 +198,13 @@ live() { # $1 = on|off
 for rust in $RENDERERS; do
   label="bash"; [ "$rust" = on ] && label="rust"
   mapfile -t GOT < <(live "$rust")
-  [ "${GOT[0]-}" = "sleep 991 approve" ] \
+  [ "${GOT[0]-}" = "sleep 991 ∣ approve" ] \
     && report "$label: an @option only the user's file names is read from tmux" pass \
     || report "$label: an @option only the user's file names is read from tmux (got: '${GOT[0]-}')" fail
-  [ "${GOT[1]-}" = "sleep 992 input Fix?it?really?now" ] \
+  [ "${GOT[1]-}" = "sleep 992 ∣ input ∣ Fix?it?really?now" ] \
     && report "$label: a plugin's state and a description, control bytes rewritten" pass \
     || report "$label: a plugin's state and a description, control bytes rewritten (got: '${GOT[1]-}')" fail
-  [ "${GOT[2]-}" = "sleep 993 error from-user" ] \
+  [ "${GOT[2]-}" = "sleep 993 ∣ error ∣ from-user" ] \
     && report "$label: the first rule to give a state gives it; a later one still gives the description" pass \
     || report "$label: the first rule to give a state gives it; a later one still gives the description (got: '${GOT[2]-}')" fail
   [ "${#GOT[@]}" = 3 ] && report "$label: one row per window, none split by the value's newline" pass \

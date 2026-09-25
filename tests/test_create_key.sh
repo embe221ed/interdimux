@@ -126,7 +126,7 @@ setup() {
   wait_for "I list-panes -t '=prod-db:1' -F '#{pane_pid}' | xargs -I{} cat /proc/{}/cmdline 2>/dev/null | tr '\\0' ' ' | grep -q deployment/payments-api" 50 || return 1
   press C-b; press f
   # ...and the list shows both the kubectl row and the agent's state
-  wait_for "screen | grep -q 'kubectl logs -f' && screen | grep -q 'claude working'" 150
+  wait_for "screen | grep -q 'kubectl logs -f' && screen | grep -q 'claude ∣ working'" 150
 }
 # type $1, then wait until the prompt shows the query $3 (default: $1) with
 # the count $2 (a regex)
@@ -211,7 +211,7 @@ done
 # `work` is a plain session name, and `working` is the state the agent row
 # shows: the row matches, Enter would switch to the agent, alt-enter creates.
 if setup on; then
-  if type_q work ' 1/' && cursor_row | grep -q 'claude working'; then
+  if type_q work ' 1/' && cursor_row | grep -q 'claude ∣ working'; then
     report "[agent] 'work' matches the agent row's state word, and only it" pass
   else
     report "[agent] 'work' matches the agent row's state word, and only it" fail

@@ -52,6 +52,8 @@ pub struct Palette {
     pub dim_tree: String,
     pub bold_red: String,
     pub sep: String,
+    /// the separator colour alone, for the bar between an agent row's parts
+    pub sep_col: String,
 }
 
 impl Palette {
@@ -75,6 +77,7 @@ impl Palette {
             dim_tree: esc(&tree),
             bold_red: escb(&danger),
             sep: format!("{}│{}", esc(&separator), RST),
+            sep_col: esc(&separator),
         }
     }
 }
