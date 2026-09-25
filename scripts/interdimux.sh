@@ -3265,7 +3265,11 @@ option_rule_r() {
 #     (field 6) is the pane's shell, and the renderers accept the record for a
 #     row only when that equals the row's #{pane_pid} -- which also rejects a
 #     %N that belongs to another tmux server.  Without /proc (macOS) it is only
-#     `kill -0`, and the sid is left empty: unchecked.
+#     `kill -0`, and the sid is left empty: unchecked, so a reused pid or
+#     another server's %N is believed there (README says so).  The record's
+#     `tmux` field is `session:@window.%pane`, with no socket in it to check.
+#     INTERDIMUX_REGISTRY_NO_PROC=1 takes that path on Linux too: a test seam
+#     (tests/test_agent_readme.sh), so the fallback runs where CI does.
 #
 # Never touched: `claude agents --json` (a 226 MB binary and a telemetry
 # event per call) and .fleetview-heartbeat (it turns on classifier calls).
@@ -3307,7 +3311,7 @@ claude_registry_r() {
       *) continue ;;
     esac
     sid=""
-    if [ -r /proc/self/stat ]; then
+    if [ -r /proc/self/stat ] && [ "${INTERDIMUX_REGISTRY_NO_PROC:-}" != 1 ]; then
       pst=""; [[ "$j" =~ \"procStart\":\"?([0-9]+) ]] && pst="${BASH_REMATCH[1]}"
       [ -n "$pst" ] || continue
       sf=()

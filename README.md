@@ -441,9 +441,13 @@ command column, as plain words you can search for:
 Where the state comes from, first source that speaks wins:
 
 1. **Claude Code's own session registry** (`~/.claude/sessions/<pid>.json`):
-   busy / waiting (and for what) / idle, with no hooks or setup. The record is
-   believed only while its pid is still that process and runs in that pane.
-   Claude's title cannot say this under tmux: its glyph is always `✳` there.
+   busy / waiting (and for what) / idle, with no hooks or setup. On Linux the
+   record is believed only while its pid is still that process (its start
+   time) and runs in that pane. Without `/proc` (macOS) only that its pid is
+   alive is checked, so a record whose pid was reused, or one for the same
+   pane id on another tmux server, can put a state on a row there (not on a
+   shell at its prompt). Claude's title cannot say this under tmux: its glyph
+   is always `✳` there.
 2. **Pane options other agent plugins publish** — read in the same single tmux
    query, no extra process. Built in: interdimux's own `@agent_state` /
    `@agent_desc`, [tmux-agent-sidebar](https://github.com/hiroppy/tmux-agent-sidebar)

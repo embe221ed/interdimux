@@ -14,6 +14,10 @@
 #   4. the preview of an agent's row names the agent, as the row does, and
 #      has the arguments the row drops (`codex resume <id>` for an npm codex
 #      whose tmux name is `node`), cut to the preview's width
+#   5. Claude's registry: on Linux a record is believed only while its pid is
+#      that process and runs in that pane; without /proc (the seam
+#      INTERDIMUX_REGISTRY_NO_PROC=1 takes the macOS path here) only that the
+#      pid is alive -- what the README says of each
 #
 # Expected rows are written out here, not computed by either renderer; the
 # authority for the option is tmux's own `show -pv`.
@@ -95,14 +99,7 @@ is_cmd()   { [ "$(pcc "$1")" = "$2" ]; }
 is_state() { [ "$(state)" = "$1" ]; }
 # the tool is running (its shebang makes it `/bin/sh <path>`): the wrapper is
 # past its `set`, and a Ctrl-C now reaches both
-tool_runs() {
-  local p c
-  for p in /proc/[0-9]*; do
-    c=$(tr '\0' ' ' 2>/dev/null < "$p/cmdline") || continue
-    [[ "$c" == *"$TMPD/bin/my-agent"* ]] && return 0
-  done
-  return 1
-}
+tool_runs() { ps -eo args= 2>/dev/null | grep -F "$TMPD/bin/my-agent" >/dev/null; }
 tool_gone() { ! tool_runs; }
 
 # $1 = on|off (the Rust core), $2 = window name: that window row's command field
@@ -197,7 +194,7 @@ tm new-window -d -t '=t:' -n sl -c "$TMPD" "exec sleep 994"
 argv_is() { # $1 = window, $2 = the start of its argv
   local pid
   pid=$(tmux -L "$SOCK" display-message -p -t "=t:$1" '#{pane_pid}')
-  [[ "$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline")" == "$2"* ]]
+  [[ "$(ps -o args= -p "$pid" 2>/dev/null)" == "$2"* ]]
 }
 wait_for 200 argv_is cx "node /opt"; wait_for 200 argv_is cl "claude --resume"
 wait_for 200 is_cmd sl sleep
@@ -226,6 +223,35 @@ same "preview, not an agent: tmux's name and no extra line" \
   "$(pv_line "$out" 1)|$(pv_line "$out" 2)" "t:$(widx sl)  sleep · $PV_PATH|$RULE78"
 [ ! -s "$TMPD/err.preview" ] && report "preview: nothing on stderr" pass \
   || { report "preview: nothing on stderr" fail; ERRORS+="$(head -3 "$TMPD/err.preview")"$'\n'; }
+
+# --- 5. the registry with and without /proc --------------------------------------
+tm new-window -d -t '=t:' -n np -c "$TMPD" "exec sleep 993"
+wait_for 200 is_cmd np sleep
+NOW=1800000000
+export INTERDIMUX_NOW="$NOW"
+REG="$INTERDIMUX_CLAUDE_DIR/sessions"
+mkdir -p "$REG"
+NP_PANE=$(tmux -L "$SOCK" display-message -p -t '=t:np' '#{pane_id}')
+SL_PANE=$(tmux -L "$SOCK" display-message -p -t '=t:sl' '#{pane_id}')
+SL_PID=$(tmux -L "$SOCK" display-message -p -t '=t:sl' '#{pane_pid}')
+sleep 0 & DEAD=$!; wait "$DEAD" || true
+record() { # $1 pid, $2 procStart, $3 pane: waiting on a permission, 5 minutes
+  printf '{"pid":%s,"sessionId":"x","cwd":"/tmp","startedAt":1,"procStart":"%s","version":"2.1.281","kind":"interactive","entrypoint":"cli","tmux":"t:@9.%s","name":"n","status":"waiting","waitingFor":"permission prompt","statusUpdatedAt":%s}' \
+    "$1" "$2" "$3" "$(( (NOW - 300) * 1000 ))"
+}
+# a live pid that is not this pane's, with a start time that is not its own:
+# what a reused pid, or a claude of another server with the same %N, looks like
+record "$SL_PID" 1 "$NP_PANE" > "$REG/$SL_PID.json"
+# a pid that is gone, for the sleep pane
+record "$DEAD" 1 "$SL_PANE" > "$REG/$DEAD.json"
+if [ -r /proc/self/stat ]; then
+  rows_all "/proc: a record whose pid is another process is not believed" np "sleep 993"
+  rows_all "/proc: a record whose pid is gone is not believed" sl "sleep 994"
+fi
+export INTERDIMUX_REGISTRY_NO_PROC=1
+rows_all "no /proc: a live pid is all it takes (README)" np "sleep 993 approve 5m"
+rows_all "no /proc: a record whose pid is gone is still not believed" sl "sleep 994"
+unset INTERDIMUX_REGISTRY_NO_PROC INTERDIMUX_NOW
 
 for rust in $RENDERERS; do
   label="bash"; [ "$rust" = on ] && label="rust"
