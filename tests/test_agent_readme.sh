@@ -11,6 +11,9 @@
 #      shows the prompt of a container that has gone (the README says it
 #      cannot help that); under one that titles its prompt with the README's
 #      PS1 line (taken out of the README), it does not
+#   4. the preview of an agent's row names the agent, as the row does, and
+#      has the arguments the row drops (`codex resume <id>` for an npm codex
+#      whose tmux name is `node`), cut to the preview's width
 #
 # Expected rows are written out here, not computed by either renderer; the
 # authority for the option is tmux's own `show -pv`.
@@ -182,6 +185,47 @@ wait_for 200 is_cmd plain docker; wait_for 200 is_cmd titled docker
 rows_all "plain bash: the next docker row shows the gone container (the documented limit)" plain "docker 302 $GONE"
 rows_all "the PS1 line: the next docker row does not" titled "docker 302"
 tm send-keys -t '=t:plain' C-c; tm send-keys -t '=t:titled' C-c
+
+# --- 4. the preview of an agent's row -------------------------------------------
+# argv set the way an npm launcher's reads (perl's $0), and a native claude
+# with its resume arguments; a plain sleep beside them
+tm new-window -d -t '=t:' -n cx -c "$TMPD" \
+  "exec perl -e '\$0 = \"node /opt/lib/node_modules/@openai/codex/bin/codex resume 0199a1b2-aaaa\"; sleep 996'"
+tm new-window -d -t '=t:' -n cl -c "$TMPD" \
+  "exec perl -e '\$0 = \"claude --resume 7f3c2a10 --model opus\"; sleep 995'"
+tm new-window -d -t '=t:' -n sl -c "$TMPD" "exec sleep 994"
+argv_is() { # $1 = window, $2 = the start of its argv
+  local pid
+  pid=$(tmux -L "$SOCK" display-message -p -t "=t:$1" '#{pane_pid}')
+  [[ "$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline")" == "$2"* ]]
+}
+wait_for 200 argv_is cx "node /opt"; wait_for 200 argv_is cl "claude --resume"
+wait_for 200 is_cmd sl sleep
+same "tmux calls the npm codex node" "$(pcc cx)" node
+PV_PATH="$TMPD"; case "$PV_PATH" in "$HOME"/*) PV_PATH="~${PV_PATH#"$HOME"}" ;; esac
+preview() { # $1 = window, $2 = the preview's width: its first three lines
+  local idx
+  idx=$(tmux -L "$SOCK" display-message -p -t "=t:$1" '#{window_index}')
+  FZF_PREVIEW_COLUMNS="$2" bash "$SCRIPT" --preview "W:t:$idx" 2>> "$TMPD/err.preview" \
+    | sed 's/\x1b\[[0-9;]*m//g' | head -3
+}
+pv_line() { printf '%s\n' "$1" | sed -n "${2}p"; }
+widx() { tmux -L "$SOCK" display-message -p -t "=t:$1" '#{window_index}'; }
+RULE78=$(printf '%*s' 78 '' | sed 's/ /─/g')
+out=$(preview cx 80)
+same "preview, npm codex: the header names codex" "$(pv_line "$out" 1)" "t:$(widx cx)  codex · $PV_PATH"
+same "preview, npm codex: the arguments the row drops" "$(pv_line "$out" 2)" "codex resume 0199a1b2-aaaa"
+same "preview, npm codex: then the rule" "$(pv_line "$out" 3)" "$RULE78"
+out=$(preview cl 80)
+same "preview, claude: its resume arguments" "$(pv_line "$out" 2)" "claude --resume 7f3c2a10 --model opus"
+out=$(preview cx 16)
+same "preview, narrow: the line is cut to the width" "$(pv_line "$out" 2)$(pv_line "$out" 3)" "codex resume 0199a1b2-aaaa"
+same "preview, narrow: ...14 characters a line" "$(pv_line "$out" 2)" "codex resume 0"
+out=$(preview sl 80)
+same "preview, not an agent: tmux's name and no extra line" \
+  "$(pv_line "$out" 1)|$(pv_line "$out" 2)" "t:$(widx sl)  sleep · $PV_PATH|$RULE78"
+[ ! -s "$TMPD/err.preview" ] && report "preview: nothing on stderr" pass \
+  || { report "preview: nothing on stderr" fail; ERRORS+="$(head -3 "$TMPD/err.preview")"$'\n'; }
 
 for rust in $RENDERERS; do
   label="bash"; [ "$rust" = on ] && label="rust"

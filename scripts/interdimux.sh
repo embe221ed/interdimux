@@ -4901,6 +4901,19 @@ preview_rule() {
   fi
 }
 
+# Text $1, dim, cut into lines as wide as the preview's rule (the preview
+# window does not wrap): an agent's command line under the header.
+preview_wrapped() {
+  local w="${FZF_PREVIEW_COLUMNS:-60}" t="$1"
+  [[ "$w" =~ ^[0-9]+$ ]] || w=60
+  [ "$w" -gt 2 ] && w=$(( w - 2 ))
+  [ "$w" -ge 1 ] || w=60
+  while [ -n "$t" ]; do
+    printf "${DIM}%s${RST}\n" "${t:0:w}"
+    t="${t:w}"
+  done
+}
+
 # Print captured pane content with trailing blank lines removed
 print_capture() {
   local content="$1" last
@@ -4961,12 +4974,33 @@ if [ "${1:-}" = "--preview" ]; then
       # Checked by index as well (spec_at): a stale row must not preview the
       # window that merely took its number as a NAME.  Captured by the IDs the
       # check found, so tmux resolves the row once.
-      p_cmd="" p_path=""
-      if spec_at "$target" "#{pane_current_command}${US}#{pane_current_path}"; then
-        IFS="$US" read -r p_cmd p_path <<< "$REPLY"
+      p_pid="" p_cmd="" p_path="" p_look="" p_args=""
+      if spec_at "$target" "#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"; then
+        IFS="$US" read -r p_pid p_cmd p_path <<< "$REPLY"
         target="$SPEC_AT"
       else
         target="$NO_SUCH_TARGET"
+      fi
+      # An agent's row is headed by the agent and, once it shows a state or a
+      # description, drops its arguments (cmd_field).  The header names it the
+      # same way (`codex`, not tmux's `node`), and the line under it is its
+      # command line with them (`codex resume <id>`).  Only an interpreter or
+      # an agent's own name can be an agent, so no other pane pays for the
+      # lookup (a /proc read; one ps without /proc).
+      if [ -n "$AGENT_KNOWN" ] && [ -n "$p_pid" ]; then
+        case "$p_cmd" in
+          node|nodejs|python*) p_look=1 ;;
+          *) [[ "$AGENT_KNOWN" == *" $p_cmd "* ]] && p_look=1 ;;
+        esac
+        if [ -n "$p_look" ]; then
+          [ "$SHOW_FULL_COMMAND" = on ] && build_process_table
+          resolve_command "$p_cmd" "$p_pid"
+          agent_of "$REPLY"
+          if [ -n "$AG_NAME" ]; then
+            p_cmd="$AG_NAME"
+            [ -n "$AG_REST" ] && p_args="$AG_NAME$AG_REST"
+          fi
+        fi
       fi
       p_path="${p_path/#$HOME/\~}"
       if [ "$SPEC_TYPE" = "W" ]; then
@@ -4976,6 +5010,7 @@ if [ "${1:-}" = "--preview" ]; then
       fi
       printf "  ${DIM_CMD}%s${RST} ${DIM}·${RST} ${DIM_PATH}%s${RST}\n" \
         "${p_cmd:-?}" "${p_path:-?}"
+      [ -n "$p_args" ] && preview_wrapped "$p_args"
       preview_rule
       print_capture "$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)" || echo "(cannot capture pane)"
       ;;

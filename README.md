@@ -434,7 +434,9 @@ command column, as plain words you can search for:
   greyed out.
 - **The description** is the agent's title with its status glyph and
   boilerplate removed. An agent row that shows a state or a description drops
-  its arguments (`--resume <uuid>` …); the preview still has them.
+  its arguments (`--resume <uuid>` …); the preview (`Ctrl-/`) names the agent
+  the same way and has them on the line under its header
+  (`codex resume 0199…`). `@interdimux-agent-args on` keeps them on the row.
 
 Where the state comes from, first source that speaks wins:
 
