@@ -325,8 +325,9 @@ pub fn command_field(
             _ => &p.dim_tree,
         };
         extra.push_str(&format!(" {}{}{}", col, &state, RST));
+        // no age under a minute: `approve now Fix the parser` read as an order
         let age = age_of(since, now);
-        if !age.is_empty() {
+        if !age.is_empty() && age != "now" {
             extra.push_str(&format!(" {}{}{}", p.dim_tree, age, RST));
         }
     }

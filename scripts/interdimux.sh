@@ -3490,8 +3490,10 @@ cmd_field() {
       input)         extra+=" ${BOLD_AMBER}${state}${RST}" ;;
       *)             extra+=" ${DIM_TREE}${state}${RST}" ;;
     esac
+    # No age under a minute: `approve now Fix the parser` read as an order
+    # (review R28).  Here, not in age_of, which session ages share.
     age_of "$since"
-    [ -n "$REPLY" ] && extra+=" ${DIM_TREE}${REPLY}${RST}"
+    [ -n "$REPLY" ] && [ "$REPLY" != now ] && extra+=" ${DIM_TREE}${REPLY}${RST}"
   fi
   [ -n "$desc" ] && extra+=" ${DIM_EDIT}${desc}${RST}"
   if [ -z "$AG_NAME" ]; then

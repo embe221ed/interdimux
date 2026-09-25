@@ -503,3 +503,17 @@ fn agent_titles_states_and_the_registry() {
     assert!(opts.contains("pane_status"), "DEFAULT_STATE_OPTS was not found");
     check("agents", &[("INTERDIMUX_TITLE_RULESET", &rules), ("INTERDIMUX_STATE_OPTS", &opts)]);
 }
+
+/// Agents that wait on you, arranged the ways that used to be miscounted or
+/// mis-marked (reviews R03, R06, R28): a waiting pane that is the ACTIVE pane
+/// of a multi-pane window (its window row repeats it), a waiting pane in a
+/// session group (listed under both sessions), a working agent whose
+/// description says `Approve`, a window called `input-form`, the current
+/// window's agent waiting, an option-published `input`, and a registry state
+/// seconds old, which shows no age (`approve now` read as an order).
+#[test]
+fn waiting_agents() {
+    let rules = shipped_title_rules();
+    let opts = shipped_state_opts();
+    check("waiting", &[("INTERDIMUX_TITLE_RULESET", &rules), ("INTERDIMUX_STATE_OPTS", &opts)]);
+}

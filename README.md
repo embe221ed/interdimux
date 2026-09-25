@@ -417,9 +417,10 @@ command column, as plain words you can search for:
   Recognised: claude, codex, gemini, qwen, opencode, amp, goose, crush,
   kiro-cli, aider, copilot, cursor-agent — add your own with
   `@interdimux-agents`.
-- **A state word, with its age:** `approve` (a permission waits — in the
-  danger colour), `input` (a question or dialog is open), `working`, `idle`,
-  `done`, `error`. Type `approve` to find every agent waiting on you.
+- **A state word, with its age** (from a minute on): `approve` (a permission
+  waits — in the danger colour), `input` (a question or dialog is open),
+  `working`, `idle`, `done`, `error`. Type `approve` to find every agent
+  waiting on you.
 - **The dashboard counts them.** `prefix + g` shows `Agents (2 need you)` —
   the panes in `approve` or `input`, by the same rules as the rows, each pane
   once however many sessions show it — and its `e` opens the navigator with
