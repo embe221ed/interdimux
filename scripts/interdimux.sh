@@ -5855,11 +5855,13 @@ popup_user_style() {
 # zeroes its attributes.  ("none" draws no frame and no title, so no border
 # style can show anything there.)
 danger_style() {
-  local base lines="${1:-}" tok ink=default
+  # `ulines`, not `lines`: shellcheck tracks a name across the whole file, and
+  # the arrays called `lines` further up made this string one a warning.
+  local base ulines="${1:-}" tok ink=default
   local -a toks=()
-  [ -n "$lines" ] || lines=$(popup_user_lines)
+  [ -n "$ulines" ] || ulines=$(popup_user_lines)
   base=$(popup_user_style)
-  if [ "$lines" = padded ]; then
+  if [ "$ulines" = padded ]; then
     IFS=', ' read -r -a toks <<< "$base"
     for tok in ${toks[@]+"${toks[@]}"}; do
       case "$tok" in bg=*) ink="${tok#bg=}" ;; esac
