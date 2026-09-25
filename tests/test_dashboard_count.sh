@@ -157,7 +157,8 @@ printf '{"pid":%s,"sessionId":"x","cwd":"/tmp","startedAt":1,"procStart":"%s","v
 SOCKP=$(tin display-message -p '#{socket_path}')
 HOSTPANE=$(pane_of '=host:')
 CLIENT=$(tin list-clients -F '#{client_name}' | head -1)
-# prefix+g, traced.  Sets TRACE (the xtrace) and LABEL (the Agents entry).
+# prefix+g, traced: the xtrace lands in $TMPD/trace, and LABEL is the Agents
+# entry display-menu was given.
 launch() {
   rm -f "$TMPD/menu.log"
   env PATH="$TMPD/shim:$PATH" PS4='+ ' TMUX="$SOCKP,99999,0" TMUX_PANE="$HOSTPANE" \
