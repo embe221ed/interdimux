@@ -192,6 +192,80 @@ else
   report "...and its first real line is the status-line message" fail
 fi
 
+# BUG-106: fzf failing says nothing itself -- an exit 2, or killed outright.
+stub_fzf exit2 'exit 2'
+run_nav exit2
+if grep -q '^fzf exited with status 2$' "$LOG" 2>/dev/null; then
+  report "fzf exiting 2 is logged with its status" pass
+else
+  report "fzf exiting 2 is logged with its status" fail
+  ERRORS+="    log: $( (cat "$LOG" 2>/dev/null || true) | tr '\n' '|')"$'\n'
+fi
+if grep -q 'interdimux: fzf exited with status 2' <<< "$(msgs)"; then
+  report "...and announced on the status line" pass
+else
+  report "...and announced on the status line" fail
+fi
+stub_fzf killed 'kill -9 $$'
+run_nav killed
+if grep -q '^fzf exited with status 137$' "$LOG" 2>/dev/null; then
+  report "fzf killed by a signal is logged with its status" pass
+else
+  report "fzf killed by a signal is logged with its status" fail
+fi
+# ...and the ordinary exits stay silent: Esc (130), and a query that matched
+# nothing (1) with no query to create from
+for st in 130 1 0; do
+  stub_fzf "rc$st" "exit $st"
+  run_nav "rc$st"
+  if [ ! -e "$LOG" ]; then
+    report "fzf exiting $st logs nothing" pass
+  else
+    report "fzf exiting $st logs nothing" fail
+    ERRORS+="    log: $(tr '\n' '|' < "$LOG")"$'\n'
+  fi
+done
+
+# A reload's error and then the navigator's own, in one file: the navigator's
+# line must not land on top of the child's.  The real fzf, killed once ^r has
+# failed; it is found by the dump path in its environment.  Linux only.
+if [ "${fzf_minor:-0}" -ge 53 ] && [ -r "/proc/$$/environ" ] && command -v pgrep >/dev/null 2>&1; then
+  cp "$SCRIPT_DIR/rust/tests/corpus/basic.dump" "$TMPD/nav2.dump"
+  rm -f "$LOG"
+  tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
+    "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_STATE_HOME='$XDG_STATE_HOME' \
+         XDG_DATA_HOME='$XDG_DATA_HOME' INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=$fzf_minor \
+         INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_DUMP_IN='$TMPD/nav2.dump' \
+         bash '$SCRIPT'; echo NAV-EXITED; sleep 30"
+  screen() { tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null || true; }
+  nav_fzf() {
+    local p
+    for p in $(pgrep -x fzf || true); do
+      tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qxF "INTERDIMUX_DUMP_IN=$TMPD/nav2.dump" \
+        && printf '%s\n' "$p"
+    done
+    return 0
+  }
+  if wait_for 'screen | grep -q bravo' 150; then
+    rm -f "$TMPD/nav2.dump"
+    tmux -L "$OUTER" send-keys -t '=drv:' C-r
+    wait_for '! screen | grep -q bravo' 100 || true
+    for p in $(nav_fzf); do kill -9 "$p" 2>/dev/null || true; done
+    wait_for 'screen | grep -q NAV-EXITED' 100 || true
+    wait_for 'grep -q "status 137" "$LOG" 2>/dev/null' 50 || true
+    if grep -q 'INTERDIMUX_DUMP_IN: cannot read' "$LOG" 2>/dev/null \
+       && grep -q '^fzf exited with status 137$' "$LOG" 2>/dev/null; then
+      report "a reload's error and then fzf's death are both logged intact" pass
+    else
+      report "a reload's error and then fzf's death are both logged intact" fail
+      ERRORS+="    log: $( (cat "$LOG" 2>/dev/null || true) | head -4 | tr '\n' '|')"$'\n'
+    fi
+  else
+    report "the navigator draws its first frame from the dump (2)" fail
+  fi
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi

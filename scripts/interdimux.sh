@@ -10546,6 +10546,16 @@ while true; do
   set -o pipefail
   set -e
 
+  # 0 is Enter, 1 a query that matched nothing, 130 Esc or ^c (and the abort
+  # that ends ^o).  Anything else is fzf failing -- 2 on its own error, 128+N
+  # killed by signal N -- which used to close the popup exactly as Esc does,
+  # leaving no trace of an OOM kill (BUG-106).  Said on stderr, so the exit
+  # report puts it on the status line and in errors.log.
+  case "$fzf_rc" in
+    0|1|130) ;;
+    *) printf 'fzf exited with status %s\n' "$fzf_rc" >&2 ;;
+  esac
+
   # ctrl-o cancelled the dir picker — reopen the navigator
   [ -s "$RESUME_FILE" ] && continue
 
