@@ -144,15 +144,18 @@ fi
 # --- THE KEYPRESS PATH, against a deliberately stale server TMUX_PANE -------------
 # Compare against the order computed IN THE KEYPRESS CONTEXT, not this shell's:
 # the two differ precisely when the pane id is wrong, which is the bug.
+# The list is written aside and moved into place when it is complete: the
+# bash renderer streams its rows, so a file that is merely non-empty can hold
+# the first session and not yet the second (under load, 1 run in ~40).
 tmux -L "$SOCK" set-environment -g TMUX_PANE '%99999'
 tmux -L "$SOCK" bind-key -n M-9 run-shell -b \
-  "TMUX_PANE=#{pane_id} bash '$SCRIPT' --list > '$TMPD/ctx.txt' 2>&1"
+  "TMUX_PANE=#{pane_id} bash '$SCRIPT' --list > '$TMPD/ctx.part' 2>&1; mv -f '$TMPD/ctx.part' '$TMPD/ctx.txt'"
 
 ctx_nth() { # the Nth session as the keypress context sees it
   rm -f "$TMPD/ctx.txt"
   tmux -L "$OUTER" send-keys -t '=drv:' M-9
   local i
-  for i in $(seq 1 60); do [ -s "$TMPD/ctx.txt" ] && break; sleep 0.1; done
+  for i in $(seq 1 100); do [ -e "$TMPD/ctx.txt" ] && break; sleep 0.1; done
   sed 's/\x1b\[[0-9;]*m//g' "$TMPD/ctx.txt" \
     | awk -F'\t' '$4 ~ /^S:/ { print substr($4, 3) }' | sed -n "${1}p"
 }
