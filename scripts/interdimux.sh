@@ -454,7 +454,7 @@ load_tmux_opts() {
     return 0
   fi
   _tmux_opts_loaded=1
-  local fmt="" name raw
+  local fmt="" name raw _noglob=0 IFS
   local -a vals
   for name in "${OPT_NAMES[@]}"; do
     [ -n "$fmt" ] && fmt+="$US"
@@ -464,7 +464,18 @@ load_tmux_opts() {
   # lookups are target-relative, so a bare display-message resolves session-local
   # overrides against whichever session was most recently attached.
   raw=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$fmt" 2>/dev/null) || return 0
-  IFS="$US" read -r -a vals <<< "$raw"
+  # Split by the shell under set -f, not `read -a <<<`: read stops at the first
+  # newline, and @interdimux-startup-command is multi-line by design (one
+  # send-keys per line).  Two lines there cut the value to its first and left
+  # every option after it in OPT_MAP -- hide, raw, the agent options -- at its
+  # default, on every path that is not primed: prefix+g, --jump, the CLI.  It is
+  # also the cheaper read: a here-string this small is a pipe (bash >= 5.1),
+  # which read takes one byte per syscall.
+  case $- in *f*) _noglob=1 ;; esac
+  set -f
+  IFS=$US
+  vals=($raw)
+  [ "$_noglob" = 1 ] || set +f
   local i=0
   for name in "${OPT_NAMES[@]}"; do
     TMUX_OPTS["@interdimux-$name"]="${vals[i]:-}"
