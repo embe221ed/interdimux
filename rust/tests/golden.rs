@@ -208,8 +208,10 @@ fn control_bytes_and_stray_separators() {
 /// How the COMMAND column classifies a command, with nothing but tmux's own
 /// #{pane_current_command} to go on: versioned interpreters and the names that
 /// only look like one (pythonw, python-config, luajit), shells idle and busy,
-/// the ssh and editor flags that take a value, and an ssh destination followed
-/// by a remote command (review BUG-36).  The bash renderer classifies
+/// the ssh and editor flags that take a value -- bundled (`-NL`, `-vp`) or with
+/// the value glued on (`-oX=no`), and mosh's long ones -- and an ssh
+/// destination followed by a remote command (review BUG-36).  The bash
+/// renderer classifies
 /// these with `case` globs and the Rust core with match tables;
 /// tests/test_corpus_parity.sh renders this dump through bash too, so the
 /// expectation binds both (review #28).

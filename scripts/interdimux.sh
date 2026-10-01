@@ -2711,8 +2711,11 @@ get_git_branch() {
 #
 #   editors                       vim nvim vi nano emacs code hx helix micro
 #                                 kate gedit subl
-#   ssh flags taking a value      -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p
-#                                 -Q -R -S -W -w
+#   ssh flags taking a value      -B -b -c -D -E -e -F -I -i -J -L -l -m -O -o
+#                                 -P -p -Q -R -S -W -w (bundled as getopt
+#                                 bundles them), and mosh's --client --server
+#                                 --predict --port --family --ssh
+#                                 --bind-server --experimental-remote-ip
 #   editor flags taking a value   -u -U -s -S -p -c --cmd --listen
 #   interpreters (whose first     python and lua, each with an optional
 #   argument, when it is a path,  version of digits and dots; node nodejs ruby
@@ -2734,6 +2737,13 @@ format_command() {
   # the words after it are the remote command: taking the last one labelled
   # `ssh box tail -f /var/log/x` as `ssh /var/log/x` (review BUG-36).  The argv
   # comes space-joined, so a quoted flag value holding a space still splits.
+  #
+  # Taking the first such word makes the flag table matter: a value it
+  # misses becomes the host.  So short flags are read as getopt reads them --
+  # bundled, and the first letter that takes a value takes the REST of the
+  # word (`-p2222`, `-oX=no`), or the next word when it is the last letter
+  # (`-NL 8080:h:80`, `-vp 2222`).  A word that ends in a value letter takes
+  # the next one unless an earlier value letter already took that last one.
   case "$cmd_base" in
     ssh|mosh)
       local host="" skip_next=""
@@ -2746,7 +2756,12 @@ format_command() {
           continue
         fi
         case "$word" in
-          -[bcDEeFIiJLlmOopQRSWw]) skip_next=1 ;;
+          --client|--server|--predict|--port|--family|--ssh|--bind-server|--experimental-remote-ip)
+              skip_next=1 ;;
+          --*) ;;
+          -*[BbcDEeFIiJLlmOoPpQRSWw])
+              word="${word#-}"
+              [ -n "${word#*[BbcDEeFIiJLlmOoPpQRSWw]}" ] || skip_next=1 ;;
           -*) ;;
           *)  host="$word"; break ;;
         esac
