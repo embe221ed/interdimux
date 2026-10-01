@@ -774,8 +774,8 @@ set -g @interdimux-dashboard-key 'g'
 set -g @interdimux-jump-keys 'M-1 M-2 M-3'
 
 # A prefix key that switches to the next agent that needs you (--agent-next,
-# see "From a status line, a script or a key").  Off by default.
-# (default: unset)
+# see "From a status line, a script or a key").  Off by default, and never
+# bound over the navigator's or the dashboard's key.  (default: unset)
 set -g @interdimux-agent-next-key 'a'
 
 # Keep sessions out of the list: space-separated glob patterns matched

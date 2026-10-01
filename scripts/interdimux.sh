@@ -279,9 +279,10 @@ if [ "${1:-}" = "--bind-keys" ]; then
 
   # Opt-in too (@interdimux-agent-next-key 'a'): a prefix key that goes straight
   # to the next agent that needs you (--agent-next), with no popup.  Unset, no
-  # key is bound.
+  # key is bound; nor is the navigator's or the dashboard's, which it would take
+  # without a word (--doctor says why it is not bound).
   _bk_an=$(tmux show-option -gqv @interdimux-agent-next-key 2>/dev/null)
-  if [ -n "$_bk_an" ]; then
+  if [ -n "$_bk_an" ] && [ "$_bk_an" != "$_bk_nav" ] && [ "$_bk_an" != "$_bk_dash" ]; then
     tmux bind-key "$_bk_an" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --agent-next" 2>/dev/null
   fi
 
@@ -8837,7 +8838,16 @@ if [ "${1:-}" = "--doctor" ]; then
         # was called unknown while the message listed it as an example.
         # A bare ';' is the one it cannot judge — tmux reads it as a command
         # separator, so the query "succeeds" and the binding never happens.
+        # The opt-in agent-next key is never bound over the navigator's or the
+        # dashboard's key (--bind-keys skips it), which nothing else here would
+        # show: that key still opens what it opened, so it ticks.
         local _ke
+        if [ "$n" = agent-next-key ]; then
+          case "$v" in
+            "$_k")  printf 'prefix+%s opens the navigator, so it is not bound to --agent-next' "$v"; return 0 ;;
+            "$_dk") printf 'prefix+%s opens the dashboard, so it is not bound to --agent-next' "$v"; return 0 ;;
+          esac
+        fi
         case "$v" in
           ';') printf "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
           *)   _ke=$(tmux list-keys -T prefix "$v" 2>&1 >/dev/null) \

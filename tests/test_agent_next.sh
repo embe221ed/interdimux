@@ -223,6 +223,29 @@ case "$out" in
   *) report "--doctor does not call it an unknown option" pass ;;
 esac
 
+# --- the navigator's key, or the dashboard's -------------------------------------------
+# --bind-keys binds the dashboard's key first and the navigator's last, so the
+# opt-in key once took prefix+g from the dashboard without a word (and lost
+# prefix+f to the navigator), while --doctor ticked both.  Neither is bound
+# over now, and --doctor says why.  What each key runs is tmux's own table.
+for pair in 'g:dashboard:--dashboard-launch' 'f:navigator:display-popup'; do
+  k="${pair%%:*}" what="${pair#*:}"; runs="${what#*:}" what="${what%%:*}"
+  tin set -g @interdimux-agent-next-key "$k"
+  bash "$SCRIPT" --bind-keys
+  bound=$(tin list-keys -T prefix 2>/dev/null | awk -v k="$k" '$2 == "-T" && $3 == "prefix" && $4 == k' || true)
+  case "$bound" in
+    *--agent-next*) report "agent-next-key $k: prefix+$k still opens the $what ($bound)" fail ;;
+    *"$runs"*)      report "agent-next-key $k: prefix+$k still opens the $what" pass ;;
+    *)              report "agent-next-key $k: prefix+$k still opens the $what ($bound)" fail ;;
+  esac
+  out=$(doctor)
+  case "$out" in
+    *"✗ @interdimux-agent-next-key = '$k' — prefix+$k opens the $what, so it is not bound to --agent-next"*)
+      report "...and --doctor says that is why it is not bound" pass ;;
+    *) report "...and --doctor says that is why it is not bound" fail ;;
+  esac
+done
+
 printf '\nResults: %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"
 
