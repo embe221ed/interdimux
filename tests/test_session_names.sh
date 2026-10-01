@@ -6,20 +6,30 @@
 # disambiguated session names instead of silently reusing an existing
 # session, while picking the same directory again reuses its session.
 #
+# Also: directories whose names tmux reads specially, opened through
+# --connect-dir (see "Odd basenames" below).
+#
 # Uses a dedicated tmux server socket so tests don't interfere with the
 # user's live session.
 
 set -euo pipefail
 
+# A UTF-8 locale for the non-ASCII name below: in the C locale tmux turns
+# every byte of one into '_'.
+export LC_ALL=C.UTF-8 LANG=C.UTF-8
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 SOCK="interdimux-names-test-$$"
+OUTER="${SOCK}-outer"
 TMPDIR_TEST="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-names-test-XXXXXX")" && pwd -P)"
 PASS=0
 FAIL=0
 ERRORS=""
 
+# OUTER first: it holds the client attached to $SOCK.
 cleanup() {
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
   tmux -L "$SOCK" kill-server 2>/dev/null || true
   rm -rf "$TMPDIR_TEST"
 }
@@ -72,7 +82,10 @@ cwd_is() { # $1 = session, $2 = directory
   return 1
 }
 
-tmux_cmd new-session -d -s bootstrap -x 80 -y 24 -c "$TMPDIR_TEST"
+# Every pane a plain bash: no rc file may move a cwd these tests wait on.
+SHELL_CMD='bash --norc --noprofile -i'
+tmux_cmd new-session -d -s bootstrap -x 80 -y 24 -c "$TMPDIR_TEST" "$SHELL_CMD"
+tmux_cmd set -g default-command "$SHELL_CMD"
 cwd_is bootstrap "$TMPDIR_TEST" || true
 
 echo "interdimux session-name tests"
@@ -134,6 +147,138 @@ if [ "$got" = "beta-api" ]; then
   report "parent-prefixed session reused for its own dir" pass
 else
   report "parent-prefixed session reused for its own dir (got: $got)" fail
+fi
+
+# ---------------------------------------------------------------------------
+# Odd basenames, through --connect-dir
+# ---------------------------------------------------------------------------
+#
+# What a directory's name can hold that tmux reads specially: '.' and ':'
+# (target separators, which the name rewrites to '-'), all digits (an index,
+# where a target takes one), '$N' (a session ID to tmux, with '=' or without),
+# '#' (format-expanded by new-session -s), a quote, a space, non-ASCII, and a
+# leading '-' (an option, on a command line).  Each must get one stable name,
+# and the same directory opened twice must give ONE session: a name that does
+# not round-trip creates another session on every Enter, and one that matches
+# the wrong session switches into another project's.
+#
+# The expected names are written out, not derived.  '$9' comes early, while no
+# session has the ID $9, and is opened once more at the end, when one does.
+#
+# The script runs directly against the private server, with HOME and the XDG
+# directories inside the fixture: --connect-dir records each directory in the
+# recent list (and in zoxide, off here).  A client is attached, and "lands on
+# it" is the session tmux says that client shows, not what the script says.
+ODD=(
+  'my.proj|my-proj'
+  '$9|$9'
+  'a:b|a-b'
+  '3|3'
+  '$1|$1'
+  'we#ird|we#ird'
+  "it's|it's"
+  'has space|has space'
+  '日本|日本'
+  '-dash|-dash'
+)
+ODD_ENV=(
+  TMUX="$(tmux_cmd display-message -p '#{socket_path}'),99999,0"
+  HOME="$TMPDIR_TEST/home" XDG_CONFIG_HOME="$TMPDIR_TEST/config"
+  XDG_DATA_HOME="$TMPDIR_TEST/data" XDG_STATE_HOME="$TMPDIR_TEST/state"
+  INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_HYDRATE=off
+)
+mkdir -p "$TMPDIR_TEST/home"
+imux() { env -u TMUX_PANE "${ODD_ENV[@]}" bash "$SCRIPT" "$@"; }
+# "ID NAME", one per session, in one collation for comm
+sessions() { tmux -L "$SOCK" list-sessions -F '#{session_id} #{session_name}' | LC_ALL=C sort; }
+wait_until() { # $1 = tenths of a second, $2.. = a command that must succeed
+  local n="$1" i; shift
+  for i in $(seq 1 "$n"); do "$@" && return 0; sleep 0.1; done
+  return 1
+}
+pane_at() { [ "$(tmux -L "$SOCK" display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null)" = "$2" ]; }
+client_on() { [ "$(tmux -L "$SOCK" display-message -p -c "$CLIENT" '#{session_id}' 2>/dev/null)" = "$1" ]; }
+# Opens $1 with --connect-dir from bootstrap.  Sets RC, NEW (the sessions that
+# appeared) and GONE (the ones that disappeared or were renamed).
+open_dir() {
+  local before after
+  tmux -L "$SOCK" switch-client -c "$CLIENT" -t bootstrap
+  before=$(sessions)
+  RC=0; imux --connect-dir "$1" >/dev/null 2>&1 || RC=$?
+  after=$(sessions)
+  NEW=$(LC_ALL=C comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+  GONE=$(LC_ALL=C comm -23 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+}
+
+tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 100 -y 30 \
+  "env -u TMUX -u TMUX_PANE tmux -L '$SOCK' attach -t bootstrap"
+CLIENT=""
+for _ in $(seq 1 100); do
+  CLIENT=$(tmux -L "$SOCK" list-clients -F '#{client_name}' 2>/dev/null | head -1)
+  [ -n "$CLIENT" ] && break
+  sleep 0.1
+done
+
+echo
+echo "odd basenames, through --connect-dir"
+if [ -z "$CLIENT" ]; then
+  report "setup: a client is attached to the test server" fail
+fi
+nine_id=""
+for row in ${CLIENT:+"${ODD[@]}"}; do
+  base="${row%%|*}" want="${row#*|}"
+  dir="$TMPDIR_TEST/odd/$base"
+  mkdir -p "$dir"
+
+  n1=$(imux --session-name-for "$dir"); n2=$(imux --session-name-for "$dir")
+  if [ "$n1" = "$want" ] && [ "$n2" = "$want" ]; then
+    report "'$base' is named '$want'" pass
+  else
+    report "'$base' is named '$want' (got: '$n1', then '$n2')" fail
+  fi
+
+  open_dir "$dir"
+  id="${NEW%% *}"
+  if [ "$RC" = 0 ] && [ -z "$GONE" ] && [ "$NEW" = "$id $want" ] \
+     && wait_until 100 pane_at "$id" "$dir" && wait_until 20 client_on "$id"; then
+    report "...the first open creates that one session, in it, and lands on it" pass
+  else
+    report "...the first open creates that one session, in it, and lands on it" fail
+    ERRORS+="    '$base': rc=$RC new=[$NEW] gone=[$GONE]"$'\n'
+  fi
+  [ "$base" = '$9' ] && nine_id="$id"
+
+  open_dir "$dir"
+  if [ "$RC" = 0 ] && [ -z "$NEW" ] && [ -z "$GONE" ] && wait_until 20 client_on "$id"; then
+    report "...the second creates and renames nothing, and lands on it again" pass
+  else
+    report "...the second creates and renames nothing, and lands on it again" fail
+    ERRORS+="    '$base': rc=$RC new=[$NEW] gone=[$GONE]"$'\n'
+  fi
+
+  n3=$(imux --session-name-for "$dir")
+  if [ "$n3" = "$want" ]; then
+    report "...and the name stays '$want'" pass
+  else
+    report "...and the name stays '$want' (got: '$n3')" fail
+  fi
+done
+
+# Session ID $9 is now another directory's, so "=$9" names THAT session to
+# tmux.  The session named '$9' is still found by its name.
+if [ -n "$nine_id" ]; then
+  other=$(tmux -L "$SOCK" display-message -p -t '$9' '#{session_name}' 2>/dev/null || true)
+  if [ -n "$other" ] && [ "$other" != '$9' ] && [ "$nine_id" != '$9' ]; then
+    open_dir "$TMPDIR_TEST/odd/\$9"
+    if [ "$RC" = 0 ] && [ -z "$NEW" ] && [ -z "$GONE" ] && wait_until 20 client_on "$nine_id"; then
+      report "'\$9', once session ID \$9 is '$other', still opens its own session" pass
+    else
+      report "'\$9', once session ID \$9 is '$other', still opens its own session" fail
+      ERRORS+="    rc=$RC new=[$NEW] gone=[$GONE]"$'\n'
+    fi
+  else
+    report "setup: session ID \$9 exists and is not the session '\$9' (it is '$other')" fail
+  fi
 fi
 
 # ---------------------------------------------------------------------------
