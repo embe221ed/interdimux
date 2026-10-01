@@ -27,11 +27,11 @@
 #                    spell "every process" `-e`: that is procps' and macOS's
 #                    reading, but on OpenBSD and NetBSD -e means "and the
 #                    environment", which their ps prints IN FRONT of argv in
-#                    the command column, and on FreeBSD it does that without
-#                    widening the selection past your own processes.  -A is
-#                    "every process" everywhere.  And without -ww a BSD ps
-#                    cuts that column to the terminal's width, COLUMNS first --
-#                    as procps does with COLUMNS (PORT-01, PORT-06).
+#                    the command column, and on FreeBSD -e selects no more
+#                    than your own processes.  -A is "every process"
+#                    everywhere.  And without -ww a BSD ps cuts that column
+#                    to the terminal's width, COLUMNS first -- as procps does
+#                    with COLUMNS (PORT-01, PORT-06).
 
 set -euo pipefail
 
