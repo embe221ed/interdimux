@@ -67,7 +67,7 @@ echo
 
 RENDERERS="off"
 [ -x "$BIN" ] && RENDERERS="off on"
-[ -x "$BIN" ] || echo "  (the Rust core is not built: only the bash renderer is checked)"
+[ -x "$BIN" ] || echo "  (the Rust core is not built: the Rust renderer's cases are skipped)"
 
 # --- the dump seam ------------------------------------------------------------
 US=$'\x1f' RS=$'\x1e' GS=$'\x1d'

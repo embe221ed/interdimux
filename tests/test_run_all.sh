@@ -103,6 +103,23 @@ STRICT=1 run pass_one
   && report "...and a run with no skip still passes" pass \
   || report "...and a run with no skip still passes (exit $RC)" fail
 
+# --- every skip note the real suites print is one it counts -----------------------------
+# run_all.sh knows a skip by the word "skipped" in a note starting "  (" or
+# "  - ".  A note of that shape on stdout that does not say it was a skip
+# IMUX_STRICT never saw: "(the Rust core is not built: only the bash renderer
+# is checked)" in seven suites read as nothing at all.  Read from the suites'
+# source, since most such paths never run where the tools are all there.
+# Notes on stderr are a failed wait's diagnostics, beside its failure, and the
+# container case's note is a stated choice (test_title_apps.sh says why).
+uncounted=$(cd "$SCRIPT_DIR" && grep -n -E "(echo|printf)[^\"']*[\"']  (\(|- )" tests/test_*.sh \
+  | grep -v -e 'skipped' -e '>&2' -e 'INTERDIMUX_TEST_DOCKER=off' || true)
+if [ -z "$uncounted" ]; then
+  report "every skip note a suite prints says \"skipped\", so run_all.sh counts it" pass
+else
+  report "every skip note a suite prints says \"skipped\", so run_all.sh counts it" fail
+  printf '%s\n' "$uncounted" | sed 's/^/      /'
+fi
+
 # --- what was there before stays -------------------------------------------------------
 STRICT="" run fails pass_one
 [ "$RC" = 1 ] && has 'failing suites: fails' && has '  ✗ 0 passed, 1 failed (Ns)' \

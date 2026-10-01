@@ -46,7 +46,7 @@ echo
 
 RENDERERS="off"
 [ -x "$BIN" ] && RENDERERS="off on"
-[ -x "$BIN" ] || echo "  (the Rust core is not built: only the bash renderer is checked)"
+[ -x "$BIN" ] || echo "  (the Rust core is not built: the Rust renderer's cases are skipped)"
 
 # --- 1. DEFAULT_STATE_OPTS against the default rules ------------------------
 # The rules' @names, parsed here with awk: the first word of every rule line

@@ -247,7 +247,7 @@ for v in 4.3 4.4 5.0 5.1; do
     '[ "$RC" = 0 ] && [ -z "$ERR" ] && [ "$rows" = "$DL/before $DL/\$RECYCLE.BIN $DL/\$nfs/gone $DL/after $DL/\$zox " ]'
   check "$v: a session named \$(touch …) never ran its name" '[ ! -e "$MARKER" ]'
 done
-[ "$dollar_ok" = 1 ] || echo "  (no bash from 4.3 to 5.1 to run these on)"
+[ "$dollar_ok" = 1 ] || echo "  (skipped every '\$' case: no bash from 4.3 to 5.1 to run them on)"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

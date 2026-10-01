@@ -106,7 +106,7 @@ case "$base" in
 esac
 
 renderers="off"
-if [ -x "$BIN" ]; then renderers="on off"; else echo "  (rust binary not built: bash renderer only)"; fi
+if [ -x "$BIN" ]; then renderers="on off"; else echo "  (rust binary not built: the Rust renderer's cases are skipped)"; fi
 
 # $1 = on|off, $2 = SHIM_CUT; sets ROWS (the spec column, space-joined) and ERR
 list_cut() {

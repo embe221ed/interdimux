@@ -410,7 +410,12 @@ case CI deliberately does not run, `test_title_apps.sh`'s real container shell
 (it needs `ubuntu:24.04` already pulled), is switched off with
 `INTERDIMUX_TEST_DOCKER=off`, which that suite reports as a choice rather than
 a skip.  A skip line is one a suite prints starting `  (` or `  - ` and saying
-"skipped"; a new skip path has to say so to be counted.
+"skipped"; a new skip path has to say so to be counted.  Eleven did not at
+first: ten suites that run half their cases without the Rust core said only
+"(the Rust core is not built: only the bash renderer is checked)" or the like,
+and `test_bash_floor.sh` "(no bash from 4.3 to 5.1 to run these on)".  So
+`tests/test_run_all.sh` also reads every suite's source for a note of that
+shape on stdout that does not say "skipped", and fails on one.
 
 ## What the developer's tmux does that no released tmux does
 
