@@ -15,17 +15,13 @@
 #     5.1 -- the ones that expand an array subscript twice -- and runs nothing.
 #
 # Old bashes are real binaries: point INTERDIMUX_OLD_BASH_DIR at a directory
-# holding <version>/bash for 3.2, 4.2, 4.3 and 5.1 (4.4 and 5.0 are used too
-# when there), e.g.
-#
-#   for v in 3.2.57 4.2 4.3 5.1; do curl -fsSL https://ftp.gnu.org/gnu/bash/bash-$v.tar.gz | tar -xz
-#     (cd bash-$v && ./configure --without-bash-malloc && make) && mkdir -p "$d/${v%.57}"
-#     cp bash-$v/bash "$d/${v%.57}/"; done
-#
-# (a modern gcc needs CFLAGS="-std=gnu89 -Wno-implicit-function-declaration
-# -Wno-implicit-int -Wno-incompatible-pointer-types" for the three oldest).  A
-# version that is not there is reported as skipped, by name.  The not-bash case
-# needs only dash.
+# holding <major.minor>/bash for each of OLD_VERSIONS below -- 3.2, 4.2, 4.3,
+# 4.4, 5.0 and 5.1.  CI builds exactly those; its "Build bash" step in
+# .github/workflows/ci.yml is the recipe, with the flags a modern gcc needs.
+# With the variable set, a version that is not there FAILS, by name: a skip
+# there is how 4.4 and 5.0 went unrun on every CI run while the totals read
+# green.  Unset (a local run without them), each is reported as skipped where
+# it would have run.  The not-bash case needs only dash.
 
 set -euo pipefail
 
@@ -93,6 +89,18 @@ old_bash() { # $1 = version: sets REPLY to a bash of exactly that version, or fa
   [ -n "$OLD_DIR" ] && [ -x "$REPLY" ] \
     && case "$("$REPLY" -c 'echo "$BASH_VERSION"' 2>/dev/null)" in "$1".*) true ;; *) false ;; esac
 }
+# Every version a case below runs on: the two that must be refused, then 4.3
+# to 5.1, the bashes that expand an array subscript twice.  This list is the
+# authority; CI's OLD_BASH_VERSIONS has to cover it.
+OLD_VERSIONS=(3.2 4.2 4.3 4.4 5.0 5.1)
+
+# --- the old bashes are there, when they were promised ---------------------------------
+if [ -n "$OLD_DIR" ]; then
+  for v in "${OLD_VERSIONS[@]}"; do
+    old_bash "$v" \
+      || report "bash $v is in \$INTERDIMUX_OLD_BASH_DIR (no $OLD_DIR/$v/bash of that version)" fail
+  done
+fi
 
 # --- the control: this bash passes ----------------------------------------------------
 run "$BASH" --version

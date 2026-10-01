@@ -30,7 +30,9 @@ only its dash and current-bash cases (14).  CI fetches and builds those
 binaries (§5, §12), and with them the two suites count 10 and 43 — so each CI
 leg reads **39 higher** than the same leg run locally.  The CI rows below are
 the local measurement plus those 39, both suites measured against the binaries
-the CI steps produce:
+the CI steps produce.  (CI has since added bash 4.4 and 5.0 and fzf 0.40.0
+(§12), and with those the two suites count 15 and 67, so the difference is now
+68.)
 
 | where | shell | rust | printed |
 |---|---|---|---|
@@ -123,9 +125,11 @@ The skip also hid that on that very fzf the navigator did not open at all: an
 unconditional `resize` bind (an event from 0.46) made 0.44 refuse to start, and
 on 0.46–0.52, which draw their whole interface on stderr, the navigator's
 stderr log swallowed it and the popup stayed black. `tests/test_old_fzf.sh`
-runs the navigator on real 0.44.1 and 0.52.1 release binaries, which the
-workflow fetches into the directory named by `INTERDIMUX_OLD_FZF_DIR`; without
-them it skips, naming each version it could not find.
+runs the navigator on real 0.40.0, 0.44.1 and 0.52.1 release binaries (0.40.0
+is the README's floor, and the only release on the `fzf_ge 42` false branch),
+which the workflow fetches into the directory named by
+`INTERDIMUX_OLD_FZF_DIR`.  Without the variable it skips, naming each version;
+with it, a version it names that is not there fails.
 
 The fetch itself failed the first time it was written, and took the whole job
 with it. fzf's release tags gained their `v` at 0.54.0 — `0.53.0` and older are
@@ -325,10 +329,11 @@ session named `$work`, under `set -u`), and a `$(…)` in one ran; every suite p
 keys with `${assoc[$key]+x}`, which expands once on every version, and the
 suite's `$`-name cases hold it there.)
 
-**Fix:** the tests job builds bash 3.2.57, 4.2.53, 4.3.30 and 5.1.16 (5.1.16 is
-Ubuntu 22.04's) from the GNU tarballs, caches them by the version list, and
-exports `INTERDIMUX_OLD_BASH_DIR`, so `run_all.sh` runs the suite's real cases
-in both legs.  Two things the build needed, both found by running it:
+**Fix:** the tests job builds bash 3.2.57, 4.2.53, 4.3.30, 4.4.18, 5.0 and
+5.1.16 (4.4 is RHEL 8's, 5.0 Ubuntu 20.04's, 5.1 Ubuntu 22.04's) from the GNU
+tarballs, caches them by the version list and the image, and exports
+`INTERDIMUX_OLD_BASH_DIR`, so `run_all.sh` runs the suite's real cases in both
+legs.  Two things the build needed, both found by running it:
 
 * `-std=gnu89` and the `-Wno-implicit-*`, `-Wno-int-conversion` and
   `-Wno-incompatible-pointer-types` flags, in `CFLAGS` and in
@@ -348,9 +353,20 @@ in both legs.  Two things the build needed, both found by running it:
   `for (time_t_max = 1; 0 < time_t_max; time_t_max *= 2)`, relies on signed
   overflow wrapping, which the optimiser may assume never happens.
 
-A cold cache costs about two and a half minutes for all four (measured on 4
-cores).  "Versions under test" runs each one, so a build that went missing
-fails that step instead of turning the suite back into skips.
+A cold cache costs about two and a half minutes for the first four (measured
+on 4 cores).  "Versions under test" runs each one, so a build that went
+missing fails that step instead of turning the suite back into skips.
+
+That step only knew the workflow's own list, though, and for a while that list
+was 3.2, 4.2, 4.3 and 5.1 while the suite also ran 4.4 and 5.0 — the rest of
+the range that expands a subscript twice — whenever they were there.  They
+never were: twelve written assertions skipped on every run while the totals
+read green.  The suites' lists are now the authority.  With
+`INTERDIMUX_OLD_BASH_DIR` set, a version `tests/test_bash_floor.sh` names that
+is not there FAILS, by name (`tests/test_old_fzf.sh` does the same with
+`INTERDIMUX_OLD_FZF_DIR`), so the workflow's list cannot fall behind unseen.
+Each bash goes under its major.minor cut from the tarball's name: `${v%.*}`,
+as the step had it, would have put 5.0 in `5/`.
 
 Both jobs name their image, `ubuntu-24.04`, rather than `ubuntu-latest`, which
 moves to 26.04 from 2026-10-19 (actions/runner-images#14748), and the tmux and

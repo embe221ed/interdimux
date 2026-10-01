@@ -34,16 +34,24 @@ on:
 #             refused in one line.  ubuntu-24.04's own bash is 5.2, and 5.2
 #             hides what behaves differently below it: a `$` in a session name
 #             was re-expanded inside `[[ -v "a[$k]" ]]` on 4.3 to 5.1 while
-#             every suite passed.  5.1 is Ubuntu 22.04's and RHEL 9's.  Listed
-#             with their patch levels; tests/test_bash_floor.sh finds each
-#             under its major.minor.
-#   fzf       0.44.1 and 0.52.1, one per failure tests/test_old_fzf.sh guards
-#             (that suite names the same two; keep them in step).
+#             every suite passed, so all four of those run: 4.4 is RHEL 8's,
+#             5.0 Ubuntu 20.04's, 5.1 Ubuntu 22.04's and RHEL 9's.  Listed as
+#             the GNU tarballs are named, each the newest tarball of its
+#             release (later patches come only as diffs, and 5.0 has no
+#             patch-level tarball at all); each is installed under its
+#             major.minor, where tests/test_bash_floor.sh looks.
+#   fzf       0.40.0, the README's floor and the only release on the
+#             `fzf_ge 42` false branch; 0.44.1 and 0.52.1, one per failure
+#             tests/test_old_fzf.sh guards.
+#
+# Those two suites' own lists are the authority, not these.  With the
+# directories set (below), a version a suite names that is not there FAILS the
+# suite instead of skipping it, so these lists cannot fall behind unnoticed.
 env:
   TMUX_VERSION: "3.7b"
   FZF_VERSION: "0.74.4"
-  OLD_BASH_VERSIONS: "3.2.57 4.2.53 4.3.30 5.1.16"
-  OLD_FZF_VERSIONS: "0.44.1 0.52.1"
+  OLD_BASH_VERSIONS: "3.2.57 4.2.53 4.3.30 4.4.18 5.0 5.1.16"
+  OLD_FZF_VERSIONS: "0.40.0 0.44.1 0.52.1"
   # The tree glyphs are multibyte and the column maths counts CELLS.  Runners do
   # not reliably set a locale, and without a UTF-8 one widths are measured in
   # bytes.
@@ -164,8 +172,8 @@ jobs:
       # navigator opens AND draws on fzf older than the pinned one.  Neither
       # failure it guards can be emulated with INTERDIMUX_FZF_MINOR on 0.74:
       # 0.44 refuses to start on an event it does not know, and 0.52 and older
-      # draw the whole interface on stderr.  Without these the suite skips, by
-      # version, rather than failing.
+      # draw the whole interface on stderr.  With INTERDIMUX_OLD_FZF_DIR set, a
+      # version the suite names that is not here fails it, by name.
       #
       # fzf's release tags gained their `v` at 0.54.0: 0.53.0 and older are
       # tagged bare, and releases/download/v0.44.1/… is a 404 -- which, piped
@@ -184,7 +192,7 @@ jobs:
           echo "INTERDIMUX_OLD_FZF_DIR=$HOME/fzf-old" >> "$GITHUB_ENV"
 
       # Real old bashes for tests/test_bash_floor.sh, which run_all.sh runs with
-      # everything else: 3.2 and 4.2 must be refused in one line, and 4.3 and
+      # everything else: 3.2 and 4.2 must be refused in one line, and 4.3 to
       # 5.1 must list, search and survive `$` in names.  Built from source --
       # no apt route installs a second bash -- and cached by version and image,
       # so a push pays for this only when either changes.  The -std/-Wno flags
@@ -194,7 +202,9 @@ jobs:
       # builds (mkbuiltins, ...) then meet gcc 15's C23 default, where `f()`
       # means `f(void)`, and fail.  CFLAGS deliberately has no -O2 (configure's
       # default): with it, 3.2's configure spins in its mktime probe, a loop
-      # that relies on signed overflow wrapping.  See docs/CI.md §12.
+      # that relies on signed overflow wrapping.  See docs/CI.md §12.  Each goes
+      # under its major.minor, cut from the tarball's name: `${v%.*}` made
+      # "5.0" into "5", where the suite, which wants 5.0, would never look.
       - name: Cache bash ${{ env.OLD_BASH_VERSIONS }}
         id: old-bash-cache
         uses: actions/cache@v4
@@ -214,8 +224,9 @@ jobs:
                    && make -j"$(nproc)"; } > "/tmp/bash-$v.log" 2>&1; then
               tail -40 "/tmp/bash-$v.log"; exit 1
             fi
-            mkdir -p "$HOME/bash-old/${v%.*}"
-            cp bash "$HOME/bash-old/${v%.*}/bash"
+            d=$(echo "$v" | cut -d. -f1,2)
+            mkdir -p "$HOME/bash-old/$d"
+            cp bash "$HOME/bash-old/$d/bash"
             cd - >/dev/null
           done
 
@@ -230,8 +241,10 @@ jobs:
         # reporting "0 passed, 0 failed" is indistinguishable from coverage.
         run: sudo systemctl start atd || sudo service atd start
 
-      # The old binaries too: the suites that use them SKIP when one is missing,
-      # and a skip reads as a pass in a total.  Here a missing one fails.
+      # The old binaries too, so one that went missing fails here, by name,
+      # before any suite runs.  (The suites that use them fail on a missing one
+      # as well, now that the directories are set: their own lists are what
+      # counts, and this step only knows the lists above.)
       - name: Versions under test
         run: |
           tmux -V
@@ -241,7 +254,9 @@ jobs:
           locale charmap
           for v in $OLD_FZF_VERSIONS; do "$INTERDIMUX_OLD_FZF_DIR/$v/fzf" --version; done
           for v in $OLD_BASH_VERSIONS; do
-            "$INTERDIMUX_OLD_BASH_DIR/${v%.*}/bash" -c 'echo "bash $BASH_VERSION"'
+            d=$(echo "$v" | cut -d. -f1,2)
+            # shellcheck disable=SC2016  # $BASH_VERSION is the old bash's own
+            "$INTERDIMUX_OLD_BASH_DIR/$d/bash" -c 'echo "bash $BASH_VERSION"'
           done
 
       - name: Build the Rust core
