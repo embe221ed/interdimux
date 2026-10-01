@@ -54,11 +54,12 @@ report() {
 # would make this suite depend on the machine it runs on.  This file tests the
 # tmux TREE format; tests/test_one_list.sh owns the D: rows.
 #
-# TMUX_PANE is passed EXPLICITLY.  `run-shell -t` does not export it — verified
-# against tmux 3.4 (apt), 3.5a (apt), 3.6 (source), 3.7b (source) and 3.7b
-# (Debian package); only a locally patched build does.  Without it the script
-# falls back to an untargeted `#S`, which resolves to the most recently ATTACHED
-# session rather than the one named here, and the MRU assertion below reads
+# TMUX_PANE is passed EXPLICITLY.  `run-shell -t` never gives its child the
+# target's pane, on any tmux: the child gets the server's global environment,
+# so a server started from inside tmux hands it the caller's pane id and one
+# started in CI hands it none (docs/CI.md).  With none the script falls back to
+# an untargeted `#S`, which resolves to the most recently ATTACHED session
+# rather than the one named here, and the MRU assertion below reads
 # `alpha charlie bravo`.  The real key bindings already do this — they bake
 # `TMUX_PANE=#{pane_id}` into the binding for exactly the same reason.
 run_list() {

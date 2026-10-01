@@ -76,10 +76,11 @@ as `$'…\037…'` (ANSI-C quoting, i.e. real control bytes); on 3.4 as `'…\03
 (plain quotes, i.e. literal backslash-zero-three-seven).
 
 One wrinkle worth knowing, because it makes casual probing misleading: even on
-3.7b the byte only survives when tmux is invoked **from inside tmux** (`$TMUX`
-set). Called with `-L` from outside, tmux sanitises it to `_`. The plugin always
-runs inside tmux, so this never bites in production — but a probe run from a
-plain shell will tell you the opposite of the truth.
+3.7b the byte only survives when the client counts as UTF-8 — invoked **from
+inside tmux** (`$TMUX` set), or with a UTF-8 `LC_ALL`, `LC_CTYPE` or `LANG`.
+Called with `-L` from a plain shell in the C locale, tmux sanitises it to `_`.
+The plugin always runs inside tmux, so this never bites in production — but a
+probe run from a plain shell can tell you the opposite of the truth.
 
 **Fix:** build tmux from source in CI. The jobs run on `ubuntu-24.04`, whose
 apt tmux is 3.4. Newer releases do package a new enough one — Ubuntu 26.04 has
@@ -419,20 +420,31 @@ and `test_bash_floor.sh` "(no bash from 4.3 to 5.1 to run these on)".  So
 `tests/test_run_all.sh` also reads every suite's source for a note of that
 shape on stdout that does not say "skipped", and fails on one.
 
-## What the developer's tmux does that no released tmux does
+## Why a dev shell and CI disagree
 
-Worth recording, because it is why local runs and CI disagreed for so long.
-`/usr/local/bin/tmux` on the development box is a local build, and it differs
-from every released tmux tested (3.4 apt, 3.5a apt, 3.6 from source, 3.7b from
-source, 3.7b Debian package) in two ways:
+Worth recording, because it is why local runs and CI disagreed for so long, and
+because this section used to blame a "locally patched" `/usr/local/bin/tmux`.
+That binary is the stock 3.7b source build, byte for byte. Neither difference
+comes from the build; both come from where the server and the client start:
 
-* `run-shell -t <target> "cmd"` **exports `TMUX_PANE`** to the child. No stock
-  build does. `tests/test_list_format.sh` depends on this: without it the
-  "current session" falls back to the most recently attached one and the MRU
-  assertion gets `alpha charlie bravo` instead of `bravo alpha charlie`.
-  Production is unaffected — the real key bindings pass `TMUX_PANE=#{pane_id}`
-  explicitly rather than relying on the implicit export.
-* A raw control byte in a `-F` format survives even when tmux is invoked from
-  *outside* tmux. Stock builds sanitise it to `_`.
+* **`TMUX_PANE` is whatever the starting shell had.** A server started from a
+  shell inside tmux copies that shell's `TMUX_PANE` into its global
+  environment, and `run-shell` and `display-popup` children get the global
+  environment, never the target's pane: only a pane's own process is given its
+  id (`environ_for_session` in environ.c; spawn.c sets `TMUX_PANE`, nothing
+  else does). Measured on stock 3.5a, 3.6a and 3.7b: a server started with
+  `TMUX_PANE=%7` hands every `run-shell -t <target>` child `%7`, one started
+  without hands it nothing. So a suite run from a dev pane resolves "the
+  current pane" against the developer's pane id — on the private server, an
+  unrelated pane or none — while in CI it is unset.
+  `tests/test_list_format.sh` passes the pane explicitly, as the real key
+  bindings do (`TMUX_PANE=#{pane_id}`); a suite that leaves it to the
+  environment can pass in one place and fail in the other.
+* **A raw control byte in `-F` output survives only in a UTF-8 client.** tmux
+  counts the client as UTF-8 when `TMUX` is set, or when the first of
+  `LC_ALL`, `LC_CTYPE` and `LANG` that is set names UTF-8 (tmux.c); otherwise
+  the byte comes out as `_` (§1). A dev shell has `TMUX`, and CI sets
+  `LC_ALL=C.UTF-8` (§3), so both keep it — but a probe from a plain shell in
+  the C locale does not.
 
-If a test passes locally and fails in CI, this is the first thing to suspect.
+If a test passes locally and fails in CI, these are the first things to suspect.
