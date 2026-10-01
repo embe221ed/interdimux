@@ -324,11 +324,16 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # comes from a tmux format expanded in-server at keypress, not a fork.
   #
   # #{q:} on the NAME only: a session name may contain a quote, which would
-  # otherwise close the -e/-T token and kill the binding.  The surrounding
-  # "#[bold]" stays unquoted, because rs_quote would double its '#' and '##['
-  # does not collapse back before '['.
-  _bk_title=' interdimux · #{q:session_name} '
-  _bk_env+=" -e \"INTERDIMUX_TITLE=$_bk_title\""
+  # otherwise close the -e token and kill the binding.
+  _bk_title_env=' interdimux · #{q:session_name} '
+  _bk_env+=" -e \"INTERDIMUX_TITLE=$_bk_title_env\""
+  # -T is a format AGAIN once display-popup has it, so a name spliced in here
+  # would be expanded twice -- and connect_dir keeps a directory's name verbatim,
+  # so a project named 'x#(cmd)' ran cmd on every prefix+f in it.  '##' leaves
+  # run-shell's pass as '#', and display-popup then inserts the name as a VALUE,
+  # which is never expanded again; it never meets the parser, so needs no #{q:}.
+  # The "#[bold]" before it stays single: '##[' does not collapse before '['.
+  _bk_title_fmt=' interdimux · ##{session_name} '
 
   # #{?…,…,…} treats the string "0" as FALSE, so it cannot be used as an
   # emptiness test — #{==:…,} can.  (Width/height can't legitimately be 0, but
@@ -337,7 +342,7 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_h='#{?#{==:#{@interdimux-popup-height},},75%,#{@interdimux-popup-height}}'
 
   tmux bind-key "$_bk_nav" run-shell -bC \
-    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title_fmt\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
 
@@ -5057,8 +5062,12 @@ at_enable_hint() {
 sched_resolve() {
   local target="$1"
   [ "$target" = "." ] && target="${TMUX_PANE:-}"
+  # Never without a target: tmux would pick "the current pane" itself, which
+  # outside a pane is the most recently active session's -- a pane nobody named.
+  # An empty -t is no help: tmux reads -t '' exactly as no -t at all.
+  [ -n "$target" ] || return 1
   local info
-  info=$(tmux display-message -p ${target:+-t "$target"} \
+  info=$(tmux display-message -p -t "$target" \
         '#{pane_id}'"$US"'#{socket_path}'"$US"'#{pid}'"$US"'#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || return 1
   IFS="$US" read -r SCHED_PANE SCHED_SOCK SCHED_SRVPID SCHED_LABEL <<< "$info"
   [ -n "$SCHED_PANE" ] || return 1
@@ -5072,12 +5081,16 @@ sched_resolve() {
 sched_job_body() {
   local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
   # POSIX quoting, not %q: atd replays this body under /bin/sh.  See shq().
-  local q_logdir q_log q_sock q_want q_pane q_send
+  local q_logdir q_log q_sock q_want q_pane q_label q_send
   shq "$SCHED_LOGDIR"; q_logdir="$REPLY"
   shq "$SCHED_LOG";    q_log="$REPLY"
   shq "$sock";         q_sock="$REPLY"
   shq "$srvpid";       q_want="$REPLY"
   shq "$pane";         q_pane="$REPLY"
+  # The label too: it is a session name, which can come from a directory name
+  # and hold a '"', a backtick or '$(' -- spliced into a live line, it ran when
+  # the job fired.  printf, not echo: dash's echo reads '\c' and '\n' in it.
+  shq "$label";        q_label="$REPLY"
   # the whole send, as send_input does it (see there): a lone key name is
   # pressed, any other text survives tmux's argv parser with a trailing ';'
   # intact, and a pane left in copy-mode still runs the command
@@ -5097,9 +5110,14 @@ sched_job_body() {
     "# atd tries to MAIL a job's output.  With no MTA installed that output is" \
     "# destroyed and leaves only 'Exec failed for mail command' in the journal --" \
     "# which reads exactly like 'my job never ran'.  Log instead of discarding." \
-    "mkdir -p ${q_logdir} 2>/dev/null" \
-    "exec >>${q_log} 2>&1" \
-    "echo \"== \$(date '+%Y-%m-%d %H:%M:%S') firing for ${label} (${pane})\"" \
+    "# Probed first, with true: exec and ':' are special builtins, and a failed" \
+    "# redirection on one ends a POSIX sh on the spot -- before the send." \
+    "if mkdir -p ${q_logdir} 2>/dev/null && true 2>/dev/null >>${q_log}; then" \
+    "  exec >>${q_log} 2>&1" \
+    "else" \
+    "  exec >/dev/null 2>&1" \
+    "fi" \
+    "printf '== %s firing for %s (%s)\\n' \"\$(date '+%Y-%m-%d %H:%M:%S')\" ${q_label} ${q_pane}" \
     "sock=${q_sock}" \
     "want=${q_want}" \
     "pane=${q_pane}" \
@@ -5171,6 +5189,12 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
   if [ -z "$_when" ] || [ -z "$_target" ] || [ -z "$_keys" ]; then
     echo "interdimux: usage: $_mode <when> <target> <command...>" >&2
     exit 2
+  fi
+  # '.' is the pane this runs in, and only TMUX_PANE says which: from cron, an
+  # ssh command or env -i there is none, and "no such target" would not say why.
+  if [ "$_target" = "." ] && [ -z "${TMUX_PANE:-}" ]; then
+    echo "interdimux: '.' means the current pane, but TMUX_PANE is not set (run this from inside a tmux pane, or name the target)" >&2
+    exit 1
   fi
   if ! sched_resolve "$_target"; then
     echo "interdimux: no such target: $_target" >&2
@@ -5391,13 +5415,12 @@ popup_accent() {
   lines=$(popup_user_lines)
   if [ "$1" = "danger" ]; then style=$(danger_style "$lines"); else style=$(popup_user_style); fi
   local -a t=()
-  # -T is a FORMAT, and the title now carries the session name, so any '#' in it
-  # would be re-expanded on every repaint.  In practice tmux already expands a
-  # name at create/rename time -- "has#hash" is stored as "has<hostname>ash" --
-  # so only benign sequences ('#x', '#1') can reach here and nothing observable
-  # breaks today.  Doubling is free, and this stops being true the moment tmux
-  # gains a format character.  The style prefix is left alone: its '#[' is meant
-  # as a format.
+  # -T is a FORMAT, and the title carries the session name, so any '#' in it
+  # would be re-expanded on every repaint.  tmux expands a name it is GIVEN at
+  # create/rename time, but connect_dir escapes a directory's name first so it
+  # is stored verbatim -- a project named 'x#(cmd)' is a session of exactly that
+  # name, and unescaped here cmd would run on every danger repaint.  The style
+  # prefix is left alone: its '#[' is meant as a format.
   [ -n "${INTERDIMUX_TITLE:-}" ] && t=(-T "${POPUP_TITLE_STYLE}${INTERDIMUX_TITLE//'#'/##}")
   # -c: the popup to repaint is the PRESSING client's.  Without it tmux picks
   # the most recently active client, and on any other client -- one with no
@@ -7957,8 +7980,22 @@ if [ "${1:-}" = "--doctor" ]; then
   # Health popup becomes a bash error.  Divert it for the duration of the checks
   # and fold whatever arrives into the report, where it belongs — a check that
   # errors is itself a finding.
-  _derr="${TMPDIR:-/tmp}/interdimux-doctor-err.$$"
-  if : > "$_derr" 2>/dev/null; then exec 3>&2 2>"$_derr"; else _derr=""; fi
+  #
+  # Never a predictable name in a shared /tmp: one planted there as a symlink
+  # would have `: >` truncate whatever it points at.  The same choice as
+  # RESUME_FILE (see there): in-process in the private $XDG_RUNTIME_DIR, else
+  # mktemp.  The trap is for a run cut short, which left the file behind.
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+    _derr="$XDG_RUNTIME_DIR/interdimux-doctor-err.$$"
+  else
+    _derr=$(mktemp "${TMPDIR:-/tmp}/interdimux-doctor-err.XXXXXX" 2>/dev/null) || _derr=""
+  fi
+  if [ -n "$_derr" ] && : > "$_derr" 2>/dev/null; then
+    trap 'rm -f "$_derr"' EXIT
+    exec 3>&2 2>"$_derr"
+  else
+    _derr=""
+  fi
 
   _doc="" _n_ok=0 _n_warn=0 _n_bad=0
   _ok()   { _doc+=$'  \033[32m✓\033[0m '"$1"$'\n'; _n_ok=$((_n_ok + 1)); }
@@ -9391,7 +9428,11 @@ if [ "${1:-}" = "--launch" ]; then
   if tmux_ge 303; then
     # Border style/lines are left to the user's popup-border-* options;
     # only destructive modes recolour the frame
-    chrome=(-T "${POPUP_TITLE_STYLE}${title}")
+    #
+    # The NAME is doubled, not the style: -T is a format, and a session named
+    # after a directory 'x#(cmd)' would run cmd here (see _bk_title_fmt).
+    # title itself stays raw for INTERDIMUX_TITLE, which popup_accent escapes.
+    chrome=(-T "${POPUP_TITLE_STYLE}${title//'#'/##}")
     [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
     # Popups don't inherit TMUX_PANE — forward it so current-target detection
     # is exact.  It is the PRESSING pane only because every route here passes

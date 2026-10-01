@@ -716,6 +716,69 @@ else
   echo "  (skipped the pending-jobs note: 'at' is not installed)"
 fi
 
+# --- the file that catches the checks' stderr -------------------------------------
+# It was "$TMPDIR/interdimux-doctor-err.<pid>", opened with a truncating,
+# symlink-following `: >`: a symlink planted at that name by someone else on a
+# shared /tmp made --doctor empty whatever it pointed at, and a run cut short
+# left the file behind (review SEC-04).  Each case below runs with its own
+# TMPDIR and with $XDG_RUNTIME_DIR unset (the mktemp branch) or private (the
+# in-process one).  The stub awk marks its stderr and, when told to, kills the
+# run mid-check, reading its pid from the file the wrapper wrote.
+mkdir -p "$TMPD/derr/stub" "$TMPD/derr/run"
+chmod 700 "$TMPD/derr/run"
+cat > "$TMPD/derr/stub/awk" <<STUB
+#!/bin/sh
+echo "DERR_MARK from a check" >&2
+[ -n "\${DERR_KILL:-}" ] && kill -TERM "\$(cat "\$DERR_KILL")"
+exec $(command -v awk) "\$@"
+STUB
+chmod +x "$TMPD/derr/stub/awk"
+# derr_run XDG_RUNTIME_DIR-or-empty plant|kill -> the report, run in a fresh
+# TMPDIR: "plant" first puts a symlink to the victim at the old name, "kill"
+# has the stub end the run mid-check
+derr_run() {
+  local -a xrd=(-u XDG_RUNTIME_DIR) kill=()
+  [ -n "$1" ] && xrd=(XDG_RUNTIME_DIR="$1")
+  [ "$2" = kill ] && kill=(DERR_KILL="$TMPD/derr/pid")
+  rm -rf "$TMPD/derr/tmp"; mkdir -p "$TMPD/derr/tmp"
+  printf 'precious\n' > "$TMPD/derr/victim"
+  env "${xrd[@]}" ${kill[@]+"${kill[@]}"} TMPDIR="$TMPD/derr/tmp" PATH="$TMPD/derr/stub:$PATH" \
+    bash -c 'echo $$ > "$1"; [ "$2" = plant ] && ln -s "$3" "$TMPDIR/interdimux-doctor-err.$$"
+             exec bash "$4" --doctor' \
+      _ "$TMPD/derr/pid" "$2" "$TMPD/derr/victim" "$SCRIPT" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true
+}
+leftovers() { find "$TMPD/derr/tmp" "$TMPD/derr/run" -name 'interdimux-doctor-err.*' ! -type l | wc -l | tr -d ' '; }
+for _xrd in "" "$TMPD/derr/run"; do
+  _how="mktemp"; [ -n "$_xrd" ] && _how="XDG_RUNTIME_DIR"
+  out=$(derr_run "$_xrd" plant)
+  if [ "$(cat "$TMPD/derr/victim")" = precious ]; then
+    report "a symlink planted at the old temp name is not followed ($_how)" pass
+  else
+    report "a symlink planted at the old temp name is not followed ($_how)" fail
+  fi
+  # what the checks wrote still lands in the report, under it, not above it
+  # (no `| grep -q` here: under pipefail its early exit can fail the pipeline)
+  _sect=$(printf '%s\n' "$out" | sed -n '/^stderr /,$p')
+  if [ "${out%%$'\n'*}" != "DERR_MARK from a check" ] && [[ "$_sect" == *'DERR_MARK from a check'* ]]; then
+    report "...and the checks' stderr is still folded into the report ($_how)" pass
+  else
+    report "...and the checks' stderr is still folded into the report ($_how)" fail
+    ERRORS+="    $(printf '%s\n' "$out" | sed -n '1,3p' | tr '\n' '|' || true)"$'\n'
+  fi
+  _left=$(leftovers)
+  [ "$_left" = 0 ] && report "...and leaves no temp file behind ($_how)" pass \
+                   || report "...and leaves no temp file behind ($_how): $_left" fail
+  out=$(derr_run "$_xrd" kill)
+  _left=$(leftovers)
+  if [[ "$out" == *'interdimux doctor'* ]]; then
+    report "the stub ends a run mid-check (precondition, $_how)" fail
+  elif [ "$_left" = 0 ]; then
+    report "a run killed mid-check leaves no temp file behind ($_how)" pass
+  else
+    report "a run killed mid-check leaves no temp file behind ($_how): $_left" fail
+  fi
+done
+
 # --- the popup viewer ---------------------------------------------------------
 # The dashboard's Health entry runs --doctor-view, which pages the report through
 # fzf.  Its contract is narrow: it must not alter the report, and it must not

@@ -914,9 +914,10 @@ interdimux.sh --sched-cancel 42     # drop one
 ```
 
 The target is any tmux target (`%5`, `work:1.0`, `=name:`) or `.` for the
-current pane, resolved to a pane id at submit time. If that pane is scrolled
-back in copy-mode when the command fires, it is taken out of copy-mode first,
-so the command runs instead of being read as copy-mode keys.
+current pane, resolved to a pane id at submit time. `.` needs `$TMUX_PANE`,
+so from cron or an ssh command it is refused: name the target there. If that
+pane is scrolled back in copy-mode when the command fires, it is taken out of
+copy-mode first, so the command runs instead of being read as copy-mode keys.
 
 **Jobs refuse to fire if the tmux server has restarted.** Pane ids are recycled,
 so `%0` after a restart is somebody else's pane — a scheduled `make deploy`
