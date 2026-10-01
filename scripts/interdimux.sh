@@ -2712,7 +2712,11 @@ format_command() {
   local old_set="$-"
   set -f
 
-  # SSH: highlight user@host
+  # SSH: highlight user@host -- the FIRST word that is neither a flag nor a
+  # flag's value.  ssh and mosh take `[options] destination [command ...]`, so
+  # the words after it are the remote command: taking the last one labelled
+  # `ssh box tail -f /var/log/x` as `ssh /var/log/x` (review BUG-36).  The argv
+  # comes space-joined, so a quoted flag value holding a space still splits.
   case "$cmd_base" in
     ssh|mosh)
       local host="" skip_next=""
@@ -2727,7 +2731,7 @@ format_command() {
         case "$word" in
           -[bcDEeFIiJLlmOopQRSWw]) skip_next=1 ;;
           -*) ;;
-          *)  host="$word" ;;
+          *)  host="$word"; break ;;
         esac
       done
       if [ -n "$host" ]; then

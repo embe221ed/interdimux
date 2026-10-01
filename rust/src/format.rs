@@ -1,7 +1,7 @@
 //! Smart command formatting: highlight the ssh host, or the file an editor has
 //! open; dim an idle shell; show argv0 (and an interpreter's script) by its
 //! basename.  A faithful port of bash `format_command`, including its
-//! flag-skipping tables and its "last positional wins" behaviour.
+//! flag-skipping tables.
 
 use crate::palette::{Palette, RST};
 use crate::proc::{is_idle_shell, is_shell};
@@ -52,6 +52,9 @@ pub fn format_command(cmd: &str, p: &Palette) -> (String, String) {
     let base = name.rsplit('/').next().unwrap_or(name);
     let args: Vec<&str> = cmd.split(' ').skip(1).filter(|s| !s.is_empty()).collect();
 
+    // The host is the FIRST word that is neither a flag nor a flag's value:
+    // `ssh [options] destination [command [argument ...]]`, and whatever follows
+    // the destination is the remote command (review BUG-36).
     if base == "ssh" || base == "mosh" {
         let mut host = "";
         let mut skip = false;
@@ -66,6 +69,7 @@ pub fn format_command(cmd: &str, p: &Palette) -> (String, String) {
                 }
             } else {
                 host = w;
+                break;
             }
         }
         if !host.is_empty() {
@@ -155,8 +159,17 @@ mod tests {
     fn ssh_flag_values_are_not_mistaken_for_the_host() {
         // -i takes a value; "key.pem" must not become the host
         assert_eq!(plain("ssh -i key.pem realhost"), "ssh realhost");
-        // last positional wins, matching bash
-        assert_eq!(plain("ssh a b"), "ssh b");
+    }
+
+    /// The destination is the first positional; what follows it is the remote
+    /// command, which used to take the label (review BUG-36).
+    #[test]
+    fn a_remote_command_does_not_take_the_hosts_place() {
+        assert_eq!(plain("ssh a b"), "ssh a");
+        assert_eq!(plain("ssh box tail -f /var/log/x"), "ssh box");
+        assert_eq!(plain("ssh -l alice host uptime"), "ssh host");
+        assert_eq!(plain("ssh -o StrictHostKeyChecking=no user@h1 sudo -i"), "ssh user@h1");
+        assert_eq!(plain("mosh me@box -- htop"), "mosh me@box");
     }
 
     #[test]

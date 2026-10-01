@@ -1,4 +1,4 @@
-cmds170000000040attached
+cmds170000000043attached
 
 cmds0w01python3.12 /x/tool.py/home/u22000000
 cmds1w10pythonw /x/tool.py/home/u22001000
@@ -40,6 +40,9 @@ cmds36w360vim --listen /s f.md/home/u12036000
 cmds37w370code ./home/u12037000
 cmds38w380kate a -c/home/u12038000
 cmds39w390subl /q/r/home/u12039000
+cmds40w400ssh box tail -f /var/log/x/home/u12040000
+cmds41w410ssh -l alice host uptime/home/u12041000
+cmds42w420mosh me@box -- htop/home/u12042000
 
 cmds001python3.12 /x/tool.py/home/u20002
 cmds010subl /q/r/home/u30002
