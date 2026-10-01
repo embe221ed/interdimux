@@ -488,24 +488,36 @@ its design does not port unchanged.
   `gather_targets | fzf` pipe already does. Progressive rendering here is either free (already
   happening) or a regression.
 
-### The two levers to reach for first, if the picker ever feels slow at scale
+### The lever to reach for first, if the picker ever feels slow at scale
 
-1. **Nested `#{S:#{W:#{P:…}}}` tree query.** One `display-message` returns the whole tree already
-   grouped and hierarchically ordered, with `loop_last_flag` for the tree glyphs. Measured
-   **19 ms vs 26 ms** for today's batched-4 form, 28% fewer bytes, and it deletes both grouping
-   loops (~22 ms). No staleness, no new machinery.
-2. **Digest-validated cache** — the only cache design worth building. `prefix+f` is already
-   `run-shell -bC "display-popup … -e … -E bash script"`, and `run-shell -C` format-expands *in
-   the server* at keypress, so a digest of everything rendered can ride in as one more `-e` var:
-   validation costs **zero tmux round-trips and zero forks**. Measured first row **6.2 ms** at
-   143 rows. Trap: `#{q:…}` escapes only a bare *variable* — `#{q:#{S:…}}` silently returns the
-   digest unescaped; escape per-variable inside the loop.
+**Digest-validated cache** — the only cache design worth building. `prefix+f` is already
+`run-shell -bC "display-popup … -e … -E bash script"`, and `run-shell -C` format-expands *in
+the server* at keypress, so a digest of everything rendered can ride in as one more `-e` var:
+validation costs **zero tmux round-trips and zero forks**. Measured first row **6.2 ms** at
+143 rows. Trap: `#{q:…}` escapes only a bare *variable* — `#{q:#{S:…}}` silently returns the
+digest unescaped; escape per-variable inside the loop. Second trap: that digest is itself a
+nested `#{S:#{W:#{P:…}}}` loop, so the time limit below applies to it. Keep it to fields that
+expand cheaply (ids, names, flags, activity times), never `pane_current_command` or
+`pane_current_path`: a digest cut short no longer covers the rows after the cut.
 
 ### Rejected outright
 
 `awk` for the row renderer, and for a fused maxima+sort+grouping pass (17 ms → 5 ms): Debian and
 Ubuntu ship **mawk**, where `length("żółć")` is 8 and `substr` splits UTF-8 mid-character, so
 every padded column misaligns for non-ASCII names. Would need an explicit gawk dependency.
+
+The **nested `#{S:#{W:#{P:…}}}` tree query** — one `display-message` returning the whole tree
+grouped, which this section used to name as the first lever. Re-measured (136 panes, the
+fields the gather carries), it saves 3.6 ms: 18.3 ms against 21.9 ms for the batched query.
+Carrying the same fields it is the same size (9,739 bytes against 9,751), not 28% smaller, and
+the ~22 ms of grouping loops it would delete no longer run on the default Rust path. And it
+loses sessions: tmux 3.7 gives one format expansion 100 ms (`FORMAT_TIME_LIMIT`, format.c),
+after which the remaining loop iterations expand to nothing — `display-message -v` logs
+`# reached time limit` — so under load the dump simply stops early, and every session after
+the cut is gone, with no error. With `pane_current_command` and `pane_current_path` in the
+loop it came back short 10 times in 10 on a loaded box. `list-panes -a -F` and the other
+`list-*` commands expand each row on its own, so a slow row costs at most that row's tail
+(see the comment above `_sfmt` in `gather_targets`).
 
 ---
 
