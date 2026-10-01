@@ -105,6 +105,46 @@ else
   ERRORS+="$(doctor | sed -n '/key bindings/,/^$/p' | sed 's/^/    /' || true)"$'\n'
 fi
 
+# --- a binding set up for another fzf (BUG-100) ----------------------------------
+# --bind-keys bakes fzf's minor version into prefix+f, and every fzf feature the
+# picker uses is gated on it; nothing refreshes it until the plugin reloads.
+# Baked from a stand-in fzf on either side of the real one, which is what the
+# server's PATH -- and so the doctor -- finds.
+live_minor=$(fzf --version 2>/dev/null | awk '{print $1}' | cut -d. -f2)
+if [[ "${live_minor:-}" =~ ^[0-9]+$ ]] && [ "$live_minor" -gt 40 ]; then
+  bake_for() { # $1 = the minor version the stand-in reports
+    mkdir -p "$TMPD/fzf-$1"
+    printf '#!/bin/sh\necho "0.%s.0 (stub)"\n' "$1" > "$TMPD/fzf-$1/fzf"
+    chmod +x "$TMPD/fzf-$1/fzf"
+    PATH="$TMPD/fzf-$1:$PATH" bash "$SCRIPT" --bind-keys
+  }
+  old_m=$((live_minor - 1)) new_m=$((live_minor + 1))
+  bake_for "$old_m"
+  out=$(doctor)
+  if grep -q "⚠ prefix+f was set up for fzf 0.$old_m, older than the fzf 0.$live_minor" <<< "$out" \
+     && grep -q 'reload the plugin, or run:' <<< "$out"; then
+    report "a binding set up for an older fzf is a warning that says to reload" pass
+  else
+    report "a binding set up for an older fzf is a warning that says to reload" fail
+    ERRORS+="$(sed -n '/key bindings/,/^$/p' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+  fi
+  bake_for "$new_m"
+  out=$(doctor)
+  if grep -q "✗ prefix+f was set up for fzf 0.$new_m, newer than the fzf 0.$live_minor" <<< "$out" \
+     && [ "$(doctor_rc)" = 1 ]; then
+    report "...one set up for a newer fzf, which may not open, is a problem" pass
+  else
+    report "...one set up for a newer fzf, which may not open, is a problem" fail
+    ERRORS+="$(sed -n '/key bindings/,/^$/p' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+  fi
+  bash "$SCRIPT" --bind-keys
+  if grep -q 'was set up for fzf' <<< "$(doctor)"; then
+    report "...and one set up for the fzf the popups run says nothing" fail
+  else
+    report "...and one set up for the fzf the popups run says nothing" pass
+  fi
+fi
+
 # --- a missing binding is reported, not assumed ---------------------------------
 tmux -L "$SOCK" unbind-key f
 if doctor | grep -q '✗ prefix+f is not bound'; then

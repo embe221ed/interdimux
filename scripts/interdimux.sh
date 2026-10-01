@@ -8603,9 +8603,28 @@ if [ "${1:-}" = "--doctor" ]; then
   if grep -q interdimux <<< "$_keytable"; then
     for _pair in "$_k:navigator" "$_dk:dashboard"; do
       _key="${_pair%%:*}"; _what="${_pair#*:}"
-      if awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k && /interdimux/ { f = 1 }
-                           END { exit !f }' <<< "$_keytable"; then
+      # ...and the fzf minor --bind-keys baked into it, if any (only prefix+f's
+      # carries one).
+      if _bfz=$(awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k && /interdimux/ {
+                                    f = 1
+                                    if (match($0, /INTERDIMUX_FZF_MINOR=[0-9]+/))
+                                      m = substr($0, RSTART + 21, RLENGTH - 21) }
+                                  END { if (f) print m; exit !f }' <<< "$_keytable"); then
         _ok "prefix+$_key opens the $_what"
+        # That number is fzf's version as it was when the plugin last loaded,
+        # and every fzf feature the picker uses is gated on it.  Nothing
+        # refreshes it: after an upgrade the new features stay off, and after
+        # a downgrade the picker asks the older fzf for options it refuses, and
+        # does not open (BUG-100).  The version judged above is the live one.
+        if [ -n "$_bfz" ] && [ -n "${_fzm:-}" ] && [ "$_bfz" != "$_fzm" ]; then
+          _bfv="0.$_bfz"; [ "$_bfz" = 999 ] && _bfv="1.x"
+          if [ "$_bfz" -gt "$_fzm" ]; then
+            _bad "prefix+$_key was set up for fzf $_bfv, newer than the fzf $_fzv the popups run — it may not open"
+          else
+            _warn "prefix+$_key was set up for fzf $_bfv, older than the fzf $_fzv the popups run — its newer features stay off"
+          fi
+          _note "reload the plugin, or run: bash '$SCRIPT_PATH' --bind-keys"
+        fi
       else
         _bad "prefix+$_key is not bound to the $_what"
         _note "reload the plugin, or run: bash '$SCRIPT_PATH' --bind-keys"
