@@ -563,6 +563,44 @@ name), a prompt of *this* host (`user@thishost:…`, fish's `[thishost] …`) an
 a preexec hook's copy of the command line. `@interdimux-show-title all` shows
 every other title, the way `prefix + w` does.
 
+#### From a status line, a script or a key
+
+`--agents` prints the agent panes, by the same rules as the rows, most urgent
+first — `approve`, `input`, `error`, `done`, `working`, `idle`, then an agent
+with no state — and within a state the one that has been in it longest first:
+
+```sh
+$ bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --agents
+%12	=work:=1.0	claude	approve	1790001200	Fix the parser
+%15	=work:=2.0	codex	approve	-	Add tests
+%9	=api:=0.1	claude	working	1790001500	Review the API
+```
+
+One line per pane (once, however many sessions show it, and none from a session
+`@interdimux-hide` keeps out), with six tab-separated columns: the pane id, a
+target for it, the agent, its state, since when (in epoch seconds; only Claude's
+registry says), and its description as the row has it. `-` is a value nothing
+gave. The columns keep their places: a new one only ever goes at the end.
+
+States, comma-separated, keep only those panes (`--agents approve,input`), and
+`--count` prints how many, so a status line can say what the dashboard says —
+Claude's state included, which no tmux format can see:
+
+```tmux
+set -ag status-right ' #(bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --agents --count approve,input)'
+```
+
+That is one bash and one tmux query every `status-interval`; fzf is not needed.
+
+`--agent-next` switches to the next agent that needs you (`approve` or `input`,
+or the states you give it), with no popup: from anywhere else the first in that
+order, and from one of them the one after it, so pressing it again visits each
+in turn. With none, the status line says so. It is a key once you name one:
+
+```tmux
+set -g @interdimux-agent-next-key 'a'    # prefix + a
+```
+
 #### Title rules
 
 Rules are lines of `APPS STATE DESC PATTERN`, in a file
@@ -733,6 +771,11 @@ set -g @interdimux-dashboard-key 'g'
 # Numbered jumps: one root-table key per session position, in order.
 # Off by default.  (default: unset)
 set -g @interdimux-jump-keys 'M-1 M-2 M-3'
+
+# A prefix key that switches to the next agent that needs you (--agent-next,
+# see "From a status line, a script or a key").  Off by default.
+# (default: unset)
+set -g @interdimux-agent-next-key 'a'
 
 # Keep sessions out of the list: space-separated glob patterns matched
 # against session names.  The session you are currently in is never
