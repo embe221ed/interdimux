@@ -31,7 +31,8 @@ A portal gun for your tmux sessions.
 - Dashboard as a native tmux menu, or a scrolling fzf menu on a client too
   short for it
 - Proper confirmation dialogs (centered boxes, `y`/`n`/`esc`) instead of raw
-  prompts; rename pre-fills the current name with readline editing
+  prompts; rename pre-fills the current name with readline editing, by word
+  too (`Alt-b`/`Alt-f` or `Ctrl-←`/`Ctrl-→`, `Alt-d`, `Alt-Backspace`)
 - Actions run in place — kill/rename/zoom/swap reload the list without
   restarting fzf, keeping your query and the cursor's row (the row, not the
   item: after a kill it rests on whatever moved into that row)
