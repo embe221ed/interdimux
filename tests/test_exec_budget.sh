@@ -30,7 +30,9 @@
 # the core (and its zoxide).
 #
 # The numbers are budgets.  A change that needs one more exec or fork on these
-# paths raises the number here, in the same commit, and says why.
+# paths raises the number here, in the same commit, and says why; the per-row
+# cases are not numbers at all -- 3 directories or 30, the cost must be the
+# same.
 #
 # Each run gets the popup's environment (options primed, versions pinned) and
 # no controlling terminal (setsid), so term_cols has no tty to `stty`: under a
@@ -117,6 +119,12 @@ for _ in $(seq 1 100); do settled && break; sleep 0.1; done
 SOCK_PATH="$(tmux -L "$SOCK" display-message -p '#{socket_path}')"
 PANE="$(tmux -L "$SOCK" list-panes -t '=alpha:0' -F '#{pane_id}')"
 
+# Directory fixtures for the per-row cases: N project dirs, each with a
+# subdirectory.
+for n in 3 30; do
+  for i in $(seq 1 "$n"); do mkdir -p "$TMPD/proj$n/svc-$i/src"; done
+done
+
 # run RENDERER [VAR=value ...] -- ARGS: the script with ARGS, as the popup
 # (no ARGS) or fzf would start it.  Sets TOOLS ("name=count ..." by name) and
 # FORKS.
@@ -199,9 +207,10 @@ for r in "${renderers[@]}"; do
 done
 
 # --- the callbacks fzf runs on every cursor move and keystroke ---------------
-run on -- --preview 'S:alpha';     check "--preview of a session" "tmux=3" 12
-run on -- --preview 'W:alpha:1';   check "--preview of a window" "tmux=2" 4
-run on -- --preview 'P:alpha:1:1'; check "--preview of a pane" "tmux=2" 4
+# A preview is one tmux client, whatever the row (review PERF-06).
+run on -- --preview 'S:alpha';     check "--preview of a session" "tmux=1" 2
+run on -- --preview 'W:alpha:1';   check "--preview of a window" "tmux=1" 2
+run on -- --preview 'P:alpha:1:1'; check "--preview of a pane" "tmux=1" 2
 run on FZF_QUERY=api FZF_MATCH_COUNT=3 -- --footer-for 'W:alpha:1'
 check "--footer-for, a query with matches" "tmux=1" 2
 run on FZF_QUERY=newproj FZF_MATCH_COUNT=0 -- --footer-for 'W:alpha:1'
@@ -210,6 +219,25 @@ run on -- --describe-create newproj
 check "--describe-create" "head=1 tmux=1 zoxide=1" 4
 run on FZF_NTH=1 -- --scope-prompt
 check "--scope-prompt" "" 1
+
+# --- the ctrl-o picker: nothing per row --------------------------------------
+# A row used to fork the whole script for its padding (review PERF-07): 3
+# directories or 30, the cost must be the same.
+same_cost() { # NAME ARGS... -- run with 3 and with 30 matching directories (@N@)
+  local name="$1" t3 f3 rows3 rows30; shift
+  run on INTERDIMUX_PROJECT_DIRS="$TMPD/proj3" -- "${@//@N@/3}"
+  t3="$TOOLS" f3="$FORKS" rows3=$(grep -c . "$TMPD/out" || true)
+  run on INTERDIMUX_PROJECT_DIRS="$TMPD/proj30" -- "${@//@N@/30}"
+  rows30=$(grep -c . "$TMPD/out" || true)
+  if [ -s "$TMPD/err" ] || [ "$rows30" -le "$rows3" ]; then
+    report "$name: premise, 30 directories list more rows than 3 ($rows3, $rows30)" fail
+  elif [ "$TOOLS" = "$t3" ] && [ "$FORKS" = "$f3" ]; then
+    report "$name: the same cost for $rows3 rows and $rows30 ($t3; $f3 bash processes)" pass
+  else
+    report "$name: the same cost for $rows3 rows and $rows30 (got $t3 / $f3, then $TOOLS / $FORKS)" fail
+  fi
+}
+same_cost "--dirs-list" --dirs-list
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

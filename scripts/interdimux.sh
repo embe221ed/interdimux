@@ -2246,12 +2246,16 @@ NO_SUCH_TARGET='$missing'
 # ':' (split there) -- become "$ID" through session_id_of, and a name that
 # matches nothing becomes NO_SUCH_TARGET.  Only those names pay for the extra
 # list-sessions, so the preview's hot path forks nothing new.
-spec_target() {
+#
+# spec_target_r sets REPLY instead, for the preview: `$(spec_target)` was one
+# more fork on every cursor move (review PERF-06).
+spec_target() { spec_target_r; printf '%s' "$REPLY"; }
+spec_target_r() {
   local s
   case "$SPEC_TYPE" in
-    D) printf '%s' "$SPEC_DIR"; return 0 ;;
+    D) REPLY="$SPEC_DIR"; return 0 ;;
     S|W|P) ;;
-    *) printf '%s' "$NO_SUCH_TARGET"; return 0 ;;
+    *) REPLY="$NO_SUCH_TARGET"; return 0 ;;
   esac
   case "$SPEC_SESSION" in
     ''|'$'*|*:*) session_id_of "$SPEC_SESSION"; s="${REPLY:-$NO_SUCH_TARGET}" ;;
@@ -2265,9 +2269,9 @@ spec_target() {
     P) case "$SPEC_PIDX" in ''|*[!0-9]*) s="$NO_SUCH_TARGET" ;; esac ;;
   esac
   case "$SPEC_TYPE" in
-    S) printf '%s:' "$s" ;;
-    W) printf '%s:=%s' "$s" "$SPEC_WIDX" ;;
-    P) printf '%s:=%s.%s' "$s" "$SPEC_WIDX" "$SPEC_PIDX" ;;
+    S) REPLY="$s:" ;;
+    W) REPLY="$s:=$SPEC_WIDX" ;;
+    P) REPLY="$s:=$SPEC_WIDX.$SPEC_PIDX" ;;
   esac
 }
 
@@ -2285,12 +2289,17 @@ spec_target() {
 # that can fail (display-message resolves its target with CANFAIL, and answers a
 # stale index with the session's current window), and a failed command ends the
 # list, so a gone target prints nothing at all.
-SPEC_AT=""
+#
+# A third argument is that round-trip's output, made by a caller that batched
+# it with more commands (the preview): `has-session -t T \; display-message -p
+# -t T "$SPEC_AT_FMT$FORMAT"`.
+SPEC_AT="" SPEC_AT_FMT="#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}"
 spec_at() {
   local info sid wid pid widx pidx
   SPEC_AT="" REPLY=""
-  info=$(tmux has-session -t "$1" \; display-message -p -t "$1" \
-    "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}${2:-}" 2>/dev/null)
+  if [ $# -ge 3 ]; then info="$3"; else
+    info=$(tmux has-session -t "$1" \; display-message -p -t "$1" "$SPEC_AT_FMT${2:-}" 2>/dev/null)
+  fi
   IFS="$US" read -r sid wid pid widx pidx REPLY <<< "$info"
   [ -n "$wid" ] && [ "$widx" = "$SPEC_WIDX" ] || { REPLY=""; return 1; }
   case "$SPEC_TYPE" in
@@ -2954,15 +2963,16 @@ npx_agent() {
 # ---------------------------------------------------------------------------
 
 # Pad (or truncate with …) a string to a target display width using
-# character count
-dpad() {
+# character count; sets REPLY.  It used to print, and `$(dpad ...)` forked the
+# whole script once per call: every row of the ctrl-o picker and every window
+# line of a session's preview paid that (review PERF-07).
+dpad_r() {
   local str="$1" width="$2"
   if [ "${#str}" -gt "$width" ] && [ "$width" -gt 1 ]; then
     str="${str:0:width-1}…"
   fi
-  printf '%s' "$str"
   local pad=$(( width - ${#str} ))
-  [ "$pad" -gt 0 ] && printf '%*s' "$pad" ""
+  if [ "$pad" -gt 0 ]; then printf -v REPLY '%s%*s' "$str" "$pad" ''; else REPLY="$str"; fi
 }
 
 # Row-field builder: accumulate colored chunks while tracking the plain
@@ -4341,47 +4351,87 @@ if [ "${1:-}" = "--preview" ]; then
     exec bash "$SCRIPT_PATH" --dirs-preview "$SPEC_DIR"
   fi
 
-  target=$(spec_target)
+  spec_target_r; target="$REPLY"
 
+  # ONE tmux client per preview (review PERF-06): each costs ~5 ms of connect
+  # and teardown, on every cursor move, and a session row's preview made three.
+  # The sections are framed by RS, as gather_targets' are, and the capture goes
+  # LAST: the substitution then strips its trailing newlines exactly as the
+  # capture's own did, and the RS appended before the split keeps an empty
+  # capture a field.  Nothing in a capture can be an RS (tmux keeps no control
+  # bytes in its grid), and nothing in the header before it either, but a
+  # pane's cwd can hold one, so what lies between is joined back on RS.
+  # INTERDIMUX_NO_BATCH runs the commands one at a time, as gather_targets.
+  RS=$'\x1e'
+  pv_parts=()
   case "$SPEC_TYPE" in
     S)
+      s_fmt="#{session_windows}${US}#{?session_attached,attached,detached}"
+      w_fmt="#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}"
       # $target is spec_target's session form ("=name:", or "$ID:" for a name
       # no '=' form can reach), which resolves to the session's active pane.
-      info=$(tmux display-message -p -t "$target" \
-        "#{session_windows}${US}#{?session_attached,attached,detached}" 2>/dev/null)
+      # A failed command ends a command list, so a session that went away (or
+      # anything else short of all three sections) asks again one at a time.
+      if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+        pv_all=$(tmux display-message -p -t "$target" "$s_fmt" \; display-message -p "$RS" \
+          \; list-windows -t "$target" -F "$w_fmt" \; display-message -p "$RS" \
+          \; capture-pane -t "$target" -p -e -S -30 2>/dev/null)
+        set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
+      fi
+      if [ "${#pv_parts[@]}" -ge 3 ]; then
+        info="${pv_parts[0]}"
+        pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
+        IFS="$RS"; pv_wins="${pv_parts[*]:1:${#pv_parts[@]}-2}"; unset IFS
+        pv_wins="${pv_wins#$'\n'}"; pv_wins="${pv_wins%$'\n'}"
+      else
+        info=$(tmux display-message -p -t "$target" "$s_fmt" 2>/dev/null)
+        pv_wins=$(tmux list-windows -t "$target" -F "$w_fmt" 2>/dev/null)
+        pv_cap=$(tmux capture-pane -t "$target" -p -e -S -30 2>/dev/null)
+      fi
       IFS="$US" read -r s_wins s_att <<< "$info"
       printf "${BOLD_AMBER}▸ %s${RST}  ${DIM}%s win · %s${RST}\n" \
         "$SPEC_SESSION" "${s_wins:-?}" "${s_att:-}"
       preview_rule
-      tmux list-windows -t "$target" \
-        -F "#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}" 2>/dev/null | \
-      while IFS="$US" read -r wid wcmd wpath wact wpanes; do
+      [ -n "$pv_wins" ] && while IFS="$US" read -r wid wcmd wpath wact wpanes; do
         # a line tmux cut short (see gather_targets) has no pane count
         case "$wpanes" in ''|*[!0-9]*) wpanes=1 ;; esac
         marker=" "
         [ "$wact" = "1" ] && marker="${MARKER_COLOR}*${RST}"
         wpath="${wpath/#$HOME/\~}"
+        dpad_r "$wid" 16; wid="$REPLY"
+        dpad_r "$wcmd" 14
         printf ' %s %s%s%s %s%s%s %s%s%s' \
-          "$marker" "$BOLD" "$(dpad "$wid" 16)" "$RST" \
-          "$DIM_CMD" "$(dpad "$wcmd" 14)" "$RST" \
+          "$marker" "$BOLD" "$wid" "$RST" \
+          "$DIM_CMD" "$REPLY" "$RST" \
           "$DIM_PATH" "$wpath" "$RST"
         [ "$wpanes" -gt 1 ] && printf '  \033[2m(%s panes)\033[0m' "$wpanes"
         printf '\n'
-      done
+      done <<< "$pv_wins"
       echo ""
       preview_rule "active pane"
-      print_capture "$(tmux capture-pane -t "$target" -p -e -S -30 2>/dev/null)" || echo "(no active pane)"
+      print_capture "$pv_cap" || echo "(no active pane)"
       ;;
     *)
       # Checked by index as well (spec_at): a stale row must not preview the
       # window that merely took its number as a NAME.  Captured by the IDs the
-      # check found, so tmux resolves the row once.
-      p_pid="" p_cmd="" p_path="" p_look="" p_args=""
-      if spec_at "$target" "#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"; then
+      # check found, so tmux resolves the row once -- or, batched, captured by
+      # the row's own target in the same command list as the check, and kept
+      # only when the check passes.  has-session fails for a target that is
+      # gone, so an empty answer is spec_at's own "gone": nothing to redo.
+      p_pid="" p_cmd="" p_path="" p_look="" p_args="" pv_cap="" pv_at=()
+      p_fmt="#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"
+      if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+        pv_all=$(tmux has-session -t "$target" \; display-message -p -t "$target" "$SPEC_AT_FMT$p_fmt" \
+          \; display-message -p "$RS" \; capture-pane -t "$target" -p -e -S -50 2>/dev/null)
+        set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
+        pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
+        IFS="$RS"; pv_at=("${pv_parts[*]:0:${#pv_parts[@]}-1}"); unset IFS
+      fi
+      if spec_at "$target" "$p_fmt" ${pv_at[@]+"${pv_at[@]}"}; then
         IFS="$US" read -r p_pid p_cmd p_path <<< "$REPLY"
         target="$SPEC_AT"
       else
-        target="$NO_SUCH_TARGET"
+        target="$NO_SUCH_TARGET" pv_cap=""
       fi
       # An agent's row is headed by the agent and, once it shows a state or a
       # description, drops its arguments (cmd_field).  The header names it the
@@ -4414,7 +4464,8 @@ if [ "${1:-}" = "--preview" ]; then
         "${p_cmd:-?}" "${p_path:-?}"
       [ -n "$p_args" ] && preview_wrapped "$p_args"
       preview_rule
-      print_capture "$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)" || echo "(cannot capture pane)"
+      [ -n "${INTERDIMUX_NO_BATCH:-}" ] && pv_cap=$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)
+      print_capture "$pv_cap" || echo "(cannot capture pane)"
       ;;
   esac
   exit 0
@@ -4551,18 +4602,19 @@ if [ "${1:-}" = "--dirs-list" ]; then
     # The display copy only: $dir itself, raw, is the spec Enter opens.
     # Sanitised the way the navigator's rows are (build_ctx_field): an ESC in a
     # directory's name reached the picker as a live escape sequence that hid
-    # the name and recoloured the row, and dpad counted the bytes the terminal
+    # the name and recoloured the row, and dpad_r counted the bytes the terminal
     # swallowed, so the badge column moved left.
     local display_path="${dir/#$HOME/\~}"
     sanitize_args "$display_path"; display_path="$REPLY"
     trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
+    dpad_r "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
 
     # Already open?  Say so, and say WHERE -- the badge column is outside fzf's
     # match scope, so the session name is display-only and cannot skew results.
     dir_session "$dir"
     if [ -n "$DIR_SID" ]; then
       printf '  %s▸%s  %s\t%s→%s %s%s%s\t%s\n' \
-        "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" \
+        "$BOLD_AMBER" "$RST" "$display_path" \
         "$DIM" "$RST" "$ACCENT_ESC" "$REPLY" "$RST" "$dir"
       return
     fi
@@ -4582,15 +4634,15 @@ if [ "${1:-}" = "--dirs-list" ]; then
     case "$tier" in
       recent)
         printf '  %s★%s  %s\t%s\t%s\n' \
-          "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" "$type_badge" "$dir"
+          "$BOLD_AMBER" "$RST" "$display_path" "$type_badge" "$dir"
         ;;
       project)
         printf "  ${GREEN}◆${RST}  %s\t%s\t%s\n" \
-          "$(dpad "$display_path" "$DIRS_PATH_W")" "$type_badge" "$dir"
+          "$display_path" "$type_badge" "$dir"
         ;;
       dir)
         printf '  %s·%s  %s\t\t%s\n' \
-          "$DIM" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" "$dir"
+          "$DIM" "$RST" "$display_path" "$dir"
         ;;
     esac
   }
