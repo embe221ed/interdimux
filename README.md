@@ -398,7 +398,9 @@ still exists, so one stalled mount cannot hold up the list.
 - `Z` / `!` / `#` flags mark zoomed, bell, and activity windows, in a column
   of their own right after the path: a narrow popup can drop the branch badge,
   never the flags
-- SSH connections show `user@host` highlighted in blue
+- SSH and mosh rows name the host they connect to, `user@host` highlighted in
+  blue — not a flag's value or a remote command after it
+  (`ssh -p 2222 deploy@web1 tail -f app.log` reads `ssh deploy@web1`)
 - Editors show the filename highlighted in green
 - The command is the one in the pane's foreground — a job you backgrounded does
   not hide it, nor does a shell you started inside the pane's own (`bash`, then
