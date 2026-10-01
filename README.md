@@ -28,7 +28,8 @@ A portal gun for your tmux sessions.
   lines and background are kept; with `padded` lines, which have no line
   to colour, the frame's background turns red instead). Kill mode's prompt
   is red too, on any tmux and any border — with `none` there is no frame
-- Dashboard as a native tmux menu on tmux >= 3.4 (fzf menu fallback below)
+- Dashboard as a native tmux menu, or a scrolling fzf menu on a client too
+  short for it
 - Proper confirmation dialogs (centered boxes, `y`/`n`/`esc`) instead of raw
   prompts; rename pre-fills the current name with readline editing
 - Actions run in place — kill/rename/zoom/swap reload the list without
@@ -168,8 +169,10 @@ There are two entry points:
 ### Dashboard (`prefix + g`)
 
 A menu that provides access to all features — rendered as a native tmux
-menu on tmux >= 3.4 (one keypress per action: `s`, `e`, `n`, `r`, `i`, `w`,
-`z`, `d`, `t`, `a`, `o`, `h`), or as a compact fzf menu on older tmux:
+menu (one keypress per action: `s`, `e`, `n`, `r`, `i`, `w`, `z`, `d`, `t`,
+`a`, `o`, `h`), or, on a client too short for that menu, as a compact fzf menu,
+where you type to filter and press `Enter` instead (`--doctor` says which one
+your client gets):
 
 - **Switch** (`s`) — Navigate & jump to target
 - **Agents** (`e`) — The agents waiting on you, e.g. `Agents (2 need you)`:
@@ -185,10 +188,11 @@ menu on tmux >= 3.4 (one keypress per action: `s`, `e`, `n`, `r`, `i`, `w`,
 - **Jobs** (`o`) — See and cancel scheduled commands
 - **Health** (`h`) — Check the setup, like nvim's `:checkhealth`
 
-`Kill` is drawn in the danger colour, and on tmux >= 3.4 an entry that cannot do
-anything is greyed out and loses its key rather than opening a popup to say so:
-`Agents` when no agent needs you and `Jobs` when nothing is queued (each shows
-its count otherwise), and both scheduling entries when `at` is not installed.
+In the native menu `Kill` is drawn in the danger colour, and an entry that
+cannot do anything is greyed out and loses its key rather than opening a popup
+to say so: `Agents` when no agent needs you and `Jobs` when nothing is queued
+(each shows its count otherwise), and both scheduling entries when `at` is not
+installed.
 
 Select an action to launch the corresponding tool. Action modes open the navigator with a modified prompt — `Enter` performs the action on the selected target, and the list reloads in place so you can repeat. Press `Esc` when done.
 

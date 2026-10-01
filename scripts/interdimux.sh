@@ -10207,8 +10207,8 @@ launch_env_prefix() {
   return 0
 }
 
-# Entry point for the prefix+g binding: a native styled menu on
-# tmux >= 3.4, otherwise a compact fzf menu in a popup.
+# Entry point for the prefix+g binding: a native styled menu on a client tall
+# enough for it, otherwise (short, or of unknown height) a compact fzf menu.
 if [ "${1:-}" = "--dashboard-launch" ]; then
   set +e
   sp="$SQ_SCRIPT"
@@ -10337,7 +10337,7 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
   exit 0
 fi
 
-# fzf fallback menu (tmux < 3.4)
+# fzf fallback menu (a client shorter than MENU_ROWS, or of unknown height)
 if [ "${1:-}" = "--dashboard" ]; then
   set +e
 
