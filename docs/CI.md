@@ -362,8 +362,10 @@ legs.  Two things the build needed, both found by running it:
   overflow wrapping, which the optimiser may assume never happens.
 
 A cold cache costs about two and a half minutes for the first four (measured
-on 4 cores).  "Versions under test" runs each one, so a build that went
-missing fails that step instead of turning the suite back into skips.
+on 4 cores), and about four for all six (the step as written, run on a
+4-core Ubuntu 24.04 box that was busy with other work).  "Versions under
+test" runs each one, so a build that went missing fails that step instead of
+turning the suite back into skips.
 
 That step only knew the workflow's own list, though, and for a while that list
 was 3.2, 4.2, 4.3 and 5.1 while the suite also ran 4.4 and 5.0 — the rest of
