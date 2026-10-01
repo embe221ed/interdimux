@@ -153,14 +153,15 @@ built elsewhere by naming it in the tmux server's environment (in
 set-environment -g INTERDIMUX_BIN '/path/to/imux'
 ```
 
-Rebuild that one whenever you update the plugin. A binary from another version
-is not trusted: the list falls back to the bash renderer, and the status line
-says so once, naming the binary.
+Rebuild that one whenever you update the plugin. A binary that speaks another
+row protocol is refused: the list falls back to the bash renderer, and the
+status line says so once, naming the binary. One built from older sources that
+still speak the same protocol is not caught, and renders as that version did.
 
 That is an environment variable, not a tmux option, on purpose: it chooses the
 program every picker runs. `--doctor` says which binary the popups use, whether
-it is older than its sources, and what to do when there is none. More in
-[rust/README.md](rust/README.md).
+the one in this checkout is older than its sources, and what to do when there
+is none. More in [rust/README.md](rust/README.md).
 
 ## Usage
 

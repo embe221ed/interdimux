@@ -31,10 +31,12 @@ since the in-repo build would not be used.
 **Rebuild after every update.** Neither TPM's update nor a `git pull` builds
 anything; the plugin's own build catches up on the next load when cargo is
 there, and a binary named by `INTERDIMUX_BIN` is never rebuilt for you. A
-binary from other sources than the script is refused rather than trusted: the
-list falls back to the bash renderer, and the status line and
+binary that speaks another protocol than the script (below) is refused rather
+than trusted: the list falls back to the bash renderer, and the status line and
 `$XDG_STATE_HOME/interdimux/errors.log` (which `--doctor` reports) say once
-which binary it was and how to rebuild it.
+which binary it was and how to rebuild it. One built from older sources that
+speak the same protocol is used, and renders as those sources did: only the
+build in `rust/target` is compared with `src/`.
 
 ## The boundary
 
@@ -67,8 +69,9 @@ The subcommand is the protocol's version: `imux gather3` (`PROTOCOL` in
 `src/main.rs`, `IMUX_PROTO` in the script). Bump both with any change to the
 framing or to the position of a field. A binary that does not know the name
 exits 2 with nothing on stdout — an extra argument or an environment variable
-would only be ignored by an old build — so a script and a binary from different
-versions fail closed, in either direction, to the bash renderer.
+would only be ignored by an old build — so a script and a binary that disagree
+on the framing fail closed, in either direction, to the bash renderer. A stale
+build of the same protocol is not caught: it renders its own version's layout.
 
 bash keeps its own renderer, so the plugin works with no binary at all.
 `tests/test_rust_parity.sh` diffs the two across the configuration space that
