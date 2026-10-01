@@ -7983,9 +7983,16 @@ if [ "${1:-}" = "--doctor" ]; then
   # `--doctor --ack`: the errors logged so far have been seen, so the check
   # below stops failing on them (UX-17).  The log itself is kept; the marker
   # is its newest entry's header.
+  #
+  # Text above the first header (a log cut by hand, or written by something
+  # else) counts as an entry of its own, under this stand-in header: counted
+  # as nothing, it was a red check that no --ack could clear.
+  _estart='== (before the first entry)'
   if [ "${2:-}" = --ack ]; then
-    _ein=$(awk '/^== / { n++; h = $0 } END { if (n) { print n; print h } }' \
-             "$SCHED_LOGDIR/errors.log" 2>/dev/null)
+    _ein=$(awk -v start="$_estart" '
+      !n && !/^== / { n = 1; h = start }
+      /^== / { n++; h = $0 }
+      END { if (n) { print n; print h } }' "$SCHED_LOGDIR/errors.log" 2>/dev/null)
     if [ -z "$_ein" ]; then
       echo "interdimux: no errors are logged"
     elif printf '%s\n' "${_ein#*$'\n'}" > "$SCHED_LOGDIR/errors.seen" 2>/dev/null; then
@@ -8528,11 +8535,13 @@ if [ "${1:-}" = "--doctor" ]; then
   # its newest entry's header to errors.seen; an entry after the last copy of
   # that header is new, and with no marker, or the marked entry trimmed away,
   # every entry is.  Seen ones are still reported, as a warning.  One awk pass:
-  # the entries, how many are new, and the newest one's header and first line.
+  # the entries (text above the first header is one, as for --ack), how many
+  # are new, and the newest one's header and first line.
   _elog="$SCHED_LOGDIR/errors.log"
   if [ -s "$_elog" ]; then
     _eseen=""; { IFS= read -r _eseen < "$SCHED_LOGDIR/errors.seen"; } 2>/dev/null || :
-    _ein=$(awk -v seen="$_eseen" '
+    _ein=$(awk -v seen="$_eseen" -v start="$_estart" '
+      !n && !/^== / { n = 1; h = start; if (h == seen) s = 1; want = 1 }
       /^== / { n++; if ($0 == seen) s = n; h = $0; l = $0; want = 1; next }
       want && /[^[:space:]]/ { l = $0; want = 0 }
       END { print n + 0; print n - s; print h; print l }' "$_elog" 2>/dev/null)

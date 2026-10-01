@@ -377,6 +377,33 @@ else
   report "a new error after the acknowledgement fails it again, counted alone" fail
   ERRORS+="$(grep -A2 'navigator' <<< "$out" | sed 's/^/    /' || true)"$'\n'
 fi
+# Text above the first entry header -- a log cut by hand, or written by
+# something else -- is an error like any other, and --ack must clear it too:
+# counted as no entries at all, it stayed red while --ack said "no errors are
+# logged".
+printf 'junk with no header\n' > "$ELOG"
+rm -f "$XDG_STATE_HOME/interdimux/errors.seen"
+out=$(doctor)
+if grep -q '✗ the navigator has logged 1 error(s)' <<< "$out" \
+   && grep -q 'most recent: junk with no header' <<< "$out"; then
+  report "text above the first entry is reported as an error" pass
+else
+  report "text above the first entry is reported as an error" fail
+  ERRORS+="$(grep -A2 'navigator' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+ack=$(bash "$SCRIPT" --doctor --ack 2>&1) && ack_rc=0 || ack_rc=$?
+if [ "$ack_rc" = 0 ] && grep -q '1 logged error(s) acknowledged' <<< "$ack" \
+   && [ "$(doctor_rc)" = "$rc_clean" ]; then
+  report "...which --doctor --ack acknowledges like any other" pass
+else
+  report "...which --doctor --ack acknowledges like any other (rc=$ack_rc: $ack)" fail
+fi
+printf '== 2026-03-03 09:00:00 navigator stderr\nafter the junk\n' >> "$ELOG"
+if grep -q '✗ the navigator has logged 1 new error(s)' <<< "$(doctor)"; then
+  report "...and an entry after it is new" pass
+else
+  report "...and an entry after it is new" fail
+fi
 rm -f "$ELOG" "$XDG_STATE_HOME/interdimux/errors.seen"
 ack=$(bash "$SCRIPT" --doctor --ack 2>&1) && ack_rc=0 || ack_rc=$?
 [ "$ack_rc" = 0 ] && grep -q 'no errors are logged' <<< "$ack" \
