@@ -132,6 +132,7 @@ OPT_MAP=(
   "agents:AGENTS"                    "agent-args:AGENT_ARGS"
   "agent-state:AGENT_STATE"          "claude-dir:CLAUDE_DIR"
   "title-rules:TITLE_RULES"          "agent-separator:AGENT_SEPARATOR"
+  "project-dirs:PROJECT_DIRS"
 )
 OPT_NAMES=()
 for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
@@ -520,6 +521,7 @@ get_opt AGENT_STATE       "${INTERDIMUX_AGENT_STATE:-}"      @interdimux-agent-s
 get_opt CLAUDE_DIR        "${INTERDIMUX_CLAUDE_DIR:-}"       @interdimux-claude-dir        ""
 get_opt TITLE_RULES_FILE  "${INTERDIMUX_TITLE_RULES:-}"      @interdimux-title-rules       ""
 get_opt AGENT_SEPARATOR   "${INTERDIMUX_AGENT_SEPARATOR:-}"  @interdimux-agent-separator   "∣"
+get_opt PROJECT_DIRS      "${INTERDIMUX_PROJECT_DIRS:-}"     @interdimux-project-dirs      ""
 
 # Numeric options reach `[ -ge ]`, `find -maxdepth` and arithmetic, so a junk
 # value is not a harmless no-op.  Verified: a non-numeric @interdimux-recent-limit
@@ -1531,8 +1533,16 @@ match_dirs() {
   esac
 }
 
+# The search roots come from get_opt like every other option: at the pane's own
+# scope, so a session can have roots of its own, and from the environment in a
+# primed child, so a ctrl-o reload asks tmux nothing.  A prefix+f binding baked
+# before project-dirs was forwarded primes the popup without the variable at
+# all, until tmux next loads the plugin; that one run still asks.
 resolve_search_paths() {
-  local project_dirs="${INTERDIMUX_PROJECT_DIRS:-$(tmux show-option -gqv @interdimux-project-dirs 2>/dev/null || true)}"
+  local project_dirs="$PROJECT_DIRS"
+  if [ -z "${INTERDIMUX_PROJECT_DIRS+set}" ] && [ "${INTERDIMUX_OPTS_PRIMED:-}" = 1 ]; then
+    project_dirs=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#{@interdimux-project-dirs}' 2>/dev/null || true)
+  fi
   if [ -n "${project_dirs:-}" ]; then
     IFS=':' read -ra _paths <<< "$project_dirs"
     for p in "${_paths[@]}"; do
@@ -7886,6 +7896,7 @@ env_fwd_vars() {
     "INTERDIMUX_CLAUDE_DIR=$CLAUDE_DIR"
     "INTERDIMUX_TITLE_RULES=$TITLE_RULES_FILE"
     "INTERDIMUX_AGENT_SEPARATOR=$AGENT_SEPARATOR"
+    "INTERDIMUX_PROJECT_DIRS=$PROJECT_DIRS"
     "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
     "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
     "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
@@ -8568,13 +8579,13 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # --- options ----------------------------------------------------------------
   _sec options
-  # Names the code understands but that are not in OPT_MAP: they are read
-  # directly rather than forwarded to the popup.
+  # Names the code understands but that are not in OPT_MAP: they are read at
+  # bind time rather than forwarded to the popup.
   # (No `binary`: the helper's path is read from $INTERDIMUX_BIN only, and an
   # option by that name was once accepted here and green-ticked while nothing
   # read it.  Unknown now, so setting it says so.)
   # (`autobuild` is read by interdimux.tmux, at plugin load.)
-  _known=("${OPT_NAMES[@]}" key dashboard-key project-dirs jump-keys autobuild)
+  _known=("${OPT_NAMES[@]}" key dashboard-key jump-keys autobuild)
 
   _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 

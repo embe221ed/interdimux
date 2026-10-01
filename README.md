@@ -790,6 +790,7 @@ set -g @interdimux-fzf-opts '--color=bg+:237'
 
 # Colon-separated list of directories to search for new sessions (ctrl-o)
 # Defaults to ~/projects:~/code:~/src:~/repos:~/work:~/dev (whichever exist)
+# A session can have its own: set -t SESSION @interdimux-project-dirs '...'
 set -g @interdimux-project-dirs '~/projects:~/work'
 
 # Max entries shown in the recent tier of the directory picker (default: 10)

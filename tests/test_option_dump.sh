@@ -3,12 +3,16 @@
 # The cold option dump: what a run that was NOT handed its options (prefix+g's
 # dashboard, --jump, --connect-dir, the CLI, tmux < 3.4) reads from tmux.
 #
-#   every option survives a multi-line value before it (BUG-27).  The dump
+#   * every option survives a multi-line value before it (BUG-27).  The dump
 #     joins all @interdimux-* values with US and was split by `read -a`, which
 #     stops at the first newline -- and @interdimux-startup-command is
 #     multi-line by design.  Two lines there kept only the first, and left hide,
 #     raw, the agent options and everything else after it in OPT_MAP at their
-#     defaults: a hidden session came back.
+#     defaults: a hidden session came back;
+#   * @interdimux-project-dirs is read like every other option (BUG-78): at the
+#     scope of the pane the run is for, so a per-session override applies, and
+#     from the environment in a primed child, which asks tmux nothing for it.
+#     It used to be the one option read on its own, with `show-option -g`.
 #
 # Against a private server (tmux -L), with a fixture HOME and XDG dirs.
 
@@ -56,7 +60,7 @@ export TMUX_PANE="$(I list-panes -t '=demo:' -F '#{pane_id}' | head -1)"
 export HOME="$TMPD/home" XDG_CONFIG_HOME="$TMPD/config" XDG_DATA_HOME="$TMPD/data" XDG_STATE_HOME="$TMPD/state"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_USE_ZOXIDE=off
 # Cold on purpose: nothing below is primed unless it says so.
-unset INTERDIMUX_OPTS_PRIMED INTERDIMUX_STARTUP_COMMAND INTERDIMUX_HIDE
+unset INTERDIMUX_OPTS_PRIMED INTERDIMUX_STARTUP_COMMAND INTERDIMUX_HIDE INTERDIMUX_PROJECT_DIRS
 
 # The session rows --list draws for the hidden sessions.  The current session
 # (demo) is never hidden, so it is not one of them.
@@ -100,6 +104,40 @@ else
 fi
 I set -gu @interdimux-startup-command
 I set -gu @interdimux-hide
+
+# --- 2. @interdimux-project-dirs, at the pane's scope -------------------------
+mkdir -p "$TMPD/glob/globproj" "$TMPD/sess/sessproj"
+# The search roots a --dirs-list drew, as the directories' names.
+dirs_rows() {
+  local out
+  out=$(bash "$SCRIPT" --dirs-list 2>/dev/null) || true
+  printf '%s\n' "$out" | awk -F'\t' '$NF ~ /(glob|sess)proj$/ { sub(/.*\//, "", $NF); print $NF }' | sort | tr '\n' ' '
+}
+I set -g @interdimux-project-dirs "$TMPD/glob"
+same "control: the global @interdimux-project-dirs is searched" "$(dirs_rows)" "globproj "
+I set -t '=demo:' @interdimux-project-dirs "$TMPD/sess"
+same "a session's own @interdimux-project-dirs overrides the global one" "$(dirs_rows)" "sessproj "
+
+# A primed child (the navigator's ctrl-o picker and its reloads) takes it from
+# the environment, as it does every other option, even when it is empty: it
+# does not ask tmux.  A tmux earlier on PATH logs every command it is given.
+mkdir -p "$TMPD/logbin"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/tmux-calls"\nexec %s "$@"\n' "$TMPD" "$(command -v tmux)" > "$TMPD/logbin/tmux"
+chmod +x "$TMPD/logbin/tmux"
+: > "$TMPD/tmux-calls"
+got=$(PATH="$TMPD/logbin:$PATH" INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_PROJECT_DIRS="" dirs_rows)
+calls=$(grep -c 'project-dirs' "$TMPD/tmux-calls" || true)
+same "a primed --dirs-list asks tmux nothing about project-dirs" "$calls" 0
+# Forwarded empty means unset: the default roots, of which the fixture has none.
+same "...and an empty forwarded value means the default roots" "$got" ""
+
+# A prefix+f binding baked by an older version primes the popup without the
+# variable at all, until tmux next loads the plugin: that still finds the
+# user's directories, as it did before the option was forwarded.
+I set -t '=demo:' -u @interdimux-project-dirs
+got=$(INTERDIMUX_OPTS_PRIMED=1 dirs_rows)
+same "a primed run that was not handed project-dirs still reads it from tmux" "$got" "globproj "
+I set -gu @interdimux-project-dirs
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
