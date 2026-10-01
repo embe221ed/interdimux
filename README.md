@@ -935,8 +935,8 @@ different thing from one you are.
 
 The confirmation screen shows the **resolved** absolute time, which is the
 detail that matters: `1:10am` is tomorrow, and so is `13:00` typed at 13:31.
-Press `u` there to undo. `prefix + g`, then `j` lists what is pending and
-cancels with `Enter`.
+Press `u` there to undo. `prefix + g`, then `o` (Jobs) lists what is pending
+and cancels with `Enter`.
 
 The time field takes anything `at` understands, plus a relative shorthand:
 
