@@ -168,7 +168,9 @@ check_text "...with its '#S' as written, neither expanded nor doubled" \
 # Removed after the picker listed it.  tmux takes `new-session -c <missing>`
 # without a word and starts the shell in $HOME, so accepting it made a session
 # named after the directory, in the wrong place, and put the dead path at the
-# top of the recent list (BUG-99).  A stand-in fzf picks the row.
+# top of the recent list (BUG-99).  A stand-in fzf picks the row.  The search
+# roots are pinned to nowhere: the list the picker builds first would otherwise
+# scan the default roots under the real $HOME.
 mkdir -p "$TMPD/pickbin" "$TMPD/imuxgonedir"
 cat > "$TMPD/pickbin/fzf" <<'STUB'
 #!/usr/bin/env bash
@@ -179,7 +181,8 @@ STUB
 chmod +x "$TMPD/pickbin/fzf"
 rmdir "$TMPD/imuxgonedir"
 rc=0
-PATH="$TMPD/pickbin:$PATH" IMUX_PICK="$TMPD/imuxgonedir" timeout 20 bash "$SCRIPT" --dirs </dev/null >/dev/null 2>&1 || rc=$?
+PATH="$TMPD/pickbin:$PATH" IMUX_PICK="$TMPD/imuxgonedir" INTERDIMUX_PROJECT_DIRS="$TMPD/nowhere" \
+  timeout 20 bash "$SCRIPT" --dirs </dev/null >/dev/null 2>&1 || rc=$?
 [ "$rc" = 1 ] && report "ctrl-o on a vanished directory cancels (exit 1: the navigator reopens)" pass \
               || report "ctrl-o on a vanished directory cancels (exit 1: the navigator reopens; rc=$rc)" fail
 if I has-session -t '=imuxgonedir' 2>/dev/null; then
