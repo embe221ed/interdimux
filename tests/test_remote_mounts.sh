@@ -451,6 +451,39 @@ FZF
     && report "the navigator leaves no scratch file behind (the mounts file included)" fail \
     || report "the navigator leaves no scratch file behind (the mounts file included)" pass
   cp "$TMPD/recent.saved" "$TMPD/data/interdimux/recent_dirs"
+
+  # The file is named after the navigator's PID, so the one a SIGKILLed
+  # navigator left is met again only once that PID is reused -- and the core
+  # must not start out with it.  rm runs only when a builtin test finds
+  # something there (an exec on the way to the first frame, review PERF-19),
+  # and a dangling symlink is something too.  The probe is a stand-in core that
+  # looks before it runs the real one (nothing writes the file before the core
+  # does); a shell that knows its PID plants the leftover and execs the
+  # navigator, which keeps that PID.  The stand-in fzf cancels.
+  mkdir -p "$TMPD/fzfcancel"
+  printf '#!/bin/sh\ncat > /dev/null\nexit 130\n' > "$TMPD/fzfcancel/fzf"
+  printf '#!/bin/sh\nif [ -e "$INTERDIMUX_MOUNTS_FILE" ] || [ -L "$INTERDIMUX_MOUNTS_FILE" ]; then s=left; else s=gone; fi\necho "$s $INTERDIMUX_MOUNTS_FILE" >> "%s/core-saw"\nexec "%s" "$@"\n' \
+    "$TMPD" "$BIN" > "$TMPD/core-probe"
+  chmod +x "$TMPD/fzfcancel/fzf" "$TMPD/core-probe"
+  for kind in file symlink; do
+    rm -f "$TMPD/core-saw" "$TMPD/planted"
+    PATH="$TMPD/fzfcancel:$PATH" INTERDIMUX_MOUNTINFO="$MI" XDG_RUNTIME_DIR="$TMPD/run" \
+      INTERDIMUX_BIN="$TMPD/core-probe" bash -c '
+        m="$XDG_RUNTIME_DIR/interdimux-resume.$$.mounts"
+        case "$1" in
+          file) printf "%s\n" "/ 1" > "$m" ;;
+          *)    ln -s "$XDG_RUNTIME_DIR/nowhere" "$m" ;;
+        esac
+        printf "%s" "$m" > "$2/planted"
+        exec bash "$3"' _ "$kind" "$TMPD" "$SCRIPT" </dev/null >/dev/null 2>&1 || :
+    got=$(head -1 "$TMPD/core-saw" 2>/dev/null || true)
+    if [ -s "$TMPD/planted" ] && [ "$got" = "gone $(cat "$TMPD/planted")" ]; then
+      report "navigator (Rust core): a mounts file left by a navigator with its PID is gone before the list ($kind)" pass
+    else
+      report "navigator (Rust core): a mounts file left by a navigator with its PID is gone before the list ($kind; got: ${got:-no list})" fail
+    fi
+  done
+  rm -f "$TMPD"/run/interdimux-resume.*
 fi
 
 # zoxide stats every entry of its database unless told --all; a zoxide that
