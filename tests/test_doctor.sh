@@ -280,7 +280,68 @@ if grep -q 'something went wrong' <<< "$out"; then
 else
   report "...and it quotes the most recent one" fail
 fi
-rm -f "$XDG_STATE_HOME/interdimux/errors.log"
+
+# --- ...but a log you have seen does not keep it red for ever (UX-17) --------------
+# Any entry at all used to fail --doctor until the file was deleted by hand.
+# --doctor --ack marks what is logged as seen: still reported, as a warning,
+# and the check fails again on the next new entry only.  The verdict is
+# compared with the same report without the log, so nothing else in it counts.
+ELOG="$XDG_STATE_HOME/interdimux/errors.log"
+if grep -q 'most recent: 2026-01-01 00:00:00 — something went wrong' <<< "$out"; then
+  report "the most recent error is dated" pass
+else
+  report "the most recent error is dated" fail
+  ERRORS+="$(grep 'most recent' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+if grep -q -- "--doctor --ack" <<< "$out"; then
+  report "...and the report says how to acknowledge it" pass
+else
+  report "...and the report says how to acknowledge it" fail
+fi
+# a second entry, so that "everything so far" is more than the first one
+printf '== 2026-01-02 08:00:00 navigator stderr\nsomething else\n' >> "$ELOG"
+mv "$ELOG" "$TMPD/errors.held"; rc_clean=$(doctor_rc); mv "$TMPD/errors.held" "$ELOG"
+ack=$(bash "$SCRIPT" --doctor --ack 2>&1) && ack_rc=0 || ack_rc=$?
+if [ "$ack_rc" = 0 ] && grep -q '2 logged error(s) acknowledged' <<< "$ack"; then
+  report "--doctor --ack acknowledges the logged errors" pass
+else
+  report "--doctor --ack acknowledges the logged errors (rc=$ack_rc: $ack)" fail
+fi
+out=$(doctor)
+if grep -q '✗ the navigator has logged' <<< "$out"; then
+  report "an acknowledged error is no longer a problem" fail
+else
+  report "an acknowledged error is no longer a problem" pass
+fi
+if grep -q '⚠ the navigator has logged 2 error(s), all acknowledged' <<< "$out" \
+   && grep -q 'most recent: 2026-01-02 08:00:00 — something else' <<< "$out"; then
+  report "...but still reported, as a warning naming the most recent" pass
+else
+  report "...but still reported, as a warning naming the most recent" fail
+  ERRORS+="$(grep -A2 'navigator' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+if [ "$(doctor_rc)" = "$rc_clean" ]; then
+  report "...and does not fail --doctor (exit $rc_clean, as without the log)" pass
+else
+  report "...and does not fail --doctor (exit $rc_clean without the log)" fail
+fi
+[ "$(grep -c '^== ' "$ELOG")" = 2 ] \
+  && report "...and the log itself is kept" pass \
+  || report "...and the log itself is kept" fail
+printf '== 2026-02-02 10:11:12 navigator stderr\n\nsomething new\n' >> "$ELOG"
+out=$(doctor)
+if grep -q '✗ the navigator has logged 1 new error(s)' <<< "$out" \
+   && grep -q 'most recent: 2026-02-02 10:11:12 — something new' <<< "$out"; then
+  report "a new error after the acknowledgement fails it again, counted alone" pass
+else
+  report "a new error after the acknowledgement fails it again, counted alone" fail
+  ERRORS+="$(grep -A2 'navigator' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+rm -f "$ELOG" "$XDG_STATE_HOME/interdimux/errors.seen"
+ack=$(bash "$SCRIPT" --doctor --ack 2>&1) && ack_rc=0 || ack_rc=$?
+[ "$ack_rc" = 0 ] && grep -q 'no errors are logged' <<< "$ack" \
+  && report "--doctor --ack with nothing logged says so" pass \
+  || report "--doctor --ack with nothing logged says so (rc=$ack_rc: $ack)" fail
 
 # The whole point: an error must reach the log rather than the rendered rows.
 # Driven end to end, because the redirect happens in the navigator and a

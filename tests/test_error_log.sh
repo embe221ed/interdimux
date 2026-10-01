@@ -172,8 +172,8 @@ stub_fzf() { # $1 = name, $2 = the body run in place of fzf
     "$2" > "$TMPD/$1/fzf"
   chmod +x "$TMPD/$1/fzf"
 }
-run_nav() { # $1 = the stand-in's name
-  rm -f "$LOG"
+run_nav() { # $1 = the stand-in's name [, $2 = keep: append to the log as it is]
+  [ "${2:-}" = keep ] || rm -f "$LOG"
   PATH="$TMPD/$1:$PATH" timeout 20 bash "$SCRIPT" </dev/null >/dev/null 2>&1 || true
 }
 
@@ -225,6 +225,37 @@ for st in 130 1 0; do
     ERRORS+="    log: $(tr '\n' '|' < "$LOG")"$'\n'
   fi
 done
+
+# --- the log is capped when it is written (UX-17) -----------------------------------
+# It only ever grew.  Past 64 KB the writer keeps the newest 50 entries.
+seed_log() { # $1 = entries, $2 = characters of text in each
+  local i pad
+  printf -v pad '%*s' "$2" ''; pad="${pad// /x}"
+  mkdir -p "${LOG%/*}"
+  for (( i = 1; i <= $1; i++ )); do
+    printf '== 2026-01-01 00:00:00 navigator stderr\nseeded-%03d %s\n' "$i" "$pad"
+  done > "$LOG"
+}
+seed_log 60 1200          # ~74 KB
+run_nav exit2 keep
+n=$(grep -c '^== ' "$LOG" 2>/dev/null || true)
+if [ "$n" = 50 ] && ! grep -q '^seeded-011 ' "$LOG" && grep -q '^seeded-012 ' "$LOG"; then
+  report "a log past 64 KB is cut to its newest 50 entries" pass
+else
+  report "a log past 64 KB is cut to its newest 50 entries (has $n)" fail
+fi
+if [ "$(tail -n 1 "$LOG")" = 'fzf exited with status 2' ]; then
+  report "...the new one last" pass
+else
+  report "...the new one last" fail
+fi
+seed_log 60 10            # ~3 KB
+run_nav exit2 keep
+n=$(grep -c '^== ' "$LOG" 2>/dev/null || true)
+[ "$n" = 61 ] \
+  && report "a small log keeps every entry" pass \
+  || report "a small log keeps every entry (has $n)" fail
+rm -f "$LOG"
 
 # A reload's error and then the navigator's own, in one file: the navigator's
 # line must not land on top of the child's.  The real fzf, killed once ^r has

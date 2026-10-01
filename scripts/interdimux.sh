@@ -161,6 +161,7 @@ With no mode, runs the navigator.  It expects a tmux popup around it: prefix+f
 opens one (the plugin binds it), and so does `--launch switch`.
 
   --doctor                   check the setup; exits 1 if anything is wrong
+  --doctor --ack             mark the errors logged so far as seen
   --list                     print the navigator's rows
   --jump N                   switch to session #N, in the picker's own order
   --connect-dir DIR          switch to DIR's session, creating it if needed
@@ -7979,6 +7980,23 @@ if [ "${1:-}" = "--doctor" ]; then
   set +e
   _doc_fail=0
 
+  # `--doctor --ack`: the errors logged so far have been seen, so the check
+  # below stops failing on them (UX-17).  The log itself is kept; the marker
+  # is its newest entry's header.
+  if [ "${2:-}" = --ack ]; then
+    _ein=$(awk '/^== / { n++; h = $0 } END { if (n) { print n; print h } }' \
+             "$SCHED_LOGDIR/errors.log" 2>/dev/null)
+    if [ -z "$_ein" ]; then
+      echo "interdimux: no errors are logged"
+    elif printf '%s\n' "${_ein#*$'\n'}" > "$SCHED_LOGDIR/errors.seen" 2>/dev/null; then
+      echo "interdimux: ${_ein%%$'\n'*} logged error(s) acknowledged; --doctor fails again only on a new one"
+    else
+      echo "interdimux: cannot write $SCHED_LOGDIR/errors.seen" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+
   # Buffered rather than streamed, so the SUMMARY can come first.  In a popup the
   # first line is the one you actually read, and "3 problems" up top is the whole
   # point of running this; a count at the bottom of a scrolling report is a count
@@ -8503,11 +8521,39 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # The navigator routes its stderr to a log rather than painting it over the
   # list, so this is the one place a past failure is still visible.
-  if [ -s "$SCHED_LOGDIR/errors.log" ]; then
-    _last=$(grep -c '^== ' "$SCHED_LOGDIR/errors.log" 2>/dev/null || echo 0)
-    _bad "the navigator has logged $_last error(s)"
-    _note "most recent: $(grep -A1 '^== ' "$SCHED_LOGDIR/errors.log" | tail -1)"
-    _note "full log: $SCHED_LOGDIR/errors.log"
+  #
+  # Only what is new is a problem, though.  Any entry at all used to keep this
+  # red for good -- months after its cause was fixed, which teaches you to
+  # ignore the check (UX-17).  `--doctor --ack` marks the log as seen by writing
+  # its newest entry's header to errors.seen; an entry after the last copy of
+  # that header is new, and with no marker, or the marked entry trimmed away,
+  # every entry is.  Seen ones are still reported, as a warning.  One awk pass:
+  # the entries, how many are new, and the newest one's header and first line.
+  _elog="$SCHED_LOGDIR/errors.log"
+  if [ -s "$_elog" ]; then
+    _eseen=""; { IFS= read -r _eseen < "$SCHED_LOGDIR/errors.seen"; } 2>/dev/null || :
+    _ein=$(awk -v seen="$_eseen" '
+      /^== / { n++; if ($0 == seen) s = n; h = $0; l = $0; want = 1; next }
+      want && /[^[:space:]]/ { l = $0; want = 0 }
+      END { print n + 0; print n - s; print h; print l }' "$_elog" 2>/dev/null)
+    { read -r _en; read -r _enew; IFS= read -r _ehdr; IFS= read -r _elast; } <<< "$_ein" || :
+    # "most recent: 2026-07-28 12:00:00 — <its first line>": the date is what
+    # says whether it is still news.
+    read -r _ _ed _et _ <<< "$_ehdr" || :
+    _eat="$_ed $_et — "
+    [[ "$_ed" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || _eat=""
+    if [ "${_enew:-0}" -gt 0 ] || [ "${_en:-0}" = 0 ]; then
+      _ewhat="error(s)"
+      [ "${_enew:-0}" -lt "${_en:-0}" ] && _ewhat="new error(s)"
+      _bad "the navigator has logged ${_enew:-0} $_ewhat"
+      _note "most recent: $_eat$_elast"
+      _note "full log: $_elog"
+      _note "acknowledge them: bash '$SCRIPT_PATH' --doctor --ack"
+    else
+      _warn "the navigator has logged $_en error(s), all acknowledged"
+      _note "most recent: $_eat$_elast"
+      _note "full log: $_elog"
+    fi
   else
     _ok "no navigator errors logged"
   fi
@@ -9887,7 +9933,7 @@ else
 fi
 
 _report_stderr() {
-  local rc=$? first=""
+  local rc=$? first="" log="$SCHED_LOGDIR/errors.log" size
   [ -n "$ERR_FILE" ] && [ -s "$ERR_FILE" ] || return 0
   # The first line that says something.  Stopping at a BLANK first line dropped
   # the whole error, from the status line and from the log alike (BUG-104).
@@ -9903,7 +9949,18 @@ _report_stderr() {
     {
       printf '== %s navigator stderr\n' "$(date '+%Y-%m-%d %H:%M:%S')"
       cat "$ERR_FILE"
-    } >> "$SCHED_LOGDIR/errors.log" 2>/dev/null || :
+    } >> "$log" 2>/dev/null || :
+    # Capped on write (UX-17): past 64 KB only the newest 50 entries are kept,
+    # so a failure that recurs for months cannot grow the log without bound,
+    # and nothing has to be run to clean it.  Here because this is the writer
+    # that can run on every open; the Rust core's refusal is logged once per
+    # binary, and trimmed with the rest.
+    size=$(wc -c < "$log" 2>/dev/null) || size=0
+    if [ "${size:-0}" -gt 65536 ]; then
+      awk 'NR == FNR { n += /^== /; next } /^== / { i++ } i > n - 50' "$log" "$log" \
+        > "$log.$$" 2>/dev/null && mv -f "$log.$$" "$log" 2>/dev/null
+      rm -f "$log.$$" 2>/dev/null
+    fi
   fi
   # A navigator that FAILED also says why where you are looking.  The popup
   # stays open on a failure (-EE, see --bind-keys) until a key closes it, and
