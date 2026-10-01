@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# The keys of the dialogs' text field: Rename, Send keys and Schedule.
+# The keys of the dialogs: the text field of Rename, Send keys and Schedule,
+# and a key pressed while a dialog only shows a message.
 #
 # What used to go wrong, all reproduced on tmux 3.7b:
 #   * a key that starts with ESC but is not a CSI or SS3 sequence cancelled
@@ -9,6 +10,10 @@
 #   * after ESC [ the editor read one byte (two after a digit), so Ctrl-Left,
 #     ESC [ 1 ; 5 D, went home and typed "5D"; F5 typed "~", Shift-Right
 #     "2C"; and Enter applied the junk (BUG-49).
+#   * the Scheduled confirmation closes on any key with a one-byte read, so an
+#     arrow left "[B" in the terminal, which fzf took as query text (BUG-98).
+#   * a message box (info_flash) read nothing, so the key pressed to dismiss it
+#     went to fzf once the box closed: Esc closed the navigator (BUG-51).
 #
 # The editor's oracle is what a pane READ: the Send dialog targets a pane
 # running `cat >> FILE`, so FILE holds every buffer exactly as it was applied.
@@ -16,6 +21,11 @@
 # covers every spelling quickly; and through a real pane with send-keys, the
 # way a terminal delivers them -- with the 50 ms that tells a lone ESC from
 # the start of a key in play.
+#
+# For the message boxes the oracle is what is LEFT in the terminal once the
+# action returns: the pane's own shell reads the next key after it.
+#
+# No real at(1) job is ever submitted: `at` is a PATH shim.
 
 set -uo pipefail
 
@@ -108,22 +118,42 @@ export TMUX="$SOCKPATH,99999,0"
 export TMUX_PANE="$(T list-panes -t '=host:' -F '#{pane_id}' | head -1)"
 
 # PATH shims for the script under test, never for this harness.
-#   sleep: with SLEEP_SKIP, the dialogs' own pauses cost nothing.
+#   sleep: with SLEEP_SKIP, the dialogs' own pauses cost nothing; with FLASH_GO,
+#     info_flash's 0.9 s lasts until this harness creates that file -- so a key
+#     is pressed while the box is up however busy the machine is.
+#   at, atq, atrm, batch: queue nothing.  at keeps the job body in at.log.
 SHIM="$TMPD/shim"
 REAL_SLEEP="$(command -v sleep)"
 mkdir -p "$SHIM"
 cat > "$SHIM/sleep" <<SHIMEOF
 #!/bin/sh
+if [ "\$1" = 0.9 ] && [ -n "\${FLASH_GO:-}" ]; then
+  : > "\$FLASH_GO.up"
+  i=0
+  while [ ! -e "\$FLASH_GO" ] && [ \$i -lt 600 ]; do "$REAL_SLEEP" 0.025; i=\$((i + 1)); done
+  exit 0
+fi
 [ -n "\${SLEEP_SKIP:-}" ] && exit 0
 exec "$REAL_SLEEP" "\$@"
 SHIMEOF
+cat > "$SHIM/at" <<SHIMEOF
+#!/bin/sh
+cat >> '$TMPD/at.log'
+echo 'job 42 at Thu Oct  1 17:30:00 2026' >&2
+exit 0
+SHIMEOF
+printf '#!/bin/sh\nexit 0\n' > "$SHIM/atq"
+cp "$SHIM/atq" "$SHIM/atrm"; cp "$SHIM/atq" "$SHIM/batch"
 chmod +x "$SHIM"/*
 
-# The program a dialog's pane runs: the command, then OUT.done.
+# The program a dialog's pane runs: the command, then OUT.done, then the
+# first key left in the terminal, as a code point (an ESC is 27), in OUT.key.
 cat > "$TMPD/wrap.sh" <<'WRAPEOF'
 out=$1; shift
 "$@"
 : > "$out.done"
+IFS= read -rsN1 k
+printf '%d\n' "'$k" > "$out.key"
 exec sleep 60
 WRAPEOF
 
@@ -298,6 +328,64 @@ T has-session -t '=keep' 2>/dev/null || RC=1
 T has-session -t '=keepzz' 2>/dev/null && RC=1
 check "a lone Esc still cancels on a real terminal" \
       "sessions: $(T list-sessions -F '#{session_name}' | tr '\n' ',')" "$RC"
+
+# ---------------------------------------------------------------------------
+# 3. A key pressed during a message box stays out of what runs next
+# ---------------------------------------------------------------------------
+# Detach on a window row only says "Only sessions can be detached."  Esc is
+# pressed while it shows -- the shim holds the box up until the tty has echoed
+# the key, the receipt that it was typed in time -- and then the pane's shell
+# reads the next key.  It must be the Q typed after the action, not the Esc.
+
+screen_has() { T capture-pane -t '=drv:' -p 2>/dev/null | grep -qF -- "$1"; }
+T kill-session -t '=drv' 2>/dev/null || true
+T new-session -d -s drv -x 80 -y 20 \
+  "bash '$TMPD/wrap.sh' '$TMPD/f' env FLASH_GO='$TMPD/go' PATH='$SHIM:$PATH' \
+     bash '$SCRIPT' --action detach 'W:host:0'"
+RC=0
+poll 10 test -e "$TMPD/go.up" || RC=1
+screen_has 'Only sessions can be detached.' || RC=1
+check "the message box is up (fixture)" "screen: $(T capture-pane -t '=drv:' -p | grep -m1 detached || true)" "$RC"
+keys Escape
+RC=0; poll 10 screen_has '^[' || RC=1
+check "Esc reached the terminal while the box was up (fixture)" "no echo of the key" "$RC"
+: > "$TMPD/go"
+poll 10 test -e "$TMPD/f.done" || true
+typed "Q"
+poll 10 test -s "$TMPD/f.key" || true
+expect "Esc pressed during a message box is not left for fzf" "$(cat "$TMPD/f.key" 2>/dev/null)" "81"
+
+# ---------------------------------------------------------------------------
+# 4. The Scheduled confirmation's "any key" takes all of the key
+# ---------------------------------------------------------------------------
+# Schedule "echo hi" at 17:30 into the catcher pane (the at shim queues
+# nothing), then close the confirmation with Down, which is three bytes.  The
+# dialogs drain their input before they read, so each key waits for the read
+# that takes it -- seen in the action's own bash -x trace, not guessed at.
+
+TRACE="$TMPD/trace"
+T kill-session -t '=drv' 2>/dev/null || true
+T new-session -d -s drv -x 100 -y 20 \
+  "exec 7>'$TRACE'; bash '$TMPD/wrap.sh' '$TMPD/s' env PATH='$SHIM:$PATH' INTERDIMUX_AT_DAEMON=up \
+     BASH_XTRACEFD=7 bash -x '$SCRIPT' --action schedule 'P:host:0:0'"
+# reads PATTERN N -- the trace holds at least N reads matching PATTERN
+reads() { local n; n=$(grep -c -- "$1" "$TRACE" 2>/dev/null); [ "${n:-0}" -ge "$2" ]; }
+FIELD_READ='read -rsN1 -u [0-9]* c$'
+RC=0
+poll 15 reads "$FIELD_READ" 1 || RC=1
+typed "17:30"; keys Enter                     # six keys: the 7th read is the next field's
+poll 15 reads "$FIELD_READ" 7 || RC=1
+typed "echo hi"; keys Enter
+poll 15 reads 'read -rsn1 -u [0-9]* sched_key$' 1 || RC=1
+grep -q 'echo' "$TMPD/at.log" 2>/dev/null || RC=1
+check "the Scheduled confirmation is up, the job given to the at shim (fixture)" \
+      "screen: $(T capture-pane -t '=drv:' -p | grep -m1 -e 'any key' -e '❯' || true)" "$RC"
+keys Down
+poll 10 test -e "$TMPD/s.done" || true
+typed "Q"
+poll 10 test -s "$TMPD/s.key" || true
+expect "an arrow that closes the Scheduled confirmation leaves nothing behind" \
+       "$(cat "$TMPD/s.key" 2>/dev/null)" "81"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

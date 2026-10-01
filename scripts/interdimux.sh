@@ -5986,6 +5986,9 @@ info_flash() {
   shift 2
   dialog_open "$_if_accent" "$_if_title" ${@+"$@"}
   sleep 0.9
+  # A key pressed to dismiss the box was left for fzf once this returned: Esc
+  # closed the whole navigator, and anything else became query text.
+  drain_input
   dialog_close
 }
 
@@ -7639,6 +7642,9 @@ if [ "${1:-}" = "--action" ]; then
           fi
           sleep 0.5
         fi
+        # "any key" is a one-byte read, so the rest of a key that sends more
+        # (an arrow is ESC [ B) was left for fzf, and came back as query text.
+        drain_input
       else
         # The sub-minute path runs on a tmux timer, which has no job id to
         # cancel and dies with the server.  Say so rather than imply a queue.
