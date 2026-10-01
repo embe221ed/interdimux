@@ -227,6 +227,12 @@ fi
 # from the tmux server's PATH (common: fzf is often only on PATH via a shell
 # rc), the preflight exits 1 — and doing that here would leave the user with NO
 # BINDINGS AT ALL, which is far worse than a popup that reports the error.
+#
+# The popup can report it because it is opened -EE -k (tmux >= 3.6): it closes
+# by itself only when its command exits 0, which every way out of a picker
+# does, and otherwise stays open with the error on it until any key.  With -E
+# it closed on any exit, so "fzf is not installed", an unknown option or a
+# crash flashed and vanished, and prefix+f seemed to do nothing (UX-75).
 if [ "${1:-}" = "--bind-keys" ]; then
   set +e
 
@@ -352,9 +358,13 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # the same idiom is wrong for colour-tree 0 or recent-limit 0.)
   _bk_w='#{?#{==:#{@interdimux-popup-width},},80%,#{@interdimux-popup-width}}'
   _bk_h='#{?#{==:#{@interdimux-popup-height},},75%,#{@interdimux-popup-height}}'
+  # -k is new in tmux 3.6, and an older display-popup refuses the whole command
+  # over a flag it does not know, so 3.4 and 3.5 keep -E.
+  _bk_close='-E'
+  [ "$_bk_tvnum" -ge 306 ] && _bk_close='-EE -k'
 
   tmux bind-key "$_bk_nav" run-shell -bC \
-    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title\"$_bk_env $_bk_close \"bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
 
@@ -9451,8 +9461,12 @@ if [ "${1:-}" = "--launch" ]; then
   # -c: open on the client that asked.  Left to tmux it lands on the most
   # recently active client, which from a menu or a popup is not reliably this
   # one (keys pressed in an overlay do not count as activity).
+  # -EE -k: a picker that fails stays open with its error until a key, as
+  # prefix+f's does (see --bind-keys).
+  _close=(-E)
+  tmux_ge 306 && _close=(-EE -k)
   exec tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
-    ${chrome[@]+"${chrome[@]}"} -E "$cmd"
+    ${chrome[@]+"${chrome[@]}"} "${_close[@]}" "$cmd"
 fi
 
 # ---------------------------------------------------------------------------
@@ -9707,8 +9721,11 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     _pop_w=64 _pop_h=17
     [ "$_cli_w" -gt 0 ] && [ "$_cli_w" -lt "$_pop_w" ] && _pop_w="$_cli_w"
     [ "$_cli_h" -gt 0 ] && [ "$_cli_h" -lt "$_pop_h" ] && _pop_h="$_cli_h"
+    # Held open on a failure, as every other popup is (see --bind-keys).
+    _close=(-E)
+    tmux_ge 306 && _close=(-EE -k)
     tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
-      -E "$cmd"
+      "${_close[@]}" "$cmd"
   fi
   exit 0
 fi
@@ -9811,13 +9828,16 @@ INTERDIMUX_MODE="${INTERDIMUX_MODE:-switch}"
 # navigator: mktemp failed under `set -e` BEFORE stderr is routed to the log
 # below, so its message flashed in a popup that closed on the spot.  When even
 # the state dir will not take a file, say so on the status line, which outlives
-# the popup; --doctor checks both directories.
+# the popup, and in the popup, which a failure now holds open; --doctor checks
+# both directories.
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
   RESUME_FILE="$XDG_RUNTIME_DIR/interdimux-resume.$$"
 elif ! RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX" 2>/dev/null) \
   && ! { mkdir -p "$SCHED_LOGDIR" 2>/dev/null \
          && RESUME_FILE=$(mktemp "$SCHED_LOGDIR/resume.XXXXXX" 2>/dev/null); }; then
-  imux_msg "cannot create a scratch file in ${TMPDIR:-/tmp} or $SCHED_LOGDIR (see --doctor)"
+  _m="cannot create a scratch file in ${TMPDIR:-/tmp} or $SCHED_LOGDIR (see --doctor)"
+  imux_msg "$_m"
+  printf 'interdimux: %s\n' "$_m" >&2
   exit 1
 fi
 PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
@@ -9860,7 +9880,7 @@ else
 fi
 
 _report_stderr() {
-  local first=""
+  local rc=$? first=""
   [ -n "$ERR_FILE" ] && [ -s "$ERR_FILE" ] || return 0
   # The first line that says something.  Stopping at a BLANK first line dropped
   # the whole error, from the status line and from the log alike (BUG-104).
@@ -9878,6 +9898,15 @@ _report_stderr() {
       cat "$ERR_FILE"
     } >> "$SCHED_LOGDIR/errors.log" 2>/dev/null || :
   fi
+  # A navigator that FAILED also says why where you are looking.  The popup
+  # stays open on a failure (-EE, see --bind-keys) until a key closes it, and
+  # this file is all there is to say: fzf's complaint, or bash's.  Off the
+  # alternate screen and with the cursor back first, in case a dying fzf left
+  # its last frame up.
+  if [ "$rc" != 0 ]; then
+    printf '\033[?1049l\033[?25h'
+    tail -n 20 "$ERR_FILE"
+  fi 2>/dev/null
   return 0
 }
 
@@ -10551,9 +10580,12 @@ while true; do
   # killed by signal N -- which used to close the popup exactly as Esc does,
   # leaving no trace of an OOM kill (BUG-106).  Said on stderr, so the exit
   # report puts it on the status line and in errors.log.
+  #
+  # And the navigator fails with it, so the popup stays open and shows why
+  # (UX-75) rather than closing as if you had pressed Esc.
   case "$fzf_rc" in
     0|1|130) ;;
-    *) printf 'fzf exited with status %s\n' "$fzf_rc" >&2 ;;
+    *) printf 'fzf exited with status %s\n' "$fzf_rc" >&2; exit 1 ;;
   esac
 
   # ctrl-o cancelled the dir picker — reopen the navigator

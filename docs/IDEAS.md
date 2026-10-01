@@ -180,7 +180,7 @@ Two recurring lessons, both of which cost real time here:
 - **fzf-marks merge** (S) — parse `~/.fzf-marks` into the recent tier; mark names become offered session names.
 - **Clickable footer hints** (S, fzf ≥ 0.65) — `click-footer` + `trigger()` re-dispatches to existing binds.
 - ~~**Bound git-status cost in dir preview**~~ — `--ignore-submodules` + `timeout 1` (when coreutils `timeout` exists). Kept untracked files: `-uno` would change what "Changes: N files" counts. Measured at 60-70 ms on a warm 30,000-file repo, so this bounds a tail rather than fixing a freeze.
-- **Hold popup open on fatal errors** (S) — unexpected non-zero exit currently flashes and vanishes; trap and wait for a key.
+- ~~**Hold popup open on fatal errors**~~ — done with tmux's own `display-popup -EE -k` (3.6, the floor): a popup closes by itself only on exit 0, which every normal way out of a picker returns, and a failed one stays open, its error shown, until any key. The navigator prints its logged stderr into the popup when it fails.
 - **`become()` instead of the RESUME_FILE restart loop** (M) — ctrl-o transitions navigator→dirs picker in-place, no restart flash; no gate (0.38 < floor).
 
 ## Suggested batches
