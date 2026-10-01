@@ -1055,22 +1055,25 @@ it. The defaults reproduce the built-in warm palette, so you only set what you
 want to change. Hex values render as truecolor and need an RGB-capable terminal
 (`$COLORTERM` = `truecolor`); the index defaults work everywhere.
 
+The block below is an example, not the defaults: a gruvbox-material theme in
+truecolor. Each line ends with the default it replaces, a 256-color index.
+
 ```tmux
-set -g @interdimux-color-accent  '#e78a4e'  # commands, marker, hint keys, prompt, titles
-set -g @interdimux-color-path    '#d8a657'  # paths, fzf match highlight
-set -g @interdimux-color-git     '#d3869b'  # ‹branch› badge
-set -g @interdimux-color-ssh     '#7daea3'  # ssh host, activity flag
-set -g @interdimux-color-editor  '#a9b665'  # editor filename
-set -g @interdimux-color-success '#a9b665'  # ✓ marks, project-dir ◆
-set -g @interdimux-color-danger  '#ea6962'  # kill accents, bell flag, danger border
-set -g @interdimux-color-tree    '#6b665f'  # tree glyphs, idle shells, fzf info
-set -g @interdimux-color-separator '#504945' # the │ column separator
-set -g @interdimux-color-query   '#ddc7a1'  # typed query text
-set -g @interdimux-color-match-current '#e78a4e' # highlight on the current row
-set -g @interdimux-color-current-bg '#32302f'    # current-line background
-set -g @interdimux-color-header  '#8d877d'  # fzf header text
-set -g @interdimux-color-border  '#504945'  # fzf borders / scrollbar
-set -g @interdimux-color-menu-sel-fg '#282828'   # dashboard menu selection text
+set -g @interdimux-color-accent  '#e78a4e'  # commands, marker, hint keys, prompt, titles, menu selection (173)
+set -g @interdimux-color-path    '#d8a657'  # paths, fzf match highlight (180)
+set -g @interdimux-color-git     '#d3869b'  # ‹branch› badge (140)
+set -g @interdimux-color-ssh     '#7daea3'  # ssh host, activity flag (109)
+set -g @interdimux-color-editor  '#a9b665'  # editor filename, ● attached marker (150)
+set -g @interdimux-color-success '#a9b665'  # ✓ marks, project-dir ◆ (150)
+set -g @interdimux-color-danger  '#ea6962'  # kill accents, bell flag, danger border (167)
+set -g @interdimux-color-tree    '#6b665f'  # tree glyphs, idle shells, fzf info (240)
+set -g @interdimux-color-separator '#504945' # the │ column separator (245)
+set -g @interdimux-color-query   '#ddc7a1'  # typed query text (223)
+set -g @interdimux-color-match-current '#e78a4e' # highlight on the current row (215)
+set -g @interdimux-color-current-bg '#32302f'    # current-line background (236)
+set -g @interdimux-color-header  '#8d877d'  # fzf header text (246)
+set -g @interdimux-color-border  '#504945'  # fzf borders / scrollbar (238)
+set -g @interdimux-color-menu-sel-fg '#282828'   # dashboard menu selection text (235)
 ```
 
 These pair with the popup border, which inherits your
