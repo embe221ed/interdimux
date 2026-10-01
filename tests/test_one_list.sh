@@ -255,11 +255,17 @@ mkdir -p "$TMPD/globtrap"
 # The loop pins each renderer in turn and then puts back what it INHERITED:
 # `unset` here flipped the rest of this suite to the Rust core under
 # IMUX_RENDERER=bash (tests/run_all.sh), silently.
+# A hidden session's rows are its S:, W: and P: specs, so the check is anchored
+# to those.  Unanchored it also read the D: rows, whose paths are under $TMPD:
+# with a TMPDIR under any directory called `scratchpad`, all four of these
+# failed while the hide worked.
+hidden_rows() { printf '%s\n' "$1" | grep -Eq '^[SWP]:(scratchpad|floax)'; }
+
 _use_rust_was="${INTERDIMUX_USE_RUST-<unset>}"
 for renderer in rust bash; do
   [ "$renderer" = bash ] && export INTERDIMUX_USE_RUST=off || export INTERDIMUX_USE_RUST=on
   trapped=$(cd "$TMPD/globtrap" && INTERDIMUX_HIDE='scratchpad floax-*' specs_of)
-  if printf '%s\n' "$trapped" | grep -q 'scratchpad\|floax'; then
+  if hidden_rows "$trapped"; then
     report "[$renderer] a hide pattern is not expanded against the cwd" fail
     ERRORS+="    $(printf '%s' "$trapped" | tr '\n' ' ')"$'\n'
   else
@@ -267,7 +273,7 @@ for renderer in rust bash; do
   fi
 
   out=$(INTERDIMUX_HIDE='scratchpad floax-*' specs_of)
-  if printf '%s\n' "$out" | grep -q 'scratchpad\|floax'; then
+  if hidden_rows "$out"; then
     report "[$renderer] @interdimux-hide removes matching sessions" fail
     ERRORS+="    $(printf '%s' "$out" | tr '\n' ' ')"$'\n'
   else
