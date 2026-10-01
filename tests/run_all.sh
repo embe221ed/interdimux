@@ -12,6 +12,20 @@
 #   tests/run_all.sh raw sched       # only suites whose name matches
 #   IMUX_SKIP_RUST=1 tests/run_all.sh
 #   IMUX_RENDERER=bash tests/run_all.sh
+#   IMUX_STRICT=1 tests/run_all.sh   # any skip fails the run (CI sets it)
+#
+# A skip is not a pass.  A suite that skips itself whole -- no fzf new enough,
+# no `at`, an old binary that is not there -- ends "Results: 0 passed, 0
+# failed", and that used to be totalled as a green tick, indistinguishable
+# from coverage.  So did a suite that skipped some of its cases.  Both are now
+# reported, with the suite's own reason: a whole skip as SKIPPED, a partial
+# one next to the suite's passes, and every skipping suite again under the
+# total.  A skip is the line a suite prints for it, "  (skipped ...)", "  (...
+# is skipped)" or "  - <case> (skipped: <why>)".  Under IMUX_STRICT=1 any skip
+# fails the run, after every suite has run: CI provides everything the suites
+# need, so a skip there means something it provided went missing.  (The
+# rust_parity skip of the bash renderer leg below is this script's own
+# choice, not a suite's, and does not count.)
 #
 # IMUX_RENDERER=bash runs every suite against the BASH renderer: the one an
 # install without cargo gets, i.e. every TPM user who never built rust/.  With
@@ -35,9 +49,9 @@ case "${IMUX_RENDERER:-}" in
   *) printf 'run_all.sh: IMUX_RENDERER must be rust or bash, not %s\n' "$IMUX_RENDERER" >&2; exit 2 ;;
 esac
 
-BOLD=$'\033[1m'; GREEN=$'\033[32m'; RED=$'\033[31m'; DIM=$'\033[2m'; RST=$'\033[0m'
+BOLD=$'\033[1m'; GREEN=$'\033[32m'; RED=$'\033[31m'; YELLOW=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
 
-total_p=0 total_f=0 failed=()
+total_p=0 total_f=0 failed=() skipped=()
 started=$SECONDS
 
 # --- Rust first: it is fast, and if the binary is broken every shell suite
@@ -76,8 +90,11 @@ for t in tests/test_*.sh; do
   out=$(timeout 600 bash "$t" 2>&1); rc=$?
   dt=$((SECONDS - t0))
 
-  line=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g' | grep -m1 '^Results:')
+  plain=$(printf '%s' "$out" | sed 's/\x1b\[[0-9;]*m//g')
+  line=$(printf '%s' "$plain" | grep -m1 '^Results:')
   p=$(printf '%s' "$line" | awk '{print $2}'); f=$(printf '%s' "$line" | awk '{print $4}')
+  skips=$(printf '%s\n' "$plain" | grep -E '^  (\(|- ).*skipped' || true)
+  n_skip=$(printf '%s' "$skips" | grep -c . || true)
 
   if [ -z "$line" ]; then
     # no Results line at all means the suite died before finishing — that is a
@@ -88,8 +105,19 @@ for t in tests/test_*.sh; do
   fi
 
   total_p=$((total_p + p)); total_f=$((total_f + f))
-  if [ "$f" -eq 0 ] && [ "$rc" -eq 0 ]; then
-    printf '  %s✓%s %d passed %s(%ds)%s\n\n' "$GREEN" "$RST" "$p" "$DIM" "$dt" "$RST"
+  if [ "$p" -eq 0 ] && [ "$f" -eq 0 ] && [ "$rc" -eq 0 ]; then
+    printf '%s\n' "${skips:-  (no reason given)}" | sed "s/^/$DIM/; s/\$/$RST/"
+    printf '  %s○%s SKIPPED %s(%ds)%s\n\n' "$YELLOW" "$RST" "$DIM" "$dt" "$RST"
+    skipped+=("$name")
+  elif [ "$f" -eq 0 ] && [ "$rc" -eq 0 ]; then
+    if [ "$n_skip" -gt 0 ]; then
+      printf '%s\n' "$skips" | sed "s/^/$DIM/; s/\$/$RST/"
+      printf '  %s✓%s %d passed, %s%d skipped%s %s(%ds)%s\n\n' \
+        "$GREEN" "$RST" "$p" "$YELLOW" "$n_skip" "$RST" "$DIM" "$dt" "$RST"
+      skipped+=("$name($n_skip)")
+    else
+      printf '  %s✓%s %d passed %s(%ds)%s\n\n' "$GREEN" "$RST" "$p" "$DIM" "$dt" "$RST"
+    fi
   else
     printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g' | grep -E '✗|FAIL|timed out' | sed 's/^/  /'
     printf '  %s✗%s %d passed, %d failed %s(%ds)%s\n\n' "$RED" "$RST" "$p" "$f" "$DIM" "$dt" "$RST"
@@ -99,7 +127,13 @@ done
 
 printf '%s%d passed, %d failed%s  %s(%ds total)%s\n' \
   "$BOLD" "$total_p" "$total_f" "$RST" "$DIM" "$((SECONDS - started))" "$RST"
+# A suite on its own is a whole skip; "name(n)" skipped n of its cases.
+[ ${#skipped[@]} -eq 0 ] || printf 'skipping suites: %s\n' "${skipped[*]}"
 if [ ${#failed[@]} -gt 0 ]; then
   printf 'failing suites: %s\n' "${failed[*]}"
+  exit 1
+fi
+if [ "${IMUX_STRICT:-0}" = 1 ] && [ ${#skipped[@]} -gt 0 ]; then
+  printf '%sIMUX_STRICT=1: a skip is a failure here%s\n' "$RED" "$RST"
   exit 1
 fi

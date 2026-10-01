@@ -15,17 +15,13 @@
 #     5.1 -- the ones that expand an array subscript twice -- and runs nothing.
 #
 # Old bashes are real binaries: point INTERDIMUX_OLD_BASH_DIR at a directory
-# holding <version>/bash for 3.2, 4.2, 4.3 and 5.1 (4.4 and 5.0 are used too
-# when there), e.g.
-#
-#   for v in 3.2.57 4.2 4.3 5.1; do curl -fsSL https://ftp.gnu.org/gnu/bash/bash-$v.tar.gz | tar -xz
-#     (cd bash-$v && ./configure --without-bash-malloc && make) && mkdir -p "$d/${v%.57}"
-#     cp bash-$v/bash "$d/${v%.57}/"; done
-#
-# (a modern gcc needs CFLAGS="-std=gnu89 -Wno-implicit-function-declaration
-# -Wno-implicit-int -Wno-incompatible-pointer-types" for the three oldest).  A
-# version that is not there is reported as skipped, by name.  The not-bash case
-# needs only dash.
+# holding <major.minor>/bash for each of OLD_VERSIONS below -- 3.2, 4.2, 4.3,
+# 4.4, 5.0 and 5.1.  CI builds exactly those; its "Build bash" step in
+# .github/workflows/ci.yml is the recipe, with the flags a modern gcc needs.
+# With the variable set, a version that is not there FAILS, by name: a skip
+# there is how 4.4 and 5.0 went unrun on every CI run while the totals read
+# green.  Unset (a local run without them), each is reported as skipped where
+# it would have run.  The not-bash case needs only dash.
 
 set -euo pipefail
 
@@ -93,6 +89,22 @@ old_bash() { # $1 = version: sets REPLY to a bash of exactly that version, or fa
   [ -n "$OLD_DIR" ] && [ -x "$REPLY" ] \
     && case "$("$REPLY" -c 'echo "$BASH_VERSION"' 2>/dev/null)" in "$1".*) true ;; *) false ;; esac
 }
+# Every version a case below runs on: the two that must be refused, then 4.3
+# to 5.1, the bashes that expand an array subscript twice.  These lists are the
+# authority: the cases loop over them, not over lists of their own, so every
+# version a case runs on is one the check below requires.  CI's
+# OLD_BASH_VERSIONS has to cover them.
+REFUSED_VERSIONS=(3.2 4.2)
+DOUBLE_EXPANSION_VERSIONS=(4.3 4.4 5.0 5.1)
+OLD_VERSIONS=("${REFUSED_VERSIONS[@]}" "${DOUBLE_EXPANSION_VERSIONS[@]}")
+
+# --- the old bashes are there, when they were promised ---------------------------------
+if [ -n "$OLD_DIR" ]; then
+  for v in "${OLD_VERSIONS[@]}"; do
+    old_bash "$v" \
+      || report "bash $v is in \$INTERDIMUX_OLD_BASH_DIR (no $OLD_DIR/$v/bash of that version)" fail
+  done
+fi
 
 # --- the control: this bash passes ----------------------------------------------------
 run "$BASH" --version
@@ -107,7 +119,7 @@ if command -v dash >/dev/null 2>&1; then
 else
   echo "  (skipped: no dash for the not-bash case)"
 fi
-for v in 3.2 4.2; do
+for v in "${REFUSED_VERSIONS[@]}"; do
   if old_bash "$v"; then
     b="$REPLY"
     refused "$b" "bash $("$b" -c 'echo "$BASH_VERSION"')"
@@ -180,8 +192,9 @@ fi
 # draws) with it.  Each key that reaches such a test is here: a session and its
 # window and pane lines, a pane's cwd (the git cache), a recent directory (the
 # recent list, the navigator's directory rows, ctrl-o's), a zoxide entry, and a
-# network mount point with the directory below it.  4.3 is the floor and 5.1
-# the last bash with the double expansion; 4.4 and 5.0 run too when present.
+# network mount point with the directory below it.  It runs on every bash in
+# DOUBLE_EXPANSION_VERSIONS: 4.3, the floor, to 5.1, the last bash with the
+# double expansion, 4.4 and 5.0 included.
 echo
 echo "a '\$' in a session name or directory, on bash < 5.2"
 DL="$TMPD/dl"
@@ -212,7 +225,7 @@ has_rows() { # $@ = specs that must all be in $rows
   for s in "$@"; do case " $rows" in *" $s "*) ;; *) return 1 ;; esac; done
 }
 dollar_ok=0
-for v in 4.3 4.4 5.0 5.1; do
+for v in "${DOUBLE_EXPANSION_VERSIONS[@]}"; do
   if ! old_bash "$v"; then
     echo "  (skipped bash $v: not in \$INTERDIMUX_OLD_BASH_DIR)"
     continue
@@ -239,7 +252,7 @@ for v in 4.3 4.4 5.0 5.1; do
     '[ "$RC" = 0 ] && [ -z "$ERR" ] && [ "$rows" = "$DL/before $DL/\$RECYCLE.BIN $DL/\$nfs/gone $DL/after $DL/\$zox " ]'
   check "$v: a session named \$(touch …) never ran its name" '[ ! -e "$MARKER" ]'
 done
-[ "$dollar_ok" = 1 ] || echo "  (no bash from 4.3 to 5.1 to run these on)"
+[ "$dollar_ok" = 1 ] || echo "  (skipped every '\$' case: no bash from 4.3 to 5.1 to run them on)"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

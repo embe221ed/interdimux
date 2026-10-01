@@ -234,7 +234,15 @@ else
   echo; echo "Results: $PASS passed, $FAIL failed"; echo; printf '%s' "$ERRORS"; exit 1
 fi
 wait_screen 'sui-cctp' || ERRORS+="    the session row never painted"$'\n'
-wait_screen '+ Circle' || ERRORS+="    the Circle suggestion never painted"$'\n'
+# An assertion, not a note: with the suggestion missing from the screen nothing
+# competes with the session, so the three queries below would pass without ever
+# reaching the tie this suite is about.  (A missing session row needs no such
+# guard: those queries then fail on their own.)
+if wait_screen '+ Circle'; then
+  report "the Circle suggestion is on screen to compete with the session" pass
+else
+  report "the Circle suggestion is on screen to compete with the session" fail
+fi
 
 # Lower case on purpose.  fzf is smart-case, so a query of `Circle` is matched
 # case-SENSITIVELY and the session `circle/sui-cctp` cannot match it at all —
@@ -270,24 +278,33 @@ before_sessions=$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null
 query circle >/dev/null
 tmux -L "$OUTER" send-keys -t '=drv:' Enter
 # The navigator having EXITED is the positive signal that Enter was acted on —
-# connect_dir runs after fzf has already given the terminal back.
+# connect_dir runs after fzf has already given the terminal back.  So it is an
+# assertion of its own, and the two below cannot pass without it: a navigator
+# that never acted on Enter creates no session either, and "no second session"
+# would hold for exactly the wrong reason.
+exited=0
 for i in $(seq 1 300); do
-  [ -s "$EXITED" ] && break
+  [ -s "$EXITED" ] && { exited=1; break; }
   sleep 0.1
 done
-[ -s "$EXITED" ] || ERRORS+="    the navigator never exited after Enter"$'\n'
+if [ "$exited" = 1 ]; then
+  report "the navigator exits after Enter" pass
+else
+  report "the navigator exits after Enter" fail
+  ERRORS+="    so nothing below was acted on, and its checks fail with it"$'\n'
+fi
 after_sessions=$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | sort)
-if [ "$after_sessions" = "$before_sessions" ]; then
+if [ "$exited" = 1 ] && [ "$after_sessions" = "$before_sessions" ]; then
   report "Enter on that query creates no second session" pass
 else
   report "Enter on that query creates no second session" fail
   ERRORS+="    before: $(printf '%s' "$before_sessions" | tr '\n' ' ')"$'\n'
   ERRORS+="    after:  $(printf '%s' "$after_sessions" | tr '\n' ' ')"$'\n'
 fi
-if tmux -L "$SOCK" has-session -t '=Circle' 2>/dev/null; then
-  report "...and specifically not one named after the suggested directory" fail
-else
+if [ "$exited" = 1 ] && ! tmux -L "$SOCK" has-session -t '=Circle' 2>/dev/null; then
   report "...and specifically not one named after the suggested directory" pass
+else
+  report "...and specifically not one named after the suggested directory" fail
 fi
 
 echo

@@ -88,7 +88,7 @@ d_rows() {
 }
 
 renderers="off"
-if [ -x "$BIN" ]; then renderers="on off"; else echo "  (rust binary not built: bash renderer only)"; fi
+if [ -x "$BIN" ]; then renderers="on off"; else echo "  (rust binary not built: the Rust renderer's cases are skipped)"; fi
 
 for r in $renderers; do
   label=$([ "$r" = on ] && echo rust || echo bash)

@@ -56,7 +56,7 @@ echo
 
 RENDERERS="off"
 [ -x "$BIN" ] && RENDERERS="off on"
-[ -x "$BIN" ] || echo "  (the Rust core is not built: only the bash renderer is checked)"
+[ -x "$BIN" ] || echo "  (the Rust core is not built: the Rust renderer's cases are skipped)"
 
 unset TMUX TMUX_PANE
 tm() { tmux -f /dev/null -L "$SOCK" "$@"; }

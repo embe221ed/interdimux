@@ -30,7 +30,9 @@ only its dash and current-bash cases (14).  CI fetches and builds those
 binaries (§5, §12), and with them the two suites count 10 and 43 — so each CI
 leg reads **39 higher** than the same leg run locally.  The CI rows below are
 the local measurement plus those 39, both suites measured against the binaries
-the CI steps produce:
+the CI steps produce.  (CI has since added bash 4.4 and 5.0 and fzf 0.40.0
+(§12), and with those the two suites count 15 and 67, so the difference is now
+68.)
 
 | where | shell | rust | printed |
 |---|---|---|---|
@@ -114,7 +116,7 @@ indistinguishable from coverage. Two suites, ~60 assertions, silently absent.
 
 ## 5. fzf 0.44 turns picker suites into skips
 
-`ubuntu-latest`'s apt fzf is 0.44.1. `test_picker_ui` and `test_raw_mode` skip
+`ubuntu-24.04`'s apt fzf is 0.44.1. `test_picker_ui` and `test_raw_mode` skip
 below their version floors. Installing 0.74 was worth +22 assertions on its own.
 
 **Fix:** install the fzf release tarball, not the distro package.
@@ -123,9 +125,11 @@ The skip also hid that on that very fzf the navigator did not open at all: an
 unconditional `resize` bind (an event from 0.46) made 0.44 refuse to start, and
 on 0.46–0.52, which draw their whole interface on stderr, the navigator's
 stderr log swallowed it and the popup stayed black. `tests/test_old_fzf.sh`
-runs the navigator on real 0.44.1 and 0.52.1 release binaries, which the
-workflow fetches into the directory named by `INTERDIMUX_OLD_FZF_DIR`; without
-them it skips, naming each version it could not find.
+runs the navigator on real 0.40.0, 0.44.1 and 0.52.1 release binaries (0.40.0
+is the README's floor, and the only release under test on the `fzf_ge 42`
+false branch, which 0.41 is on too), which the workflow fetches into the
+directory named by `INTERDIMUX_OLD_FZF_DIR`.  Without the variable it skips,
+naming each version; with it, a version it names that is not there fails.
 
 The fetch itself failed the first time it was written, and took the whole job
 with it. fzf's release tags gained their `v` at 0.54.0 — `0.53.0` and older are
@@ -197,6 +201,14 @@ tests/                       -e SC2155,SC2034,SC2164,SC2010,SC2154
 One invocation needs the union of those lists, and that union is exactly what
 hid the dead variables behind the harnesses' deliberate SC2034s. Split, the
 plugin is linted with SC2034 and SC2155 **on**.
+
+Both invocations live in `tests/lint.sh`, which is all the shellcheck job runs.
+It pins the version too: when the `shellcheck` on PATH is not 0.10.0 (the
+image's apt one is 0.9.0 on 24.04 and 0.11.0 on 26.04), it fetches the 0.10.0
+release into `~/.cache/shellcheck/`, checksummed, and uses that.  So an image
+bump cannot fail the lint with new SC codes, and the lint a push will get can
+be run before the push — three lint-fix commits in round 2 were made after
+pushing, because the commands lived only in the workflow.
 
 ## 10. GitHub runs `run:` steps with SIGPIPE ignored
 
@@ -325,24 +337,85 @@ session named `$work`, under `set -u`), and a `$(…)` in one ran; every suite p
 keys with `${assoc[$key]+x}`, which expands once on every version, and the
 suite's `$`-name cases hold it there.)
 
-**Fix:** the tests job builds bash 3.2.57, 4.2.53, 4.3.30 and 5.1.16 (5.1.16 is
-Ubuntu 22.04's) from the GNU tarballs, caches them by the version list, and
-exports `INTERDIMUX_OLD_BASH_DIR`, so `run_all.sh` runs the suite's real cases
-in both legs.  Two things the build needed, both found by running it:
+**Fix:** the tests job builds bash 3.2.57, 4.2.53, 4.3.30, 4.4.18, 5.0 and
+5.1.16 (4.4 is RHEL 8's, 5.0 Ubuntu 20.04's, 5.1 Ubuntu 22.04's) from the GNU
+tarballs, caches them by the version list and the image, and exports
+`INTERDIMUX_OLD_BASH_DIR`, so `run_all.sh` runs the suite's real cases in both
+legs.  Two things the build needed, both found by running it:
 
 * `-std=gnu89` and the `-Wno-implicit-*`, `-Wno-int-conversion` and
-  `-Wno-incompatible-pointer-types` flags: these K&R-era sources lean on
-  exactly what gcc 14 turned from warnings into errors (the runner's gcc 13
-  still only warns, so the flags are for the image that replaces it);
+  `-Wno-incompatible-pointer-types` flags, in `CFLAGS` and in
+  `CFLAGS_FOR_BUILD`: these K&R-era sources lean on exactly what gcc 14
+  turned from warnings into errors (24.04's gcc 13 still only warns).
+  `CFLAGS_FOR_BUILD` is what the build-time helpers (`mkbuiltins`,
+  `mksignames`, …) are compiled with, and 3.2's and 4.2's configure set it
+  to a bare `-g` instead of inheriting `CFLAGS`.  gcc 15, 26.04's, compiles
+  as C23 by default, where `int f();` declares a function of NO arguments,
+  so without it `mkbuiltins.c` stops at "number of arguments doesn't match
+  prototype".  Reproduced by giving gcc 13 that default
+  (`CC="gcc -std=gnu2x"`): 3.2.57 and 4.2.53 failed with `CFLAGS` alone, and
+  all six versions built with both;
 * NO `-O2` — which also means CFLAGS must be given, since configure's default
   is `-g -O2`.  With it, 3.2's `configure` spun in its `mktime` probe (a
   minute of CPU before it was killed): the probe's loop,
   `for (time_t_max = 1; 0 < time_t_max; time_t_max *= 2)`, relies on signed
   overflow wrapping, which the optimiser may assume never happens.
 
-A cold cache costs about two and a half minutes for all four (measured on 4
-cores).  "Versions under test" runs each one, so a build that went missing
-fails that step instead of turning the suite back into skips.
+A cold cache costs about two and a half minutes for the first four (measured
+on 4 cores), and about four for all six (the step as written, run on a
+4-core Ubuntu 24.04 box that was busy with other work).  "Versions under
+test" runs each one, so a build that went missing fails that step instead of
+turning the suite back into skips.
+
+That step only knew the workflow's own list, though, and for a while that list
+was 3.2, 4.2, 4.3 and 5.1 while the suite also ran 4.4 and 5.0 — the rest of
+the range that expands a subscript twice — whenever they were there.  They
+never were: twelve written assertions skipped on every run while the totals
+read green.  The suites' lists are now the authority.  With
+`INTERDIMUX_OLD_BASH_DIR` set, a version `tests/test_bash_floor.sh` names that
+is not there FAILS, by name (`tests/test_old_fzf.sh` does the same with
+`INTERDIMUX_OLD_FZF_DIR`), so the workflow's list cannot fall behind unseen.
+Each bash goes under its major.minor cut from the tarball's name: `${v%.*}`,
+as the step had it, would have put 5.0 in `5/`.
+
+Both jobs name their image, `ubuntu-24.04`, rather than `ubuntu-latest`, which
+moves to 26.04 from 2026-10-19 (actions/runner-images#14748), and the tmux and
+bash caches are keyed on it (`matrix.os`).  A warm cache would not have shown
+the gcc 15 failure above: a bash built on 24.04 runs unchanged on 26.04, and
+actions/cache does not version an entry by image.  But GitHub evicts a cache
+nobody restored for seven days, and pushes here are often weeks apart, so the
+first push after the move would have built cold and gone red for a reason
+that has nothing to do with the code.  A move is now a one-line change to the
+`os` list, which rebuilds everything on the new image; adding it as a second
+entry first tries it without giving up the old one.
+
+## 13. A skip still read as a pass
+
+§4, §5, §8 and §12 are one failure, found four times: a suite that cannot run
+something skips it, and the skip disappears into a total.  `run_all.sh` gave
+a suite that skipped itself whole ("Results: 0 passed, 0 failed") the same
+green tick as one that passed, and a suite that skipped some of its cases left
+no trace at all.  Each was found by reading a log line by line.
+
+**Fix:** `run_all.sh` reports a whole skip as SKIPPED and a partial one next
+to the suite's passes, each with the skip lines the suite printed, and names
+every skipping suite under the total.  `IMUX_STRICT=1`, which the "Shell
+tests" step sets, fails the run on any of them once every suite has run.
+`tests/test_run_all.sh` holds `run_all.sh` to that.
+
+For a strict run to pass, the job provides everything the suites ask for.
+`zsh` was the one thing missing: `test_foreground_job.sh`'s nested zsh and
+`test_raw_fallback.sh`'s `--with-shell='zsh -c'` skipped on every run.  The one
+case CI deliberately does not run, `test_title_apps.sh`'s real container shell
+(it needs `ubuntu:24.04` already pulled), is switched off with
+`INTERDIMUX_TEST_DOCKER=off`, which that suite reports as a choice rather than
+a skip.  A skip line is one a suite prints starting `  (` or `  - ` and saying
+"skipped"; a new skip path has to say so to be counted.  Eleven did not at
+first: ten suites that run half their cases without the Rust core said only
+"(the Rust core is not built: only the bash renderer is checked)" or the like,
+and `test_bash_floor.sh` "(no bash from 4.3 to 5.1 to run these on)".  So
+`tests/test_run_all.sh` also reads every suite's source for a note of that
+shape on stdout that does not say "skipped", and fails on one.
 
 ## What the developer's tmux does that no released tmux does
 

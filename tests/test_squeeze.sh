@@ -118,7 +118,7 @@ RENDERERS="bash"
 if [ -x "$BIN" ]; then
   RENDERERS="rust bash"
 else
-  echo "  (rust binary not built: only the bash renderer is exercised)"
+  echo "  (rust binary not built: the Rust renderer's cases are skipped)"
 fi
 # Both passes are PINNED.  tests/run_all.sh's bash leg (IMUX_RENDERER=bash)
 # exports INTERDIMUX_USE_RUST=off, and a "rust" pass that inherited it rendered

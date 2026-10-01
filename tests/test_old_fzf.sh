@@ -21,14 +21,17 @@
 # cannot reproduce either failure.  Point INTERDIMUX_OLD_FZF_DIR at a directory
 # holding <version>/fzf (CI fetches them; see docs/CI.md), e.g.
 #
-#   for v in 0.44.1 0.52.1; do mkdir -p "$d/$v"; curl -fsSL \
+#   for v in 0.40.0 0.44.1 0.52.1; do mkdir -p "$d/$v"; curl -fsSL \
 #     "https://github.com/junegunn/fzf/releases/download/$v/fzf-$v-linux_amd64.tar.gz" \
 #     | tar -xz -C "$d/$v"; done
 #
 # (no `v` in the tag: fzf's tags gained it at 0.54.0, and .../download/v0.44.1/
 # is a 404).
 #
-# A version that is not there is reported as skipped, by name.
+# With INTERDIMUX_OLD_FZF_DIR set, a version that is not there FAILS, by name:
+# this list is the one CI must supply (OLD_FZF_VERSIONS in ci.yml), and a skip
+# there would read as a pass in every total.  Unset, a local run without the
+# binaries, each one is reported as skipped.
 
 set -euo pipefail
 
@@ -71,21 +74,27 @@ plain() { sed 's/\x1b\[[0-9;]*m//g'; }
 echo "interdimux old-fzf tests"
 echo
 
-# One below the `resize` floor (and what Ubuntu 24.04 ships), and the last
-# release that draws on stderr.
-VERSIONS=(0.44.1 0.52.1)
+# The README's floor, and the only release under test on the `fzf_ge 42` false
+# branch (plain `--info=inline`; 0.41 is on it too); one below the `resize`
+# floor (and what Ubuntu 24.04 ships); and the last release that draws on
+# stderr.
+VERSIONS=(0.40.0 0.44.1 0.52.1)
 OLD_DIR="${INTERDIMUX_OLD_FZF_DIR:-}"
 have=()
 for v in "${VERSIONS[@]}"; do
   bin="$OLD_DIR/$v/fzf"
   if [ -n "$OLD_DIR" ] && [ -x "$bin" ] && [ "$("$bin" --version 2>/dev/null | awk '{print $1}')" = "$v" ]; then
     have+=("$v")
+  elif [ -n "$OLD_DIR" ]; then
+    report "fzf $v is in \$INTERDIMUX_OLD_FZF_DIR (no $OLD_DIR/$v/fzf of that version)" fail
   else
     echo "  (skipped fzf $v: no $v/fzf under INTERDIMUX_OLD_FZF_DIR='${OLD_DIR}')"
   fi
 done
 if [ "${#have[@]}" -eq 0 ]; then
-  echo; echo "Results: 0 passed, 0 failed"; exit 0
+  echo; echo "Results: $PASS passed, $FAIL failed"
+  if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi
+  exit 0
 fi
 
 mkdir -p "$TMPD/cwd" "$TMPD/home"
