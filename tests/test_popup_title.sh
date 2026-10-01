@@ -117,10 +117,17 @@ close_popup() {
   fi
   wait_for '! screen | grep -q "interdimux ·"' || true
 }
-# A '#(...)' job is started at expansion time, before the popup is drawn, and
-# is asynchronous.  A synchronous run-shell queued behind it is a bounded wait
-# for it to have finished, instead of a fixed sleep.
-settle() { T run-shell 'true' 2>/dev/null || true; }
+# A '#(...)' job is started when its format is expanded -- before the popup is
+# drawn -- and runs on its own, outside the command queue: no tmux command
+# waits for it, so `run-shell true` returns while it may still be running.  The
+# barrier is a job of the same shape instead, the same one tmux call, started
+# only once the title is on screen.  When it has set its option, the injected
+# command, started earlier, has had longer than that to set @pwned.
+settle() {
+  T set -gu @ptitle_barrier 2>/dev/null || true
+  T run-shell "tmux -L $SOCK set -g @ptitle_barrier 1" 2>/dev/null || true
+  wait_for '[ -n "$(T show -gv @ptitle_barrier 2>/dev/null)" ]' || true
+}
 
 # --- --launch ---------------------------------------------------------------------
 open_launch " interdimux · $EVIL "
