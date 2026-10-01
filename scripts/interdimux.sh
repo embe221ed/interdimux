@@ -7979,8 +7979,22 @@ if [ "${1:-}" = "--doctor" ]; then
   # Health popup becomes a bash error.  Divert it for the duration of the checks
   # and fold whatever arrives into the report, where it belongs — a check that
   # errors is itself a finding.
-  _derr="${TMPDIR:-/tmp}/interdimux-doctor-err.$$"
-  if : > "$_derr" 2>/dev/null; then exec 3>&2 2>"$_derr"; else _derr=""; fi
+  #
+  # Never a predictable name in a shared /tmp: one planted there as a symlink
+  # would have `: >` truncate whatever it points at.  The same choice as
+  # RESUME_FILE (see there): in-process in the private $XDG_RUNTIME_DIR, else
+  # mktemp.  The trap is for a run cut short, which left the file behind.
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+    _derr="$XDG_RUNTIME_DIR/interdimux-doctor-err.$$"
+  else
+    _derr=$(mktemp "${TMPDIR:-/tmp}/interdimux-doctor-err.XXXXXX" 2>/dev/null) || _derr=""
+  fi
+  if [ -n "$_derr" ] && : > "$_derr" 2>/dev/null; then
+    trap 'rm -f "$_derr"' EXIT
+    exec 3>&2 2>"$_derr"
+  else
+    _derr=""
+  fi
 
   _doc="" _n_ok=0 _n_warn=0 _n_bad=0
   _ok()   { _doc+=$'  \033[32m✓\033[0m '"$1"$'\n'; _n_ok=$((_n_ok + 1)); }
