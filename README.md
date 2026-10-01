@@ -33,7 +33,8 @@ A portal gun for your tmux sessions.
 - Proper confirmation dialogs (centered boxes, `y`/`n`/`esc`) instead of raw
   prompts; rename pre-fills the current name with readline editing
 - Actions run in place — kill/rename/zoom/swap reload the list without
-  restarting fzf, keeping your query and cursor
+  restarting fzf, keeping your query and the cursor's row (the row, not the
+  item: after a kill it rests on whatever moved into that row)
 - Optional live preview with a title line (target, command, path) and a
   window summary for sessions — off by default, toggle with `Ctrl-/`
 - Metadata: window count, attached marker `●`, last-used age, zoomed `Z` /
