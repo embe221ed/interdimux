@@ -9970,6 +9970,9 @@ _report_stderr() {
   # (At the end of the file read fails but still hands back a last line that
   # has no newline.)
   { while read -r first && [ -z "$first" ]; do :; done < "$ERR_FILE"; } 2>/dev/null || :
+  # imux_msg says whose message it is, and a mode's own errors already do
+  # ("interdimux: INTERDIMUX_DUMP_IN: cannot read"): not "interdimux: " twice.
+  first="${first#interdimux: }"
   # A long line would be truncated by the status line anyway, so cut it where
   # it stays readable.  imux_msg escapes the '#'s -- after the cut, which
   # therefore cannot split a "##" pair and leave a lone '#' to start a format.

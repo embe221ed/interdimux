@@ -151,10 +151,15 @@ if [ "${fzf_minor:-0}" -ge 53 ]; then
       report "a ^r reload that fails reaches errors.log" fail
       ERRORS+="    log: $( (cat "$LOG" 2>/dev/null || true) | head -3 | tr '\n' '|')"$'\n'
     fi
-    if grep -q 'interdimux: interdimux: INTERDIMUX_DUMP_IN: cannot read' <<< "$(msgs)"; then
-      report "...and is announced on the status line" pass
+    # once: the mode's message already starts "interdimux: ", and the status
+    # line's prefix is not added to it a second time
+    m=$(msgs)
+    if grep -q 'interdimux: INTERDIMUX_DUMP_IN: cannot read' <<< "$m" \
+       && ! grep -q 'interdimux: interdimux:' <<< "$m"; then
+      report "...and is announced on the status line, named once" pass
     else
-      report "...and is announced on the status line" fail
+      report "...and is announced on the status line, named once" fail
+      ERRORS+="    messages: $( (grep 'interdimux:' <<< "$m" || true) | head -3 | tr '\n' '|')"$'\n'
     fi
   else
     report "the navigator draws its first frame from the dump" fail
