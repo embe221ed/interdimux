@@ -210,6 +210,7 @@ The fuzzy navigator for quick switching, with shortcut keys for power users:
 | `Ctrl-]` | Cycle the match scope: name / path / cmd / all / name+cmd (fzf >= 0.58). The prompt names the active scope |
 | `Ctrl-/` | Toggle preview pane |
 | `Ctrl-r` | Reload the list |
+| `Ctrl-n` / `Ctrl-p` | Next / previous match: in raw mode (fzf >= 0.74, below) they skip the dimmed rows that `Up`/`Down` stop on |
 | `Esc` | Cancel |
 
 The **hint bar sits at the bottom** and updates to show only the keybindings
