@@ -834,8 +834,9 @@ after these:
   (PERF-07: `dpad_r`), and **a deep search ran a finder and a sed per
   matching directory** (PERF-08: `scan_roots`, one run over every root).
 
-The scratchpad A/B harness (12 sessions / 40 windows / 90 panes, a 158x35
-popup, 30-80 interleaved pairs, every output byte-identical), CPU of the
+Measured outside the repo, with the A/B harness this round was checked with
+(12 sessions / 40 windows / 90 panes, a 158x35 popup, 100 `svc-*` project
+directories, 30-80 interleaved pairs, every output byte-identical), CPU of the
 process tree and the tmux server, median ms, main → after:
 
 | path | CPU | wall |
@@ -855,9 +856,16 @@ before and after). zoxide's own 5-10 ms now overlaps the core's render
 instead of following it; on a small server the render is short, so most of
 the query is still waited for.
 
-`tests/bench.sh [-n PAIRS] [REF]` is the in-repo A/B: it times these paths for
-this checkout against REF (extracted with its own Rust core). A perf-relevant
-change pastes its table.
+`tests/bench.sh [-n PAIRS] [-s SCENARIO,...] [REF]` is the in-repo A/B, with a
+scenario for every row above, on a smaller fixture (6 sessions x 4 windows, 30
+`svc-*` directories) and with plain medians, no noise estimate: it times these
+paths for this checkout against REF, extracted with its own Rust core, and
+refuses to compare unlike cores. Its run against main, 30 pairs, CPU ms, main
+→ after: first row 85.0 → 77.0, `--list` 48.0 → 45.5, a session's preview
+46.0 → 24.0, a window's 30.5 → 23.0, `--dirs-list` 146 → 86, `--deep svc` (30
+matches) 1004 → 198; the footer, `--scope-prompt`, a directory row's preview,
+`--doctor`, the bash renderer's list and `bash -n` within ±5% (noise). A
+perf-relevant change pastes its table.
 
 ## Suggested rollout
 
