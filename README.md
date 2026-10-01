@@ -695,7 +695,8 @@ interdimux doctor                                    23 ok, 2 warn, 1 problem
 Reports what tmux, fzf and interdimux itself can see: versions and the features
 they gate, whether the Rust helper is built *and newer than its sources* (and if
 not, the command that builds it — or, with no cargo, where to get one), whether
-the key bindings are actually installed, whether the state directories are
+the key bindings are actually installed, and set up for the fzf the popups run
+now (after a new fzf, reload the plugin), whether the state directories are
 writable, whether your locale is UTF-8 (the tree glyphs and every column width
 assume it), whether `sort -s` works (the session order is stable and locale-free
 only because of it), whether fzf accepts your `$FZF_DEFAULT_OPTS` — one flag it
