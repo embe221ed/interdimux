@@ -62,18 +62,20 @@ export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_USE_ZOXIDE=of
 # Cold on purpose: nothing below is primed unless it says so.
 unset INTERDIMUX_OPTS_PRIMED INTERDIMUX_STARTUP_COMMAND INTERDIMUX_HIDE INTERDIMUX_PROJECT_DIRS
 
-# The session rows --list draws for the hidden sessions.  The current session
-# (demo) is never hidden, so it is not one of them.
-gone_rows() { # $1 = on|off (the Rust core)
+# The session rows --list draws.  The current session (demo) is never hidden,
+# so with gone* hidden it is the only one -- and a --list that drew nothing at
+# all cannot pass for one that hid them.
+session_rows() { # $1 = on|off (the Rust core)
   local out
   out=$(INTERDIMUX_USE_RUST="$1" bash "$SCRIPT" --list 2>/dev/null) || true
-  printf '%s\n' "$out" | awk -F'\t' '$NF ~ /^S:gone/ { print $NF }' | sort | tr '\n' ' '
+  printf '%s\n' "$out" | awk -F'\t' '$NF ~ /^S:/ { print $NF }' | sort | tr '\n' ' '
 }
 
 # --- 1. a two-line startup command ------------------------------------------
+same "control: without @interdimux-hide, every session is listed" "$(session_rows off)" "S:demo S:gone1 S:gone2 "
 I set -g @interdimux-hide 'gone*'
 I set -g @interdimux-startup-command 'echo ONE'
-same "control: with a one-line startup command, @interdimux-hide hides" "$(gone_rows off)" ""
+same "control: with a one-line startup command, @interdimux-hide hides" "$(session_rows off)" "S:demo "
 
 I set -g @interdimux-startup-command "echo LINE''_ONE"$'\n'"echo LINE''_TWO"
 # What tmux holds is the two lines, or this tests nothing.
@@ -83,7 +85,7 @@ renderers=(off)
 [ -x "$SCRIPT_DIR/rust/target/release/imux" ] && renderers+=(on)
 for r in "${renderers[@]}"; do
   label=bash; [ "$r" = on ] && label=rust
-  same "[$label] after a two-line startup command, @interdimux-hide still hides" "$(gone_rows "$r")" ""
+  same "[$label] after a two-line startup command, @interdimux-hide still hides" "$(session_rows "$r")" "S:demo "
 done
 
 # ...and the value itself arrives whole: a new session runs both lines.  The
