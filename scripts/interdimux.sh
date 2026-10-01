@@ -185,6 +185,23 @@ case "${1:-}" in
   --version) printf 'interdimux %s\n' "$VERSION"; exit 0 ;;
 esac
 
+# The navigator's children report into the navigator's error file.  fzf hands a
+# reload, transform or execute-silent child /dev/null as its stderr (measured on
+# 0.74.3), so a --list that failed on ^r, ^/, a resize or after an action was
+# neither shown nor logged, and an execute child's error was painted over its
+# own dialog.  The navigator exports the file its stderr goes to (see ERR_FILE),
+# and the modes its binds start -- all but the previews, whose stderr fzf shows
+# in the preview pane -- append to it, to be reported with the navigator's own
+# when it exits.  Only while the file exists: a child outliving the navigator
+# must not recreate it.
+if [ -n "${INTERDIMUX_ERR_FILE:-}" ]; then
+  case "${1:-}" in
+    --list|--action|--footer-for|--describe-create|--scope-prompt|--create-key|\
+    --create-from-query|--dirs|--dirs-list|--dirs-hints)
+      if [ -f "$INTERDIMUX_ERR_FILE" ]; then exec 2>>"$INTERDIMUX_ERR_FILE"; fi ;;
+  esac
+fi
+
 # ---------------------------------------------------------------------------
 # Key bindings (called once by interdimux.tmux at plugin load)
 # ---------------------------------------------------------------------------
@@ -9828,31 +9845,40 @@ export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
 # also lands in `tmux show-messages`) and the whole thing is appended to a log
 # that --doctor points at.
 #
-# Only on this path.  Child modes (--list, --preview, --action, --doctor …) keep
-# their real stderr: they are called by fzf, by the test suites, and by the user.
+# The children of the navigator's binds append to the same file: it is exported
+# for them (see the top of the file), so a reload that fails is reported too.
+# Hence >> here as well -- with > this fd keeps its own offset, and the
+# navigator's next line would overwrite what a child had appended.  Modes run
+# any other way (by the test suites, by the user) keep their real stderr.
 ERR_FILE="${RESUME_FILE}.err"
 if fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null; then
-  exec 2>"$ERR_FILE"
+  exec 2>>"$ERR_FILE"
+  export INTERDIMUX_ERR_FILE="$ERR_FILE"
 else
   ERR_FILE=""
+  unset INTERDIMUX_ERR_FILE
 fi
 
 _report_stderr() {
+  local first=""
   [ -n "$ERR_FILE" ] && [ -s "$ERR_FILE" ] || return 0
-  local first
-  { read -r first < "$ERR_FILE"; } 2>/dev/null || :
-  [ -n "$first" ] || return 0
+  # The first line that says something.  Stopping at a BLANK first line dropped
+  # the whole error, from the status line and from the log alike (BUG-104).
+  # (At the end of the file read fails but still hands back a last line that
+  # has no newline.)
+  { while read -r first && [ -z "$first" ]; do :; done < "$ERR_FILE"; } 2>/dev/null || :
   # A long line would be truncated by the status line anyway, so cut it where
   # it stays readable.  imux_msg escapes the '#'s -- after the cut, which
   # therefore cannot split a "##" pair and leave a lone '#' to start a format.
   [ "${#first}" -gt 160 ] && first="${first:0:157}…"
-  imux_msg "$first"
+  [ -z "$first" ] || imux_msg "$first"
   if mkdir -p "$SCHED_LOGDIR" 2>/dev/null; then
     {
       printf '== %s navigator stderr\n' "$(date '+%Y-%m-%d %H:%M:%S')"
       cat "$ERR_FILE"
     } >> "$SCHED_LOGDIR/errors.log" 2>/dev/null || :
   fi
+  return 0
 }
 
 # The query (and match scope) the raw-mode `result` bind last answered, so it

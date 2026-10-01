@@ -677,11 +677,12 @@ shell, it says which one it read.
 the version; an argument that is not a mode is refused with exit status 2
 rather than opening the navigator.
 
-It is also where past failures surface. The navigator sends its stderr to the
-status line and to `$XDG_STATE_HOME/interdimux/errors.log` rather than to the
-popup — anything written to a popup's stderr is painted over the rendered rows
-and then vanishes with the popup, which is how several silent failures stayed
-silent. `--doctor` reports the log and quotes the most recent entry.
+It is also where past failures surface. The navigator sends its stderr, and
+that of the list reloads and dialogs it runs, to the status line and to
+`$XDG_STATE_HOME/interdimux/errors.log` rather than to the popup — anything
+written to a popup's stderr is painted over the rendered rows and then vanishes
+with the popup, which is how several silent failures stayed silent. `--doctor`
+reports the log and quotes the most recent entry.
 
 A hide pattern that matches no session is called out too, and so is one whose
 only match is the session you are in — that one never gets hidden, so the pattern
