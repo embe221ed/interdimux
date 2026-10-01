@@ -93,11 +93,16 @@ queue_ids() { atq -q i 2>/dev/null | awk '{print $1}' | sort; }
 # by concatenation rather than with `printf %b` because \x takes "one or two"
 # hex digits, so "\x152h" reads as \x15 followed by "2h" only if you are certain
 # of the greediness — and getting it wrong silently sends a different key.
+# An answer that ends in ESC gets no newline and must be the last: ESC then a
+# newline is Alt-Enter, which the field drops, and an Esc is only an Esc when
+# nothing follows it -- here, the end of the file.
 CTRL_U=$'\025'
 ESC=$'\033'
 fixture() {
   local out="" a
-  for a in "$@"; do out+="$a"$'\n'; done
+  for a in "$@"; do
+    case "$a" in *"$ESC") out+="$a" ;; *) out+="$a"$'\n' ;; esac
+  done
   printf '%s' "$out"
 }
 
@@ -377,11 +382,14 @@ fi
 # ---------------------------------------------------------------------------
 # 7. cancelling at the first prompt schedules nothing
 # ---------------------------------------------------------------------------
+# Text is typed before each Esc, and the Esc ends the input: a field that did
+# not cancel would take that text at EOF -- the time prompt would go on to ask
+# for the command, the command prompt would schedule it.
 
 before_n=$(queue_ids | grep -c . || true)
-run_schedule "P:sched:0:0" "$ESC"
+run_schedule "P:sched:0:0" "7h$ESC"
 after_n=$(queue_ids | grep -c . || true)
-if [ "$before_n" = "$after_n" ]; then
+if [ "$before_n" = "$after_n" ] && ! grep -q 'Schedule 7h' "$OUT_FILE"; then
   report "esc at the time prompt schedules nothing" pass
 else
   report "esc at the time prompt schedules nothing" fail
@@ -389,7 +397,7 @@ fi
 
 # An empty command must not schedule a bare Enter into someone's shell.
 before_n=$(queue_ids | grep -c . || true)
-run_schedule "P:sched:0:0" '7h' "$ESC"
+run_schedule "P:sched:0:0" '7h' "echo SCHEDUI_ESC$ESC"
 after_n=$(queue_ids | grep -c . || true)
 if [ "$before_n" = "$after_n" ]; then
   report "esc at the command prompt schedules nothing" pass
