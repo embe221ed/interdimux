@@ -5421,10 +5421,12 @@ popup_accent() {
   # someone dismisses it.  INTERDIMUX_TITLE is set only by the popup launchers,
   # so without it there is no popup -- a hand-written binding or run-shell
   # running --action kill hung behind a shell popup before its dialog even drew
-  # (BUG-53).  And a popup closed under a waiting dialog (display-popup -C, its
-  # session killed) hangs up the dialog's terminal, after which /dev/tty no
-  # longer opens: the orphaned dialog's cleanup repainted a popup that was gone,
-  # and so opened a shell one (BUG-52).
+  # (BUG-53).  (So a popup you open yourself, without the title, keeps its frame
+  # through a kill dialog: nothing else tells it from a pane.)  And a popup
+  # closed under a waiting dialog (display-popup -C, its session killed) hangs
+  # up the dialog's terminal, after which /dev/tty no longer opens: the
+  # orphaned dialog's cleanup repainted a popup that was gone, and so opened a
+  # shell one (BUG-52).
   [ -n "${INTERDIMUX_TITLE:-}" ] || return 0
   { : </dev/tty; } 2>/dev/null || return 0
   local style lines
