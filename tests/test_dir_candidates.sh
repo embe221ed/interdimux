@@ -98,6 +98,38 @@ for r in $renderers; do
   done
 done
 
+# The Rust core STARTS the zoxide query before it renders the first row and
+# collects it at the directory rows (review PERF-01): run after the rows, as it
+# was, zoxide was the largest single cost of every list and every reload, and
+# nothing reached fzf until it returned.
+#
+# No clock in the oracle.  The mount table is a FIFO, which the core opens on
+# its first is_remote -- the git probe of the first pane's path, i.e. while it
+# renders the tmux rows -- and blocks on until something opens it for writing.
+# The only writer is the stand-in zoxide.  So a core that starts zoxide first
+# reads an empty table and finishes; one that starts it at the directory rows
+# never gets there, and `timeout` ends it.  The zoxide directory in the output
+# says the query was collected, not just started.
+if [ -x "$BIN" ]; then
+  mkfifo "$TMPD/mi.fifo"
+  mkdir -p "$TMPD/zbin" "$TMPD/fx/zearly"
+  cat > "$TMPD/zbin/zoxide" <<ZOX
+#!/bin/sh
+timeout 10 sh -c 'exec 3>"\$1"' _ "$TMPD/mi.fifo"
+printf '%s\n' "$TMPD/fx/zearly"
+ZOX
+  chmod +x "$TMPD/zbin/zoxide"
+  rc=0
+  got=$(PATH="$TMPD/zbin:$PATH" INTERDIMUX_USE_RUST=on INTERDIMUX_USE_ZOXIDE=on INTERDIMUX_SHOW_GIT_BRANCH=on \
+        INTERDIMUX_MOUNTINFO="$TMPD/mi.fifo" INTERDIMUX_DUMP_IN="$SCRIPT_DIR/rust/tests/corpus/basic.dump" \
+        timeout 10 bash "$SCRIPT" --list 2>/dev/null) || rc=$?
+  if [ "$rc" = 0 ] && printf '%s\n' "$got" | awk -F'\t' '$4 ~ /^D:/ { print substr($4, 3) }' | grep -qxF "$TMPD/fx/zearly"; then
+    report "rust renderer: the zoxide query runs while the tmux rows render" pass
+  else
+    report "rust renderer: the zoxide query runs while the tmux rows render (exit $rc)" fail
+  fi
+fi
+
 # The directory picker (ctrl-o) reads the same list through load_recent_dirs.
 got=$(PATH="$TMPD/bin:$PATH" INTERDIMUX_USE_ZOXIDE=on bash "$SCRIPT" --dirs-list 2>/dev/null | cut -f3)
 if printf '%s\n' "$got" | grep -qxF "$ACCENT" && ! printf '%s\n' "$got" | grep -qaF -e "nonutf8-" -e "zoxide-"; then

@@ -810,6 +810,63 @@ the rule index (~5-8 ms) and their titles. "Before" also counted the
 `./codex` pane as nothing (review R12). A count-only subcommand in the Rust
 core would take the rest, for installs that have it.
 
+## Tier 10 — what a keypress still forked (round 3, 2026-10)
+
+Nothing counted what the paths a keypress waits on execute, so the 15-35%
+that 49 merges added (TEST-33) showed only in how prefix+f felt. Now
+`tests/test_exec_budget.sh` counts it without a clock -- the commands run,
+through a PATH of logging shims, and bash's own forks, as distinct `$BASHPID`s
+in an xtrace -- and holds each path to a budget; the per-row and per-match
+paths must cost the same for 3 directories as for 30. The budgets were set
+after these:
+
+* **The navigator ran an `rm` before every first frame** (PERF-19), for a
+  mount-table file that exists only after PID reuse. A builtin test first.
+* **Every list waited for zoxide after its rows** (PERF-01): the Rust core
+  ran the query at the directory rows, and bash captures its whole output.
+  It starts before the first row now and is collected there. And
+  `$(term_cols)`/`$(live_preview_state)` around the core's call were a
+  subshell each (PERF-05); the REPLY forms take the values first.
+* **A preview was three tmux clients** for a session row, two for a window
+  or pane, plus two `$(dpad)` forks per window line and a `$(spec_target)`
+  (PERF-06). One client now, its sections framed by RS as the gather's are.
+* **The ctrl-o picker forked the script once per row** for its padding
+  (PERF-07: `dpad_r`), and **a deep search ran a finder and a sed per
+  matching directory** (PERF-08: `scan_roots`, one run over every root).
+
+Measured outside the repo, with the A/B harness this round was checked with
+(12 sessions / 40 windows / 90 panes, a 158x35 popup, 100 `svc-*` project
+directories, 30-80 interleaved pairs, every output byte-identical), CPU of the
+process tree and the tmux server, median ms, main → after:
+
+| path | CPU | wall |
+|---|---|---|
+| navigator, to its first row | 111.7 → 103.2 (-4%, noise) | 101.4 → 90.5 (-9%) |
+| `--list`, Rust core | 76.2 → 70.9 (-5%) | 77.0 → 69.6 (-10%) |
+| `--preview` of a session | 69.7 → 30.4 (-56%) | 68.3 → 31.3 |
+| `--preview` of a window / a pane | 39.9 / 38.1 → 30.9 / 28.9 (-21% / -25%) | 38.8 / 37.3 → 30.1 / 28.9 |
+| `--dirs-list` (ctrl-o) | 202 → 134 (-34%) | 184 → 116 |
+| `--dirs-list --deep svc`, 100 matches | 2695 → 585 (-78%) | 2320 → 543 |
+
+The hint bar, `--footer-for`, `--describe-create`, `--session-name-for`,
+`--dirs-preview`, `--doctor` and the bash renderer's `--list`: unchanged
+within noise: the ~95 lines added above the callbacks parse in no measurable
+time (`bash -n` of the script up to `--footer-for`, interleaved: 13.0-14.4 ms
+before and after). zoxide's own 5-10 ms now overlaps the core's render
+instead of following it; on a small server the render is short, so most of
+the query is still waited for.
+
+`tests/bench.sh [-n PAIRS] [-s SCENARIO,...] [REF]` is the in-repo A/B, with a
+scenario for every row above, on a smaller fixture (6 sessions x 4 windows, 30
+`svc-*` directories) and with plain medians, no noise estimate: it times these
+paths for this checkout against REF, extracted with its own Rust core, and
+refuses to compare unlike cores. Its run against main, 30 pairs, CPU ms, main
+→ after: first row 85.0 → 77.0, `--list` 48.0 → 45.5, a session's preview
+46.0 → 24.0, a window's 30.5 → 23.0, `--dirs-list` 146 → 86, `--deep svc` (30
+matches) 1004 → 198; the footer, `--scope-prompt`, a directory row's preview,
+`--doctor`, the bash renderer's list and `bash -n` within ±5% (noise). A
+perf-relevant change pastes its table.
+
 ## Suggested rollout
 
 1. **Tier 0 (0.1 + 0.2 + 0.3)** in one pass — pure fork removal, no gate, test-covered. This
@@ -856,7 +913,8 @@ Script paths, warm, by scale:
 | raw `ps -eo` | 16 ms | 23 ms | 31 ms |
 | raw 3× tmux bulk queries | 13 ms | 13 ms | 16 ms |
 
-Reproduce: the harness lives in the scratchpad used to build this plan; it creates N×M
-detached sessions, times `bash script --{scope-prompt,header-for,preview,list}` warm/cold,
-and cleans up on exit. The two numbers that matter: `ps`+tmux stay flat while `--list` and
+Reproduce: the harness for these numbers lived in the scratchpad used to build this plan; it
+created N×M detached sessions, timed `bash script --{scope-prompt,header-for,preview,list}`
+warm/cold, and cleaned up on exit. `tests/bench.sh` is the in-repo A/B now (Tier 10), and
+`tests/test_exec_budget.sh` holds the fork and exec counts these tiers removed. The two numbers that matter: `ps`+tmux stay flat while `--list` and
 `--header-for` scale with row count and system load — i.e. **forks, not data fetching.**

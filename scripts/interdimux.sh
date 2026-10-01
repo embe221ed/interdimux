@@ -1536,6 +1536,33 @@ scan_dirs() {
   esac
 }
 
+# scan_dirs over many roots: scan_roots DEPTH FINDER ROOT...  ONE finder run
+# (and one sed) for all of them, where a loop over scan_dirs paid a fork of
+# each per root -- a deep search whose query matched 300 directories took ~7 s,
+# against 0.06 s for the one run (review PERF-08).  fd and find both apply the
+# depth to each root, and the callers only ever gather a SET of directories
+# (emit_sorted_tiers sorts and dedups), so it does not matter that one run
+# orders them differently, or repeats a nested root's.  $HOME keeps a run of
+# its own: its ~/Library prune is anchored to it, and fd's --exclude would
+# apply to every root.  In chunks, to stay clear of ARG_MAX.
+scan_roots() {
+  local depth="$1" finder="$2" r i
+  local -a roots=()
+  shift 2
+  for r in "$@"; do
+    if [ "$r" = "$HOME" ]; then scan_dirs "$r" "$depth" "$finder"
+    elif [ -d "$r" ]; then roots+=("$r")
+    fi
+  done
+  [ "${#roots[@]}" -gt 0 ] || return 0
+  for (( i = 0; i < ${#roots[@]}; i += 256 )); do
+    case "$finder" in
+      fd|fdfind) "$finder" --type d --max-depth "$depth" --absolute-path . "${roots[@]:i:256}" 2>/dev/null ;;
+      find) find "${roots[@]:i:256}" -maxdepth "$depth" -path '*/.*' -prune -o -type d -print 2>/dev/null ;;
+    esac
+  done | sed 's:/\{1,\}$::' || true
+}
+
 # Find dirs whose *name* contains the query, case-insensitively, using
 # the finder's native matching — much deeper reach than scanning
 # everything and filtering in bash.
@@ -2279,12 +2306,16 @@ NO_SUCH_TARGET='$missing'
 # ':' (split there) -- become "$ID" through session_id_of, and a name that
 # matches nothing becomes NO_SUCH_TARGET.  Only those names pay for the extra
 # list-sessions, so the preview's hot path forks nothing new.
-spec_target() {
+#
+# spec_target_r sets REPLY instead, for the preview: `$(spec_target)` was one
+# more fork on every cursor move (review PERF-06).
+spec_target() { spec_target_r; printf '%s' "$REPLY"; }
+spec_target_r() {
   local s
   case "$SPEC_TYPE" in
-    D) printf '%s' "$SPEC_DIR"; return 0 ;;
+    D) REPLY="$SPEC_DIR"; return 0 ;;
     S|W|P) ;;
-    *) printf '%s' "$NO_SUCH_TARGET"; return 0 ;;
+    *) REPLY="$NO_SUCH_TARGET"; return 0 ;;
   esac
   case "$SPEC_SESSION" in
     ''|'$'*|*:*) session_id_of "$SPEC_SESSION"; s="${REPLY:-$NO_SUCH_TARGET}" ;;
@@ -2298,9 +2329,9 @@ spec_target() {
     P) case "$SPEC_PIDX" in ''|*[!0-9]*) s="$NO_SUCH_TARGET" ;; esac ;;
   esac
   case "$SPEC_TYPE" in
-    S) printf '%s:' "$s" ;;
-    W) printf '%s:=%s' "$s" "$SPEC_WIDX" ;;
-    P) printf '%s:=%s.%s' "$s" "$SPEC_WIDX" "$SPEC_PIDX" ;;
+    S) REPLY="$s:" ;;
+    W) REPLY="$s:=$SPEC_WIDX" ;;
+    P) REPLY="$s:=$SPEC_WIDX.$SPEC_PIDX" ;;
   esac
 }
 
@@ -2318,12 +2349,17 @@ spec_target() {
 # that can fail (display-message resolves its target with CANFAIL, and answers a
 # stale index with the session's current window), and a failed command ends the
 # list, so a gone target prints nothing at all.
-SPEC_AT=""
+#
+# A third argument is that round-trip's output, made by a caller that batched
+# it with more commands (the preview): `has-session -t T \; display-message -p
+# -t T "$SPEC_AT_FMT$FORMAT"`.
+SPEC_AT="" SPEC_AT_FMT="#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}"
 spec_at() {
   local info sid wid pid widx pidx
   SPEC_AT="" REPLY=""
-  info=$(tmux has-session -t "$1" \; display-message -p -t "$1" \
-    "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}${2:-}" 2>/dev/null)
+  if [ $# -ge 3 ]; then info="$3"; else
+    info=$(tmux has-session -t "$1" \; display-message -p -t "$1" "$SPEC_AT_FMT${2:-}" 2>/dev/null)
+  fi
   IFS="$US" read -r sid wid pid widx pidx REPLY <<< "$info"
   [ -n "$wid" ] && [ "$widx" = "$SPEC_WIDX" ] || { REPLY=""; return 1; }
   case "$SPEC_TYPE" in
@@ -2987,15 +3023,16 @@ npx_agent() {
 # ---------------------------------------------------------------------------
 
 # Pad (or truncate with …) a string to a target display width using
-# character count
-dpad() {
+# character count; sets REPLY.  It used to print, and `$(dpad ...)` forked the
+# whole script once per call: every row of the ctrl-o picker and every window
+# line of a session's preview paid that (review PERF-07).
+dpad_r() {
   local str="$1" width="$2"
   if [ "${#str}" -gt "$width" ] && [ "$width" -gt 1 ]; then
     str="${str:0:width-1}…"
   fi
-  printf '%s' "$str"
   local pad=$(( width - ${#str} ))
-  [ "$pad" -gt 0 ] && printf '%*s' "$pad" ""
+  if [ "$pad" -gt 0 ]; then printf -v REPLY '%s%*s' "$str" "$pad" ''; else REPLY="$str"; fi
 }
 
 # Row-field builder: accumulate colored chunks while tracking the plain
@@ -3246,7 +3283,7 @@ live_preview_state() {
 # Turn the measured maxima into column widths that fit the popup width.
 compute_widths() {
   local avail
-  avail=$(term_cols)
+  term_cols_r; avail="$REPLY"
   # The live preview state, not the configured one: ctrl-/ toggles the preview
   # after launch, and FZF_COLUMNS does not move when it does (verified), so
   # without this the rows stay sized for the old geometry and fzf just clips them
@@ -3467,7 +3504,8 @@ build_ctx_field() {
 #
 # Emitted AFTER every tmux row, which matters twice over: fzf appends streamed
 # rows as they arrive, so the tmux tree still paints at the same moment it
-# always did; and the column widths are already fixed by then, so a long
+# always did (in this renderer: the Rust core's rows all arrive at once, see
+# gather_targets); and the column widths are already fixed by then, so a long
 # directory path can never widen the tree's columns.
 #
 # Sources are only the cheap ones — the recent list and zoxide (~3-5 ms
@@ -3818,6 +3856,9 @@ gather_targets() {
     # The assignments live INSIDE the substitution on purpose: written as a
     # `VAR=v \ _imux_out=$(...)` prefix chain, bash parses the lot as a list of
     # assignments with NO command, so the binary would run without any of them.
+    # Only the two VALUES that need a lookup are taken out, by the REPLY forms:
+    # `$(term_cols)` and `$(live_preview_state)` in that list were a subshell
+    # each, on every open and every reload (review PERF-05).
     #
     # Its stderr is dropped.  Every failure falls back to the bash renderer
     # below, which draws the right list, and the one failure worth telling the
@@ -3825,13 +3866,15 @@ gather_targets() {
     # navigator's stderr, a binary older than IMUX_PROTO printed its usage line
     # on every open and every reload, and each one became another entry in
     # errors.log and another status-line message.
-    local _imux_rc=0
+    local _imux_rc=0 _imux_cols _imux_pv
+    term_cols_r; _imux_cols="$REPLY"
+    live_preview_state_r; _imux_pv="$REPLY"
     _imux_out=$(
-      INTERDIMUX_COLS="$(term_cols)" \
+      INTERDIMUX_COLS="$_imux_cols" \
       INTERDIMUX_NOW="$NOW_EPOCH" \
       INTERDIMUX_SHOW_FULL_COMMAND="$SHOW_FULL_COMMAND" \
       INTERDIMUX_SHOW_GIT_BRANCH="$SHOW_GIT_BRANCH" \
-      INTERDIMUX_SHOW_PREVIEW="$(live_preview_state)" \
+      INTERDIMUX_SHOW_PREVIEW="$_imux_pv" \
       INTERDIMUX_ORDER="$ORDER" \
       INTERDIMUX_SHOW_DIRS="$SHOW_DIRS" \
       INTERDIMUX_SESSION_RULE="$SESSION_RULE" \
@@ -3871,8 +3914,11 @@ IMUX_SECTIONS
     # sources than this script, and speaks another version of the protocol.
     if [ "$_imux_rc" = 2 ]; then imux_refused; fi
     # A failed or empty render must fall through to the bash renderer, never be
-    # mistaken for "there is nothing to show".  Capturing costs ~2ms (the binary
-    # renders the whole list in about that) and buys a safe failure mode.
+    # mistaken for "there is nothing to show".  Capturing buys a safe failure
+    # mode, and holds every row until the binary exits: ~3 ms with directory
+    # rows off, and with them on (the default) whatever of zoxide's own 5-10 ms
+    # the render did not overlap -- the binary starts the query before its
+    # first row and collects it at the directory rows (rust/src/dirs.rs).
     #
     # So must one that is not a row list at all.  INTERDIMUX_BIN accepts any
     # executable, and whatever a wrong one printed on exit 0 — `/bin/echo` prints
@@ -4365,47 +4411,87 @@ if [ "${1:-}" = "--preview" ]; then
     exec bash "$SCRIPT_PATH" --dirs-preview "$SPEC_DIR"
   fi
 
-  target=$(spec_target)
+  spec_target_r; target="$REPLY"
 
+  # ONE tmux client per preview (review PERF-06): each costs ~5 ms of connect
+  # and teardown, on every cursor move, and a session row's preview made three.
+  # The sections are framed by RS, as gather_targets' are, and the capture goes
+  # LAST: the substitution then strips its trailing newlines exactly as the
+  # capture's own did, and the RS appended before the split keeps an empty
+  # capture a field.  Nothing in a capture can be an RS (tmux keeps no control
+  # bytes in its grid), and nothing in the header before it either, but a
+  # pane's cwd can hold one, so what lies between is joined back on RS.
+  # INTERDIMUX_NO_BATCH runs the commands one at a time, as gather_targets.
+  RS=$'\x1e'
+  pv_parts=()
   case "$SPEC_TYPE" in
     S)
+      s_fmt="#{session_windows}${US}#{?session_attached,attached,detached}"
+      w_fmt="#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}"
       # $target is spec_target's session form ("=name:", or "$ID:" for a name
       # no '=' form can reach), which resolves to the session's active pane.
-      info=$(tmux display-message -p -t "$target" \
-        "#{session_windows}${US}#{?session_attached,attached,detached}" 2>/dev/null)
+      # A failed command ends a command list, so a session that went away (or
+      # anything else short of all three sections) asks again one at a time.
+      if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+        pv_all=$(tmux display-message -p -t "$target" "$s_fmt" \; display-message -p "$RS" \
+          \; list-windows -t "$target" -F "$w_fmt" \; display-message -p "$RS" \
+          \; capture-pane -t "$target" -p -e -S -30 2>/dev/null)
+        set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
+      fi
+      if [ "${#pv_parts[@]}" -ge 3 ]; then
+        info="${pv_parts[0]}"
+        pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
+        IFS="$RS"; pv_wins="${pv_parts[*]:1:${#pv_parts[@]}-2}"; unset IFS
+        pv_wins="${pv_wins#$'\n'}"; pv_wins="${pv_wins%$'\n'}"
+      else
+        info=$(tmux display-message -p -t "$target" "$s_fmt" 2>/dev/null)
+        pv_wins=$(tmux list-windows -t "$target" -F "$w_fmt" 2>/dev/null)
+        pv_cap=$(tmux capture-pane -t "$target" -p -e -S -30 2>/dev/null)
+      fi
       IFS="$US" read -r s_wins s_att <<< "$info"
       printf "${BOLD_AMBER}▸ %s${RST}  ${DIM}%s win · %s${RST}\n" \
         "$SPEC_SESSION" "${s_wins:-?}" "${s_att:-}"
       preview_rule
-      tmux list-windows -t "$target" \
-        -F "#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}" 2>/dev/null | \
-      while IFS="$US" read -r wid wcmd wpath wact wpanes; do
+      [ -n "$pv_wins" ] && while IFS="$US" read -r wid wcmd wpath wact wpanes; do
         # a line tmux cut short (see gather_targets) has no pane count
         case "$wpanes" in ''|*[!0-9]*) wpanes=1 ;; esac
         marker=" "
         [ "$wact" = "1" ] && marker="${MARKER_COLOR}*${RST}"
         wpath="${wpath/#$HOME/\~}"
+        dpad_r "$wid" 16; wid="$REPLY"
+        dpad_r "$wcmd" 14
         printf ' %s %s%s%s %s%s%s %s%s%s' \
-          "$marker" "$BOLD" "$(dpad "$wid" 16)" "$RST" \
-          "$DIM_CMD" "$(dpad "$wcmd" 14)" "$RST" \
+          "$marker" "$BOLD" "$wid" "$RST" \
+          "$DIM_CMD" "$REPLY" "$RST" \
           "$DIM_PATH" "$wpath" "$RST"
         [ "$wpanes" -gt 1 ] && printf '  \033[2m(%s panes)\033[0m' "$wpanes"
         printf '\n'
-      done
+      done <<< "$pv_wins"
       echo ""
       preview_rule "active pane"
-      print_capture "$(tmux capture-pane -t "$target" -p -e -S -30 2>/dev/null)" || echo "(no active pane)"
+      print_capture "$pv_cap" || echo "(no active pane)"
       ;;
     *)
       # Checked by index as well (spec_at): a stale row must not preview the
       # window that merely took its number as a NAME.  Captured by the IDs the
-      # check found, so tmux resolves the row once.
-      p_pid="" p_cmd="" p_path="" p_look="" p_args=""
-      if spec_at "$target" "#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"; then
+      # check found, so tmux resolves the row once -- or, batched, captured by
+      # the row's own target in the same command list as the check, and kept
+      # only when the check passes.  has-session fails for a target that is
+      # gone, so an empty answer is spec_at's own "gone": nothing to redo.
+      p_pid="" p_cmd="" p_path="" p_look="" p_args="" pv_cap="" pv_at=()
+      p_fmt="#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"
+      if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+        pv_all=$(tmux has-session -t "$target" \; display-message -p -t "$target" "$SPEC_AT_FMT$p_fmt" \
+          \; display-message -p "$RS" \; capture-pane -t "$target" -p -e -S -50 2>/dev/null)
+        set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
+        pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
+        IFS="$RS"; pv_at=("${pv_parts[*]:0:${#pv_parts[@]}-1}"); unset IFS
+      fi
+      if spec_at "$target" "$p_fmt" ${pv_at[@]+"${pv_at[@]}"}; then
         IFS="$US" read -r p_pid p_cmd p_path <<< "$REPLY"
         target="$SPEC_AT"
       else
-        target="$NO_SUCH_TARGET"
+        target="$NO_SUCH_TARGET" pv_cap=""
       fi
       # An agent's row is headed by the agent and, once it shows a state or a
       # description, drops its arguments (cmd_field).  The header names it the
@@ -4438,7 +4524,8 @@ if [ "${1:-}" = "--preview" ]; then
         "${p_cmd:-?}" "${p_path:-?}"
       [ -n "$p_args" ] && preview_wrapped "$p_args"
       preview_rule
-      print_capture "$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)" || echo "(cannot capture pane)"
+      [ -n "${INTERDIMUX_NO_BATCH:-}" ] && pv_cap=$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)
+      print_capture "$pv_cap" || echo "(cannot capture pane)"
       ;;
   esac
   exit 0
@@ -4557,7 +4644,8 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
   # Path column width derived from the popup (list pane is ~60% with the
   # 40% preview open)
-  DIRS_PATH_W=$(( $(term_cols) * 55 / 100 - 10 ))
+  term_cols_r
+  DIRS_PATH_W=$(( REPLY * 55 / 100 - 10 ))
   [ "$DIRS_PATH_W" -lt 28 ] && DIRS_PATH_W=28
   [ "$DIRS_PATH_W" -gt 64 ] && DIRS_PATH_W=64
 
@@ -4574,18 +4662,19 @@ if [ "${1:-}" = "--dirs-list" ]; then
     # The display copy only: $dir itself, raw, is the spec Enter opens.
     # Sanitised the way the navigator's rows are (build_ctx_field): an ESC in a
     # directory's name reached the picker as a live escape sequence that hid
-    # the name and recoloured the row, and dpad counted the bytes the terminal
+    # the name and recoloured the row, and dpad_r counted the bytes the terminal
     # swallowed, so the badge column moved left.
     local display_path="${dir/#$HOME/\~}"
     sanitize_args "$display_path"; display_path="$REPLY"
     trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
+    dpad_r "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
 
     # Already open?  Say so, and say WHERE -- the badge column is outside fzf's
     # match scope, so the session name is display-only and cannot skew results.
     dir_session "$dir"
     if [ -n "$DIR_SID" ]; then
       printf '  %s▸%s  %s\t%s→%s %s%s%s\t%s\n' \
-        "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" \
+        "$BOLD_AMBER" "$RST" "$display_path" \
         "$DIM" "$RST" "$ACCENT_ESC" "$REPLY" "$RST" "$dir"
       return
     fi
@@ -4605,15 +4694,15 @@ if [ "${1:-}" = "--dirs-list" ]; then
     case "$tier" in
       recent)
         printf '  %s★%s  %s\t%s\t%s\n' \
-          "$BOLD_AMBER" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" "$type_badge" "$dir"
+          "$BOLD_AMBER" "$RST" "$display_path" "$type_badge" "$dir"
         ;;
       project)
         printf "  ${GREEN}◆${RST}  %s\t%s\t%s\n" \
-          "$(dpad "$display_path" "$DIRS_PATH_W")" "$type_badge" "$dir"
+          "$display_path" "$type_badge" "$dir"
         ;;
       dir)
         printf '  %s·%s  %s\t\t%s\n' \
-          "$DIM" "$RST" "$(dpad "$display_path" "$DIRS_PATH_W")" "$dir"
+          "$DIM" "$RST" "$display_path" "$dir"
         ;;
     esac
   }
@@ -4698,21 +4787,25 @@ if [ "${1:-}" = "--dirs-list" ]; then
           done
           [ "$anc" = "/" ] && continue
           [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
+          _roots=()
           while IFS= read -r d; do
             [ -z "$d" ] && continue
             if [[ "${d,,}" == "${qr,,}"* ]]; then
               collect_dir "$d"
-              while IFS= read -r sub; do
-                [ -z "$sub" ] && continue
-                collect_dir "$sub"
-              done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
+              _roots+=("$d")
             fi
           done < <(scan_dirs "$anc" "$stripped" "$finder")
+          # every completion's subtree in one finder run (scan_roots)
+          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+            [ -z "$sub" ] && continue
+            collect_dir "$sub"
+          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
         done
 
         if [[ "$query" != */* ]]; then
           # Name fragment (no slash): let the finder search for matching
           # dir names natively — reaches deep at low cost.
+          _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
             mapfile -t _matches < <(match_dirs "$sp" "$query" $((SCAN_DEPTH * 2)) "$finder" | sort)
@@ -4723,12 +4816,14 @@ if [ "${1:-}" = "--dirs-list" ]; then
               # A match inside an already-scanned match is covered
               [ -n "$_scanned_root" ] && [[ "$d" == "$_scanned_root"/* ]] && continue
               _scanned_root="$d"
-              while IFS= read -r sub; do
-                [ -z "$sub" ] && continue
-                collect_dir "$sub"
-              done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
+              _roots+=("$d")
             done
           done
+          # every match's subtree in one finder run (scan_roots)
+          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+            [ -z "$sub" ] && continue
+            collect_dir "$sub"
+          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
         else
           # Multi-component query: match it as a path substring against a
           # scan deep enough for it to appear, capped to keep the scan
@@ -4737,19 +4832,21 @@ if [ "${1:-}" = "--dirs-list" ]; then
           match_depth=$((1 + ${#slashes}))
           [ "$match_depth" -lt 2 ] && match_depth=2
           [ "$match_depth" -gt "$SCAN_DEPTH" ] && match_depth="$SCAN_DEPTH"
+          _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
             while IFS= read -r d; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               if [[ "${d,,}" == *"${query,,}"* ]]; then
                 collect_dir "$d"
-                while IFS= read -r sub; do
-                  [ -z "$sub" ] && continue
-                  collect_dir "$sub"
-                done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
+                _roots+=("$d")
               fi
             done < <(scan_dirs "$sp" "$match_depth" "$finder")
           done
+          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+            [ -z "$sub" ] && continue
+            collect_dir "$sub"
+          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
         fi
       fi
 
@@ -10139,7 +10236,10 @@ if [ -z "$IMUX_BIN" ] && { [ "$SHOW_GIT_BRANCH" = on ] || [ "$SHOW_DIRS" = on ];
   mounts_export
 elif [ -n "$IMUX_BIN" ]; then
   MOUNTS_FILE="${RESUME_FILE}.mounts"
-  rm -f "$MOUNTS_FILE" 2>/dev/null || :
+  # A builtin test first: the file exists only after PID reuse (a navigator
+  # that was SIGKILLed left it), and rm is a fork+exec (~4 ms) on the way to the
+  # first frame.  tests/test_exec_budget.sh holds that path to nothing but fzf.
+  if [ -e "$MOUNTS_FILE" ] || [ -L "$MOUNTS_FILE" ]; then rm -f "$MOUNTS_FILE" 2>/dev/null || :; fi
   export INTERDIMUX_MOUNTS_FILE="$MOUNTS_FILE"
 fi
 

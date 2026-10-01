@@ -286,6 +286,138 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Deep mode: the whole result set, written out
+# ---------------------------------------------------------------------------
+#
+# A deep search scans the subtree of every directory its query matched, all of
+# them in one finder run (scan_roots, review PERF-08), and the checks above only
+# ask whether a row or two is there: a depth off by one, or a match's subtree
+# lost, passed them all.  So here each search's rows are listed in full, in
+# order, by hand -- under find, and under fd when there is one.  SCAN_DEPTH is
+# the default 3, so where a subtree stops is part of each answer.
+#
+# dp/
+#   hq/                      <- $HOME
+#     Library/Caches/junk/   pruned whenever $HOME itself is scanned
+#     code/                  <- the search path
+#       svc-a/  src/lib/deep/deeper/deepest
+#               svc-inner/x/y/z        a match inside a match
+#       other/svc-b/one/two/three/four
+#             svc-b/.cache                     hidden, inside a match: never listed
+#       tier/svc-c/alpha
+#       .hidden/svc-hid                hidden: never listed
+#   hqx/a/b/c/d              a sibling that matches "hq" too
+
+DP="$TMPDIR_TEST/dp"
+DH="$DP/hq"
+mkdir -p "$DH/Library/Caches/junk" "$DH/code/svc-a/src/lib/deep/deeper/deepest" \
+  "$DH/code/svc-a/svc-inner/x/y/z" "$DH/code/other/svc-b/one/two/three/four" \
+  "$DH/code/other/svc-b/.cache" "$DH/code/tier/svc-c/alpha" "$DH/code/.hidden/svc-hid" \
+  "$DP/hqx/a/b/c/d"
+
+# A PATH of just the tools the picker runs: without fd in it, the finder is
+# find.  fd (or Debian's fdfind) joins it for the second pass.
+FINDBIN="$TMPDIR_TEST/findbin"
+mkdir -p "$FINDBIN"
+for t in bash sh env fzf sed sort find tmux cat head tail tr wc cut grep awk mkdir \
+         mv rm cp ln touch chmod date stty uname id basename dirname readlink mktemp; do
+  p=$(command -v "$t" 2>/dev/null) || continue
+  case "$p" in /*) ln -s "$p" "$FINDBIN/$t" ;; esac
+done
+finders=("find:$FINDBIN")
+for f in fd fdfind; do
+  p=$(command -v "$f" 2>/dev/null) || continue
+  case "$p" in /*) ;; *) continue ;; esac
+  mkdir -p "$TMPDIR_TEST/fdbin"
+  cp -P "$FINDBIN"/* "$TMPDIR_TEST/fdbin/"
+  ln -s "$p" "$TMPDIR_TEST/fdbin/$f"
+  finders+=("$f:$TMPDIR_TEST/fdbin")
+  break
+done
+[ "${#finders[@]}" -gt 1 ] || echo "  (no fd or fdfind: the deep result sets run under find only)"
+
+# deep_rows NAME BIN PROJECT_DIRS QUERY WANT...: --dirs-list --deep QUERY's
+# spec column is exactly WANT, in order, and nothing went to stderr
+deep_rows() {
+  local name="$1" bin="$2" pdirs="$3" q="$4" got want
+  shift 4
+  got=$(env -i PATH="$bin" HOME="$DH" XDG_DATA_HOME="$TMPDIR_TEST/no-data" \
+          TMUX="$TMPDIR_TEST/no-such-socket,0,0" INTERDIMUX_PROJECT_DIRS="$pdirs" \
+          INTERDIMUX_USE_ZOXIDE=off \
+          bash "$SCRIPT" --dirs-list --deep "$q" 2> "$TMPDIR_TEST/deep.err" | cut -f3)
+  want=$(printf '%s\n' "$@")
+  if [ "$got" = "$want" ] && [ ! -s "$TMPDIR_TEST/deep.err" ]; then
+    report "$name" pass
+  else
+    report "$name" fail
+    ERRORS+="$(diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | head -12 || true)"$'\n'
+    ERRORS+="$(head -c 300 "$TMPDIR_TEST/deep.err")"
+  fi
+}
+
+for fb in "${finders[@]}"; do
+  fname="${fb%%:*}" fbin="${fb#*:}"
+
+  # Every match's subtree to depth 3 -- but a match inside one already
+  # scanned (svc-inner) is listed, not scanned again from itself, so its z,
+  # four levels below svc-a, is not.  The hidden svc-hid is never a match.
+  deep_rows "deep result set ($fname): a name fragment, with a match inside a match" \
+    "$fbin" "$DH/code" svc \
+    "$DH/code/other/svc-b" \
+    "$DH/code/other/svc-b/one" \
+    "$DH/code/other/svc-b/one/two" \
+    "$DH/code/other/svc-b/one/two/three" \
+    "$DH/code/svc-a" \
+    "$DH/code/svc-a/src" \
+    "$DH/code/svc-a/src/lib" \
+    "$DH/code/svc-a/src/lib/deep" \
+    "$DH/code/svc-a/svc-inner" \
+    "$DH/code/svc-a/svc-inner/x" \
+    "$DH/code/svc-a/svc-inner/x/y" \
+    "$DH/code/tier/svc-c" \
+    "$DH/code/tier/svc-c/alpha"
+
+  # A path fragment: every directory whose path holds it, and their subtrees
+  deep_rows "deep result set ($fname): a multi-component fragment" \
+    "$fbin" "$DH/code" r/svc \
+    "$DH/code/other/svc-b" \
+    "$DH/code/other/svc-b/one" \
+    "$DH/code/other/svc-b/one/two" \
+    "$DH/code/other/svc-b/one/two/three" \
+    "$DH/code/tier/svc-c" \
+    "$DH/code/tier/svc-c/alpha"
+
+  # A path being typed: its completion (src) is scanned, and so -- as a
+  # path fragment -- is every directory whose path holds what was typed,
+  # src/lib among them, which reaches deepest
+  deep_rows "deep result set ($fname): a partly typed path" \
+    "$fbin" "$DH/code" "$DH/code/svc-a/sr" \
+    "$DH/code/svc-a/src" \
+    "$DH/code/svc-a/src/lib" \
+    "$DH/code/svc-a/src/lib/deep" \
+    "$DH/code/svc-a/src/lib/deep/deeper" \
+    "$DH/code/svc-a/src/lib/deep/deeper/deepest"
+
+  # $HOME is a match itself: its subtree comes without ~/Library, and the
+  # sibling that matches alongside it keeps its own depth
+  deep_rows "deep result set ($fname): \$HOME as a match, ~/Library pruned" \
+    "$fbin" "$DP" hq \
+    "$DH" \
+    "$DH/code" \
+    "$DH/code/other" \
+    "$DH/code/other/svc-b" \
+    "$DH/code/svc-a" \
+    "$DH/code/svc-a/src" \
+    "$DH/code/svc-a/svc-inner" \
+    "$DH/code/tier" \
+    "$DH/code/tier/svc-c" \
+    "$DP/hqx" \
+    "$DP/hqx/a" \
+    "$DP/hqx/a/b" \
+    "$DP/hqx/a/b/c"
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
