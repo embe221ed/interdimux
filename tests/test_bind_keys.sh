@@ -11,9 +11,10 @@
 #                  prefix+f then does nothing at all, with no error
 #   #{?@x,...}     tmux format truthiness treats the string "0" as FALSE, so
 #                  colour-tree 0 / recent-limit 0 get replaced by defaults
-#   TMUX_PANE      a popup natively exports its OWN pane id, which resolves to
-#                  an empty target: the current-row marker disappears and MRU's
-#                  move-current-to-end (Enter = hop back) stops working
+#   TMUX_PANE      a popup gets the server's global TMUX_PANE, not the pressing
+#                  pane (another session's, or none): the current-row marker
+#                  disappears and MRU's move-current-to-end (Enter = hop back)
+#                  stops working
 #
 # Note `send-keys` cannot be used to fire a binding: it writes straight to a
 # pane's pty, while real keys arrive via a CLIENT.  Hence the nested client.

@@ -164,8 +164,9 @@ literal `G`). `$2` = the answer to `ask`, or empty. Nothing else, ever.
 inherited `TMUX`/`TMUX_PANE`. Values are raw bytes — no shell is involved, so
 nothing needs quoting.
 
-`IMUX_CALLER_PANE` is **not** `TMUX_PANE`: inside a popup that is the popup's own
-id, which is the trap already documented at the `--bind-keys` binding.
+`IMUX_CALLER_PANE` is **not** `TMUX_PANE`: a popup's command gets the server's
+global `TMUX_PANE`, not the pressing pane, which is the trap already documented
+at the `--bind-keys` binding.
 
 **stdin** is never a pipe. A plugin that wants input calls
 `"$IMUX_SELF" --dialog input …`.

@@ -342,9 +342,9 @@ if [ "${1:-}" = "--bind-keys" ]; then
   done
   unset _m
   _bk_env+=" -e \"INTERDIMUX_OPTS_PRIMED=1\""
-  # A popup natively exports TMUX_PANE as its OWN pane id, which resolves to an
-  # empty target — current-row marker and MRU's move-current-to-end both break,
-  # silently.  #{pane_id} is the pressing client's pane.
+  # A popup's command gets the server's global TMUX_PANE, as run-shell's does
+  # (above _bk_who), not the pressing pane -- current-row marker and MRU's
+  # move-current-to-end both break, silently.  #{pane_id} is the pressing pane.
   _bk_env+=" -e \"TMUX_PANE=#{pane_id}\""
   # ...and the pressing CLIENT, for the reason given above _bk_who.
   _bk_env+=" -e \"INTERDIMUX_CLIENT=#{q:client_name}\""
@@ -10027,12 +10027,12 @@ if [ "${1:-}" = "--launch" ]; then
     # title itself stays raw for INTERDIMUX_TITLE, which popup_accent escapes.
     chrome=(-T "${POPUP_TITLE_STYLE}${title//'#'/##}")
     [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
-    # Popups don't inherit TMUX_PANE — forward it so current-target detection
-    # is exact.  It is the PRESSING pane only because every route here passes
-    # it explicitly (the bindings' TMUX_PANE=#{pane_id}, the dashboard's baked
-    # items): run-shell itself hands over the server's global TMUX_PANE, which
-    # can belong to another server entirely.  The pressing client rides along
-    # for the same reason (see TMUX_C).
+    # A popup gets the server's global TMUX_PANE — forward ours so
+    # current-target detection is exact.  It is the PRESSING pane only because
+    # every route here passes it explicitly (the bindings' TMUX_PANE=#{pane_id},
+    # the dashboard's baked items): run-shell itself hands over the server's
+    # global TMUX_PANE, which can belong to another server entirely.  The
+    # pressing client rides along for the same reason (see TMUX_C).
     [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
     [ -n "$INTERDIMUX_CLIENT" ] && chrome+=(-e "INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT")
     env_fwd_flags

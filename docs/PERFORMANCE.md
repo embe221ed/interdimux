@@ -396,9 +396,11 @@ against zero rows — so a silently broken gather printed green ticks.
    **`#{?@x,…}` cannot test emptiness**, because tmux format truthiness treats the
    string `"0"` as false, so `color-tree 0` and `recent-limit 0` would be replaced
    by defaults (use `#{==:…,}`);
-   and `TMUX_PANE` must be injected as `#{pane_id}` — a popup natively exports its
-   *own* pane id, which resolves to an empty target and silently kills both the
-   current-row marker and MRU's move-current-to-end.
+   and `TMUX_PANE` must be injected as `#{pane_id}` — a popup's command gets the
+   server's *global* `TMUX_PANE`, whatever the process that started the server
+   exported (another session's pane, or nothing), not the pressing pane, which
+   silently kills both the current-row marker and MRU's move-current-to-end
+   (see the comment above `_bk_who` in `--bind-keys`).
    `--bind-keys` dispatches **before** the preflight on purpose: if `fzf` is not on
    the tmux server's `PATH` (common — it is often only on `PATH` via a shell rc)
    the preflight exits 1, and doing that at plugin load would leave the user with
