@@ -16,7 +16,10 @@ on:
 #             unless tmux is built here the test job is testing an empty picker.
 #   fzf 0.74  the floor the suite pins itself to (INTERDIMUX_FZF_MINOR=74).
 #             ubuntu-24.04's apt fzf is 0.44, which silently turns the picker
-#             suites into skips rather than failures.
+#             suites into skips rather than failures.  Pinned at the latest
+#             0.74 patch release, the one users run: 0.74.1 to 0.74.4 changed
+#             how fzf draws (synchronized updates, faster non-ASCII, escape
+#             sequences split across reads), and the suites read its screen.
 #
 # Both jobs run on ubuntu-24.04, by name: `ubuntu-latest` moves to 26.04 from
 # 2026-10-19, and every image-specific number in this file is 24.04's.  26.04's
@@ -38,7 +41,7 @@ on:
 #             (that suite names the same two; keep them in step).
 env:
   TMUX_VERSION: "3.7b"
-  FZF_VERSION: "0.74.0"
+  FZF_VERSION: "0.74.4"
   OLD_BASH_VERSIONS: "3.2.57 4.2.53 4.3.30 5.1.16"
   OLD_FZF_VERSIONS: "0.44.1 0.52.1"
   # The tree glyphs are multibyte and the column maths counts CELLS.  Runners do
