@@ -11,7 +11,7 @@
 #   - trailing-slash normalization and dedup across tiers
 #   - zoxide merge (via a stubbed zoxide binary)
 #   - INTERDIMUX_RECENT_LIMIT and INTERDIMUX_SCAN_DEPTH options
-#   - fd: ignore files above the search root, and an fd too old for the flag
+#   - fd: ignore files above a scan's root, and an fd too old for the flag
 #
 # Runs against a fixture HOME, so it never touches the user's data.
 
@@ -287,14 +287,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# fd and the ignore files ABOVE the search root (BUG-31)
+# fd and the ignore files ABOVE a scan's root (BUG-31)
 # ---------------------------------------------------------------------------
-# A dotfiles repo in $HOME whose .gitignore is `*`: fd applied it to every
-# search root under $HOME, and the scan came back empty with no hint why, while
-# the find backend listed everything.  And an fd too old to know
-# --no-ignore-parent (before 8.3) refuses the whole command line -- status 1
-# from its old argument parser, 2 from the new one -- and must still list.
+# A dotfiles repo in $HOME whose .gitignore is `*`: fd applied it under every
+# search root, and the scan came back empty with no hint why, while the find
+# backend listed everything.  Only a root those files hide entirely is scanned
+# without them, though.  Inside any other repo a browse, or a deep search,
+# starts below the repo's .gitignore too, and must keep the directories it
+# ignores (node_modules) out as it always has -- and so must a ~/.fdignore.
 REAL_FD=$(command -v fd || command -v fdfind || true)
+has_spec() { specs <<< "$1" | grep -qx "$FIX_HOME/$2"; }
 if [ -z "$REAL_FD" ]; then
   printf '  - fd cases (skipped: no fd or fdfind on PATH)\n'
 else
@@ -314,13 +316,27 @@ else
     report "fd: \$HOME's .gitignore '*' does not empty the scan" fail
   fi
   out=$(dirs_list -- --deep 'camelproj')
-  if echo "$out" | specs | grep -qx "$FIX_HOME/work/tools/CamelProj"; then
+  if has_spec "$out" work/tools/CamelProj; then
     report "fd: ...nor the deep search" pass
   else
     report "fd: ...nor the deep search" fail
   fi
-  rm -rf "$FIX_HOME/.git" "$FIX_HOME/.gitignore"
+  out=$(dirs_list -- --deep "$FIX_HOME/work/too")
+  if has_spec "$out" work/tools/CamelProj; then
+    report "fd: ...nor a partly typed path" pass
+  else
+    report "fd: ...nor a partly typed path" fail
+  fi
+  out=$(dirs_list -- --scan "$FIX_HOME/work/tools")
+  if has_spec "$out" work/tools/CamelProj; then
+    report "fd: ...nor a browse (^g)" pass
+  else
+    report "fd: ...nor a browse (^g)" fail
+  fi
 
+  # An fd too old for --no-ignore-parent (before 8.3) refuses the whole command
+  # line -- status 1 from its old argument parser, 2 from the new one.  Here
+  # that leaves the scan as it was, and the list still comes up.
   mkdir -p "$TMPDIR_TEST/oldfd"
   for rc in 1 2; do
     cat > "$TMPDIR_TEST/oldfd/fd" <<STUB
@@ -332,18 +348,59 @@ exec "$REAL_FD" "\$@"
 STUB
     chmod +x "$TMPDIR_TEST/oldfd/fd"
     out=$(dirs_list PATH="$TMPDIR_TEST/oldfd:$PATH" --)
-    if echo "$out" | grep "work/api" | grep -q '◆'; then
-      report "an fd that refuses --no-ignore-parent (status $rc) still scans" pass
+    if has_spec "$out" Desktop/proj_alpha; then
+      report "an fd that refuses --no-ignore-parent (status $rc) still lists" pass
     else
-      report "an fd that refuses --no-ignore-parent (status $rc) still scans" fail
-    fi
-    out=$(dirs_list PATH="$TMPDIR_TEST/oldfd:$PATH" -- --deep 'camelproj')
-    if echo "$out" | specs | grep -qx "$FIX_HOME/work/tools/CamelProj"; then
-      report "...and still deep-searches (status $rc)" pass
-    else
-      report "...and still deep-searches (status $rc)" fail
+      report "an fd that refuses --no-ignore-parent (status $rc) still lists" fail
     fi
   done
+  rm -rf "$FIX_HOME/.git" "$FIX_HOME/.gitignore"
+
+  # A repo's own .gitignore, above a browse's or a deep search's root.  web2's
+  # only subdirectory is one it ignores, so its browse finds nothing -- and
+  # web2 is not hidden itself, so that is what it shows.
+  mono="$FIX_HOME/work/mono"
+  mkdir -p "$mono/.git" "$mono/services/web/src" "$mono/services/web/node_modules/dep" \
+           "$mono/services/web2/node_modules"
+  printf 'node_modules\n' > "$mono/.gitignore"
+  # The control: without those files, fd WOULD list node_modules here.
+  ctl=$("$REAL_FD" --no-ignore-parent --type d --max-depth 2 . "$mono/services" 2>/dev/null || true)
+  if [[ "$ctl" == *node_modules* ]]; then
+    report "control: fd lists node_modules below ~/work/mono/services without the repo's .gitignore" pass
+  else
+    report "control: fd lists node_modules below ~/work/mono/services without the repo's .gitignore" fail
+  fi
+  out=$(dirs_list -- --scan "$mono/services")
+  if has_spec "$out" work/mono/services/web/src && [[ "$out" != *node_modules* ]]; then
+    report "fd: a browse inside a repo keeps the directories it ignores out" pass
+  else
+    report "fd: a browse inside a repo keeps the directories it ignores out" fail
+  fi
+  out=$(dirs_list -- --deep 'services')
+  if has_spec "$out" work/mono/services/web/src && [[ "$out" != *node_modules* ]]; then
+    report "fd: ...and so does a deep search" pass
+  else
+    report "fd: ...and so does a deep search" fail
+  fi
+  out=$(dirs_list -- --scan "$mono/services/web2")
+  if has_spec "$out" work/mono/services/web2 && [[ "$out" != *node_modules* ]]; then
+    report "fd: ...even where it ignores every subdirectory there is" pass
+  else
+    report "fd: ...even where it ignores every subdirectory there is" fail
+  fi
+  rm -rf "$mono"
+
+  # A deliberate ~/.fdignore, which needs no repo.
+  printf 'node_modules\n' > "$FIX_HOME/.fdignore"
+  mkdir -p "$FIX_HOME/work/tools/node_modules/dep"
+  out=$(dirs_list -- --deep '')
+  out2=$(dirs_list -- --scan "$FIX_HOME/work/tools")
+  if has_spec "$out" work/tools/CamelProj && [[ "$out$out2" != *node_modules* ]]; then
+    report "fd: a ~/.fdignore still applies to the deep search and a browse" pass
+  else
+    report "fd: a ~/.fdignore still applies to the deep search and a browse" fail
+  fi
+  rm -rf "$FIX_HOME/.fdignore" "$FIX_HOME/work/tools/node_modules"
 fi
 
 # ---------------------------------------------------------------------------

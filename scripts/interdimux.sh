@@ -1508,21 +1508,26 @@ _scan_prune() {
   fi
 }
 
-# _fd_dirs FINDER ARGS...: the directories fd finds, trailing slashes stripped
-# (see scan_dirs).
-#
-# --no-ignore-parent: fd also applies the ignore files of every directory ABOVE
-# the root, so a dotfiles repo in $HOME whose .gitignore is `*` emptied every
-# scan under it, silently -- the find backend listed them all.  An fd older
-# than 8.3 does not know the flag and refuses the whole command line (status 1
-# or 2, nothing printed); only then is it run again without it, since probing
-# for the flag first would cost every list a process.  Under pipefail the
-# pipeline's status is fd's, unless sed died first (141: the reader is gone).
-_fd_dirs() {
-  local finder="$1"; shift
-  "$finder" --no-ignore-parent "$@" 2>/dev/null | sed 's:/\{1,\}$::' && return 0
-  [ "$?" -le 2 ] || return 0
-  "$finder" "$@" 2>/dev/null | sed 's:/\{1,\}$::' || true
+# fd also applies the ignore files of every directory ABOVE its root.  Inside a
+# repo that is the point -- a browse into one of its subdirectories keeps the
+# repo's node_modules out -- but a dotfiles repo in $HOME whose .gitignore is
+# `*` hides everything under $HOME the same way, and every scan came back
+# empty, silently, while the find backend listed it all.  fd_parents_hide ROOT
+# FINDER is asked only once ROOT's scan has found nothing.  When ROOT has a
+# visible subdirectory and is itself missing from its parent's listing, it sets
+# FD_NIP, and the rest of this list scans without those files
+# (--no-ignore-parent; an fd older than 8.3 refuses it and finds nothing, as
+# before).  A scan that found anything is untouched and costs nothing more, and
+# a directory that only its OWN ignore files empty stays empty.
+FD_NIP=()
+fd_parents_hide() {
+  local r="${1%/}" up d
+  [ -n "$r" ] && [ "$2" != find ] && [ "${#FD_NIP[@]}" = 0 ] && compgen -G "$r/*/" >/dev/null || return 1
+  up="${r%/*}"
+  while IFS= read -r d; do
+    [ "${d%/}" = "$r" ] && return 1
+  done < <("$2" --hidden --max-depth 1 --fixed-strings --absolute-path -- "${r##*/}" "${up:-/}" 2>/dev/null)
+  FD_NIP=(--no-ignore-parent)
 }
 
 scan_dirs() {
@@ -1533,7 +1538,7 @@ scan_dirs() {
   # which breaks dedup between tiers and finder backends.
   case "$finder" in
     fd|fdfind)
-      _fd_dirs "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} . "$root"
+      "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} . "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
       ;;
     find)
       find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -print 2>/dev/null | sed 's:/\{1,\}$::' || true
@@ -1550,7 +1555,7 @@ match_dirs() {
   _scan_prune "$root"
   case "$finder" in
     fd|fdfind)
-      _fd_dirs "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} -- "$query" "$root"
+      "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} -- "$query" "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
       ;;
     find)
       find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -iname "*$query*" -print 2>/dev/null | sed 's:/\{1,\}$::' || true
@@ -4637,6 +4642,24 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # handed it down -- see mounts_export).
   [ "$_MOUNTS_READ" = 1 ] || _mounts_read
 
+  # collect_scan ROOT DEPTH [PREFIX]: collect_dir each directory ROOT's scan
+  # finds -- with PREFIX, only those it begins, and everything below them -- and
+  # scan once more if ignore files above ROOT hid them all (fd_parents_hide).
+  collect_scan() {
+    local d n=0
+    while IFS= read -r d; do
+      [ -z "$d" ] || [ "$d" = "$1" ] && continue
+      n=1
+      if [ $# = 2 ]; then
+        collect_dir "$d"
+      elif [[ "${d,,}" == "${3,,}"* ]]; then
+        collect_dir "$d"
+        collect_scan "$d" "$SCAN_DEPTH"
+      fi
+    done < <(scan_dirs "$1" "$2" "$finder")
+    [ "$n" = 1 ] || ! fd_parents_hide "$1" "$finder" || collect_scan "$@"
+  }
+
   case "$mode" in
     default)
       while IFS= read -r d; do
@@ -4647,10 +4670,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
       _others=()
       for sp in "${search_paths[@]}"; do
         [ -d "$sp" ] || continue
-        while IFS= read -r d; do
-          [ -z "$d" ] || [ "$d" = "$sp" ] && continue
-          collect_dir "$d"
-        done < <(scan_dirs "$sp" 1 "$finder")
+        collect_scan "$sp" 1
       done
       emit_sorted_tiers
       ;;
@@ -4673,10 +4693,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
       if [ -z "$query" ]; then
         for sp in "${search_paths[@]}"; do
           [ -d "$sp" ] || continue
-          while IFS= read -r d; do
-            [ -z "$d" ] || [ "$d" = "$sp" ] && continue
-            collect_dir "$d"
-          done < <(scan_dirs "$sp" 2 "$finder")
+          collect_scan "$sp" 2
         done
       else
         # Try the query as a literal path first: if relative, resolve
@@ -4694,10 +4711,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         for qr in "${query_roots[@]}"; do
           if [ -d "$qr" ]; then
             collect_dir "$qr"
-            while IFS= read -r d; do
-              [ -z "$d" ] || [ "$d" = "$qr" ] && continue
-              collect_dir "$d"
-            done < <(scan_dirs "$qr" "$SCAN_DEPTH" "$finder")
+            collect_scan "$qr" "$SCAN_DEPTH"
             continue
           fi
           # Partially typed path: walk up to the deepest existing
@@ -4711,16 +4725,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
           done
           [ "$anc" = "/" ] && continue
           [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
-          while IFS= read -r d; do
-            [ -z "$d" ] && continue
-            if [[ "${d,,}" == "${qr,,}"* ]]; then
-              collect_dir "$d"
-              while IFS= read -r sub; do
-                [ -z "$sub" ] && continue
-                collect_dir "$sub"
-              done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
-            fi
-          done < <(scan_dirs "$anc" "$stripped" "$finder")
+          collect_scan "$anc" "$stripped" "$qr"
         done
 
         if [[ "$query" != */* ]]; then
@@ -4788,10 +4793,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         _projects=()
         _others=()
         collect_dir "$scan_root"
-        while IFS= read -r d; do
-          [ -z "$d" ] || [ "$d" = "$scan_root" ] && continue
-          collect_dir "$d"
-        done < <(scan_dirs "$scan_root" 2 "$finder")
+        collect_scan "$scan_root" 2
         emit_sorted_tiers
       fi
       ;;
