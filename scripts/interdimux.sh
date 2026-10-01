@@ -2618,6 +2618,13 @@ resolve_command() {
 # Git branch (pure bash — no subprocess per pane)
 # ---------------------------------------------------------------------------
 
+# Keyed by directory -- every directory a walk passed through, not only the cwd
+# it started from.  A walk from any of those directories would have gone the
+# same way from there, so each has the same answer, and a later walk stops at
+# the first of them it reaches.  Keyed by cwd alone, N cwds under one home
+# re-tested $HOME, /home and / N times each: on a tree with no repository,
+# every directory of every path, which _probe_has_branch pays in full wherever
+# the squeeze could keep the badge (review BUG-108).
 declare -A GIT_BRANCH_CACHE=()
 
 get_git_branch() {
@@ -2626,17 +2633,18 @@ get_git_branch() {
   [ "$SHOW_GIT_BRANCH" != "on" ] && return
   [ -z "$dir" ] && return
 
-  local _cache_key="$dir"
-  if [[ ${GIT_BRANCH_CACHE[$_cache_key]+x} ]]; then
-    REPLY="${GIT_BRANCH_CACHE[$_cache_key]}"
+  if [[ ${GIT_BRANCH_CACHE[$dir]+x} ]]; then
+    REPLY="${GIT_BRANCH_CACHE[$dir]}"
     return
   fi
 
   # Up to and INCLUDING "/", as git's own discovery walks (and rust/src/git.rs):
   # a repository at the root is a repository.  $b is the directory with its
   # trailing slash dropped, so the root's marker is "/.git", not "//.git".
-  local d="$dir" b _chk=1
+  local d="$dir" b _chk=1 branch=""
+  local -a _walked=()
   while [ -n "$d" ]; do
+    _walked+=("$d")
     # Never probe a filesystem whose stat can block (is_remote_path): the walk
     # stops there, badge-less, rather than stall the first paint.  Once a level
     # is below no blocking mount point at all, nothing above it is either, and
@@ -2682,22 +2690,25 @@ get_git_branch() {
       { read -r head_content < "$head_file"; } 2>/dev/null || :
       head_content="${head_content%$'\r'}"
       [ -n "$head_content" ] || break
-      local branch=""
       case "$head_content" in
         "ref: refs/heads/"*) branch="${head_content#ref: refs/heads/}" ;;
         *) branch="@${head_content:0:7}" ;;
       esac
-      GIT_BRANCH_CACHE["$_cache_key"]="$branch"
-      REPLY="$branch"
-      return
+      break
     fi
     [ "$d" = "/" ] && break
     case "$b" in */*) ;; *) break ;; esac   # relative: nothing above it to walk to
     d="${b%/*}"
     [ -n "$d" ] || d="/"
+    # An earlier walk went through here: what it found is this walk's answer.
+    if [[ ${GIT_BRANCH_CACHE[$d]+x} ]]; then
+      branch="${GIT_BRANCH_CACHE[$d]}"
+      break
+    fi
   done
 
-  GIT_BRANCH_CACHE["$_cache_key"]=""
+  for d in "${_walked[@]}"; do GIT_BRANCH_CACHE["$d"]="$branch"; done
+  REPLY="$branch"
 }
 
 # ---------------------------------------------------------------------------
@@ -3200,7 +3211,8 @@ measure_widths() {
 # Does any window or pane row have a git branch to show?  The one question the
 # squeeze asks that reads files: each cwd is walked up to / (get_git_branch)
 # until one has a branch, so on a tree with none it is every directory of every
-# path -- plus the mount table, on the first walk step (is_remote_path).  It was
+# path, each once (a walk stops at a directory an earlier one went through) --
+# plus the mount table, on the first walk step (is_remote_path).  It was
 # asked up front in measure_widths, at every width; but it decides only whether
 # the path gives up cells to keep the badge, and at most widths the badge fits,
 # or goes, whatever the answer (at 80 columns it never matters).  So
