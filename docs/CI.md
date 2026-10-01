@@ -387,6 +387,29 @@ that has nothing to do with the code.  A move is now a one-line change to the
 `os` list, which rebuilds everything on the new image; adding it as a second
 entry first tries it without giving up the old one.
 
+## 13. A skip still read as a pass
+
+§4, §5, §8 and §12 are one failure, found four times: a suite that cannot run
+something skips it, and the skip disappears into a total.  `run_all.sh` gave
+a suite that skipped itself whole ("Results: 0 passed, 0 failed") the same
+green tick as one that passed, and a suite that skipped some of its cases left
+no trace at all.  Each was found by reading a log line by line.
+
+**Fix:** `run_all.sh` reports a whole skip as SKIPPED and a partial one next
+to the suite's passes, each with the skip lines the suite printed, and names
+every skipping suite under the total.  `IMUX_STRICT=1`, which the "Shell
+tests" step sets, fails the run on any of them once every suite has run.
+`tests/test_run_all.sh` holds `run_all.sh` to that.
+
+For a strict run to pass, the job provides everything the suites ask for.
+`zsh` was the one thing missing: `test_foreground_job.sh`'s nested zsh and
+`test_raw_fallback.sh`'s `--with-shell='zsh -c'` skipped on every run.  The one
+case CI deliberately does not run, `test_title_apps.sh`'s real container shell
+(it needs `ubuntu:24.04` already pulled), is switched off with
+`INTERDIMUX_TEST_DOCKER=off`, which that suite reports as a choice rather than
+a skip.  A skip line is one a suite prints starting `  (` or `  - ` and saying
+"skipped"; a new skip path has to say so to be counted.
+
 ## What the developer's tmux does that no released tmux does
 
 Worth recording, because it is why local runs and CI disagreed for so long.

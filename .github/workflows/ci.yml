@@ -108,11 +108,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            fd-find at gawk locales strace \
+            fd-find at gawk locales strace zsh \
             build-essential libevent-dev libncurses-dev bison pkg-config
           # strace: tests/test_render_cost.sh counts the bash renderer's
           # read(2) calls, the one measure of its cost a loaded runner cannot
           # blur.  Without it those cases skip.
+          # zsh: test_foreground_job.sh's nested zsh (`zsh -f`) and
+          # test_raw_fallback.sh's --with-shell='zsh -c' skip without it, and
+          # the image has none.  Neither reads a zsh rc file.
           # A SECOND locale, whose collation differs from C's.  The parity suite
           # guards a real bug with it — the MRU sort used to order tied
           # timestamps by collation, so the two renderers disagreed on any
@@ -221,6 +224,7 @@ jobs:
       - name: Start the at job-runner
         # Without it the schedule suites do not fail — they SKIP, and a skip
         # reporting "0 passed, 0 failed" is indistinguishable from coverage.
+        # ("Shell tests" now fails on any skip, under IMUX_STRICT.)
         run: sudo systemctl start atd || sudo service atd start
 
       # The old binaries too, so one that went missing fails here, by name,
@@ -276,4 +280,15 @@ jobs:
       # tests/test_pipefail.sh restores the default disposition for the one
       # assertion that genuinely needs it, and only for that assertion.
       - name: Shell tests
+        env:
+          # Any skip, of a whole suite or of some of its cases, fails the step
+          # once every suite has run (tests/run_all.sh lists them).  This job
+          # installs everything the suites ask for, so a skip here means
+          # something it provided went missing -- and a skip used to read as a
+          # pass in the total (docs/CI.md §13).
+          IMUX_STRICT: "1"
+          # The one case not run here, as a stated choice rather than a skip:
+          # test_title_apps.sh's real container shell needs ubuntu:24.04
+          # already local, and this job does not pull images.
+          INTERDIMUX_TEST_DOCKER: "off"
         run: IMUX_SKIP_RUST=1 IMUX_RENDERER=${{ matrix.renderer }} bash tests/run_all.sh

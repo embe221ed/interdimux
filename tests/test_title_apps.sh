@@ -25,7 +25,7 @@
 #      and then become the app (argv0 is what picks the rules); a real nested
 #      tmux client with set-titles on; a real docker container shell when
 #      docker runs without sudo and ubuntu:24.04 is already local (never pulled;
-#      INTERDIMUX_TEST_DOCKER=off skips it)
+#      INTERDIMUX_TEST_DOCKER=off turns it off)
 #
 # Expected rows are written out here, not computed by either renderer.
 
@@ -315,9 +315,13 @@ tmux -L "$ISOCK" set -g set-titles on
 tmux_cmd new-window -d -t '=t:' -n nest -c "$TMPD" "exec env -u TMUX tmux -L $ISOCK attach -t inner"
 
 # a real container shell, when docker is there without sudo and the image is
-# already local
+# already local.  INTERDIMUX_TEST_DOCKER=off is a choice, not something missing,
+# so it is said without the word run_all.sh counts as a skip: CI makes it, since
+# it never pulls the image (and IMUX_STRICT there fails on any skip).
 DOCKER=0
-if [ "${INTERDIMUX_TEST_DOCKER:-on}" != off ] && command -v docker >/dev/null 2>&1 \
+if [ "${INTERDIMUX_TEST_DOCKER:-on}" = off ]; then
+  echo "  (the container case is off: INTERDIMUX_TEST_DOCKER=off)"
+elif command -v docker >/dev/null 2>&1 \
    && timeout 10 docker image inspect ubuntu:24.04 >/dev/null 2>&1; then
   DOCKER=1 DOCKER_RAN=1
   # the container ends itself too, should cleanup never run

@@ -282,8 +282,8 @@ if [ "$HAVE_DATE_D" = 1 ]; then
     report "a bare 90 means 90 minutes (got $got, wanted ~$(date -d '+90 minutes' '+%Y-%m-%d %H:%M'))" fail
   fi
 else
-  report "5m schedules five minutes out (skipped: no date -d)" pass
-  report "a bare 90 means 90 minutes (skipped: no date -d)" pass
+  # A skip, not two passes: run_all.sh counts this line as one.
+  echo "  (skipped the 5m and bare-90 cases: no date -d to compute the time they should land on)"
 fi
 
 # FOUR digits are at's own HHMM and must be left alone.  If the shorthand ever
