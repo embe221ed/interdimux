@@ -12,16 +12,23 @@ on:
 #             format.  tmux <= 3.5a rewrites that byte as the four characters
 #             `\037`, so every row parses as ONE field, the session name comes
 #             out empty, and `--list` emits nothing at all.  Measured: 3.4 -> 0
-#             rows, 3.5a -> 0 rows, 3.6 -> 3 rows.  ubuntu-latest ships 3.4, so
+#             rows, 3.5a -> 0 rows, 3.6 -> 3 rows.  ubuntu-24.04 ships 3.4, so
 #             unless tmux is built here the test job is testing an empty picker.
 #   fzf 0.74  the floor the suite pins itself to (INTERDIMUX_FZF_MINOR=74).
-#             ubuntu-latest's apt fzf is 0.44, which silently turns the picker
+#             ubuntu-24.04's apt fzf is 0.44, which silently turns the picker
 #             suites into skips rather than failures.
+#
+# Both jobs run on ubuntu-24.04, by name: `ubuntu-latest` moves to 26.04 from
+# 2026-10-19, and every image-specific number in this file is 24.04's.  26.04's
+# apt tmux is 3.6a, above the floor, so the tmux build could become optional
+# there; its apt fzf is 0.67.0, so the fzf download could not.  To move, add
+# the new image to the tests job's `os` list first: the caches are keyed on
+# it, so that leg builds everything cold and proves the recipes on it.
 #
 # And what runs below them, as real binaries rather than emulated:
 #
 #   bash 4.3  the documented floor; 3.2 (macOS) and 4.2 (RHEL 7) must be
-#             refused in one line.  The runner's own bash is 5.2, and 5.2
+#             refused in one line.  ubuntu-24.04's own bash is 5.2, and 5.2
 #             hides what behaves differently below it: a `$` in a session name
 #             was re-expanded inside `[[ -v "a[$k]" ]]` on 4.3 to 5.1 while
 #             every suite passed.  5.1 is Ubuntu 22.04's and RHEL 9's.  Listed
@@ -42,7 +49,7 @@ env:
 
 jobs:
   shellcheck:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +81,7 @@ jobs:
 
   tests:
     name: tests (${{ matrix.renderer }} renderer)
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     # The suites drive real tmux servers and wait on real panes.  They take ~5
     # minutes; a cap keeps a hung one from burning the job's six-hour default.
     timeout-minutes: 30
@@ -89,9 +96,17 @@ jobs:
     # INTERDIMUX_USE_RUST=off: the renderer path is then exactly a cargo-less
     # install's.  The binary is still BUILT there, because the suites that
     # compare the two renderers, and --doctor's helper checks, pin it on.
+    #
+    # The image is a matrix value, not `env`, because `runs-on` cannot read
+    # `env`: this way one name feeds both runs-on and the cache keys, so a
+    # cache built on one image is never restored onto another.  (actions/cache
+    # versions an entry by its paths and compression only, not the image, and
+    # a bash built against one image's libc is not proof the recipe works on
+    # the next.)  The job's name leaves it out, to keep the two check names.
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-24.04]
         renderer: [rust, bash]
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +138,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/tmux-prefix
-          key: tmux-${{ env.TMUX_VERSION }}-${{ runner.os }}
+          key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}
 
       - name: Build tmux ${{ env.TMUX_VERSION }}
         if: steps.tmux-cache.outputs.cache-hit != 'true'
@@ -168,28 +183,31 @@ jobs:
       # Real old bashes for tests/test_bash_floor.sh, which run_all.sh runs with
       # everything else: 3.2 and 4.2 must be refused in one line, and 4.3 and
       # 5.1 must list, search and survive `$` in names.  Built from source --
-      # no apt route installs a second bash -- and cached by version, so a
-      # push pays for this only when OLD_BASH_VERSIONS changes.  The -std/-Wno
-      # flags are for gcc 14, which rejects these K&R-era sources outright (13
-      # only warns), and CFLAGS deliberately has no -O2 (configure's default):
-      # with it, 3.2's configure spins in its mktime probe, a loop that relies
-      # on signed overflow wrapping.  See docs/CI.md §12.
+      # no apt route installs a second bash -- and cached by version and image,
+      # so a push pays for this only when either changes.  The -std/-Wno flags
+      # are for gcc 14 and later, which reject these K&R-era sources outright
+      # (24.04's gcc 13 only warns), and they go to CFLAGS_FOR_BUILD as well:
+      # 3.2's and 4.2's configure set that to a bare -g, and the helpers it
+      # builds (mkbuiltins, ...) then meet gcc 15's C23 default, where `f()`
+      # means `f(void)`, and fail.  CFLAGS deliberately has no -O2 (configure's
+      # default): with it, 3.2's configure spins in its mktime probe, a loop
+      # that relies on signed overflow wrapping.  See docs/CI.md §12.
       - name: Cache bash ${{ env.OLD_BASH_VERSIONS }}
         id: old-bash-cache
         uses: actions/cache@v4
         with:
           path: ~/bash-old
-          key: bash-old-${{ env.OLD_BASH_VERSIONS }}-${{ runner.os }}
+          key: bash-old-${{ env.OLD_BASH_VERSIONS }}-${{ matrix.os }}
 
       - name: Build bash ${{ env.OLD_BASH_VERSIONS }}
         if: steps.old-bash-cache.outputs.cache-hit != 'true'
         run: |
+          F="-std=gnu89 -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion -Wno-incompatible-pointer-types"
           for v in $OLD_BASH_VERSIONS; do
             curl -fsSL --retry 3 -o "/tmp/bash-$v.tar.gz" "https://ftp.gnu.org/gnu/bash/bash-$v.tar.gz"
             tar -xzf "/tmp/bash-$v.tar.gz" -C /tmp
             cd "/tmp/bash-$v"
-            if ! { ./configure --without-bash-malloc \
-                     CFLAGS="-std=gnu89 -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion -Wno-incompatible-pointer-types" \
+            if ! { ./configure --without-bash-malloc CFLAGS="$F" CFLAGS_FOR_BUILD="$F" \
                    && make -j"$(nproc)"; } > "/tmp/bash-$v.log" 2>&1; then
               tail -40 "/tmp/bash-$v.log"; exit 1
             fi
