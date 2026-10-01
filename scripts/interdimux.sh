@@ -1002,7 +1002,9 @@ build_fzf_theme() {
   #   --preview       `--preview 'bat {}'` ran on every row of the pickers that
   #     have no preview of their own (swap, Health, Jobs, the fzf dashboard) and
   #     took half the popup.  The navigator's and ctrl-o's own --preview come
-  #     after this, so they still apply.
+  #     after this, so they still apply.  And --preview-window is cumulative: a
+  #     `hidden` there outlived their own window flags, so ctrl-o's preview, and
+  #     the navigator's with show-preview on, never drew -- nohidden clears it.
   # Each reset is fzf's own default, so without $FZF_DEFAULT_OPTS the screen is
   # unchanged.  @interdimux-fzf-opts is appended last and can still ask for any
   # of them -- that is the channel for a deliberate choice.
@@ -1011,6 +1013,7 @@ build_fzf_theme() {
   FZF_THEME+=(
     --no-height
     --no-preview
+    --preview-window=nohidden
     --no-border
     --margin=0
     --padding=0
@@ -7817,7 +7820,7 @@ if [ "${1:-}" = "--dirs" ]; then
     --prompt='new session ❯ ' \
     ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
     --preview="bash '$SCRIPT_PATH' --dirs-preview {-1}" \
-    --preview-window="right,40%,border-left,nowrap,nohidden" \
+    --preview-window="right,40%,border-left,nowrap" \
     --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints deep {q})${ctrl_f_extra}" \
     --bind="ctrl-g:reload(bash '$SCRIPT_PATH' --dirs-list --scan {-1})+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints browse {-1})" \
     --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints)" \
@@ -10554,10 +10557,7 @@ while true; do
   # could not be toggled back on.
   fzf_opts+=(--preview="bash '$SCRIPT_PATH' --preview {-1}")
   if [ "$SHOW_PREVIEW" = "on" ]; then
-    # nohidden: --preview-window is cumulative, so a `hidden` in
-    # $FZF_DEFAULT_OPTS outlived this one, and the rows were sized for a
-    # preview that never drew.  (fzf's default, so otherwise a no-op.)
-    fzf_opts+=(--preview-window="right,50%,border-left,nowrap,nohidden")
+    fzf_opts+=(--preview-window="right,50%,border-left,nowrap")
   else
     fzf_opts+=(--preview-window="right,50%,border-left,nowrap,hidden")
   fi

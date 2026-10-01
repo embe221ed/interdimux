@@ -337,6 +337,47 @@ if wait_for 'themeproj' && wait_for 'active pane'; then
 else
   report "a --preview-window=hidden in \$FZF_DEFAULT_OPTS leaves show-preview's preview drawn" fail; why_dead
 fi
+
+# ctrl-o's preview is always on, and the same `hidden` kept it from ever
+# drawing.  The reset goes before @interdimux-fzf-opts, though, so a `hidden`
+# put THERE on purpose still hides it -- in ctrl-o, and in the navigator even
+# with show-preview on.  The preview's left border is drawn in the same frame as
+# the prompt line's match count, so that line, once it has a count, says which.
+mkdir -p "$TMPD/pw/pwproj"
+printf '# pwproj\nPWMARK first line\n' > "$TMPD/pw/pwproj/README.md"
+prompt_line() { # -> REPLY = the prompt line, once it shows a match count
+  local s
+  wait_for '^[^'$'\n'']* [0-9]+/[0-9]+' || return 1
+  s=$(screen); REPLY="${s%%$'\n'*}"
+}
+LAUNCH_MODE=--dirs launch 120 20 "INTERDIMUX_PROJECT_DIRS=$TMPD/pw" "FZF_DEFAULT_OPTS=--preview-window=hidden"
+if wait_for 'pwproj' && wait_for 'PWMARK'; then
+  report "a --preview-window=hidden in \$FZF_DEFAULT_OPTS leaves ctrl-o's preview drawn" pass
+else
+  report "a --preview-window=hidden in \$FZF_DEFAULT_OPTS leaves ctrl-o's preview drawn" fail; why_dead
+fi
+LAUNCH_MODE=--dirs launch 120 20 "INTERDIMUX_PROJECT_DIRS=$TMPD/pw" "INTERDIMUX_FZF_OPTS=--preview-window=hidden"
+if wait_for 'pwproj' && prompt_line; then
+  if [[ "$REPLY" != *│* ]]; then
+    report "a --preview-window=hidden in @interdimux-fzf-opts still hides ctrl-o's preview" pass
+  else
+    report "a --preview-window=hidden in @interdimux-fzf-opts still hides ctrl-o's preview" fail
+    ERRORS+="     prompt line: $(tr -s ' ' <<< "$REPLY" | head -c 100)"$'\n'
+  fi
+else
+  report "ctrl-o draws with --preview-window=hidden in @interdimux-fzf-opts" fail; why_dead
+fi
+launch 120 20 "INTERDIMUX_FZF_OPTS=--preview-window=hidden" INTERDIMUX_SHOW_PREVIEW=on
+if wait_for 'themeproj' && prompt_line; then
+  if [[ "$REPLY" != *│* ]]; then
+    report "...and the navigator's, with show-preview on" pass
+  else
+    report "...and the navigator's, with show-preview on" fail
+    ERRORS+="     prompt line: $(tr -s ' ' <<< "$REPLY" | head -c 100)"$'\n'
+  fi
+else
+  report "the navigator draws with --preview-window=hidden in @interdimux-fzf-opts" fail; why_dead
+fi
 tmux -L "$OUTER" kill-server 2>/dev/null || true
 
 # Every reset above is FATAL on an fzf that does not know it, and only the argv
