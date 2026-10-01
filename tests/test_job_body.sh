@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # The job body --send-at hands to at(1), run the way atd runs it: under
-# /bin/sh, later, from nowhere in particular.
+# /bin/sh, later, from nowhere in particular.  And the target it is built for.
 #
 # What used to go wrong, each reproduced with the body run under dash:
 #   * the session label ("name:window.pane") was spliced raw into a live
@@ -13,6 +13,9 @@
 #     server guard and its send.  exec is a special builtin, so under dash a
 #     log dir that cannot be created or opened at firing time ENDS the job
 #     there: no keys, and no log line saying why (BUG-88).
+#   * target '.' with TMUX_PANE unset (cron, an ssh command, env -i) dropped -t,
+#     and tmux picked a pane of its own: the keys went somewhere never named,
+#     with exit status 0 (BUG-44).
 #
 # No real at job is ever submitted: `at` is a PATH shim that keeps the body and
 # queues nothing, and the body is then run by /bin/sh against this suite's
@@ -184,6 +187,40 @@ if [ -s "$TMPD/body" ]; then
 else
   report "a job can be scheduled with an unopenable log (precondition)" fail
 fi
+
+# --- '.' is the caller's pane, or nothing -------------------------------------------
+rm -f "$TMPD/body"
+env -u TMUX_PANE PATH="$shimdir:$PATH" IMUX_AT_BODY="$TMPD/body" \
+  bash "$SCRIPT" --send-at 'now + 1 hour' . 'echo DOT_AT' >/dev/null 2>"$TMPD/err"
+RC=$?
+if [ "$RC" != 0 ] && grep -q 'TMUX_PANE' "$TMPD/err"; then
+  report "--send-at '.' without TMUX_PANE is refused, naming TMUX_PANE" pass
+else
+  report "--send-at '.' without TMUX_PANE is refused, naming TMUX_PANE" fail
+  ERRORS+="    rc=$RC: $(cat "$TMPD/err")"$'\n'
+fi
+[ -e "$TMPD/body" ] && report "...and nothing is handed to at" fail \
+                     || report "...and nothing is handed to at" pass
+
+# The sub-minute path is a tmux timer.  Nothing may be scheduled: a sentinel
+# timer set AFTER it with the same delay fires after it, so once the sentinel
+# has arrived, a refused send that slipped through would already be there.
+env -u TMUX_PANE bash "$SCRIPT" --send-in 1 . 'echo DOT_IN' >/dev/null 2>"$TMPD/err"
+RC=$?
+if [ "$RC" != 0 ] && grep -q 'TMUX_PANE' "$TMPD/err"; then
+  report "--send-in '.' without TMUX_PANE is refused, naming TMUX_PANE" pass
+else
+  report "--send-in '.' without TMUX_PANE is refused, naming TMUX_PANE" fail
+  ERRORS+="    rc=$RC: $(cat "$TMPD/err")"$'\n'
+fi
+n=$(( $(nlines "$TMPD/caught") + 1 ))
+bash "$SCRIPT" --send-in 1 "$P0" 'echo DOT_SENTINEL' >/dev/null 2>&1
+expect "...and nothing reaches a pane tmux picked instead" "$(next_line "$TMPD/caught" "$n")" 'echo DOT_SENTINEL'
+
+# ...while '.' from inside a pane is still that pane
+submit . 'echo DOT_OK'
+expect "'.' with TMUX_PANE set still schedules into that pane" \
+  "$(sed -n 's/^# imux-pane: //p' "$TMPD/body" 2>/dev/null)" "$P0"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

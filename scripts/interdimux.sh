@@ -5062,8 +5062,11 @@ at_enable_hint() {
 sched_resolve() {
   local target="$1"
   [ "$target" = "." ] && target="${TMUX_PANE:-}"
+  # Never without -t: tmux would pick "the current pane" itself, which outside
+  # a pane is the most recently active session's -- a pane nobody named.
+  [ -n "$target" ] || return 1
   local info
-  info=$(tmux display-message -p ${target:+-t "$target"} \
+  info=$(tmux display-message -p -t "$target" \
         '#{pane_id}'"$US"'#{socket_path}'"$US"'#{pid}'"$US"'#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || return 1
   IFS="$US" read -r SCHED_PANE SCHED_SOCK SCHED_SRVPID SCHED_LABEL <<< "$info"
   [ -n "$SCHED_PANE" ] || return 1
@@ -5185,6 +5188,12 @@ if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
   if [ -z "$_when" ] || [ -z "$_target" ] || [ -z "$_keys" ]; then
     echo "interdimux: usage: $_mode <when> <target> <command...>" >&2
     exit 2
+  fi
+  # '.' is the pane this runs in, and only TMUX_PANE says which: from cron, an
+  # ssh command or env -i there is none, and "no such target" would not say why.
+  if [ "$_target" = "." ] && [ -z "${TMUX_PANE:-}" ]; then
+    echo "interdimux: '.' means the current pane, but TMUX_PANE is not set (run this from inside a tmux pane, or name the target)" >&2
+    exit 1
   fi
   if ! sched_resolve "$_target"; then
     echo "interdimux: no such target: $_target" >&2
