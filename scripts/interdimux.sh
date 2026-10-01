@@ -1407,11 +1407,16 @@ utf8_ctype_r() {
 # (review BUG-111).  The prefix scopes the C locale to that one read: the loop
 # body still counts characters.  It costs two setlocale(3) calls a line, so it
 # is only where a line can end in a path -- never on a window or pane line.
+# And its stderr goes to /dev/null: when LC_ALL names a locale that is not
+# installed, bash warns each time it puts LC_ALL back after the read, and in
+# the navigator stderr is ERR_FILE -- a line per read, on the status line and
+# in errors.log, where there was only bash's one warning at startup.  (Bash
+# 4.x warns after the redirection is undone, but its read never had the bug.)
 load_recent_dirs() {
   local d count=0
   local -A _recent_seen=()
   if [ -f "$RECENT_DIRS_FILE" ]; then
-    while LC_ALL=C IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
       [[ ${_recent_seen[$d]+x} ]] && continue
@@ -1425,7 +1430,7 @@ load_recent_dirs() {
   # Merge frecent dirs from zoxide when available
   if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
     local zcount=0
-    while LC_ALL=C IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
       [[ ${_recent_seen[$d]+x} ]] && continue
@@ -1460,7 +1465,7 @@ record_recent_dir() {
   [ -n "$tmp" ] || return 0
   if ! echo "$dir" > "$tmp" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
   if [ -f "$RECENT_DIRS_FILE" ]; then
-    while LC_ALL=C IFS= read -r d; do   # LC_ALL=C: see load_recent_dirs
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do   # LC_ALL=C: see load_recent_dirs
       [ "$d" = "$dir" ] && continue
       is_remote_path "$d" || [ -d "$d" ] || continue   # a stalled mount must not delay the switch
       echo "$d" >> "$tmp"
@@ -2102,12 +2107,12 @@ record_dir_use() {
 # LC_ALL=C on each read: see load_recent_dirs.
 emit_sorted_tiers() {
   if [ "${#_projects[@]}" -gt 0 ]; then
-    while LC_ALL=C IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
       emit_dir "$d" project ""
     done < <(printf '%s\n' "${_projects[@]}" | sort -u)
   fi
   if [ "${#_others[@]}" -gt 0 ]; then
-    while LC_ALL=C IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
       emit_dir "$d" dir ""
     done < <(printf '%s\n' "${_others[@]}" | sort -u)
   fi
@@ -3954,7 +3959,7 @@ IMUX_SECTIONS
     # byte there joined the next session onto it -- which vanished from the
     # list, and could be the one you are in (see load_recent_dirs).
     sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr)
-    while LC_ALL=C IFS= read -r line; do
+    while LC_ALL=C IFS= read -r line 2>/dev/null; do
       [ -z "$line" ] && continue
       sn_check="${line%%"$US"*}"
       if [ "$sn_check" = "$current_session" ]; then
@@ -4117,7 +4122,7 @@ IMUX_SECTIONS
   local -A AMARKED=()   # the agents view: panes already marked (agent_mark_r)
 
   # LC_ALL=C on the read: the line ends in #{session_path} (see the MRU pass).
-  while LC_ALL=C IFS="$US" read -r sname sla swins sattach spath; do
+  while LC_ALL=C IFS="$US" read -r sname sla swins sattach spath 2>/dev/null; do
     [ -z "$sname" ] && continue
     [ -n "$spath" ] && SESSION_DIRS["$spath"]=1
     marker=" "
@@ -4666,7 +4671,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
       _others=()
       for sp in "${search_paths[@]}"; do
         [ -d "$sp" ] || continue
-        while LC_ALL=C IFS= read -r d; do
+        while LC_ALL=C IFS= read -r d 2>/dev/null; do
           [ -z "$d" ] || [ "$d" = "$sp" ] && continue
           collect_dir "$d"
         done < <(scan_dirs "$sp" 1 "$finder")
@@ -4692,7 +4697,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
       if [ -z "$query" ]; then
         for sp in "${search_paths[@]}"; do
           [ -d "$sp" ] || continue
-          while LC_ALL=C IFS= read -r d; do
+          while LC_ALL=C IFS= read -r d 2>/dev/null; do
             [ -z "$d" ] || [ "$d" = "$sp" ] && continue
             collect_dir "$d"
           done < <(scan_dirs "$sp" 2 "$finder")
@@ -4713,7 +4718,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         for qr in "${query_roots[@]}"; do
           if [ -d "$qr" ]; then
             collect_dir "$qr"
-            while LC_ALL=C IFS= read -r d; do
+            while LC_ALL=C IFS= read -r d 2>/dev/null; do
               [ -z "$d" ] || [ "$d" = "$qr" ] && continue
               collect_dir "$d"
             done < <(scan_dirs "$qr" "$SCAN_DEPTH" "$finder")
@@ -4730,11 +4735,11 @@ if [ "${1:-}" = "--dirs-list" ]; then
           done
           [ "$anc" = "/" ] && continue
           [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
-          while LC_ALL=C IFS= read -r d; do
+          while LC_ALL=C IFS= read -r d 2>/dev/null; do
             [ -z "$d" ] && continue
             if [[ "${d,,}" == "${qr,,}"* ]]; then
               collect_dir "$d"
-              while LC_ALL=C IFS= read -r sub; do
+              while LC_ALL=C IFS= read -r sub 2>/dev/null; do
                 [ -z "$sub" ] && continue
                 collect_dir "$sub"
               done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
@@ -4755,7 +4760,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
               # A match inside an already-scanned match is covered
               [ -n "$_scanned_root" ] && [[ "$d" == "$_scanned_root"/* ]] && continue
               _scanned_root="$d"
-              while LC_ALL=C IFS= read -r sub; do
+              while LC_ALL=C IFS= read -r sub 2>/dev/null; do
                 [ -z "$sub" ] && continue
                 collect_dir "$sub"
               done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
@@ -4771,11 +4776,11 @@ if [ "${1:-}" = "--dirs-list" ]; then
           [ "$match_depth" -gt "$SCAN_DEPTH" ] && match_depth="$SCAN_DEPTH"
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
-            while LC_ALL=C IFS= read -r d; do
+            while LC_ALL=C IFS= read -r d 2>/dev/null; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               if [[ "${d,,}" == *"${query,,}"* ]]; then
                 collect_dir "$d"
-                while LC_ALL=C IFS= read -r sub; do
+                while LC_ALL=C IFS= read -r sub 2>/dev/null; do
                   [ -z "$sub" ] && continue
                   collect_dir "$sub"
                 done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
@@ -4807,7 +4812,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         _projects=()
         _others=()
         collect_dir "$scan_root"
-        while LC_ALL=C IFS= read -r d; do
+        while LC_ALL=C IFS= read -r d 2>/dev/null; do
           [ -z "$d" ] || [ "$d" = "$scan_root" ] && continue
           collect_dir "$d"
         done < <(scan_dirs "$scan_root" 2 "$finder")

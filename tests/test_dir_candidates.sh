@@ -166,6 +166,37 @@ for mode in default deep 'deep path' scan; do
 done
 set --
 
+# Those reads run with LC_ALL=C as a prefix, and when the user's LC_ALL names a
+# locale that is not installed, bash 5 warns each time it puts it back after a
+# read -- in the navigator, onto ERR_FILE, the status line and errors.log.  It
+# must stay bash's one warning at startup (the control: that one is there, so
+# the locale really is missing).  ASCII names only, in a data dir and a scan
+# root of their own: what is under test is the reads, not the is_utf8 check a
+# non-ASCII name gets.  Bash 4.x warns per read whatever is done, but its read
+# never needed the prefix.
+if [ "$(bash -c 'echo "${BASH_VERSINFO[0]}"')" -ge 5 ]; then
+  mkdir -p "$TMPD/locdata/interdimux"
+  for sd in one two three four; do mkdir -p "$TMPD/locscan/$sd/.git" "$TMPD/fx/loc-$sd"; done
+  printf '%s\n' "$TMPD/fx/loc-one" "$TMPD/fx/loc-two" "$TMPD/fx/loc-three" "$TMPD/fx/loc-four" \
+    > "$TMPD/locdata/interdimux/recent_dirs"
+  for args in "--list" "--dirs-list" "--dirs-list --scan $TMPD/locscan"; do
+    # shellcheck disable=SC2086  # $args is split on purpose
+    env -u LANG -u LC_CTYPE LC_ALL=xx_XX.UTF-8 XDG_DATA_HOME="$TMPD/locdata" INTERDIMUX_USE_RUST=off \
+      INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_PROJECT_DIRS="$TMPD/locscan" \
+      bash "$SCRIPT" $args > "$TMPD/locale.out" 2> "$TMPD/locale.err" || true
+    warned=$(grep -c 'setlocale' "$TMPD/locale.err" || true)
+    # the premise: the reads happened -- the last entry of what they read is listed
+    case "$args" in --list) last="$TMPD/fx/loc-four" ;; *) last="$TMPD/locscan/four" ;; esac
+    if [ "$warned" = 1 ] && grep -qF "$last" "$TMPD/locale.out"; then
+      report "${args%% $TMPD*} under a missing LC_ALL: bash's one startup warning, none per read" pass
+    else
+      report "${args%% $TMPD*} under a missing LC_ALL: bash's one startup warning, none per read (got $warned)" fail
+    fi
+  done
+else
+  echo "  (skipped the missing-locale warnings: bash 4.x warns per read whatever is done)"
+fi
+
 # A switch rewrites the recent list, keeping the entries that still exist: the
 # one after the Latin-1 directory must survive it.  (Last: it adds a session.)
 bash "$SCRIPT" --connect-dir "$TMPD/fx/zgood" >/dev/null 2>&1 || true
