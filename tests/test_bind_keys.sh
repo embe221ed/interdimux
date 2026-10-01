@@ -76,6 +76,8 @@ NASTY='a"b\c$HOME;d#{pane_id}e}f --no-mouse'
 "$T" -L "$SOCK" set -g @interdimux-color-tree 0      # "0" is FALSE to #{?...}
 "$T" -L "$SOCK" set -g @interdimux-recent-limit 0
 "$T" -L "$SOCK" set -g @interdimux-order index
+# shellcheck disable=SC2088  # a literal tilde: the script expands it, later
+"$T" -L "$SOCK" set -g @interdimux-project-dirs '~/my projects:~/work'
 # popup-width/height deliberately left UNSET, to exercise the defaults
 
 # point $TMUX at the private server or the script rebinds the REAL one
@@ -117,6 +119,10 @@ ck "hostile @interdimux-fzf-opts survives verbatim" "$(get INTERDIMUX_FZF_OPTS)"
 ck "color-tree=0 is not swallowed as false"         "$(get INTERDIMUX_COLOR_TREE)" "0"
 ck "recent-limit=0 is not swallowed as false"       "$(get INTERDIMUX_RECENT_LIMIT)" "0"
 ck "order forwarded"                                "$(get INTERDIMUX_ORDER)" "index"
+# The one option once read on its own, with show-option -g, in every ctrl-o
+# list (BUG-78); its '~' is the script's to expand, so it must arrive as typed.
+# shellcheck disable=SC2088  # the literal tilde, as set above
+ck "project-dirs forwarded verbatim, '~' and blank kept" "$(get INTERDIMUX_PROJECT_DIRS)" "~/my projects:~/work"
 ck "unset option arrives empty (-> built-in default)" "$(get INTERDIMUX_SHOW_PREVIEW)" ""
 ck "OPTS_PRIMED set"                                "$(get INTERDIMUX_OPTS_PRIMED)" "1"
 ck "TMUX_PANE is the PRESSING client's pane"        "$(get TMUX_PANE)" "$EXPECT_PANE"
