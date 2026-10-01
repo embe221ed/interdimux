@@ -165,6 +165,10 @@ opens one (the plugin binds it), and so does `--launch switch`.
   --doctor --ack             mark the errors logged so far as seen
   --list                     print the navigator's rows
   --jump N                   switch to session #N, in the picker's own order
+  --agents [STATES]          list the agent panes, the most urgent first
+  --agents --count [STATES]  print how many there are
+  --agent-next [STATES]      switch to the next agent that needs you
+                             (STATES: e.g. approve,input -- only those states)
   --connect-dir DIR          switch to DIR's session, creating it if needed
   --session-name-for DIR     print the session name DIR would get
   --send-at WHEN TARGET CMD  type CMD into TARGET at WHEN (an at(1) time)
@@ -298,6 +302,15 @@ if [ "${1:-}" = "--bind-keys" ]; then
     unset _bk_i _bk_k
   fi
 
+  # Opt-in too (@interdimux-agent-next-key 'a'): a prefix key that goes straight
+  # to the next agent that needs you (--agent-next), with no popup.  Unset, no
+  # key is bound; nor is the navigator's or the dashboard's, which it would take
+  # without a word (--doctor says why it is not bound).
+  _bk_an=$(tmux show-option -gqv @interdimux-agent-next-key 2>/dev/null)
+  if [ -n "$_bk_an" ] && [ "$_bk_an" != "$_bk_nav" ] && [ "$_bk_an" != "$_bk_dash" ]; then
+    tmux bind-key "$_bk_an" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --agent-next" 2>/dev/null
+  fi
+
   # run-shell -C needs tmux >= 3.4; below it, keep the original binding.
   if [ "$_bk_tvnum" -lt 304 ]; then
     tmux bind-key "$_bk_nav" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --launch switch"
@@ -380,8 +393,11 @@ fi
 # ---------------------------------------------------------------------------
 
 # Except for --doctor, whose job is to report exactly this: stopping it here
-# printed one line where the report should have been.
-if ! command -v fzf >/dev/null 2>&1 && [ "${1:-}" != "--doctor" ]; then
+# printed one line where the report should have been.  And for --agents and
+# --agent-next, which run no fzf: a status line runs --agents every few
+# seconds, so they do not ask fzf its version below either.
+if ! command -v fzf >/dev/null 2>&1 && [ "${1:-}" != "--doctor" ] \
+   && [ "${1:-}" != "--agents" ] && [ "${1:-}" != "--agent-next" ]; then
   echo "interdimux: fzf is not installed" >&2
   exit 1
 fi
@@ -396,7 +412,7 @@ if [[ "${INTERDIMUX_FZF_MINOR:-}" =~ ^[0-9]+$ ]]; then
   # (~100ms under load) that would otherwise run on every child callback
   # (preview/header/reload).
   FZF_MINOR="$INTERDIMUX_FZF_MINOR"
-else
+elif [ "${1:-}" != "--agents" ] && [ "${1:-}" != "--agent-next" ]; then
   fzf_version=$(fzf --version 2>/dev/null) || true
   fzf_version="${fzf_version%% *}"   # "0.74.0 (rev)" -> "0.74.0", no awk fork
   IFS=. read -r fzf_major fzf_minor _ <<< "$fzf_version"
@@ -7089,6 +7105,66 @@ agent_mark_r() {
   return 0
 }
 
+# What a row shows of the description $1 (agent_state_r's AS_DESC, which
+# @interdimux-show-title let by), in REPLY: empty when it only repeats what the
+# row says already.  $2 the resolved command, as agent_state_r had it; reads
+# AS_NAME and AS_PUBD, and CUR_HOST/CUR_HOST_SHORT (gather_targets).
+# cmd_field draws it and --agents prints it, so the two say the same.
+row_desc_r() {
+  REPLY="$1"
+  if [ "$AS_PUBD" = 1 ]; then
+    # Published text (@agent_desc, a plugin's option, an @option rule's DESC)
+    # is what its publisher meant to say: it is no stale title and no copy of
+    # the command line, so it is shown as it is -- only a bare repeat of the
+    # name goes.
+    [ "$REPLY" = "$AS_NAME" ] && REPLY=""
+    return 0
+  fi
+  # What only repeats the row: the app's own name, tmux's default title (the
+  # host name), a prompt of this host and, from a preexec hook, the command
+  # line itself.
+  #   * a prompt: `user@host:path` (bash, zsh; `@host.domain`, `[user@host]`
+  #     too) -- @host where the name ends there, so `web` does not hide a
+  #     container or remote host called `web-7d4b9c`.  fish, when SSH_TTY is
+  #     set, heads its prompt AND its command lines with `[host]`, the name
+  #     cut to 10 characters (fish_title).
+  #   * a command line: its first word, past VAR=x and sudo-like prefixes, is
+  #     argv0 -- or, for an interpreter, the script it runs.  A prefix that
+  #     is itself argv0 counts: `sudo docker run ...` on a sudo row.  A word
+  #     with a ':' before its last '/' is no command path but a prompt
+  #     (`deploy@web1:/etc/ssh`, `host:~/ssh`): its last directory is not
+  #     argv0 however it is spelled.
+  local desc="$1" raw="$2" a0 b r w cw=""
+  a0="${raw%% *}"; b="${a0##*/}"
+  r="$CUR_HOST_SHORT"
+  if [ "$desc" = "$AS_NAME" ] || [ "$desc" = "$CUR_HOST" ] || [ "$desc" = "$r" ] \
+     || { [ -n "$r" ] && [[ "$desc" == *"@$r" || "$desc" == *"@$r"[!A-Za-z0-9_-]* \
+                            || "$desc" == "[${r:0:10}]" || "$desc" == "[${r:0:10}] "* ]]; }; then
+    REPLY=""
+    return 0
+  fi
+  set -f
+  for w in $desc; do
+    cw="${w##*/}"; [[ "$w" == *:*/* ]] && cw=""
+    [ -n "$cw" ] && [ "$cw" = "${b#-}" ] && break
+    case "$w" in *=*|sudo|env|nohup|exec|time|command|builtin|noglob|nice) continue ;; esac
+    break
+  done
+  set +f
+  r=""
+  case "$b" in
+    node|nodejs|ruby|perl|php) r=1 ;;
+    python*) [[ "${b#python}" == *[!0123456789.]* ]] || r=1 ;;
+    lua*)    [[ "${b#lua}" == *[!0123456789.]* ]] || r=1 ;;
+  esac
+  [[ "$SHELL_NAMES" == *" ${b#-} "* ]] && r=1
+  if [ -n "$r" ]; then r="${raw#"$a0"}"; r="${r# }"; r="${r%% *}"; fi
+  if [ -n "$cw" ] && { [ "$cw" = "${b#-}" ] || { [ -n "$r" ] && [ "$cw" = "${r##*/}" ]; }; }; then
+    REPLY=""
+  fi
+  return 0
+}
+
 # The command field of a window or pane row, in REPLY.  The arguments are
 # agent_state_r's; it also reads CUR_HOST/CUR_HOST_SHORT from gather_targets.
 #
@@ -7104,7 +7180,7 @@ cmd_field() {
   AS_STATE=""   # the row's state, for the agents view's mark (agent_mark_r)
   format_command "$raw"
   [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
-  local fc="$REPLY" a0 b name state since desc rest r w cw=""
+  local fc="$REPLY" a0 b name state since desc rest r
   # The row nothing can be added to, known in a few tests instead of through
   # agent_state_r: no option published for the pane, no registry record for
   # it, not an agent, and no title -- or one that no title rule for the app
@@ -7128,60 +7204,13 @@ cmd_field() {
     fi
   fi
   agent_state_r "$@" || { REPLY="$fc"; return 0; }
-  name="$AS_NAME" state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
-  a0="${raw%% *}"; b="${a0##*/}"
+  state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
   case "$SHOW_TITLE" in
     off)   desc="" ;;
     known) [ "$AS_KNOWN" = 1 ] || desc="" ;;
   esac
-  if [ -n "$desc" ] && [ "$AS_PUBD" = 1 ]; then
-    # Published text (@agent_desc, a plugin's option, an @option rule's DESC)
-    # is what its publisher meant to say: it is no stale title and no copy of
-    # the command line, so it is shown as it is -- only a bare repeat of the
-    # name goes.
-    [ "$desc" = "$name" ] && desc=""
-    if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
-  elif [ -n "$desc" ]; then
-    # What only repeats the row: the app's own name, tmux's default title (the
-    # host name), a prompt of this host and, from a preexec hook, the command
-    # line itself.
-    #   * a prompt: `user@host:path` (bash, zsh; `@host.domain`, `[user@host]`
-    #     too) -- @host where the name ends there, so `web` does not hide a
-    #     container or remote host called `web-7d4b9c`.  fish, when SSH_TTY is
-    #     set, heads its prompt AND its command lines with `[host]`, the name
-    #     cut to 10 characters (fish_title).
-    #   * a command line: its first word, past VAR=x and sudo-like prefixes, is
-    #     argv0 -- or, for an interpreter, the script it runs.  A prefix that
-    #     is itself argv0 counts: `sudo docker run ...` on a sudo row.  A word
-    #     with a ':' before its last '/' is no command path but a prompt
-    #     (`deploy@web1:/etc/ssh`, `host:~/ssh`): its last directory is not
-    #     argv0 however it is spelled.
-    r="$CUR_HOST_SHORT"
-    if [ "$desc" = "$name" ] || [ "$desc" = "$CUR_HOST" ] || [ "$desc" = "$r" ] \
-       || { [ -n "$r" ] && [[ "$desc" == *"@$r" || "$desc" == *"@$r"[!A-Za-z0-9_-]* \
-                              || "$desc" == "[${r:0:10}]" || "$desc" == "[${r:0:10}] "* ]]; }; then
-      desc=""
-    else
-      set -f
-      for w in $desc; do
-        cw="${w##*/}"; [[ "$w" == *:*/* ]] && cw=""
-        [ -n "$cw" ] && [ "$cw" = "${b#-}" ] && break
-        case "$w" in *=*|sudo|env|nohup|exec|time|command|builtin|noglob|nice) continue ;; esac
-        break
-      done
-      set +f
-      r=""
-      case "$b" in
-        node|nodejs|ruby|perl|php) r=1 ;;
-        python*) [[ "${b#python}" == *[!0123456789.]* ]] || r=1 ;;
-        lua*)    [[ "${b#lua}" == *[!0123456789.]* ]] || r=1 ;;
-      esac
-      [[ "$SHELL_NAMES" == *" ${b#-} "* ]] && r=1
-      if [ -n "$r" ]; then r="${raw#"$a0"}"; r="${r# }"; r="${r%% *}"; fi
-      if [ -n "$cw" ] && { [ "$cw" = "${b#-}" ] || { [ -n "$r" ] && [ "$cw" = "${r##*/}" ]; }; }; then
-        desc=""
-      fi
-    fi
+  if [ -n "$desc" ]; then
+    row_desc_r "$desc" "$raw"; desc="$REPLY"
     if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
   fi
   if [ "$AS_AGENT" = 0 ] && [ -z "$desc" ]; then REPLY="$fc"; return 0; fi
@@ -7292,28 +7321,47 @@ aw_can_r() {
 # one is never hidden), the size for the dashboard, which would otherwise have
 # spent a round-trip of its own on it.  Empty when that lookup failed (a stale
 # target: the one command here that can, hence last) or was never made.
-AW_CLIENT=""
+#
+# --agents and --agent-next walk the panes with this too, through two globals:
+#   AW_WANT  the states that count, " approve input " for the dashboard; empty,
+#            every agent pane (AS_AGENT).  The two shortcuts above hold only
+#            while it names nothing but approve and input: past that, every
+#            pane is resolved and asked, as its row is.
+#   AW_LIST  set: each pane that counts is also handed to aw_row, which those
+#            modes define below --list, so that a list never parses it.  The
+#            RS line then also brings the host names (CUR_HOST, CUR_HOST_SHORT),
+#            which the description of a row is checked against (row_desc_r).
+AW_CLIENT="" AW_WANT=' approve input ' AW_LIST=""
 agents_waiting_r() {
   REPLY=0 AW_CLIENT=""
-  [ "$AGENT_ON" = 1 ] && [ "$AGENT_STATE" = on ] || return 0
+  [ "$AGENT_ON" = 1 ] && { [ "$AGENT_STATE" = on ] || [ -z "$AW_WANT" ]; } || return 0
   utf8_ctype_r   # the rows' character type (see gather_targets)
   [ -z "$REPLY" ] || local LC_CTYPE="$REPLY"
   REPLY=0
-  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e' a0 b v
+  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e' mark=$'\x1e' a0 b v fast=1 wi="" pi=""
   local -a f=() lines=()
   local -A CLAUDE_BY_PANE=() aw_seen=()
   local AS_STATE_ONLY=1   # see agent_state_r: the count wants the state alone
+  v="${AW_WANT// approve / }"; v="${v// input / }"
+  [ -n "$AW_WANT" ] && [[ "$v" != *[!\ ]* ]] || fast=0
+  [ "$fast" = 1 ] && [ -z "$AW_LIST" ] || AS_STATE_ONLY=""
   title_ruleset
   state_optfmt_r
   fmt="#{session_name}${US}#{pane_id}${US}#{pane_pid}${US}#{pane_current_command}${US}#{pane_title}${US}$REPLY"
-  all=$(tmux list-panes -a -F "$fmt" \; display-message -p "$rs" \; \
+  [ -z "$AW_LIST" ] || { fmt="#{window_index}${US}#{pane_index}${US}$fmt"; mark+="#{host}${US}#{host_short}"; }
+  all=$(tmux list-panes -a -F "$fmt" \; display-message -p "$mark" \; \
           display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} \
           '#{client_height} #{client_width} #S' 2>/dev/null)
   # Cut at the LAST RS (a command name may hold one), from the end: a
   # ${x#*pat} would be quadratic in its offset.
   rest="${all%"$rs"*}"
   if [ "$rest" != "$all" ]; then
-    AW_CLIENT="${all:${#rest}+1}"; AW_CLIENT="${AW_CLIENT#$'\n'}"; all="$rest"
+    AW_CLIENT="${all:${#rest}+1}"
+    if [ -n "$AW_LIST" ]; then
+      v="${AW_CLIENT%%$'\n'*}"; AW_CLIENT="${AW_CLIENT:${#v}}"
+      CUR_HOST="${v%%"$US"*}" CUR_HOST_SHORT="${v#*"$US"}"
+    fi
+    AW_CLIENT="${AW_CLIENT#$'\n'}"; all="$rest"
     if [[ "$AW_CLIENT" =~ ^([0-9]*)\ ([0-9]*)\ (.*)$ ]]; then
       cur="${BASH_REMATCH[3]}"   # a session with no client has no size, but has a name
       [ -n "${BASH_REMATCH[1]}" ] && [ -n "${BASH_REMATCH[2]}" ] || AW_CLIENT=""
@@ -7332,6 +7380,7 @@ agents_waiting_r() {
   for line in ${lines[@]+"${lines[@]}"}; do
     # set -f per line: agent_state_r's option rules turn it back off.
     set -f; IFS="$US"; f=($line$US); unset IFS; set +f   # the appended US: see gather_targets
+    [ -z "$AW_LIST" ] || { wi="${f[0]-}" pi="${f[1]-}"; f=("${f[@]:2}"); }
     pane="${f[1]-}"
     case "$pane" in %[0-9]*) ;; *) continue ;; esac
     case "$pane" in %*[!0-9]*) continue ;; esac
@@ -7352,15 +7401,15 @@ agents_waiting_r() {
     pcc="${f[3]-}" raw="${f[3]-}" res=0
     a0="${pcc%% *}"; b="${a0##*/}"
     # A record that applies (agent_state_r's test) and says anything but
-    # approve or input decides it: the registry speaks first.
+    # approve or input (AW_WANT) decides it: the registry speaks first.
     v="${CLAUDE_BY_PANE[$pane]-}"
-    if [ -n "$v" ] && { [ -z "${v%%"$US"*}" ] || [ "${v%%"$US"*}" = "$pid" ]; }; then
+    if [ -n "$v" ] && [ -n "$AW_WANT" ] && { [ -z "${v%%"$US"*}" ] || [ "${v%%"$US"*}" = "$pid" ]; }; then
       v="${v#*"$US"}"
-      case "${v%%"$US"*}" in approve|input) ;; *) continue ;; esac
+      [[ "$AW_WANT" == *" ${v%%"$US"*} "* ]] || continue
     fi
     case "$b" in
       ''|node|nodejs|python*) res=1 ;;
-      *) if [ -n "${CLAUDE_BY_PANE[$pane]-}" ] || [[ "${f[5]-}" == *[!$GS]* ]]; then res=1; fi ;;
+      *) if [ "$fast" = 0 ] || [ -n "${CLAUDE_BY_PANE[$pane]-}" ] || [[ "${f[5]-}" == *[!$GS]* ]]; then res=1; fi ;;
     esac
     if [ "$res" = 1 ]; then
       [ "$pt" = 1 ] || { [ "$SHOW_FULL_COMMAND" = on ] && build_process_table; pt=1; }
@@ -7376,7 +7425,13 @@ agents_waiting_r() {
       [[ "$AW_CAN" == *" ${b#-} "* || "$AW_CAN" == *" * "* ]] || continue
     fi
     agent_state_r "$raw" "$pid" "$pane" "${f[4]-}" "${f[5]-}" || continue
-    case "$AS_STATE" in approve|input) n=$(( n + 1 )) ;; esac
+    if [ -n "$AW_WANT" ]; then
+      [[ -n "$AS_STATE" && "$AW_WANT" == *" $AS_STATE "* ]] || continue
+    else
+      [ "$AS_AGENT" = 1 ] || continue
+    fi
+    n=$(( n + 1 ))
+    [ -z "$AW_LIST" ] || aw_row "$n" "$pane" "${f[0]}" "$wi" "$pi" "$raw"
   done
   REPLY="$n"
 }
@@ -8190,6 +8245,123 @@ if [ "${1:-}" = "--jump" ]; then
   # one tmux thinks was active last.
   parse_spec "S:$_jt"
   tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "$(spec_target)" 2>/dev/null || exit 1
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Agents from the command line: --agents, --agent-next
+# ---------------------------------------------------------------------------
+#
+# The panes the dashboard counts, for a status line, a script or a key, with
+# Claude's registry state, which no tmux format can see.  Both modes walk the
+# panes with agents_waiting_r (one tmux call, the registry read, agent_state_r
+# per pane), so what they say is what the rows and the count say.  Down here,
+# below --list and --jump, so that no list parses them.
+#
+#   --agents [--count] [STATES]   one line per agent pane, tab-separated:
+#                                 pane id, target, agent, state, since (epoch
+#                                 seconds), description -- or, with --count,
+#                                 how many.  STATES (approve,input,...) keeps
+#                                 only the panes in one of them.
+#   --agent-next [STATES]         switch to the next of them (approve,input by
+#                                 default), wrapping.
+#
+# The columns are fixed: a new one only ever goes at the end.  `-` is a state
+# or a since that is not known (only Claude's registry says since when).  The
+# target is spec_target's for the pane's row, `=session:=window.pane`, in the
+# first session that shows it, as the count takes it.  The description is the
+# row's (row_desc_r: none when it only repeats the name, the host or the
+# command), before @interdimux-title-max cuts it, and cleaned as a title is
+# (title_text_r): no tab or newline can reach a line.
+#
+# Most urgent first -- approve, input, error, done, working, idle, then a pane
+# with no state -- and within a state, the one in it longest first.  That
+# order is the KEY of AW_ROWS, which bash walks in index order: urgency, since
+# (an unknown one after every known one) and the pane's place in the list, so
+# nothing is sorted and nothing forks.
+AW_ROWS=()
+aw_row() { # $1 the pane's place, $2 its id, $3 session, $4 window, $5 pane index, $6 command
+  local r s d="$AS_DESC"
+  case "$AS_STATE" in
+    approve) r=0 ;; input) r=1 ;; error) r=2 ;; done) r=3 ;; working) r=4 ;; idle) r=5 ;; *) r=6 ;;
+  esac
+  # A record with no statusUpdatedAt says 0 (claude_registry_r), which the row
+  # shows no age for (age_of): unknown, not the oldest of all.
+  s="$AS_SINCE"
+  case "$s" in ''|0|*[!0-9]*|???????????*) s="" ;; esac
+  case "$SHOW_TITLE" in off) d="" ;; known) [ "$AS_KNOWN" = 1 ] || d="" ;; esac
+  [ -z "$d" ] || { row_desc_r "$d" "$6"; d="$REPLY"; }
+  r=$(( r * 10**15 + 10#${s:-9999999999} * 10**5 + $1 ))
+  AW_ROWS[r]="$2$US$3$US$4$US$5$US${AS_NAME//[[:cntrl:]]/?}	${AS_STATE:--}	${s:--}	$d"
+}
+
+# STATE,STATE,... ($1) as AW_WANT; status 1 for a word that is no state.
+aw_want() {
+  local w
+  AW_WANT=""
+  set -f; IFS=,
+  for w in $1; do
+    case "$w" in
+      approve|input|error|done|working|idle) AW_WANT+=" $w" ;;
+      *) unset IFS; set +f; return 1 ;;
+    esac
+  done
+  unset IFS; set +f
+  [ -z "$AW_WANT" ] || AW_WANT+=" "
+}
+
+if [ "${1:-}" = "--agents" ]; then
+  set +e
+  _ac=""
+  [ "${2:-}" = --count ] && { _ac=1; shift; }
+  if [ $# -gt 2 ] || ! aw_want "${2:-}"; then
+    echo "interdimux: usage: --agents [--count] [STATE,...]  (approve input error done working idle)" >&2
+    exit 2
+  fi
+  [ -n "$_ac" ] || AW_LIST=1
+  agents_waiting_r
+  if [ -n "$_ac" ]; then
+    printf '%s\n' "$REPLY"
+    exit 0
+  fi
+  for _k in ${AW_ROWS[@]+"${!AW_ROWS[@]}"}; do
+    set -f; IFS="$US"; _f=(${AW_ROWS[_k]}); unset IFS; set +f
+    parse_spec "P:${_f[1]}:${_f[2]}:${_f[3]}"
+    printf '%s\t' "${_f[0]}"; spec_target; printf '\t%s\n' "${_f[4]-}"
+  done
+  exit 0
+fi
+
+# The next agent that needs you, for a key (@interdimux-agent-next-key) or a
+# script: the first pane in --agents order AFTER the one you are in, wrapping,
+# so that pressing it again visits the next one -- A, B, C, A -- rather than
+# going back and forth between the two at the top: you have not answered A
+# yet, so A is still first.  From a pane not in the list, the first one.
+if [ "${1:-}" = "--agent-next" ]; then
+  set +e
+  if [ $# -gt 2 ] || ! aw_want "${2:-approve,input}"; then
+    echo "interdimux: usage: --agent-next [STATE,...]  (approve input error done working idle)" >&2
+    exit 2
+  fi
+  AW_LIST=1
+  agents_waiting_r
+  _first="" _next="" _here=""
+  for _k in ${AW_ROWS[@]+"${!AW_ROWS[@]}"}; do
+    [ -n "$_first" ] || _first="$_k"
+    if [ -n "$_here" ]; then _next="$_k"; break; fi
+    [ "${AW_ROWS[_k]%%"$US"*}" = "${TMUX_PANE:-}" ] && _here=1
+  done
+  _next="${_next:-$_first}"
+  if [ -z "$_next" ]; then
+    imux_msg "no agent needs you"
+    exit 0
+  fi
+  # The client that pressed the key (TMUX_C), as for --jump.  By the pane's
+  # id, which moves it to that session, window and pane at once, and leaves
+  # the choice of session to tmux when a session group or a linked window
+  # shows the pane more than once: the one you are in if it is one of them,
+  # else the one used last (tmux 3.7b, measured).
+  tmux switch-client ${TMUX_C[@]+"${TMUX_C[@]}"} -t "${AW_ROWS[_next]%%"$US"*}" 2>/dev/null || exit 1
   exit 0
 fi
 
@@ -9012,7 +9184,7 @@ if [ "${1:-}" = "--doctor" ]; then
   # option by that name was once accepted here and green-ticked while nothing
   # read it.  Unknown now, so setting it says so.)
   # (`autobuild` is read by interdimux.tmux, at plugin load.)
-  _known=("${OPT_NAMES[@]}" key dashboard-key jump-keys autobuild)
+  _known=("${OPT_NAMES[@]}" key dashboard-key jump-keys agent-next-key autobuild)
 
   _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 
@@ -9102,7 +9274,7 @@ if [ "${1:-}" = "--doctor" ]; then
           ????*) printf 'a colour index must be 0-255' ;;
           *) [ "$v" -le 255 ] || printf 'a colour index must be 0-255' ;;
         esac ;;
-      key|dashboard-key)
+      key|dashboard-key|agent-next-key)
         # Any key tmux can bind, not one character: --bind-keys hands the value to
         # `tmux bind-key` as it is, and C-f, M-g, F5 and Space all bind fine — a
         # length test called them wrong in the same report that confirmed them
@@ -9115,7 +9287,16 @@ if [ "${1:-}" = "--doctor" ]; then
         # was called unknown while the message listed it as an example.
         # A bare ';' is the one it cannot judge — tmux reads it as a command
         # separator, so the query "succeeds" and the binding never happens.
+        # The opt-in agent-next key is never bound over the navigator's or the
+        # dashboard's key (--bind-keys skips it), which nothing else here would
+        # show: that key still opens what it opened, so it ticks.
         local _ke
+        if [ "$n" = agent-next-key ]; then
+          case "$v" in
+            "$_k")  printf 'prefix+%s opens the navigator, so it is not bound to --agent-next' "$v"; return 0 ;;
+            "$_dk") printf 'prefix+%s opens the dashboard, so it is not bound to --agent-next' "$v"; return 0 ;;
+          esac
+        fi
         case "$v" in
           ';') printf "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
           *)   _ke=$(tmux list-keys -T prefix "$v" 2>&1 >/dev/null) \
