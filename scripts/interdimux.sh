@@ -325,15 +325,15 @@ if [ "${1:-}" = "--bind-keys" ]; then
   #
   # #{q:} on the NAME only: a session name may contain a quote, which would
   # otherwise close the -e token and kill the binding.
-  _bk_title=' interdimux · #{q:session_name} '
-  _bk_env+=" -e \"INTERDIMUX_TITLE=$_bk_title\""
+  _bk_title_env=' interdimux · #{q:session_name} '
+  _bk_env+=" -e \"INTERDIMUX_TITLE=$_bk_title_env\""
   # -T is a format AGAIN once display-popup has it, so a name spliced in here
   # would be expanded twice -- and connect_dir keeps a directory's name verbatim,
   # so a project named 'x#(cmd)' ran cmd on every prefix+f in it.  '##' leaves
   # run-shell's pass as '#', and display-popup then inserts the name as a VALUE,
   # which is never expanded again; it never meets the parser, so needs no #{q:}.
   # The "#[bold]" before it stays single: '##[' does not collapse before '['.
-  _bk_ttl=' interdimux · ##{session_name} '
+  _bk_title_fmt=' interdimux · ##{session_name} '
 
   # #{?…,…,…} treats the string "0" as FALSE, so it cannot be used as an
   # emptiness test — #{==:…,} can.  (Width/height can't legitimately be 0, but
@@ -342,7 +342,7 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_h='#{?#{==:#{@interdimux-popup-height},},75%,#{@interdimux-popup-height}}'
 
   tmux bind-key "$_bk_nav" run-shell -bC \
-    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_ttl\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title_fmt\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
 
@@ -9427,9 +9427,10 @@ if [ "${1:-}" = "--launch" ]; then
   if tmux_ge 303; then
     # Border style/lines are left to the user's popup-border-* options;
     # only destructive modes recolour the frame
+    #
     # The NAME is doubled, not the style: -T is a format, and a session named
-    # after a directory 'x#(cmd)' would run cmd here (see _bk_ttl).  title
-    # itself stays raw for INTERDIMUX_TITLE, which popup_accent escapes.
+    # after a directory 'x#(cmd)' would run cmd here (see _bk_title_fmt).
+    # title itself stays raw for INTERDIMUX_TITLE, which popup_accent escapes.
     chrome=(-T "${POPUP_TITLE_STYLE}${title//'#'/##}")
     [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
     # Popups don't inherit TMUX_PANE — forward it so current-target detection
