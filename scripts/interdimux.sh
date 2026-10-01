@@ -999,6 +999,10 @@ build_fzf_theme() {
   #     came out too wide and was clipped.  `--style=default` goes FIRST
   #     because the preset also resets --info, the gutter colour, the separator
   #     and --highlight-line, all of which are set below.
+  #   --preview       `--preview 'bat {}'` ran on every row of the pickers that
+  #     have no preview of their own (swap, Health, Jobs, the fzf dashboard) and
+  #     took half the popup.  The navigator's and ctrl-o's own --preview come
+  #     after this, so they still apply.
   # Each reset is fzf's own default, so without $FZF_DEFAULT_OPTS the screen is
   # unchanged.  @interdimux-fzf-opts is appended last and can still ask for any
   # of them -- that is the channel for a deliberate choice.
@@ -1006,6 +1010,7 @@ build_fzf_theme() {
   fzf_ge 58 && FZF_THEME+=(--style=default)
   FZF_THEME+=(
     --no-height
+    --no-preview
     --no-border
     --margin=0
     --padding=0
@@ -7787,7 +7792,7 @@ if [ "${1:-}" = "--dirs" ]; then
     --prompt='new session ❯ ' \
     ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
     --preview="bash '$SCRIPT_PATH' --dirs-preview {-1}" \
-    --preview-window="right,40%,border-left,nowrap" \
+    --preview-window="right,40%,border-left,nowrap,nohidden" \
     --bind="ctrl-f:reload(bash '$SCRIPT_PATH' --dirs-list --deep {q})+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints deep {q})${ctrl_f_extra}" \
     --bind="ctrl-g:reload(bash '$SCRIPT_PATH' --dirs-list --scan {-1})+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints browse {-1})" \
     --bind="ctrl-r:reload(bash '$SCRIPT_PATH' --dirs-list)+transform-$HINT_BAR(bash '$SCRIPT_PATH' --dirs-hints)" \
@@ -8407,13 +8412,13 @@ if [ "${1:-}" = "--doctor" ]; then
   #
   # Nothing else in them can.  build_fzf_theme resets what people usually put
   # there — --tmux/--popup, --height, --border, --margin, --padding, --style,
-  # --with-shell, and every colour — on each fzf that parses the flag, and an
-  # fzf too old to parse one rejects it here.  This used to warn about those
-  # very flags, and to advise moving them to @interdimux-fzf-opts: the one place
-  # they DO take effect, since it comes after the resets.  Following it turned a
-  # harmless global setting into the nested frame and shrunk list the resets
-  # exist to prevent.  (Whether the flags there are sensible is the option
-  # check's business, and a deliberate choice's.)
+  # --preview, --with-shell, and every colour — on each fzf that parses the
+  # flag, and an fzf too old to parse one rejects it here.  This used to warn
+  # about those very flags, and to advise moving them to @interdimux-fzf-opts:
+  # the one place they DO take effect, since it comes after the resets.
+  # Following it turned a harmless global setting into the nested frame and
+  # shrunk list the resets exist to prevent.  (Whether the flags there are
+  # sensible is the option check's business, and a deliberate choice's.)
   if { [ -n "$_fdo" ] || [ -n "$_fdof" ]; } && [ -n "$_jfzf" ]; then
     if ! _fe=$(FZF_DEFAULT_OPTS="$_fdo" FZF_DEFAULT_OPTS_FILE="$_fdof" "$_jfzf" --version 2>&1 >/dev/null </dev/null); then
       _bad "fzf rejects its default options — every picker exits before it draws"
@@ -10519,7 +10524,10 @@ while true; do
   # could not be toggled back on.
   fzf_opts+=(--preview="bash '$SCRIPT_PATH' --preview {-1}")
   if [ "$SHOW_PREVIEW" = "on" ]; then
-    fzf_opts+=(--preview-window="right,50%,border-left,nowrap")
+    # nohidden: --preview-window is cumulative, so a `hidden` in
+    # $FZF_DEFAULT_OPTS outlived this one, and the rows were sized for a
+    # preview that never drew.  (fzf's default, so otherwise a no-op.)
+    fzf_opts+=(--preview-window="right,50%,border-left,nowrap,nohidden")
   else
     fzf_opts+=(--preview-window="right,50%,border-left,nowrap,hidden")
   fi
