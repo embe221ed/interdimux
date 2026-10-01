@@ -74,9 +74,10 @@ plain() { sed 's/\x1b\[[0-9;]*m//g'; }
 echo "interdimux old-fzf tests"
 echo
 
-# The README's floor, and the only release on the `fzf_ge 42` false branch
-# (plain `--info=inline`); one below the `resize` floor (and what Ubuntu 24.04
-# ships); and the last release that draws on stderr.
+# The README's floor, and the only release under test on the `fzf_ge 42` false
+# branch (plain `--info=inline`; 0.41 is on it too); one below the `resize`
+# floor (and what Ubuntu 24.04 ships); and the last release that draws on
+# stderr.
 VERSIONS=(0.40.0 0.44.1 0.52.1)
 OLD_DIR="${INTERDIMUX_OLD_FZF_DIR:-}"
 have=()

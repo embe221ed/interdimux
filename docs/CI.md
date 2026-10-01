@@ -126,10 +126,10 @@ unconditional `resize` bind (an event from 0.46) made 0.44 refuse to start, and
 on 0.46–0.52, which draw their whole interface on stderr, the navigator's
 stderr log swallowed it and the popup stayed black. `tests/test_old_fzf.sh`
 runs the navigator on real 0.40.0, 0.44.1 and 0.52.1 release binaries (0.40.0
-is the README's floor, and the only release on the `fzf_ge 42` false branch),
-which the workflow fetches into the directory named by
-`INTERDIMUX_OLD_FZF_DIR`.  Without the variable it skips, naming each version;
-with it, a version it names that is not there fails.
+is the README's floor, and the only release under test on the `fzf_ge 42`
+false branch, which 0.41 is on too), which the workflow fetches into the
+directory named by `INTERDIMUX_OLD_FZF_DIR`.  Without the variable it skips,
+naming each version; with it, a version it names that is not there fails.
 
 The fetch itself failed the first time it was written, and took the whole job
 with it. fzf's release tags gained their `v` at 0.54.0 — `0.53.0` and older are

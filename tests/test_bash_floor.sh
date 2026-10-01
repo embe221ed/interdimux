@@ -90,9 +90,13 @@ old_bash() { # $1 = version: sets REPLY to a bash of exactly that version, or fa
     && case "$("$REPLY" -c 'echo "$BASH_VERSION"' 2>/dev/null)" in "$1".*) true ;; *) false ;; esac
 }
 # Every version a case below runs on: the two that must be refused, then 4.3
-# to 5.1, the bashes that expand an array subscript twice.  This list is the
-# authority; CI's OLD_BASH_VERSIONS has to cover it.
-OLD_VERSIONS=(3.2 4.2 4.3 4.4 5.0 5.1)
+# to 5.1, the bashes that expand an array subscript twice.  These lists are the
+# authority: the cases loop over them, not over lists of their own, so every
+# version a case runs on is one the check below requires.  CI's
+# OLD_BASH_VERSIONS has to cover them.
+REFUSED_VERSIONS=(3.2 4.2)
+DOUBLE_EXPANSION_VERSIONS=(4.3 4.4 5.0 5.1)
+OLD_VERSIONS=("${REFUSED_VERSIONS[@]}" "${DOUBLE_EXPANSION_VERSIONS[@]}")
 
 # --- the old bashes are there, when they were promised ---------------------------------
 if [ -n "$OLD_DIR" ]; then
@@ -115,7 +119,7 @@ if command -v dash >/dev/null 2>&1; then
 else
   echo "  (skipped: no dash for the not-bash case)"
 fi
-for v in 3.2 4.2; do
+for v in "${REFUSED_VERSIONS[@]}"; do
   if old_bash "$v"; then
     b="$REPLY"
     refused "$b" "bash $("$b" -c 'echo "$BASH_VERSION"')"
@@ -188,8 +192,9 @@ fi
 # draws) with it.  Each key that reaches such a test is here: a session and its
 # window and pane lines, a pane's cwd (the git cache), a recent directory (the
 # recent list, the navigator's directory rows, ctrl-o's), a zoxide entry, and a
-# network mount point with the directory below it.  4.3 is the floor and 5.1
-# the last bash with the double expansion; 4.4 and 5.0 run too when present.
+# network mount point with the directory below it.  It runs on every bash in
+# DOUBLE_EXPANSION_VERSIONS: 4.3, the floor, to 5.1, the last bash with the
+# double expansion, 4.4 and 5.0 included.
 echo
 echo "a '\$' in a session name or directory, on bash < 5.2"
 DL="$TMPD/dl"
@@ -220,7 +225,7 @@ has_rows() { # $@ = specs that must all be in $rows
   for s in "$@"; do case " $rows" in *" $s "*) ;; *) return 1 ;; esac; done
 }
 dollar_ok=0
-for v in 4.3 4.4 5.0 5.1; do
+for v in "${DOUBLE_EXPANSION_VERSIONS[@]}"; do
   if ! old_bash "$v"; then
     echo "  (skipped bash $v: not in \$INTERDIMUX_OLD_BASH_DIR)"
     continue

@@ -40,9 +40,9 @@ on:
 #             release (later patches come only as diffs, and 5.0 has no
 #             patch-level tarball at all); each is installed under its
 #             major.minor, where tests/test_bash_floor.sh looks.
-#   fzf       0.40.0, the README's floor and the only release on the
-#             `fzf_ge 42` false branch; 0.44.1 and 0.52.1, one per failure
-#             tests/test_old_fzf.sh guards.
+#   fzf       0.40.0, the README's floor and the only release under test on
+#             the `fzf_ge 42` false branch (0.41 is on it too); 0.44.1 and
+#             0.52.1, one per failure tests/test_old_fzf.sh guards.
 #
 # Those two suites' own lists are the authority, not these.  With the
 # directories set (below), a version a suite names that is not there FAILS the
