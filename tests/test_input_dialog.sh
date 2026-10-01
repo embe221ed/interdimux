@@ -436,6 +436,29 @@ keys End
 run cursor_after " cd ef"
 check "after Ctrl-U, End lands after the text" \
       "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+
+# The Alt word keys (ESC b, f, d, DEL) edit the same way: each delete is made
+# with wide text after it, which End or Alt-f then has to cross.
+typed " 日本x"
+wait_vis " cd ef 日本x" || true
+keys M-b
+run cursor_after " cd ef "
+check "Alt-b puts the cursor at the start of a wide word" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys M-BSpace
+run wait_vis " cd 日本x"
+check "Alt-Backspace in the middle erases the word before the cursor" "shown: '$VIS'" "$RC"
+keys End
+run cursor_after " cd 日本x"
+check "after Alt-Backspace in the middle, End lands after the text" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
+keys Home M-d
+run wait_vis " 日本x"
+check "Alt-d deletes the next word" "shown: '$VIS'" "$RC"
+keys M-f
+run cursor_after " 日本x"
+check "after Alt-d, Alt-f over a wide word lands after the text" \
+      "want x=$WANT_X, got x=$CUR_X; field: '$FIELD_ROW'" "$RC"
 keys Escape
 
 # ---------------------------------------------------------------------------

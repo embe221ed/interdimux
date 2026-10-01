@@ -5872,7 +5872,7 @@ input_dialog() {
   # EOF is accepted below as "take what we have", which is right for one prompt
   # and non-terminating for a loop.
   _input_eof=0
-  local c c2 c3 vis len off cur k w blank
+  local c vis len off cur k w blank
   printf -v blank '%*s' "$field_w" ''
   while true; do
     len=${#buf}
@@ -5963,27 +5963,7 @@ input_dialog() {
     IFS= read -rsN1 -u "$ifd" c || { _input_eof=1; c=$'\n'; }   # EOF → accept what we have
     case "$c" in
       $'\n'|$'\r') break ;;                                  # accept
-      $'\x1b')                                               # ESC: a sequence, or lone → cancel
-        if IFS= read -rsN1 -t 0.05 -u "$ifd" c2 && [[ "$c2" == '[' || "$c2" == 'O' ]]; then
-          IFS= read -rsN1 -t 0.05 -u "$ifd" c3
-          case "$c3" in
-            D) (( pos > 0 ))   && pos=$(( pos - 1 )) ;;      # left
-            C) (( pos < len )) && pos=$(( pos + 1 )) ;;      # right
-            H) pos=0 ;;
-            F) pos=$len ;;
-            [0-9])
-              IFS= read -rsN1 -t 0.05 -u "$ifd" _           # swallow the trailing '~'
-              case "$c3" in
-                1|7) pos=0 ;;
-                4|8) pos=$len ;;
-                3) (( pos < len )) && {                     # delete
-                     buf="${buf:0:pos}${buf:pos+1}" cw="${cw:0:pos}${cw:pos+1}"
-                     _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; } ;;
-              esac ;;
-          esac
-        else
-          buf=""; break                                      # lone ESC → cancel
-        fi ;;
+      $'\x1b') _dlg_esc "$ifd" || { buf=""; break; } ;;     # a key (see _dlg_esc), or lone ESC → cancel
       $'\x7f'|$'\x08') (( pos > 0 )) && {
                          buf="${buf:0:pos-1}${buf:pos}" cw="${cw:0:pos-1}${cw:pos}"; pos=$(( pos - 1 ))
                          _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; } ;;
@@ -6029,6 +6009,9 @@ info_flash() {
   shift 2
   dialog_open "$_if_accent" "$_if_title" ${@+"$@"}
   sleep 0.9
+  # A key pressed to dismiss the box was left for fzf once this returned: Esc
+  # closed the whole navigator, and anything else became query text.
+  drain_input
   dialog_close
 }
 
@@ -7136,6 +7119,86 @@ agents_waiting_r() {
   REPLY="$n"
 }
 
+# _dlg_esc FD -- the rest of a key whose ESC input_dialog has just read from FD,
+# applied to its buffer (buf, cw and pos are its locals, as in _dlg_remeasure).
+# Returns non-zero to cancel the dialog: for a lone ESC -- nothing after it
+# within 50 ms -- as always, and for Esc pressed twice or Esc then Ctrl-C.  Any
+# other byte in those 50 ms makes it an Alt chord, as readline and fzf read it:
+# Alt-x IS ESC x, so Esc with another key hard on its heels does not cancel.
+# Here and not beside input_dialog because only the actions below open one,
+# and the fzf callbacks above would pay to parse it on every keystroke.
+#
+# Any other key is read WHOLE, then handled or dropped whole, never typed:
+#
+#   ESC b/B, ESC f/F    back / on by a word -- Alt-b/f, and what Ghostty sends
+#                       for Option+Left/Right
+#   ESC d/D, ESC DEL/^H delete a word forward / back
+#   ESC [ ... / ESC O ...   CSI and SS3: parameter and intermediate bytes
+#                       (0x20-0x3F), then one final byte (0x40-0x7E).  The
+#                       arrows, by a word with any modifier but Shift (Ctrl or
+#                       Alt, as readline's inputrc has them); Home and End in
+#                       every spelling; Delete.
+#
+# It used to read ESC and ONE more byte, and cancel on anything but [ or O, so
+# Alt-b threw away all the user had typed; and after the [ it took one byte
+# (two after a digit), so Ctrl-Left -- ESC [ 1 ; 5 D -- went home and typed
+# "5D", F5 typed "~", and Enter applied the junk.  A word is a run of letters
+# and digits, as it is to readline's Alt keys, with any character drawn into
+# the cell before it (a 0 in cw: the accent of an NFD é) -- so a word key never
+# stops between a letter and its mark.  Ctrl-W keeps its blank-ended words.
+_dlg_esc() {
+  local fd=$1 c="" p="" f="" k=0 e=0
+  IFS= read -rsN1 -t 0.05 -u "$fd" c || return 1
+  case "$c" in
+    '['|O)
+      while IFS= read -rsN1 -t 0.05 -u "$fd" c; do
+        printf -v k '%d' "'$c" 2>/dev/null || k=0
+        if (( k >= 0x20 && k < 0x40 )); then p+="$c"; continue; fi
+        (( k >= 0x40 && k < 0x7f )) && f="$c"
+        break
+      done
+      case "$p$f" in
+        D|1D|'1;2D') c=left ;;
+        C|1C|'1;2C') c=right ;;
+        '1;'*D) c=b ;;
+        '1;'*C) c=f ;;
+        *H|1~|7~) c=home ;;
+        *F|4~|8~) c=end ;;
+        3~) c=del ;;
+        *) return 0 ;;
+      esac ;;
+    $'\x1b'|$'\x03') return 1 ;;
+  esac
+  case "$c" in
+    left)  (( pos > 0 )) && pos=$(( pos - 1 )) ;;
+    right) (( pos < ${#buf} )) && pos=$(( pos + 1 )) ;;
+    home)  pos=0 ;;
+    end)   pos=${#buf} ;;
+    del)   (( pos < ${#buf} )) && {
+             buf="${buf:0:pos}${buf:pos+1}" cw="${cw:0:pos}${cw:pos+1}"
+             _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"; } ;;
+    [bB]|$'\x7f'|$'\x08')
+      p="${buf:0:pos}"
+      while [ -n "$p" ] && [[ "${p: -1}" != [[:alnum:]] ]]; do p="${p%?}"; done
+      while [ -n "$p" ] && [[ "${p: -1}" == [[:alnum:]] || "${cw:${#p}-1:1}" == 0 ]]; do p="${p%?}"; done
+      e=${#p}
+      if [[ "$c" == [bB] ]]; then pos=$e; else
+        buf="$p${buf:pos}" cw="${cw:0:e}${cw:pos}"; pos=$e
+        _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"
+      fi ;;
+    [fFdD])
+      p="${buf:pos}"
+      while [ -n "$p" ] && [[ "${p:0:1}" != [[:alnum:]] ]]; do p="${p#?}"; done
+      while [ -n "$p" ] && [[ "${p:0:1}" == [[:alnum:]] || "${cw:${#buf}-${#p}:1}" == 0 ]]; do p="${p#?}"; done
+      e=$(( ${#buf} - ${#p} ))
+      if [[ "$c" == [fF] ]]; then pos=$e; else
+        buf="${buf:0:pos}$p" cw="${cw:0:pos}${cw:e}"
+        _dlg_remeasure $(( pos - 1 )); _dlg_remeasure "$pos"
+      fi ;;
+  esac
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Actions (called by fzf keybindings via execute)
 # ---------------------------------------------------------------------------
@@ -7602,6 +7665,9 @@ if [ "${1:-}" = "--action" ]; then
           fi
           sleep 0.5
         fi
+        # "any key" is a one-byte read, so the rest of a key that sends more
+        # (an arrow is ESC [ B) was left for fzf, and came back as query text.
+        drain_input
       else
         # The sub-minute path runs on a tmux timer, which has no job id to
         # cancel and dies with the server.  Say so rather than imply a queue.
