@@ -7236,11 +7236,11 @@ if [ "${1:-}" = "--action" ]; then
   # prints nothing at all.  The indices are compared as well: spec_target's exact
   # "=idx" form still falls back to a window NAMED exactly "3" once index 3 is
   # gone.  Free-text fields go last, where a stray separator cannot shift the
-  # fields after them.
+  # fields after them.  (The zoom and active flags are for ^z, below.)
   _t_info=$(tmux has-session -t "$target" \; display-message -p -t "$target" \
-    "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}#{session_windows}${US}#{window_panes}${US}#{session_group}${US}#{session_name}${US}#{window_name}${US}#{pane_current_command}" \
+    "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}#{session_windows}${US}#{window_panes}${US}#{window_zoomed_flag}${US}#{pane_active}${US}#{session_group}${US}#{session_name}${US}#{window_name}${US}#{pane_current_command}" \
     2>/dev/null)
-  IFS="$US" read -r T_SID T_WID T_PID T_WIDX T_PIDX T_SWINS T_WPANES T_SGRP T_SNAME T_WNAME T_PCMD <<< "$_t_info"
+  IFS="$US" read -r T_SID T_WID T_PID T_WIDX T_PIDX T_SWINS T_WPANES T_WZOOM T_PACT T_SGRP T_SNAME T_WNAME T_PCMD <<< "$_t_info"
   case "$SPEC_TYPE" in
     S) [ -n "$T_SID" ] ;;
     W) [ -n "$T_WID" ] && [ "$T_WIDX" = "$SPEC_WIDX" ] ;;
@@ -7438,7 +7438,15 @@ if [ "${1:-}" = "--action" ]; then
         imux_msg "only panes can be zoomed"
         exit 0
       fi
-      tmux resize-pane -Z -t "$target" 2>/dev/null || imux_msg "failed to toggle zoom"
+      # resize-pane -Z toggles the WINDOW's zoom, whichever pane it names: with
+      # another pane of the window zoomed, ^z on this one only unzoomed that
+      # one, the opposite of what the hint says.  select-pane -Z moves the zoom
+      # to it instead.  On the zoomed pane itself, ^z still unzooms.
+      if [ "$T_WZOOM" = 1 ] && [ "$T_PACT" = 0 ]; then
+        tmux select-pane -Z -t "$target"
+      else
+        tmux resize-pane -Z -t "$target"
+      fi 2>/dev/null || imux_msg "failed to toggle zoom"
       ;;
 
     detach)

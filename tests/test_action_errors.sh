@@ -150,6 +150,32 @@ else
   report "an action outside a popup does not hang" pass
 fi
 
+# ^z on a pane whose window already has ANOTHER pane zoomed (UX-62).  tmux's
+# resize-pane -Z toggles the window whichever pane it names, so the first ^z
+# only unzoomed the other pane -- the hint says "zoom", and the list came back
+# with the Z gone.  The chosen pane must end up zoomed; ^z again unzooms it,
+# as on any zoomed pane.  tmux's own flags are the oracle.
+tmux -L "$SOCK" new-session -d -s zoomer -x 100 -y 30 'sleep 900'
+tmux -L "$SOCK" split-window -t '=zoomer:0' 'sleep 900'
+tmux -L "$SOCK" split-window -t '=zoomer:0' 'sleep 900'
+tmux -L "$SOCK" select-pane -t '=zoomer:0.0'
+tmux -L "$SOCK" resize-pane -Z -t '=zoomer:0.0'
+zstate() { tmux -L "$SOCK" display-message -p -t '=zoomer:0' 'zoomed=#{window_zoomed_flag} active=#{pane_index}'; }
+z0=$(zstate)
+timeout 10 bash "$SCRIPT" --action zoom 'P:zoomer:0:2' >/dev/null 2>&1 || true
+z1=$(zstate)
+timeout 10 bash "$SCRIPT" --action zoom 'P:zoomer:0:2' >/dev/null 2>&1 || true
+z2=$(zstate)
+if [ "$z0" = 'zoomed=1 active=0' ] && [ "$z1" = 'zoomed=1 active=2' ]; then
+  report "^z on a pane while another pane of its window is zoomed zooms the chosen one" pass
+else
+  report "^z on a pane while another pane of its window is zoomed zooms the chosen one" fail
+  ERRORS+="    before: $z0 / after: $z1"$'\n'
+fi
+[ "$z2" = 'zoomed=0 active=2' ] \
+  && report "...and ^z on it again unzooms it" pass \
+  || { report "...and ^z on it again unzooms it" fail; ERRORS+="    after the second: $z2"$'\n'; }
+
 # tmux parses a leading '-' as a flag unless -- separates it.  Checked by what
 # tmux stored, not by the command's spelling in the script (that grep broke on
 # every change to how the name is escaped).  The window rename is checked the
