@@ -5062,8 +5062,9 @@ at_enable_hint() {
 sched_resolve() {
   local target="$1"
   [ "$target" = "." ] && target="${TMUX_PANE:-}"
-  # Never without -t: tmux would pick "the current pane" itself, which outside
-  # a pane is the most recently active session's -- a pane nobody named.
+  # Never without a target: tmux would pick "the current pane" itself, which
+  # outside a pane is the most recently active session's -- a pane nobody named.
+  # An empty -t is no help: tmux reads -t '' exactly as no -t at all.
   [ -n "$target" ] || return 1
   local info
   info=$(tmux display-message -p -t "$target" \

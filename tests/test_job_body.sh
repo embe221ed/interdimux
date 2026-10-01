@@ -222,6 +222,21 @@ submit . 'echo DOT_OK'
 expect "'.' with TMUX_PANE set still schedules into that pane" \
   "$(sed -n 's/^# imux-pane: //p' "$TMPD/body" 2>/dev/null)" "$P0"
 
+# sched_resolve's own guard, beneath the CLI's: no caller hands it an empty
+# target today, but tmux reads -t '' exactly as no -t, so that guard is all
+# that keeps the next caller from scheduling into tmux's pick.  The function is
+# taken from the script and called directly, outside any pane.
+fn=$(sed -n '/^sched_resolve() {$/,/^}$/p' "$SCRIPT")
+# resolve TARGET -> "refused", or the pane it resolved to
+resolve() (
+  unset TMUX_PANE; US=$'\x1f'; eval "$fn"
+  if sched_resolve "$1"; then echo "$SCHED_PANE"; else echo refused; fi
+)
+expect "sched_resolve, taken from the script, resolves a named pane (precondition)" \
+  "$(resolve "$P0")" "$P0"
+expect "sched_resolve refuses an empty target" "$(resolve '')" refused
+expect "sched_resolve refuses '.' outside a pane" "$(resolve .)" refused
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then
