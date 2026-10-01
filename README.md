@@ -591,7 +591,9 @@ Claude's state included, which no tmux format can see:
 set -ag status-right ' #(bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --agents --count approve,input)'
 ```
 
-That is one bash and one tmux query every `status-interval`; fzf is not needed.
+That is one bash and three short tmux calls every `status-interval` (its
+version, the options and the panes; only the last is as big as your server),
+and fzf is not needed.
 
 `--agent-next` switches to the next agent that needs you (`approve` or `input`,
 or the states you give it), with no popup: from anywhere else the first in that
