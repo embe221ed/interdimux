@@ -335,7 +335,7 @@ for f in fd fdfind; do
   finders+=("$f:$TMPDIR_TEST/fdbin")
   break
 done
-[ "${#finders[@]}" -gt 1 ] || echo "  (no fd or fdfind: the deep result sets run under find only)"
+[ "${#finders[@]}" -gt 1 ] || echo "  (no fd or fdfind: the deep result sets under fd are skipped; find ran them)"
 
 # deep_rows NAME BIN PROJECT_DIRS QUERY WANT...: --dirs-list --deep QUERY's
 # spec column is exactly WANT, in order, and nothing went to stderr

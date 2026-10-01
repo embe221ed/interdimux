@@ -166,7 +166,7 @@ check() {
 }
 
 renderers=(off); [ -x "$BIN" ] && renderers=(on off)
-[ -x "$BIN" ] || echo "  (rust binary not built: bash renderer only)"
+[ -x "$BIN" ] || echo "  (the Rust core is not built: the Rust renderer's cases are skipped)"
 
 # --- the navigator: open, first list, cancel --------------------------------
 for r in "${renderers[@]}"; do

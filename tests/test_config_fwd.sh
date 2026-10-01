@@ -124,7 +124,7 @@ mapfile -t CODE_OPTS < <(grep -vE '^[[:space:]]*#' "$SCRIPT" \
   | grep -oE '@interdimux-[a-z-]+' | sed 's/^@interdimux-//' | sort -u)
 stray=""
 for o in ${CODE_OPTS[@]+"${CODE_OPTS[@]}"}; do
-  case "$o" in key|dashboard-key|jump-keys) continue ;; esac
+  case "$o" in key|dashboard-key|jump-keys|agent-next-key) continue ;; esac
   has "$o" ${OPT_NAMES[@]+"${OPT_NAMES[@]}"} || stray+=" $o"
 done
 if [ "${#CODE_OPTS[@]}" -ge 20 ] && [ -z "$stray" ]; then
