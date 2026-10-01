@@ -74,7 +74,7 @@ A portal gun for your tmux sessions.
   match-scope cycling, 0.61 ghost text, 0.63 the footer hint bar, 0.66 the
   scope highlight, 0.67 the frozen identity column, 0.74 raw filter mode) —
   but 0.74 is the only version the test suite exercises in full;
-  `tests/test_old_fzf.sh` checks just that 0.44 and 0.52 open and draw.
+  `tests/test_old_fzf.sh` checks just that 0.40, 0.44 and 0.52 open and draw.
 - `bash` >= 4.3, on the tmux server's PATH (macOS's own `/bin/bash` is 3.2). An
   older one is refused with a one-line error — on the status line, too, when
   tmux runs it — rather than failing somewhere inside.

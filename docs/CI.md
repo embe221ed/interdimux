@@ -122,7 +122,12 @@ indistinguishable from coverage. Two suites, ~60 assertions, silently absent.
 `ubuntu-24.04`'s apt fzf is 0.44.1. `test_picker_ui` and `test_raw_mode` skip
 below their version floors. Installing 0.74 was worth +22 assertions on its own.
 
-**Fix:** install the fzf release tarball, not the distro package.
+**Fix:** install the fzf release tarball, not the distro package.  It is pinned
+(`FZF_VERSION`) at the latest 0.74 patch release, 0.74.4, the one users run,
+rather than 0.74.0: 0.74.1 to 0.74.4 changed how fzf draws — synchronized
+updates, faster non-ASCII, escape sequences split across reads — and the
+suites read its screen.  The floor the suites pin themselves to
+(`INTERDIMUX_FZF_MINOR=74`) is unchanged.
 
 The skip also hid that on that very fzf the navigator did not open at all: an
 unconditional `resize` bind (an event from 0.46) made 0.44 refuse to start, and
