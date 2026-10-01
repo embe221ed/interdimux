@@ -2352,12 +2352,19 @@ build_process_table() {
   # pgid/tpgid ride along for pick_child: which child is the FOREGROUND job.
   # Every ps this runs on (procps, macOS, the BSDs) has both keywords, and args
   # stays last so it keeps its embedded spaces.
+  #
+  # -A, not -e: "every process" is -e only on procps and macOS.  On OpenBSD and
+  # NetBSD -e means "the environment too", printed in front of argv in the args
+  # column, and FreeBSD's selects no more than your own processes.  -ww: a BSD
+  # ps cuts that column to the terminal (COLUMNS, else the popup's tty on our
+  # stdin), and procps cuts it to COLUMNS (PORT-01, PORT-06).  rust/src/proc.rs
+  # runs the same command.
   while read -r pid ppid pgid tpgid args; do
     PS_ARGS[$pid]="$args"
     PS_PGID[$pid]="$pgid"
     PS_TPGID[$pid]="$tpgid"
     PS_CHILDREN[$ppid]+="$pid "
-  done < <(ps -eo pid=,ppid=,pgid=,tpgid=,args= 2>/dev/null)
+  done < <(ps -A -ww -o pid=,ppid=,pgid=,tpgid=,args= 2>/dev/null)
   return 0
 }
 
@@ -3794,7 +3801,7 @@ gather_targets() {
   # for anyone without the binary.
   #
   # The binary resolves full commands from /proc on Linux and from its own single
-  # `ps -eo` snapshot on macOS/BSD (or when INTERDIMUX_FORCE_PS=1), so it renders
+  # `ps -A` snapshot on macOS/BSD (or when INTERDIMUX_FORCE_PS=1), so it renders
   # correctly EVERYWHERE — it is preferred whenever it is present.  A binary that
   # fails or prints nothing falls through to the bash renderer below (the empty
   # `_imux_out` guard), so preferring it can never turn into an empty picker.

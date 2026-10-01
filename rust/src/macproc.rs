@@ -1,6 +1,6 @@
 //! Native macOS command resolution — the O(panes), fork-free backend.
 //!
-//! The ps backend (proc.rs) forks `ps -eo` and reads the argv of EVERY process
+//! The ps backend (proc.rs) forks `ps -A` and reads the argv of EVERY process
 //! on the host before the first row can emit (~100 ms on a busy Mac).  Here we
 //! ask the kernel directly, per pane:
 //!   * argv          -> sysctl(KERN_PROCARGS2, pid)
@@ -19,7 +19,7 @@
 //!     from macOS `ps` on this host: tab -> \011, newline -> \012, every other
 //!     control byte and 0x7f -> caret notation, printable/valid-UTF-8 bytes
 //!     verbatim.
-//!   * children are listed lowest-pid first.  `ps -eo` orders processes by
+//!   * children are listed lowest-pid first.  `ps -A` orders processes by
 //!     (controlling tty, pid), so lowest-pid == ps's first child for every
 //!     ordinary multi-child shell (jobs, pipelines, foreground+background — all
 //!     share the pane tty and stay pid-ascending).  It differs ONLY when a
