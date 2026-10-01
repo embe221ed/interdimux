@@ -8,6 +8,14 @@
 # core already dropped it (by accident: it tested is_dir() on the lossy string);
 # the bash renderer listed it -- so the list depended on whether the binary was
 # built.  A valid non-ASCII name must of course still be offered.
+#
+# And skipping one must not cost the entry AFTER it.  A name ending in a byte
+# that starts a UTF-8 sequence -- Latin-1 é is 0xE9 -- made bash's `read`,
+# under a UTF-8 locale, swallow the newline into a character and return that
+# entry and the next as one line, which the UTF-8 test then dropped whole
+# (review BUG-111).  The same read fed ctrl-o's scan rows, where the two came
+# out as one row split across two lines, and the rewrite of the recent list on
+# a switch, which dropped both entries from the file.
 
 set -euo pipefail
 
@@ -46,13 +54,22 @@ wait_for() { # $1 = description, $2.. = a command that must succeed
 echo "interdimux directory-candidate tests"
 echo
 
+# A UTF-8 locale, as a desktop has: under C, `read` takes bytes one by one and
+# the line-final lead byte below is harmless.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+
 BAD="$TMPD/fx/nonutf8-"$'\377'"z"          # \377 can never start a UTF-8 sequence
 ACCENT="$TMPD/fx/caf"$'\xc3\xa9'           # valid UTF-8: must still be offered
 ZBAD="$TMPD/fx/zoxide-"$'\xc3'"x"          # a truncated sequence, via zoxide
-mkdir -p "$BAD" "$ACCENT" "$ZBAD" "$TMPD/fx/zgood" "$TMPD/home" "$TMPD/data/interdimux" "$TMPD/bin"
-printf '%s\n' "$BAD" "$ACCENT" > "$TMPD/data/interdimux/recent_dirs"
-# zoxide stub: one directory it would offer, one whose name is not UTF-8
-printf '#!/bin/sh\nprintf "%%s\\n" "%s" "%s"\n' "$ZBAD" "$TMPD/fx/zgood" > "$TMPD/bin/zoxide"
+LAT="$TMPD/fx/caf"$'\xe9'                  # Latin-1: ends in a lead byte
+ZLAT="$TMPD/fx/zcaf"$'\xe9'
+mkdir -p "$BAD" "$ACCENT" "$ZBAD" "$TMPD/fx/zgood" "$TMPD/home" "$TMPD/data/interdimux" "$TMPD/bin" \
+         "$LAT" "$TMPD/fx/after" "$ZLAT" "$TMPD/fx/zafter"
+printf '%s\n' "$BAD" "$ACCENT" "$LAT" "$TMPD/fx/after" > "$TMPD/data/interdimux/recent_dirs"
+# zoxide stub: one directory it would offer, one whose name is not UTF-8, and
+# one ending in a Latin-1 byte with an ordinary one after it
+printf '#!/bin/sh\nprintf "%%s\\n" "%s" "%s" "%s" "%s"\n' "$ZBAD" "$TMPD/fx/zgood" "$ZLAT" "$TMPD/fx/zafter" \
+  > "$TMPD/bin/zoxide"
 chmod +x "$TMPD/bin/zoxide"
 
 tmux -f /dev/null -L "$SOCK" new-session -d -s bench -x 200 -y 50 -c "$TMPD/home" 'sleep 99999'
@@ -88,11 +105,21 @@ for r in $renderers; do
     else
       report "$ctx: a non-UTF-8 recent dir is not offered" pass
     fi
+    if printf '%s\n' "$got" | grep -qxF "$TMPD/fx/after"; then
+      report "$ctx: the recent dir after a Latin-1 one is offered" pass
+    else
+      report "$ctx: the recent dir after a Latin-1 one is offered" fail
+    fi
     if [ "$zox" = on ]; then
       if printf '%s\n' "$got" | grep -qxF "$TMPD/fx/zgood" && ! printf '%s\n' "$got" | grep -qaF "zoxide-"; then
         report "$ctx: zoxide's valid dir is offered, its non-UTF-8 one is not" pass
       else
         report "$ctx: zoxide's valid dir is offered, its non-UTF-8 one is not" fail
+      fi
+      if printf '%s\n' "$got" | grep -qxF "$TMPD/fx/zafter"; then
+        report "$ctx: zoxide's dir after a Latin-1 one is offered" pass
+      else
+        report "$ctx: zoxide's dir after a Latin-1 one is offered" fail
       fi
     fi
   done
@@ -104,6 +131,51 @@ if printf '%s\n' "$got" | grep -qxF "$ACCENT" && ! printf '%s\n' "$got" | grep -
   report "--dirs-list: the valid dir is listed, the non-UTF-8 ones are not" pass
 else
   report "--dirs-list: the valid dir is listed, the non-UTF-8 ones are not" fail
+fi
+if printf '%s\n' "$got" | grep -qxF "$TMPD/fx/after" && printf '%s\n' "$got" | grep -qxF "$TMPD/fx/zafter"; then
+  report "--dirs-list: the dirs after the Latin-1 ones are listed" pass
+else
+  report "--dirs-list: the dirs after the Latin-1 ones are listed" fail
+fi
+
+# ...and its scans of the project dirs, in each mode: a Latin-1 directory and
+# its siblings, all project roots, each its own ◆ row of three fields.  Merged,
+# the pair was one row spanning two lines (the second a bare path), and as one
+# path it was no project root, so both lost their ◆.
+for sd in "caf"$'\xe9' sibling zz; do mkdir -p "$TMPD/scan/$sd/.git"; done
+for mode in default deep 'deep path' scan; do
+  case "$mode" in
+    default)     set -- ;;
+    deep)        set -- --deep '' ;;
+    'deep path') set -- --deep "$TMPD/scan" ;;
+    scan)        set -- --scan "$TMPD/scan" ;;
+  esac
+  raw=$(INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_PROJECT_DIRS="$TMPD/scan" bash "$SCRIPT" --dirs-list "$@" 2>/dev/null \
+          | LC_ALL=C sed 's/\x1b\[[0-9;]*m//g')
+  rows=$(printf '%s\n' "$raw" | LC_ALL=C grep -aF "$TMPD/scan/" || true)
+  if [ -n "$raw" ] && printf '%s\n' "$raw" | LC_ALL=C awk -F'\t' 'NF != 3 { bad = 1 } END { exit bad }' \
+     && [ "$(printf '%s\n' "$rows" | wc -l)" -eq 3 ] \
+     && ! printf '%s\n' "$rows" | LC_ALL=C grep -qav '◆' \
+     && printf '%s\n' "$rows" | cut -f3 | LC_ALL=C grep -qaxF "$TMPD/scan/sibling" \
+     && printf '%s\n' "$rows" | cut -f3 | LC_ALL=C grep -qaxF "$TMPD/scan/zz"; then
+    report "--dirs-list $mode: a Latin-1 project and its siblings, three ◆ rows of 3 fields" pass
+  else
+    report "--dirs-list $mode: a Latin-1 project and its siblings, three ◆ rows of 3 fields" fail
+    ERRORS+="$(printf '%s\n' "$raw" | LC_ALL=C sed -n l | head -8)"$'\n'
+  fi
+done
+set --
+
+# A switch rewrites the recent list, keeping the entries that still exist: the
+# one after the Latin-1 directory must survive it.  (Last: it adds a session.)
+bash "$SCRIPT" --connect-dir "$TMPD/fx/zgood" >/dev/null 2>&1 || true
+if [ "$(head -1 "$TMPD/data/interdimux/recent_dirs")" = "$TMPD/fx/zgood" ] \
+   && grep -qxF "$TMPD/fx/after" "$TMPD/data/interdimux/recent_dirs" \
+   && grep -qaxF "$LAT" "$TMPD/data/interdimux/recent_dirs"; then
+  report "a switch keeps the recent dirs after a Latin-1 one (and that one)" pass
+else
+  report "a switch keeps the recent dirs after a Latin-1 one (and that one)" fail
+  ERRORS+="$(LC_ALL=C sed -n l "$TMPD/data/interdimux/recent_dirs" | head -6)"$'\n'
 fi
 
 echo

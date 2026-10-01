@@ -27,6 +27,11 @@ fn corpus_dir() -> PathBuf {
 /// Render one dump under a fully pinned environment, so the only variable is the
 /// renderer itself. Everything time-, host-, or config-dependent is fixed here.
 fn render(dump: &str, extra: &[(&str, &str)]) -> String {
+    render_bytes(dump.as_bytes(), extra)
+}
+
+/// `render` for a dump that is not UTF-8: tmux hands over a path's bytes raw.
+fn render_bytes(dump: &[u8], extra: &[(&str, &str)]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_imux"));
     cmd.arg("gather3")
         .env_clear()
@@ -64,7 +69,7 @@ fn render(dump: &str, extra: &[(&str, &str)]) -> String {
         .stdin
         .as_mut()
         .unwrap()
-        .write_all(dump.as_bytes())
+        .write_all(dump)
         .expect("write dump");
     let out = child.wait_with_output().expect("run imux");
     assert!(out.status.success(), "imux exited {:?}", out.status);
@@ -103,9 +108,10 @@ fn check(case: &str, extra: &[(&str, &str)]) {
 /// two ways (`<dump>.expected` and, say, `<dump>.view.expected`).
 fn check_as(dump_case: &str, case: &str, extra: &[(&str, &str)]) {
     let dir = corpus_dir();
-    let dump = std::fs::read_to_string(dir.join(format!("{}.dump", dump_case)))
+    // Bytes, not a String: a dump may hold a path that is not UTF-8 (latin1).
+    let dump = std::fs::read(dir.join(format!("{}.dump", dump_case)))
         .unwrap_or_else(|e| panic!("read {}.dump: {}", dump_case, e));
-    let got = render(&dump, extra);
+    let got = render_bytes(&dump, extra);
     let exp_path = dir.join(format!("{}.expected", case));
 
     if std::env::var("IMUX_BLESS").is_ok() {
@@ -210,6 +216,18 @@ fn control_bytes_and_stray_separators() {
 #[test]
 fn command_classification() {
     check("commands", &[]);
+}
+
+/// Session start directories ending in a Latin-1 byte (`caf\xe9`), each
+/// followed by another session.  #{session_path} ends the session line and
+/// tmux hands it over raw; bash's `read` under a UTF-8 locale took the byte
+/// for the start of a character and swallowed the newline, so the session
+/// after it -- here the current one -- and all its windows vanished from the
+/// bash renderer's list (review BUG-111).  tests/test_corpus_parity.sh renders
+/// this dump through bash too, so the expectation binds both.
+#[test]
+fn a_latin1_start_directory_keeps_the_next_session() {
+    check("latin1", &[]);
 }
 
 /// Layout must hold at every width, not just the one the goldens pin.
