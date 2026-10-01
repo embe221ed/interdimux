@@ -223,6 +223,19 @@ stays "fzf fails (exit 2)" 'stub-fzf: unknown option: --imux-bogus' 'fzf exited 
 I set-environment -g PATH "$TMPD/nofzf"
 key C-b f
 stays "fzf is not on the server's PATH" 'interdimux: fzf is not installed'
+# The other two places a popup is opened: --launch, which every dashboard entry
+# runs, and the dashboard's own fzf fallback on a client too short for its menu.
+# Each opens its popup itself, so each is a flag that can be lost on its own.
+I set-environment -g PATH "$TMPD/stub:$PATH0"
+launch --launch switch
+stays "--launch switch, fzf fails" 'stub-fzf: unknown option: --imux-bogus' 'fzf exited with status 2'
+O resize-window -t '=drv:' -x 100 -y 14
+wait_for '[ "$(I display-message -c "$CL" -p "#{client_height}" 2>/dev/null)" = 14 ]' 50 || true
+I set-environment -g PATH "$TMPD/nofzf"
+launch --dashboard-launch
+stays "dashboard fallback, fzf not on the server's PATH" 'interdimux: fzf is not installed'
+O resize-window -t '=drv:' -x 100 -y 30
+wait_for '[ "$(I display-message -c "$CL" -p "#{client_height}" 2>/dev/null)" = 30 ]' 50 || true
 I set-environment -g PATH "$PATH0"
 
 # --- the danger frame's repaint never opens a popup of its own ------------------------
