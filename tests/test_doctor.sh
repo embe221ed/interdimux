@@ -333,10 +333,13 @@ else
   report "the most recent error is dated" fail
   ERRORS+="$(grep 'most recent' <<< "$out" | sed 's/^/    /' || true)"$'\n'
 fi
-if grep -q -- "--doctor --ack" <<< "$out"; then
-  report "...and the report says how to acknowledge it" pass
+# The flag ahead of the install path: the Health popup cuts a long line off,
+# and a path that filled it hid the one thing the note is there to say.
+if grep -q -- "^ *acknowledge[^']*--doctor --ack" <<< "$out"; then
+  report "...and the report says how to acknowledge it, before the path" pass
 else
-  report "...and the report says how to acknowledge it" fail
+  report "...and the report says how to acknowledge it, before the path" fail
+  ERRORS+="$(grep 'acknowledge' <<< "$out" | sed 's/^/    /' || true)"$'\n'
 fi
 # a second entry, so that "everything so far" is more than the first one
 printf '== 2026-01-02 08:00:00 navigator stderr\nsomething else\n' >> "$ELOG"

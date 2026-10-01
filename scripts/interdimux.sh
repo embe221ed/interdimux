@@ -8557,7 +8557,9 @@ if [ "${1:-}" = "--doctor" ]; then
       _bad "the navigator has logged ${_enew:-0} $_ewhat"
       _note "most recent: $_eat$_elast"
       _note "full log: $_elog"
-      _note "acknowledge them: bash '$SCRIPT_PATH' --doctor --ack"
+      # The flag first: in the Health popup a long install path is cut off,
+      # and the note would end before it said what to run.
+      _note "acknowledge them with --doctor --ack: bash '$SCRIPT_PATH' --doctor --ack"
     else
       _warn "the navigator has logged $_en error(s), all acknowledged"
       _note "most recent: $_eat$_elast"
