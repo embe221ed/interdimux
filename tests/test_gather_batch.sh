@@ -199,7 +199,8 @@ for spec in "${pv_specs[@]}"; do
   fi
 done
 # at least this fixture's 10 rows (pv's 6, lead's 2, $cash's 2) and the 7 gone
-if [ "${#pv_specs[@]}" -ge 17 ] && [ "$pv_kinds" = SWP ] && [ "$pv_diff" -eq 0 ]; then
+if [ "${#pv_specs[@]}" -ge 17 ] && [[ "$pv_kinds" == *S* && "$pv_kinds" == *W* && "$pv_kinds" == *P* ]] \
+   && [ "$pv_diff" -eq 0 ]; then
   report "every row previews as the separate queries preview it (${#pv_specs[@]} rows)" pass
 else
   report "every row previews as the separate queries preview it (${#pv_specs[@]} rows, kinds $pv_kinds, $pv_diff differ)" fail

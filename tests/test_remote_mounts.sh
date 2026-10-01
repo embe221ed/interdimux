@@ -468,7 +468,7 @@ FZF
   for kind in file symlink; do
     rm -f "$TMPD/core-saw" "$TMPD/planted"
     PATH="$TMPD/fzfcancel:$PATH" INTERDIMUX_MOUNTINFO="$MI" XDG_RUNTIME_DIR="$TMPD/run" \
-      INTERDIMUX_BIN="$TMPD/core-probe" bash -c '
+      INTERDIMUX_USE_RUST=on INTERDIMUX_BIN="$TMPD/core-probe" bash -c '
         m="$XDG_RUNTIME_DIR/interdimux-resume.$$.mounts"
         case "$1" in
           file) printf "%s\n" "/ 1" > "$m" ;;
