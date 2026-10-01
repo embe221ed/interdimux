@@ -8,7 +8,8 @@ accessibility), a live visual critique of the current build, and the fzf
 
 Effort: **S** ≲ 30 lines · **M** = a focused session · **L** = a real feature.
 Version gates are noted where a feature needs one (the plugin floor is
-fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
+fzf ≥ 0.40, tmux ≥ 3.6 — hard: older tmux rewrites the US byte the rows are
+split on, see the README; gated features degrade gracefully below their gate).
 
 ## 1. Quick wins
 
@@ -20,7 +21,7 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 | 4 | ✅ **Done** — **Footer hint bar** — key hints moved to `--footer`, so the top of the list stops twitching on every cursor move. Two things the entry did not know: the footer's DEFAULT border costs a SECOND row (use `--footer-border=none` and the move is free), and the footer is drawn inside the *list* column, so a right-hand preview halves it while `FZF_COLUMNS` does not move — branch on `FZF_PREVIEW_COLUMNS` being set. Shipped tiered rather than truncated, since the untiered bar overflowed at any width under ~95. | S | fzf ≥ 0.63 |
 | 5 | **Responsive preview layout** — `--preview-window='right,50%,…,<90(up,40%,…)'` so narrow popups stack the preview below instead of starving both panes. | S | — |
 | 6 | **Highlight the current session row** — render the current session/window name in amber bold; the lone `*` is easy to miss in 30+ rows. | S | — |
-| 7 | **Session badge in the dir picker** — mark dirs that already have a running session (`●`) so Enter's switch-vs-create is predictable. One `tmux list-panes -a` call. | S | — |
+| 7 | ✅ **Done** — **Session badge in the dir picker** — mark dirs that already have a running session (`●`) so Enter's switch-vs-create is predictable. One `tmux list-panes -a` call. Shipped as `▸` and the session's name (`▸  ~/code/api → api`); see #27. | S | — |
 | 8 | **Don't blank the popup behind dialogs** — drop the `\033[2J` clear in `dialog_open` so the confirm box floats over the frozen list (you keep seeing what you're about to kill). | S | — |
 | 9 | **Kill dialog shows blast radius** — list the target's windows/commands in the confirm body ("3 windows: nvim, server, zsh…") instead of a generic warning. | S | — |
 | 10 | **Dim idle shells** — strip login-dash/dirname from bare shells (`-bash`, `/bin/bash`) and dim them so rows doing real work pop. | S | — |
@@ -33,9 +34,9 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 |---|------|--------|-------|
 | 13 | ✅ **Done** — **Per-project startup commands / hydration** — after `new-session`, resolve a startup command (glob-matched `~/.config/interdimux/startup.conf` → per-repo `.tmux-sessionizer`-style file → `@interdimux-startup-command` default) and `send-keys` it. sesh tried exec-based delivery and reverted to send-keys (v2.26.2) — send-keys is the robust mechanism. Shipped: `~/.config/interdimux/startup.conf` globs → `.interdimux-startup` in the dir → `@interdimux-startup-command`; delivered via send-keys behind a shell-readiness wait; `@interdimux-hydrate off` disables. Layout *scripts* for multi-window bootstrapping are still open. | M | — |
 | 14 | ✅ **Done** — **One-list model** — sesh's core UX: dim `+ dir` rows (recent/zoxide/projects, new `D:` spec) inline under session rows in the navigator, so Enter works without caring whether a session exists. Keep ctrl-o for deep-scan/browse. Shipped: `D:` rows from the recent list + zoxide, emitted *after* every tmux row so first paint is untouched and the tree's columns can't widen; directories that already have a session are skipped; `@interdimux-show-dirs` / `@interdimux-dirs-limit`. Still open: the project-dir tier (a filesystem scan would cost first paint) and `+ dir` rows *interleaved* per session rather than appended. | M | — |
-| 15 | ✅ **Done** — **Raw filter mode** — the tree stays fully rendered while typing; non-matches dim (`--color nomatch:240:strip:dim`), ctrl-n/p hop between matches. Fixes the orphaned-`├─` collapse, the biggest visual weakness of tree-in-fzf. Needs care around find-or-create Enter semantics. | M | fzf ≥ 0.66 |
+| 15 | ✅ **Done** — **Raw filter mode** — the tree stays fully rendered while typing; non-matches dim (`--color nomatch:240:strip:dim`), ctrl-n/p hop between matches. Fixes the orphaned-`├─` collapse, the biggest visual weakness of tree-in-fzf. Needs care around find-or-create Enter semantics. Shipped on 0.74's own `--raw` (0.66 was the estimate before it). | M | fzf ≥ 0.74 |
 | 16 | **TAB multi-select kill** — sweep several dead sessions in one confirm. Verified: selections survive reloads only with `reload-sync` (not plain `reload`) and identity-matching needs `--id-nth`. `{+-1}` passes all selected SPECs to one `--action kill-multi`. | M | fzf ≥ 0.71 |
-| 17 | **Help overlay** — `F1`/`alt-h` renders the full keymap in the preview pane (fzf's `preview()` action is ephemeral). About half the bindings are undiscoverable today. Plus a real `--help` CLI entry. | S/M | — |
+| 17 | **Help overlay** — `F1`/`alt-h` renders the full keymap in the preview pane (fzf's `preview()` action is ephemeral). About half the bindings are undiscoverable today. Plus a real `--help` CLI entry — that half is done (`interdimux.sh --help`); the overlay is still open. | S/M | — |
 | 18 | **Break out & move/link** — promote a pane/window to its own session (`break-pane`/`move-window`), and a two-step "move/link into…" mode (pick source, then destination session). Completes the manipulation story started by swap. | M | — |
 
 ## 3. Theme & accessibility (one coherent change)
@@ -43,7 +44,7 @@ fzf ≥ 0.40, tmux ≥ 3.2; gated features degrade gracefully below their gate).
 | # | Idea | Effort | Notes |
 |---|------|--------|-------|
 | 19 | ✅ **Done** — **Configurable palette.** Every color is now an `@interdimux-color-*` option (hex / 256-index / `-1`) resolved through `set_palette()`; the built-in defaults reproduce the warm dark look. Light themes come from *feeding* those options (e.g. via interdotensional's per-theme config), which reconfigures the row ANSI that `@interdimux-fzf-opts` couldn't reach. | M | — |
-| 20 | **Honor `NO_COLOR` / `TERM=dumb`** — blank the color vars (keep bold/dim; the NO_COLOR spec permits non-color styling), `--color=bw` for fzf. Still open: the palette is configurable but not auto-blanked. | S | — |
+| 20 | **Honor `NO_COLOR` / `TERM=dumb`** — blank the color vars (keep bold/dim; the NO_COLOR spec permits non-color styling), `--color=bw` for fzf. Partly done: under a non-empty `NO_COLOR` the pickers start from fzf's `bw` base (fzf ≥ 0.53), which drops the rows' colours too. Still open: nothing else reads `NO_COLOR` — the dialogs, the dashboard menu and the popup frames keep their colours — and `TERM=dumb` is not looked at. | S | — |
 | 21 | ✅ **Done** — `separator` default changed from dim-white `2;37` to grey `245`, and is now the `@interdimux-color-separator` option. | S | — |
 
 ## 4. Robustness & speed (arguably bugs)
@@ -173,7 +174,7 @@ Two recurring lessons, both of which cost real time here:
 - **Live auto-refresh** (S, fzf ≥ 0.73) — `every(4)` + `FZF_IDLE_TIME` guard; safe once cursor tracking (#2) lands. Use `reload-sync` (not `reload`) so the swap preserves query/viewport, and `--id-nth` **without** `--track` — see the warning on #2; a periodic refresh with `--track` would drop keystrokes every tick.
 - ~~**CJK/emoji display-width handling**~~ — done in the Rust core (cluster-aware `UnicodeWidthStr`, verified against tmux's own grid). Not backported to the frozen bash renderer.
 - **`--info-command`** (S, fzf ≥ 0.54) — show `12/24 · mru` so the active ordering is visible.
-- **Red Kill entry in the dashboard menu** (S) — `#[fg=colour167]Kill`, matching the danger vocabulary elsewhere.
+- ~~**Red Kill entry in the dashboard menu**~~ — done: the native menu draws `Kill` in `@interdimux-color-danger`, the colour of the frame it turns red (the fzf fallback menu's is not).
 - **Pluggable dir preview command** (S) — `@interdimux-dirs-preview-cmd 'eza -la {}'` for the listing body.
 - ~~**Recent (★) rows keep the project-type badge**~~ — done.
 - **tmuxinator/tmuxp tier** (M) — list projects, start detached (`--no-attach` / `-d`) + switch-client, popup-safe.

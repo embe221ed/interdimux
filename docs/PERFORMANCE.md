@@ -9,7 +9,8 @@ pass over `sesh` (the Go rewrite of the bash tool `t`), `tmux-sessionx`, `tmux-f
 `tmux-sessionizer`, and the fzf man page + 0.36–0.74 changelog.
 
 Effort: **S** ≲ 30 lines · **M** = a focused session · **L** = a real refactor.
-Plugin floor is fzf ≥ 0.40, tmux ≥ 3.2; version gates are noted where a fix needs one.
+Plugin floor is fzf ≥ 0.40, tmux ≥ 3.6 (hard: older tmux rewrites the US byte the rows are
+split on — see the README); version gates are noted where a fix needs one.
 
 ---
 
