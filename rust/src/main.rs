@@ -161,6 +161,9 @@ fn read_sections() -> Vec<String> {
 
 fn gather() {
     let sections = read_sections();
+    // Started before the first row is rendered, collected at the directory
+    // rows (dirs::start_zoxide): the query overlaps the render.
+    let zoxide = if env_is("INTERDIMUX_SHOW_DIRS", "on") { dirs::start_zoxide() } else { None };
     let sessions_raw = sections.first().cloned().unwrap_or_default();
     let windows_raw = sections.get(1).cloned().unwrap_or_default();
     let panes_raw = sections.get(2).cloned().unwrap_or_default();
@@ -468,7 +471,7 @@ fn gather() {
         let taken: std::collections::HashSet<String> =
             session_dirs.iter().map(|s| dirs::canon_dir(s)).collect();
         let mut n = 0;
-        for d in dirs::candidates() {
+        for d in dirs::candidates(zoxide) {
             if n >= limit {
                 break;
             }

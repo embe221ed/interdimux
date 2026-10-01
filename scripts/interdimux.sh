@@ -3213,7 +3213,7 @@ live_preview_state() {
 # Turn the measured maxima into column widths that fit the popup width.
 compute_widths() {
   local avail
-  avail=$(term_cols)
+  term_cols_r; avail="$REPLY"
   # The live preview state, not the configured one: ctrl-/ toggles the preview
   # after launch, and FZF_COLUMNS does not move when it does (verified), so
   # without this the rows stay sized for the old geometry and fzf just clips them
@@ -3434,7 +3434,8 @@ build_ctx_field() {
 #
 # Emitted AFTER every tmux row, which matters twice over: fzf appends streamed
 # rows as they arrive, so the tmux tree still paints at the same moment it
-# always did; and the column widths are already fixed by then, so a long
+# always did (in this renderer: the Rust core's rows all arrive at once, see
+# gather_targets); and the column widths are already fixed by then, so a long
 # directory path can never widen the tree's columns.
 #
 # Sources are only the cheap ones — the recent list and zoxide (~3-5 ms
@@ -3785,6 +3786,9 @@ gather_targets() {
     # The assignments live INSIDE the substitution on purpose: written as a
     # `VAR=v \ _imux_out=$(...)` prefix chain, bash parses the lot as a list of
     # assignments with NO command, so the binary would run without any of them.
+    # Only the two VALUES that need a lookup are taken out, by the REPLY forms:
+    # `$(term_cols)` and `$(live_preview_state)` in that list were a subshell
+    # each, on every open and every reload (review PERF-05).
     #
     # Its stderr is dropped.  Every failure falls back to the bash renderer
     # below, which draws the right list, and the one failure worth telling the
@@ -3792,13 +3796,15 @@ gather_targets() {
     # navigator's stderr, a binary older than IMUX_PROTO printed its usage line
     # on every open and every reload, and each one became another entry in
     # errors.log and another status-line message.
-    local _imux_rc=0
+    local _imux_rc=0 _imux_cols _imux_pv
+    term_cols_r; _imux_cols="$REPLY"
+    live_preview_state_r; _imux_pv="$REPLY"
     _imux_out=$(
-      INTERDIMUX_COLS="$(term_cols)" \
+      INTERDIMUX_COLS="$_imux_cols" \
       INTERDIMUX_NOW="$NOW_EPOCH" \
       INTERDIMUX_SHOW_FULL_COMMAND="$SHOW_FULL_COMMAND" \
       INTERDIMUX_SHOW_GIT_BRANCH="$SHOW_GIT_BRANCH" \
-      INTERDIMUX_SHOW_PREVIEW="$(live_preview_state)" \
+      INTERDIMUX_SHOW_PREVIEW="$_imux_pv" \
       INTERDIMUX_ORDER="$ORDER" \
       INTERDIMUX_SHOW_DIRS="$SHOW_DIRS" \
       INTERDIMUX_SESSION_RULE="$SESSION_RULE" \
@@ -3838,8 +3844,11 @@ IMUX_SECTIONS
     # sources than this script, and speaks another version of the protocol.
     if [ "$_imux_rc" = 2 ]; then imux_refused; fi
     # A failed or empty render must fall through to the bash renderer, never be
-    # mistaken for "there is nothing to show".  Capturing costs ~2ms (the binary
-    # renders the whole list in about that) and buys a safe failure mode.
+    # mistaken for "there is nothing to show".  Capturing buys a safe failure
+    # mode, and holds every row until the binary exits: ~3 ms with directory
+    # rows off, and with them on (the default) whatever of zoxide's own 5-10 ms
+    # the render did not overlap -- the binary starts the query before its
+    # first row and collects it at the directory rows (rust/src/dirs.rs).
     #
     # So must one that is not a row list at all.  INTERDIMUX_BIN accepts any
     # executable, and whatever a wrong one printed on exit 0 — `/bin/echo` prints
@@ -4524,7 +4533,8 @@ if [ "${1:-}" = "--dirs-list" ]; then
 
   # Path column width derived from the popup (list pane is ~60% with the
   # 40% preview open)
-  DIRS_PATH_W=$(( $(term_cols) * 55 / 100 - 10 ))
+  term_cols_r
+  DIRS_PATH_W=$(( REPLY * 55 / 100 - 10 ))
   [ "$DIRS_PATH_W" -lt 28 ] && DIRS_PATH_W=28
   [ "$DIRS_PATH_W" -gt 64 ] && DIRS_PATH_W=64
 

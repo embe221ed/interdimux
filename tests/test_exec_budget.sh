@@ -165,11 +165,11 @@ for r in "${renderers[@]}"; do
   if [ "$r" = on ]; then
     label="Rust core"
     # the gather's one tmux query, the core's zoxide, the EXIT trap's rm
-    want="FZF=1 rm=1 tmux=1 zoxide=1" forks=8
+    want="FZF=1 rm=1 tmux=1 zoxide=1" forks=6
   else
     label="bash renderer"
     # ...and the MRU sort
-    want="FZF=1 rm=1 sort=1 tmux=1 zoxide=1" forks=10
+    want="FZF=1 rm=1 sort=1 tmux=1 zoxide=1" forks=9
   fi
   run "$r" -- ; check "navigator ($label)" "$want" "$forks"
   if [ "$r" = on ]; then
@@ -188,12 +188,13 @@ done
 
 # --- --list: every reload ----------------------------------------------------
 # One tmux client for the whole gather (this was strace's job in
-# test_gather_batch.sh, which CI could skip).
+# test_gather_batch.sh, which CI could skip), and on the Rust path no
+# subshell around the core's call (review PERF-05).
 for r in "${renderers[@]}"; do
   if [ "$r" = on ]; then
-    run on -- --list;  check "--list (Rust core)" "tmux=1 zoxide=1" 5
+    run on -- --list;  check "--list (Rust core)" "tmux=1 zoxide=1" 3
   else
-    run off -- --list; check "--list (bash renderer)" "sort=1 tmux=1 zoxide=1" 7
+    run off -- --list; check "--list (bash renderer)" "sort=1 tmux=1 zoxide=1" 6
   fi
 done
 

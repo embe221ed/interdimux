@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
 
 fn recent_file() -> String {
     let base = std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
@@ -39,8 +40,38 @@ fn offerable(d: &str) -> bool {
     crate::mounts::is_remote(d) || Path::new(d).is_dir()
 }
 
+/// `zoxide query --list`, with `--all` or without.  `--all`: without it zoxide
+/// stats EVERY entry in its database to hide the missing ones, so one entry on
+/// a stalled mount hangs zoxide itself.  The existence check is ours now
+/// (offerable), and a zoxide too old to know the flag gets the plain query.
+fn zoxide_query(all: bool) -> Command {
+    let mut c = Command::new("zoxide");
+    c.args(["query", "--list"]);
+    if all {
+        c.arg("--all");
+    }
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    c
+}
+
+/// zoxide's query, STARTED, for `candidates` to collect.  gather calls this
+/// before it renders the first row, so the query -- 7-20 ms, the largest single
+/// cost of a list with directory rows on -- runs while the tmux rows are drawn
+/// instead of after them; the rows still all go out in one write at the end.
+/// None when zoxide is off, or not installed (then there is nothing to wait
+/// for: the plain query could not start either).
+pub fn start_zoxide() -> Option<Child> {
+    let use_zoxide = std::env::var("INTERDIMUX_USE_ZOXIDE").map(|v| v == "on").unwrap_or(true);
+    if !use_zoxide {
+        return None;
+    }
+    zoxide_query(true).spawn().ok()
+}
+
 /// The recent list first, then zoxide's frecency, deduped, existing dirs only.
-pub fn candidates() -> Vec<String> {
+/// `zoxide` is start_zoxide's child: collected here, not re-run.  Never cached
+/// across lists -- the recent file changes on every switch.
+pub fn candidates(zoxide: Option<Child>) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut out = Vec::new();
     let limit = recent_limit();
@@ -63,21 +94,14 @@ pub fn candidates() -> Vec<String> {
         }
     }
 
-    let use_zoxide = std::env::var("INTERDIMUX_USE_ZOXIDE").map(|v| v == "on").unwrap_or(true);
-    if use_zoxide {
-        // `--all`: without it zoxide stats EVERY entry in its database to hide
-        // the missing ones, so one entry on a stalled mount hangs zoxide itself.
-        // The existence check is ours now (offerable), and a zoxide too old to
-        // know the flag gets the plain query.
-        let query = |all: bool| {
-            let mut c = std::process::Command::new("zoxide");
-            c.args(["query", "--list"]);
-            if all {
-                c.arg("--all");
-            }
-            c.stderr(std::process::Stdio::null()).output().ok().filter(|o| o.status.success())
-        };
-        if let Some(o) = query(true).or_else(|| query(false)) {
+    if let Some(child) = zoxide {
+        let ok = |o: std::process::Output| if o.status.success() { Some(o) } else { None };
+        let listed = child
+            .wait_with_output()
+            .ok()
+            .and_then(ok)
+            .or_else(|| zoxide_query(false).output().ok().and_then(ok));
+        if let Some(o) = listed {
             let mut n = 0;
             for d in utf8_lines(&o.stdout) {
                 if n >= limit {
