@@ -5077,12 +5077,16 @@ sched_resolve() {
 sched_job_body() {
   local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
   # POSIX quoting, not %q: atd replays this body under /bin/sh.  See shq().
-  local q_logdir q_log q_sock q_want q_pane q_send
+  local q_logdir q_log q_sock q_want q_pane q_label q_send
   shq "$SCHED_LOGDIR"; q_logdir="$REPLY"
   shq "$SCHED_LOG";    q_log="$REPLY"
   shq "$sock";         q_sock="$REPLY"
   shq "$srvpid";       q_want="$REPLY"
   shq "$pane";         q_pane="$REPLY"
+  # The label too: it is a session name, which can come from a directory name
+  # and hold a '"', a backtick or '$(' -- spliced into a live line, it ran when
+  # the job fired.  printf, not echo: dash's echo reads '\c' and '\n' in it.
+  shq "$label";        q_label="$REPLY"
   # the whole send, as send_input does it (see there): a lone key name is
   # pressed, any other text survives tmux's argv parser with a trailing ';'
   # intact, and a pane left in copy-mode still runs the command
@@ -5102,9 +5106,14 @@ sched_job_body() {
     "# atd tries to MAIL a job's output.  With no MTA installed that output is" \
     "# destroyed and leaves only 'Exec failed for mail command' in the journal --" \
     "# which reads exactly like 'my job never ran'.  Log instead of discarding." \
-    "mkdir -p ${q_logdir} 2>/dev/null" \
-    "exec >>${q_log} 2>&1" \
-    "echo \"== \$(date '+%Y-%m-%d %H:%M:%S') firing for ${label} (${pane})\"" \
+    "# Probed first, with true: exec and ':' are special builtins, and a failed" \
+    "# redirection on one ends a POSIX sh on the spot -- before the send." \
+    "if mkdir -p ${q_logdir} 2>/dev/null && true 2>/dev/null >>${q_log}; then" \
+    "  exec >>${q_log} 2>&1" \
+    "else" \
+    "  exec >/dev/null 2>&1" \
+    "fi" \
+    "printf '== %s firing for %s (%s)\\n' \"\$(date '+%Y-%m-%d %H:%M:%S')\" ${q_label} ${q_pane}" \
     "sock=${q_sock}" \
     "want=${q_want}" \
     "pane=${q_pane}" \
