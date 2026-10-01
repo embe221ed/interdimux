@@ -202,6 +202,14 @@ One invocation needs the union of those lists, and that union is exactly what
 hid the dead variables behind the harnesses' deliberate SC2034s. Split, the
 plugin is linted with SC2034 and SC2155 **on**.
 
+Both invocations live in `tests/lint.sh`, which is all the shellcheck job runs.
+It pins the version too: when the `shellcheck` on PATH is not 0.10.0 (the
+image's apt one is 0.9.0 on 24.04 and 0.11.0 on 26.04), it fetches the 0.10.0
+release into `~/.cache/shellcheck/`, checksummed, and uses that.  So an image
+bump cannot fail the lint with new SC codes, and the lint a push will get can
+be run before the push — three lint-fix commits in round 2 were made after
+pushing, because the commands lived only in the workflow.
+
 ## 10. GitHub runs `run:` steps with SIGPIPE ignored
 
 The one failure mode no container reproduced, because no container has it.

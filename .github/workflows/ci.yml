@@ -64,31 +64,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      # Two invocations on purpose, with the SHIPPED code held to the stricter
-      # bar.  A single call needs the union of both exclusion lists, and that
-      # union hid two genuinely dead variables in the script behind the test
-      # harnesses' deliberate SC2034s.
-      #
-      # scripts/ excludes only what is deliberate there:
-      #   SC2191  `--"$HINT_BAR"="$REPLY"` as an array element; the `=` is literal
-      #   SC2206  the RS split and the grouping loops' line and field splits in
-      #           gather_targets, unquoted on purpose under `set -f`
-      - name: Lint the plugin
-        run: |
-          shellcheck -S warning -e SC2191,SC2206 \
-            scripts/interdimux.sh interdimux.tmux
-      # tests/ additionally excludes the harness idioms:
-      #   SC2155  `export TMUX="$(tmux …)"` — the masked exit status is not wanted
-      #   SC2034  loop counters and flags read by an eval'd snippet
-      #   SC2164  `cd` in run_all.sh, guarded by its caller
-      #   SC2010  `ls | grep` over a tmux socket directory
-      #   SC2154  a variable defined by the `eval` on the line above
-      - name: Lint the tests
-        run: |
-          shellcheck -S warning -e SC2155,SC2034,SC2164,SC2010,SC2154 \
-            tests/*.sh
+      # tests/lint.sh holds both invocations, and why there are two, so the
+      # lint runs on a developer's box exactly as here.  It also pins the
+      # shellcheck: the image's own (0.9.0 here, 0.11.0 on 26.04) is set aside
+      # and the 0.10.0 release fetched, checksummed, so an image bump cannot
+      # bring in SC codes nobody has run.
+      - name: Lint the plugin and the tests
+        run: bash tests/lint.sh
 
   tests:
     name: tests (${{ matrix.renderer }} renderer)
