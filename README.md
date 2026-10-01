@@ -60,8 +60,9 @@ A portal gun for your tmux sessions.
   3.5a and older rewrite that byte as the four characters `\037`. The whole row
   then parses as one field, the session name comes out empty, and the picker is
   simply blank. Measured: 3.4 → 0 rows, 3.5a → 0 rows, 3.6 → works. Note that
-  Ubuntu 24.04 ships 3.4 and Debian 13 ships 3.5a, so on those you want tmux
-  from source or a backport.
+  Ubuntu 24.04 ships 3.4 and Debian 13 ships 3.5a. On Debian 13, enable
+  trixie-backports and `apt install -t trixie-backports tmux` (3.6b); Ubuntu
+  26.04 ships 3.6a; on Ubuntu 24.04, build tmux from source.
 - **`fzf` >= 0.40, and 0.74 for everything.** Below 0.40 the picker refuses to
   start, and says so. From 0.40 up it opens a working picker, and every newer
   feature is version-gated and degrades on its own (0.46 the find-or-create

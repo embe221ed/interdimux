@@ -81,8 +81,10 @@ set). Called with `-L` from outside, tmux sanitises it to `_`. The plugin always
 runs inside tmux, so this never bites in production — but a probe run from a
 plain shell will tell you the opposite of the truth.
 
-**Fix:** build tmux from source in CI. There is no apt route: no Ubuntu or
-Debian release currently packages >= 3.6.
+**Fix:** build tmux from source in CI. The jobs run on `ubuntu-24.04`, whose
+apt tmux is 3.4. Newer releases do package a new enough one — Ubuntu 26.04 has
+3.6a, Debian 13's trixie-backports 3.6b — so on a 26.04 image the build could
+become optional, as `ci.yml` notes where it names the image.
 
 ## 2. Ubuntu's `awk` is mawk, and mawk counts bytes
 
