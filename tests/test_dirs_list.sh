@@ -11,6 +11,7 @@
 #   - trailing-slash normalization and dedup across tiers
 #   - zoxide merge (via a stubbed zoxide binary)
 #   - INTERDIMUX_RECENT_LIMIT and INTERDIMUX_SCAN_DEPTH options
+#   - fd: ignore files above the search root, and an fd too old for the flag
 #
 # Runs against a fixture HOME, so it never touches the user's data.
 
@@ -283,6 +284,66 @@ if echo "$out" | specs | grep -qx "$FIX_HOME/Desktop/proj_alpha/nested_one" \
   report "option: INTERDIMUX_SCAN_DEPTH limits deep scan" pass
 else
   report "option: INTERDIMUX_SCAN_DEPTH limits deep scan" fail
+fi
+
+# ---------------------------------------------------------------------------
+# fd and the ignore files ABOVE the search root (BUG-31)
+# ---------------------------------------------------------------------------
+# A dotfiles repo in $HOME whose .gitignore is `*`: fd applied it to every
+# search root under $HOME, and the scan came back empty with no hint why, while
+# the find backend listed everything.  And an fd too old to know
+# --no-ignore-parent (before 8.3) refuses the whole command line -- status 1
+# from its old argument parser, 2 from the new one -- and must still list.
+REAL_FD=$(command -v fd || command -v fdfind || true)
+if [ -z "$REAL_FD" ]; then
+  printf '  - fd cases (skipped: no fd or fdfind on PATH)\n'
+else
+  mkdir -p "$FIX_HOME/.git"
+  printf '*\n' > "$FIX_HOME/.gitignore"
+  # The precondition, from fd itself: on its own it lists nothing here.
+  ctl=$("$REAL_FD" --type d --max-depth 1 . "$FIX_HOME/work" 2>/dev/null || true)
+  if [ -z "$ctl" ]; then
+    report "control: fd alone honours \$HOME's .gitignore '*' under ~/work" pass
+  else
+    report "control: fd alone honours \$HOME's .gitignore '*' under ~/work" fail
+  fi
+  out=$(dirs_list)
+  if echo "$out" | grep "work/api" | grep -q '◆' && echo "$out" | grep "work/tools" | grep -q '·'; then
+    report "fd: \$HOME's .gitignore '*' does not empty the scan" pass
+  else
+    report "fd: \$HOME's .gitignore '*' does not empty the scan" fail
+  fi
+  out=$(dirs_list -- --deep 'camelproj')
+  if echo "$out" | specs | grep -qx "$FIX_HOME/work/tools/CamelProj"; then
+    report "fd: ...nor the deep search" pass
+  else
+    report "fd: ...nor the deep search" fail
+  fi
+  rm -rf "$FIX_HOME/.git" "$FIX_HOME/.gitignore"
+
+  mkdir -p "$TMPDIR_TEST/oldfd"
+  for rc in 1 2; do
+    cat > "$TMPDIR_TEST/oldfd/fd" <<STUB
+#!/bin/sh
+for a in "\$@"; do
+  [ "\$a" = --no-ignore-parent ] && { echo "error: unexpected argument '\$a' found" >&2; exit $rc; }
+done
+exec "$REAL_FD" "\$@"
+STUB
+    chmod +x "$TMPDIR_TEST/oldfd/fd"
+    out=$(dirs_list PATH="$TMPDIR_TEST/oldfd:$PATH" --)
+    if echo "$out" | grep "work/api" | grep -q '◆'; then
+      report "an fd that refuses --no-ignore-parent (status $rc) still scans" pass
+    else
+      report "an fd that refuses --no-ignore-parent (status $rc) still scans" fail
+    fi
+    out=$(dirs_list PATH="$TMPDIR_TEST/oldfd:$PATH" -- --deep 'camelproj')
+    if echo "$out" | specs | grep -qx "$FIX_HOME/work/tools/CamelProj"; then
+      report "...and still deep-searches (status $rc)" pass
+    else
+      report "...and still deep-searches (status $rc)" fail
+    fi
+  done
 fi
 
 # ---------------------------------------------------------------------------

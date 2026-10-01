@@ -1505,6 +1505,23 @@ _scan_prune() {
   fi
 }
 
+# _fd_dirs FINDER ARGS...: the directories fd finds, trailing slashes stripped
+# (see scan_dirs).
+#
+# --no-ignore-parent: fd also applies the ignore files of every directory ABOVE
+# the root, so a dotfiles repo in $HOME whose .gitignore is `*` emptied every
+# scan under it, silently -- the find backend listed them all.  An fd older
+# than 8.3 does not know the flag and refuses the whole command line (status 1
+# or 2, nothing printed); only then is it run again without it, since probing
+# for the flag first would cost every list a process.  Under pipefail the
+# pipeline's status is fd's, unless sed died first (141: the reader is gone).
+_fd_dirs() {
+  local finder="$1"; shift
+  "$finder" --no-ignore-parent "$@" 2>/dev/null | sed 's:/\{1,\}$::' && return 0
+  [ "$?" -le 2 ] || return 0
+  "$finder" "$@" 2>/dev/null | sed 's:/\{1,\}$::' || true
+}
+
 scan_dirs() {
   local root="$1" depth="$2" finder="$3"
   [ -d "$root" ] || return
@@ -1513,7 +1530,7 @@ scan_dirs() {
   # which breaks dedup between tiers and finder backends.
   case "$finder" in
     fd|fdfind)
-      "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} . "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
+      _fd_dirs "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} . "$root"
       ;;
     find)
       find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -print 2>/dev/null | sed 's:/\{1,\}$::' || true
@@ -1530,7 +1547,7 @@ match_dirs() {
   _scan_prune "$root"
   case "$finder" in
     fd|fdfind)
-      "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} -- "$query" "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
+      _fd_dirs "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} -- "$query" "$root"
       ;;
     find)
       find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -iname "*$query*" -print 2>/dev/null | sed 's:/\{1,\}$::' || true
