@@ -987,7 +987,9 @@ jobs. And job output goes to
 destroyed and the job merely *looks* like it never ran.
 
 Sub-minute jobs use `run-shell -d`, which lives inside the tmux server: they are
-lost if the server exits. `at` jobs survive a reboot.
+lost if the server exits. `at` jobs outlive it, but only as queue entries: the
+check above makes them skip once tmux has restarted, so after a reboot clear
+them from Jobs and schedule them again.
 
 `at`-backed jobs (anything ≥ 1 minute) only fire if the OS `at` daemon is
 running. **macOS ships `atrun` disabled by default**, so a freshly scheduled job
