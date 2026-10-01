@@ -324,11 +324,16 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # comes from a tmux format expanded in-server at keypress, not a fork.
   #
   # #{q:} on the NAME only: a session name may contain a quote, which would
-  # otherwise close the -e/-T token and kill the binding.  The surrounding
-  # "#[bold]" stays unquoted, because rs_quote would double its '#' and '##['
-  # does not collapse back before '['.
+  # otherwise close the -e token and kill the binding.
   _bk_title=' interdimux · #{q:session_name} '
   _bk_env+=" -e \"INTERDIMUX_TITLE=$_bk_title\""
+  # -T is a format AGAIN once display-popup has it, so a name spliced in here
+  # would be expanded twice -- and connect_dir keeps a directory's name verbatim,
+  # so a project named 'x#(cmd)' ran cmd on every prefix+f in it.  '##' leaves
+  # run-shell's pass as '#', and display-popup then inserts the name as a VALUE,
+  # which is never expanded again; it never meets the parser, so needs no #{q:}.
+  # The "#[bold]" before it stays single: '##[' does not collapse before '['.
+  _bk_ttl=' interdimux · ##{session_name} '
 
   # #{?…,…,…} treats the string "0" as FALSE, so it cannot be used as an
   # emptiness test — #{==:…,} can.  (Width/height can't legitimately be 0, but
@@ -337,7 +342,7 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_h='#{?#{==:#{@interdimux-popup-height},},75%,#{@interdimux-popup-height}}'
 
   tmux bind-key "$_bk_nav" run-shell -bC \
-    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_ttl\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
 
@@ -5391,13 +5396,12 @@ popup_accent() {
   lines=$(popup_user_lines)
   if [ "$1" = "danger" ]; then style=$(danger_style "$lines"); else style=$(popup_user_style); fi
   local -a t=()
-  # -T is a FORMAT, and the title now carries the session name, so any '#' in it
-  # would be re-expanded on every repaint.  In practice tmux already expands a
-  # name at create/rename time -- "has#hash" is stored as "has<hostname>ash" --
-  # so only benign sequences ('#x', '#1') can reach here and nothing observable
-  # breaks today.  Doubling is free, and this stops being true the moment tmux
-  # gains a format character.  The style prefix is left alone: its '#[' is meant
-  # as a format.
+  # -T is a FORMAT, and the title carries the session name, so any '#' in it
+  # would be re-expanded on every repaint.  tmux expands a name it is GIVEN at
+  # create/rename time, but connect_dir escapes a directory's name first so it
+  # is stored verbatim -- a project named 'x#(cmd)' is a session of exactly that
+  # name, and unescaped here cmd would run on every danger repaint.  The style
+  # prefix is left alone: its '#[' is meant as a format.
   [ -n "${INTERDIMUX_TITLE:-}" ] && t=(-T "${POPUP_TITLE_STYLE}${INTERDIMUX_TITLE//'#'/##}")
   # -c: the popup to repaint is the PRESSING client's.  Without it tmux picks
   # the most recently active client, and on any other client -- one with no
@@ -9391,7 +9395,10 @@ if [ "${1:-}" = "--launch" ]; then
   if tmux_ge 303; then
     # Border style/lines are left to the user's popup-border-* options;
     # only destructive modes recolour the frame
-    chrome=(-T "${POPUP_TITLE_STYLE}${title}")
+    # The NAME is doubled, not the style: -T is a format, and a session named
+    # after a directory 'x#(cmd)' would run cmd here (see _bk_ttl).  title
+    # itself stays raw for INTERDIMUX_TITLE, which popup_accent escapes.
+    chrome=(-T "${POPUP_TITLE_STYLE}${title//'#'/##}")
     [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
     # Popups don't inherit TMUX_PANE — forward it so current-target detection
     # is exact.  It is the PRESSING pane only because every route here passes
