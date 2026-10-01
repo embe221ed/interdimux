@@ -12,6 +12,13 @@
 # navigator's Esc and Enter, ^o and back, the --launch pickers, the jobs flash,
 # Health and the dashboard's fzf fallback.
 #
+# And two ways the danger frame's repaint (popup_accent, a display-popup with
+# no command) used to OPEN a popup running a shell and block in it:
+#
+#   * BUG-52  the popup closed under a waiting kill dialog (display-popup -C):
+#             the orphaned dialog's cleanup repainted a popup that was gone
+#   * BUG-53  --action kill run outside any popup, on a server with a client
+#
 # Real clients need real terminals: an outer server's pane runs `tmux attach`
 # to the server under test, and what the client shows is read off that pane.
 
@@ -217,6 +224,83 @@ I set-environment -g PATH "$TMPD/nofzf"
 key C-b f
 stays "fzf is not on the server's PATH" 'interdimux: fzf is not installed'
 I set-environment -g PATH "$PATH0"
+
+# --- the danger frame's repaint never opens a popup of its own ------------------------
+# How many processes are still running the kill dialog for this server.
+dialogs() {
+  local p n=0
+  for p in $(pgrep -f 'interdimux.sh --action kill' 2>/dev/null || true); do
+    tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -q "^TMUX=.*/$SOCK," && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+# BUG-52: open the kill dialog from the navigator, then close the popup under it
+if opens "kill dialog" "C-b f" '❯'; then
+  key C-x
+  if wait_for 'shows "Kill session"' 100; then
+    I display-popup -C -c "$CL"
+    wait_for '[ "$(dialogs)" = 0 ] && ! popup_up' 30 || true
+    if popup_up; then
+      report "closing the popup under a kill dialog leaves no popup behind" fail
+      ERRORS+="    screen: $(cap | grep -v '^ *$' | head -4 | tr '\n' '|')"$'\n'
+      I display-popup -C -c "$CL" 2>/dev/null || true
+    else
+      report "closing the popup under a kill dialog leaves no popup behind" pass
+    fi
+    if [ -r "/proc/$$/environ" ]; then
+      [ "$(dialogs)" = 0 ] \
+        && report "...and the dialog does not linger" pass \
+        || report "...and the dialog does not linger" fail
+    fi
+    I has-session -t '=victim' 2>/dev/null \
+      && report "...and nothing was killed" pass \
+      || report "...and nothing was killed" fail
+  else
+    report "setup: ^x opens the kill dialog" fail
+  fi
+fi
+I display-popup -C -c "$CL" 2>/dev/null || true
+wait_for '! popup_up' 30 || true
+
+# Run --action kill on its own, its dialog answered "n", and it must neither
+# hang nor put a popup on the client.  In a pane of the outer server, so that
+# it has a terminal of its own the way a run-shell or a binding's command does
+# -- the popup's terminal is not the only one /dev/tty can open.
+# $1 = label, $2 = a command to run it under.
+bare_kill() {
+  local label="$1" pre="$2" rc
+  printf 'n' > "$TMPD/answer"
+  rm -f "$TMPD/rc"
+  O new-session -d -s run -x 80 -y 20 \
+    "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' INTERDIMUX_CLIENT='$CL' INTERDIMUX_TTY_IN='$TMPD/answer' \
+         INTERDIMUX_TTY_OUT=/dev/null INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 \
+         INTERDIMUX_TMUX_VNUM=307 timeout -k 2 8 $pre bash '$SCRIPT' --action kill S:victim \
+         </dev/null >/dev/null 2>&1; echo \$? > '$TMPD/rc'; sleep 30"
+  wait_for '[ -s "$TMPD/rc" ]' 150 || true
+  rc=$(cat "$TMPD/rc" 2>/dev/null || echo none)
+  O kill-session -t '=run' 2>/dev/null || true
+  [ "$rc" = 0 ] \
+    && report "$label: does not hang" pass \
+    || report "$label: does not hang (rc=$rc)" fail
+  if popup_up; then
+    report "$label: ...and opens no popup on the client" fail
+    I display-popup -C -c "$CL" 2>/dev/null || true
+    wait_for '! popup_up' 30 || true
+  else
+    report "$label: ...and opens no popup on the client" pass
+  fi
+  I has-session -t '=victim' 2>/dev/null \
+    && report "$label: ...and kills nothing on a no" pass \
+    || report "$label: ...and kills nothing on a no" fail
+}
+# BUG-53: outside any popup -- a hand-written binding, run-shell: no title
+bare_kill "--action kill outside a popup" "env -u INTERDIMUX_TITLE"
+# BUG-52, deterministically: the title says "in a popup", but the terminal is
+# gone, which is the orphaned dialog's state once its popup has closed (its
+# controlling tty hung up).  setsid gives a process no terminal at all.
+if command -v setsid >/dev/null 2>&1; then
+  bare_kill "a dialog whose popup has closed" "env INTERDIMUX_TITLE=interdimux setsid"
+fi
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

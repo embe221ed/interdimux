@@ -5414,6 +5414,18 @@ danger_style() {
 # forwarded into the popup by --launch.
 popup_accent() {
   tmux_ge 303 || return 0
+  # Only INSIDE a popup that is still there.  This is a display-popup with no
+  # command: in a popup it repaints the frame, but on a client with no popup
+  # open tmux OPENS one, running the default shell, and blocks in it until
+  # someone dismisses it.  INTERDIMUX_TITLE is set only by the popup launchers,
+  # so without it there is no popup -- a hand-written binding or run-shell
+  # running --action kill hung behind a shell popup before its dialog even drew
+  # (BUG-53).  And a popup closed under a waiting dialog (display-popup -C, its
+  # session killed) hangs up the dialog's terminal, after which /dev/tty no
+  # longer opens: the orphaned dialog's cleanup repainted a popup that was gone,
+  # and so opened a shell one (BUG-52).
+  [ -n "${INTERDIMUX_TITLE:-}" ] || return 0
+  { : </dev/tty; } 2>/dev/null || return 0
   local style lines
   lines=$(popup_user_lines)
   if [ "$1" = "danger" ]; then style=$(danger_style "$lines"); else style=$(popup_user_style); fi
@@ -7182,17 +7194,12 @@ if [ "${1:-}" = "--action" ]; then
     # regular file (that is how the dialogs are tested), and > TRUNCATES it —
     # silently destroying everything the dialog drew.
     printf '\033[?25h' >>"$tty_out" 2>/dev/null
-    # Only touch the border when we are actually INSIDE a popup.  popup_accent
-    # issues `display-popup` with no -E: in a popup that repaints it, but with a
-    # client attached and no popup open tmux OPENS one running the default
-    # shell, and blocks until someone dismisses it.  INTERDIMUX_TITLE is set
-    # only by the popup launcher, so it is the marker for "we are in one".
-    if [ -n "${INTERDIMUX_TITLE:-}" ]; then
-      if [ "${INTERDIMUX_MODE:-switch}" = "kill" ]; then
-        popup_accent danger
-      else
-        popup_accent user
-      fi
+    # Outside a popup, or once it has closed, this does nothing: popup_accent
+    # checks for both itself.
+    if [ "${INTERDIMUX_MODE:-switch}" = "kill" ]; then
+      popup_accent danger
+    else
+      popup_accent user
     fi
   }
   trap '_action_cleanup; exit 130' INT TERM
