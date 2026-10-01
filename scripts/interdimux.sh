@@ -132,6 +132,7 @@ OPT_MAP=(
   "agents:AGENTS"                    "agent-args:AGENT_ARGS"
   "agent-state:AGENT_STATE"          "claude-dir:CLAUDE_DIR"
   "title-rules:TITLE_RULES"          "agent-separator:AGENT_SEPARATOR"
+  "project-dirs:PROJECT_DIRS"
 )
 OPT_NAMES=()
 for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
@@ -487,7 +488,7 @@ load_tmux_opts() {
     return 0
   fi
   _tmux_opts_loaded=1
-  local fmt="" name raw
+  local fmt="" name raw _noglob=0 IFS
   local -a vals
   for name in "${OPT_NAMES[@]}"; do
     [ -n "$fmt" ] && fmt+="$US"
@@ -497,7 +498,18 @@ load_tmux_opts() {
   # lookups are target-relative, so a bare display-message resolves session-local
   # overrides against whichever session was most recently attached.
   raw=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} "$fmt" 2>/dev/null) || return 0
-  IFS="$US" read -r -a vals <<< "$raw"
+  # Split by the shell under set -f, not `read -a <<<`: read stops at the first
+  # newline, and @interdimux-startup-command is multi-line by design (one
+  # send-keys per line).  Two lines there cut the value to its first and left
+  # every option after it in OPT_MAP -- hide, raw, the agent options -- at its
+  # default, on every path that is not primed: prefix+g, --jump, the CLI.  It is
+  # also the cheaper read: a here-string this small is a pipe (bash >= 5.1),
+  # which read takes one byte per syscall.
+  case $- in *f*) _noglob=1 ;; esac
+  set -f
+  IFS=$US
+  vals=($raw)
+  [ "$_noglob" = 1 ] || set +f
   local i=0
   for name in "${OPT_NAMES[@]}"; do
     TMUX_OPTS["@interdimux-$name"]="${vals[i]:-}"
@@ -542,6 +554,7 @@ get_opt AGENT_STATE       "${INTERDIMUX_AGENT_STATE:-}"      @interdimux-agent-s
 get_opt CLAUDE_DIR        "${INTERDIMUX_CLAUDE_DIR:-}"       @interdimux-claude-dir        ""
 get_opt TITLE_RULES_FILE  "${INTERDIMUX_TITLE_RULES:-}"      @interdimux-title-rules       ""
 get_opt AGENT_SEPARATOR   "${INTERDIMUX_AGENT_SEPARATOR:-}"  @interdimux-agent-separator   "∣"
+get_opt PROJECT_DIRS      "${INTERDIMUX_PROJECT_DIRS:-}"     @interdimux-project-dirs      ""
 
 # Numeric options reach `[ -ge ]`, `find -maxdepth` and arithmetic, so a junk
 # value is not a harmless no-op.  Verified: a non-numeric @interdimux-recent-limit
@@ -1019,6 +1032,12 @@ build_fzf_theme() {
   #     came out too wide and was clipped.  `--style=default` goes FIRST
   #     because the preset also resets --info, the gutter colour, the separator
   #     and --highlight-line, all of which are set below.
+  #   --preview       `--preview 'bat {}'` ran on every row of the pickers that
+  #     have no preview of their own (swap, Health, Jobs, the fzf dashboard) and
+  #     took half the popup.  The navigator's and ctrl-o's own --preview come
+  #     after this, so they still apply.  And --preview-window is cumulative: a
+  #     `hidden` there outlived their own window flags, so ctrl-o's preview, and
+  #     the navigator's with show-preview on, never drew -- nohidden clears it.
   # Each reset is fzf's own default, so without $FZF_DEFAULT_OPTS the screen is
   # unchanged.  @interdimux-fzf-opts is appended last and can still ask for any
   # of them -- that is the channel for a deliberate choice.
@@ -1026,6 +1045,8 @@ build_fzf_theme() {
   fzf_ge 58 && FZF_THEME+=(--style=default)
   FZF_THEME+=(
     --no-height
+    --no-preview
+    --preview-window=nohidden
     --no-border
     --margin=0
     --padding=0
@@ -1534,6 +1555,28 @@ _scan_prune() {
   fi
 }
 
+# fd also applies the ignore files of every directory ABOVE its root.  Inside a
+# repo that is the point -- a browse into one of its subdirectories keeps the
+# repo's node_modules out -- but a dotfiles repo in $HOME whose .gitignore is
+# `*` hides everything under $HOME the same way, and every scan came back
+# empty, silently, while the find backend listed it all.  fd_parents_hide ROOT
+# FINDER is asked only once ROOT's scan has found nothing.  When ROOT has a
+# visible subdirectory and is itself missing from its parent's listing, it sets
+# FD_NIP, and the rest of this list scans without those files
+# (--no-ignore-parent; an fd older than 8.3 refuses it and finds nothing, as
+# before).  A scan that found anything is untouched and costs nothing more, and
+# a directory that only its OWN ignore files empty stays empty.
+FD_NIP=()
+fd_parents_hide() {
+  local r="${1%/}" up d
+  [ -n "$r" ] && [ "$2" != find ] && [ "${#FD_NIP[@]}" = 0 ] && compgen -G "$r/*/" >/dev/null || return 1
+  up="${r%/*}"
+  while IFS= read -r d; do
+    [ "${d%/}" = "$r" ] && return 1
+  done < <("$2" --hidden --max-depth 1 --fixed-strings --absolute-path -- "${r##*/}" "${up:-/}" 2>/dev/null)
+  FD_NIP=(--no-ignore-parent)
+}
+
 scan_dirs() {
   local root="$1" depth="$2" finder="$3"
   [ -d "$root" ] || return
@@ -1542,7 +1585,7 @@ scan_dirs() {
   # which breaks dedup between tiers and finder backends.
   case "$finder" in
     fd|fdfind)
-      "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} . "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
+      "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} . "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
       ;;
     find)
       find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -print 2>/dev/null | sed 's:/\{1,\}$::' || true
@@ -1571,7 +1614,7 @@ scan_roots() {
   [ "${#roots[@]}" -gt 0 ] || return 0
   for (( i = 0; i < ${#roots[@]}; i += 256 )); do
     case "$finder" in
-      fd|fdfind) "$finder" --type d --max-depth "$depth" --absolute-path . "${roots[@]:i:256}" 2>/dev/null ;;
+      fd|fdfind) "$finder" --type d --max-depth "$depth" --absolute-path ${FD_NIP[@]+"${FD_NIP[@]}"} . "${roots[@]:i:256}" 2>/dev/null ;;
       find) find "${roots[@]:i:256}" -maxdepth "$depth" -path '*/.*' -prune -o -type d -print 2>/dev/null ;;
     esac
   done | sed 's:/\{1,\}$::' || true
@@ -1586,7 +1629,7 @@ match_dirs() {
   _scan_prune "$root"
   case "$finder" in
     fd|fdfind)
-      "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} -- "$query" "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
+      "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} -- "$query" "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
       ;;
     find)
       find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -iname "*$query*" -print 2>/dev/null | sed 's:/\{1,\}$::' || true
@@ -1594,8 +1637,16 @@ match_dirs() {
   esac
 }
 
+# The search roots come from get_opt like every other option: at the pane's own
+# scope, so a session can have roots of its own, and from the environment in a
+# primed child, so a ctrl-o reload asks tmux nothing.  A prefix+f binding baked
+# before project-dirs was forwarded primes the popup without the variable at
+# all, until tmux next loads the plugin; that one run still asks.
 resolve_search_paths() {
-  local project_dirs="${INTERDIMUX_PROJECT_DIRS:-$(tmux show-option -gqv @interdimux-project-dirs 2>/dev/null || true)}"
+  local project_dirs="$PROJECT_DIRS"
+  if [ -z "${INTERDIMUX_PROJECT_DIRS+set}" ] && [ "${INTERDIMUX_OPTS_PRIMED:-}" = 1 ]; then
+    project_dirs=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#{@interdimux-project-dirs}' 2>/dev/null || true)
+  fi
   if [ -n "${project_dirs:-}" ]; then
     IFS=':' read -ra _paths <<< "$project_dirs"
     for p in "${_paths[@]}"; do
@@ -4783,6 +4834,26 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # Each read of a finder's output is LC_ALL=C (see load_recent_dirs): a Latin-1
   # directory took the next one into its row, which then spanned two lines.
   # load_recent_dirs's own output is valid UTF-8, so it is read plainly.
+  #
+  # collect_scan ROOT DEPTH [PREFIX]: collect_dir each directory ROOT's scan
+  # finds -- with PREFIX, only those it begins, which also go on _roots for the
+  # caller's one scan_roots run over all their subtrees -- and scan once more if
+  # ignore files above ROOT hid them all (fd_parents_hide).
+  collect_scan() {
+    local d n=0
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
+      [ -z "$d" ] || [ "$d" = "$1" ] && continue
+      n=1
+      if [ $# = 2 ]; then
+        collect_dir "$d"
+      elif [[ "${d,,}" == "${3,,}"* ]]; then
+        collect_dir "$d"
+        _roots+=("$d")
+      fi
+    done < <(scan_dirs "$1" "$2" "$finder")
+    [ "$n" = 1 ] || ! fd_parents_hide "$1" "$finder" || collect_scan "$@"
+  }
+
   case "$mode" in
     default)
       while IFS= read -r d; do
@@ -4793,10 +4864,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
       _others=()
       for sp in "${search_paths[@]}"; do
         [ -d "$sp" ] || continue
-        while LC_ALL=C IFS= read -r d 2>/dev/null; do
-          [ -z "$d" ] || [ "$d" = "$sp" ] && continue
-          collect_dir "$d"
-        done < <(scan_dirs "$sp" 1 "$finder")
+        collect_scan "$sp" 1
       done
       emit_sorted_tiers
       ;;
@@ -4819,10 +4887,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
       if [ -z "$query" ]; then
         for sp in "${search_paths[@]}"; do
           [ -d "$sp" ] || continue
-          while LC_ALL=C IFS= read -r d 2>/dev/null; do
-            [ -z "$d" ] || [ "$d" = "$sp" ] && continue
-            collect_dir "$d"
-          done < <(scan_dirs "$sp" 2 "$finder")
+          collect_scan "$sp" 2
         done
       else
         # Try the query as a literal path first: if relative, resolve
@@ -4840,10 +4905,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         for qr in "${query_roots[@]}"; do
           if [ -d "$qr" ]; then
             collect_dir "$qr"
-            while LC_ALL=C IFS= read -r d 2>/dev/null; do
-              [ -z "$d" ] || [ "$d" = "$qr" ] && continue
-              collect_dir "$d"
-            done < <(scan_dirs "$qr" "$SCAN_DEPTH" "$finder")
+            collect_scan "$qr" "$SCAN_DEPTH"
             continue
           fi
           # Partially typed path: walk up to the deepest existing
@@ -4858,13 +4920,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
           [ "$anc" = "/" ] && continue
           [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
           _roots=()
-          while LC_ALL=C IFS= read -r d 2>/dev/null; do
-            [ -z "$d" ] && continue
-            if [[ "${d,,}" == "${qr,,}"* ]]; then
-              collect_dir "$d"
-              _roots+=("$d")
-            fi
-          done < <(scan_dirs "$anc" "$stripped" "$finder")
+          collect_scan "$anc" "$stripped" "$qr"
           # every completion's subtree in one finder run (scan_roots)
           [ "${#_roots[@]}" -gt 0 ] && while LC_ALL=C IFS= read -r sub 2>/dev/null; do
             [ -z "$sub" ] && continue
@@ -4942,10 +4998,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         _projects=()
         _others=()
         collect_dir "$scan_root"
-        while LC_ALL=C IFS= read -r d 2>/dev/null; do
-          [ -z "$d" ] || [ "$d" = "$scan_root" ] && continue
-          collect_dir "$d"
-        done < <(scan_dirs "$scan_root" 2 "$finder")
+        collect_scan "$scan_root" 2
         emit_sorted_tiers
       fi
       ;;
@@ -7483,11 +7536,11 @@ if [ "${1:-}" = "--action" ]; then
   # prints nothing at all.  The indices are compared as well: spec_target's exact
   # "=idx" form still falls back to a window NAMED exactly "3" once index 3 is
   # gone.  Free-text fields go last, where a stray separator cannot shift the
-  # fields after them.
+  # fields after them.  (The zoom and active flags are for ^z, below.)
   _t_info=$(tmux has-session -t "$target" \; display-message -p -t "$target" \
-    "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}#{session_windows}${US}#{window_panes}${US}#{session_group}${US}#{session_name}${US}#{window_name}${US}#{pane_current_command}" \
+    "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}#{session_windows}${US}#{window_panes}${US}#{window_zoomed_flag}${US}#{pane_active}${US}#{session_group}${US}#{session_name}${US}#{window_name}${US}#{pane_current_command}" \
     2>/dev/null)
-  IFS="$US" read -r T_SID T_WID T_PID T_WIDX T_PIDX T_SWINS T_WPANES T_SGRP T_SNAME T_WNAME T_PCMD <<< "$_t_info"
+  IFS="$US" read -r T_SID T_WID T_PID T_WIDX T_PIDX T_SWINS T_WPANES T_WZOOM T_PACT T_SGRP T_SNAME T_WNAME T_PCMD <<< "$_t_info"
   case "$SPEC_TYPE" in
     S) [ -n "$T_SID" ] ;;
     W) [ -n "$T_WID" ] && [ "$T_WIDX" = "$SPEC_WIDX" ] ;;
@@ -7685,7 +7738,15 @@ if [ "${1:-}" = "--action" ]; then
         imux_msg "only panes can be zoomed"
         exit 0
       fi
-      tmux resize-pane -Z -t "$target" 2>/dev/null || imux_msg "failed to toggle zoom"
+      # resize-pane -Z toggles the WINDOW's zoom, whichever pane it names: with
+      # another pane of the window zoomed, ^z on this one only unzoomed that
+      # one, the opposite of what the hint says.  select-pane -Z moves the zoom
+      # to it instead.  On the zoomed pane itself, ^z still unzooms.
+      if [ "$T_WZOOM" = 1 ] && [ "$T_PACT" = 0 ]; then
+        tmux select-pane -Z -t "$target"
+      else
+        tmux resize-pane -Z -t "$target"
+      fi 2>/dev/null || imux_msg "failed to toggle zoom"
       ;;
 
     detach)
@@ -8072,6 +8133,11 @@ if [ "${1:-}" = "--dirs" ]; then
   [ -z "$dir_path" ] && exit 1
   # Physical path, so comparisons match finder output (which resolves symlinks)
   dir_path=$(cd "$dir_path" 2>/dev/null && pwd -P || echo "$dir_path")
+  # Removed since the list was built: refused, as the navigator's D row refuses
+  # it.  tmux takes `new-session -c <missing>` without a word and starts the
+  # shell in $HOME, so this became a session named after the directory, in the
+  # wrong place.  Exit 1 is the cancel, so the navigator reopens.
+  [ -d "$dir_path" ] || { imux_msg "directory '$dir_path' no longer exists"; exit 1; }
 
   record_dir_use "$dir_path"
   connect_dir "$dir_path"
@@ -8168,6 +8234,7 @@ env_fwd_vars() {
     "INTERDIMUX_CLAUDE_DIR=$CLAUDE_DIR"
     "INTERDIMUX_TITLE_RULES=$TITLE_RULES_FILE"
     "INTERDIMUX_AGENT_SEPARATOR=$AGENT_SEPARATOR"
+    "INTERDIMUX_PROJECT_DIRS=$PROJECT_DIRS"
     "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
     "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
     "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
@@ -8716,13 +8783,13 @@ if [ "${1:-}" = "--doctor" ]; then
   #
   # Nothing else in them can.  build_fzf_theme resets what people usually put
   # there — --tmux/--popup, --height, --border, --margin, --padding, --style,
-  # --with-shell, and every colour — on each fzf that parses the flag, and an
-  # fzf too old to parse one rejects it here.  This used to warn about those
-  # very flags, and to advise moving them to @interdimux-fzf-opts: the one place
-  # they DO take effect, since it comes after the resets.  Following it turned a
-  # harmless global setting into the nested frame and shrunk list the resets
-  # exist to prevent.  (Whether the flags there are sensible is the option
-  # check's business, and a deliberate choice's.)
+  # --preview, --with-shell, and every colour — on each fzf that parses the
+  # flag, and an fzf too old to parse one rejects it here.  This used to warn
+  # about those very flags, and to advise moving them to @interdimux-fzf-opts:
+  # the one place they DO take effect, since it comes after the resets.
+  # Following it turned a harmless global setting into the nested frame and
+  # shrunk list the resets exist to prevent.  (Whether the flags there are
+  # sensible is the option check's business, and a deliberate choice's.)
   if { [ -n "$_fdo" ] || [ -n "$_fdof" ]; } && [ -n "$_jfzf" ]; then
     if ! _fe=$(FZF_DEFAULT_OPTS="$_fdo" FZF_DEFAULT_OPTS_FILE="$_fdof" "$_jfzf" --version 2>&1 >/dev/null </dev/null); then
       _bad "fzf rejects its default options — every picker exits before it draws"
@@ -8939,13 +9006,13 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # --- options ----------------------------------------------------------------
   _sec options
-  # Names the code understands but that are not in OPT_MAP: they are read
-  # directly rather than forwarded to the popup.
+  # Names the code understands but that are not in OPT_MAP: they are read at
+  # bind time rather than forwarded to the popup.
   # (No `binary`: the helper's path is read from $INTERDIMUX_BIN only, and an
   # option by that name was once accepted here and green-ticked while nothing
   # read it.  Unknown now, so setting it says so.)
   # (`autobuild` is read by interdimux.tmux, at plugin load.)
-  _known=("${OPT_NAMES[@]}" key dashboard-key project-dirs jump-keys autobuild)
+  _known=("${OPT_NAMES[@]}" key dashboard-key jump-keys autobuild)
 
   _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
 

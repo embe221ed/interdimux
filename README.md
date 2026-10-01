@@ -647,11 +647,11 @@ the key bindings are actually installed, whether the state directories are
 writable, whether your locale is UTF-8 (the tree glyphs and every column width
 assume it), whether `sort -s` works (the session order is stable and locale-free
 only because of it), whether fzf accepts your `$FZF_DEFAULT_OPTS` — one flag it
-does not know stops every picker, while its layout flags are harmless, because
-the pickers reset them — and which of the two dashboards your client is tall
-enough for. Plus every `@interdimux-*` option you have set, with its value
-checked: a value the plugin cannot use is replaced, not fatal, and the report
-names what it uses instead (`@interdimux-agent-state 'yes'` stays on,
+does not know stops every picker, while its layout flags and a `--preview` are
+harmless, because the pickers reset them — and which of the two dashboards your
+client is tall enough for. Plus every `@interdimux-*` option you have set, with
+its value checked: a value the plugin cannot use is replaced, not fatal, and the
+report names what it uses instead (`@interdimux-agent-state 'yes'` stays on,
 `@interdimux-title-max '500'` is 200, a word of `@interdimux-agents` that is
 not a name is skipped).
 
@@ -797,6 +797,7 @@ set -g @interdimux-fzf-opts '--color=bg+:237'
 
 # Colon-separated list of directories to search for new sessions (ctrl-o)
 # Defaults to ~/projects:~/code:~/src:~/repos:~/work:~/dev (whichever exist)
+# A session can have its own: set -t SESSION @interdimux-project-dirs '...'
 set -g @interdimux-project-dirs '~/projects:~/work'
 
 # Max entries shown in the recent tier of the directory picker (default: 10)

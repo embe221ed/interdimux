@@ -116,6 +116,23 @@ else
   report "load_tmux_opts honours INTERDIMUX_OPTS_PRIMED" fail
 fi
 
+# Every option the CODE names (comment lines aside) is in OPT_MAP, apart from
+# the few --bind-keys reads when it bakes the bindings.  One read on its own
+# instead -- @interdimux-project-dirs, with `show-option -g` in the directory
+# search -- was global-only and cost every ctrl-o list a tmux round-trip (BUG-78).
+mapfile -t CODE_OPTS < <(grep -vE '^[[:space:]]*#' "$SCRIPT" \
+  | grep -oE '@interdimux-[a-z-]+' | sed 's/^@interdimux-//' | sort -u)
+stray=""
+for o in ${CODE_OPTS[@]+"${CODE_OPTS[@]}"}; do
+  case "$o" in key|dashboard-key|jump-keys) continue ;; esac
+  has "$o" ${OPT_NAMES[@]+"${OPT_NAMES[@]}"} || stray+=" $o"
+done
+if [ "${#CODE_OPTS[@]}" -ge 20 ] && [ -z "$stray" ]; then
+  report "every option the code reads is in OPT_MAP, bar the bind-time ones (${#CODE_OPTS[@]})" pass
+else
+  report "every option the code reads is in OPT_MAP, bar the bind-time ones (${#CODE_OPTS[@]}; not in it:$stray)" fail
+fi
+
 # Guard against the reverse desync: a forwarded var nothing reads is dead weight
 # (and usually means a rename went half-applied).
 unread=""

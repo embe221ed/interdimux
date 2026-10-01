@@ -13,8 +13,9 @@
 #   isolation  - $FZF_DEFAULT_OPTS is parsed before the picker's own flags.  Its
 #                --tmux/--popup opened a second popup and left this one blank;
 #                its --height/--border/--margin/--padding/--style moved fzf's
-#                window without moving FZF_COLUMNS; and its colours blended into
-#                the plugin's palette.
+#                window without moving FZF_COLUMNS; its --preview covered the
+#                pickers that have none; and its colours blended into the
+#                plugin's palette.
 #   the bar    - the Gone dialog says "press ^r to reload", so the bar on the
 #                rows that can be gone has to advertise it.
 #
@@ -142,6 +143,7 @@ tmux -L "$SOCK" set -gu @interdimux-color-path
 # The pane runs the navigator and then prints how it exited, so "it died" and
 # "it is slow" are told apart without a fixed sleep.
 launch() { # $1 = cols, $2 = rows, rest = NAME=value exports for the navigator
+  # (or for the mode in $LAUNCH_MODE, a fixed flag such as --doctor-view)
   local cols="$1" rows="$2"; shift 2
   local sh="$TMPD/launch.sh" e n v
   tmux -L "$OUTER" kill-server 2>/dev/null || true
@@ -156,7 +158,7 @@ launch() { # $1 = cols, $2 = rows, rest = NAME=value exports for the navigator
     printf 'export INTERDIMUX_SHOW_DIRS=off INTERDIMUX_USE_ZOXIDE=off FZF_DEFAULT_OPTS=\n'
     printf 'unset FZF_DEFAULT_OPTS_FILE INTERDIMUX_FZF_MINOR NO_COLOR\n'
     for e in "$@"; do n="${e%%=*}"; v="${e#*=}"; printf 'export %s=%q\n' "$n" "$v"; done
-    printf 'bash %q; echo "NAV-EXITED=$?"\n' "$SCRIPT"
+    printf 'bash %q %s; echo "NAV-EXITED=$?"\n' "$SCRIPT" "${LAUNCH_MODE:-}"
   } > "$sh"
   chmod +x "$sh"
   tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x "$cols" -y "$rows" "$sh; sleep 60"
@@ -304,6 +306,79 @@ else
   report "FZF_DEFAULT_OPTS='$geo' draws the picker" fail; why_dead
 fi
 
+# A --preview there ran on every row of the pickers that have no preview of
+# their own, and took half the popup (BUG-109).  Its label is drawn with the
+# window, in the same frame as the first rows -- before the reset, Health and
+# the fzf dashboard both showed it on the first capture that had their rows --
+# so the capture taken when the rows appear is the one that would show it.
+LEAK_OPTS="--preview 'echo LEAK {}' --preview-label=LEAKLABEL"
+for spec in '--doctor-view:interdimux doctor:Health' '--dashboard:Health:the fzf dashboard'; do
+  IFS=: read -r mode rows what <<< "$spec"
+  LAUNCH_MODE="$mode" launch 120 20 "FZF_DEFAULT_OPTS=$LEAK_OPTS"
+  if wait_for "$rows"; then
+    scr=$(screen)
+    if [[ "$scr" != *LEAK* ]]; then
+      report "a --preview in \$FZF_DEFAULT_OPTS stays out of $what" pass
+    else
+      report "a --preview in \$FZF_DEFAULT_OPTS stays out of $what" fail
+      ERRORS+="     $(grep -m1 LEAK <<< "$scr" | tr -s ' ' | head -c 120)"$'\n'
+    fi
+  else
+    report "$what draws under a --preview in \$FZF_DEFAULT_OPTS" fail; why_dead
+  fi
+done
+
+# --preview-window is cumulative, so a `hidden` there outlived the navigator's
+# own preview window: with @interdimux-show-preview on, nothing drew, while the
+# rows were sized for it.  The session row's preview has an "active pane" rule.
+launch 120 20 "FZF_DEFAULT_OPTS=--preview-window=hidden" INTERDIMUX_SHOW_PREVIEW=on
+if wait_for 'themeproj' && wait_for 'active pane'; then
+  report "a --preview-window=hidden in \$FZF_DEFAULT_OPTS leaves show-preview's preview drawn" pass
+else
+  report "a --preview-window=hidden in \$FZF_DEFAULT_OPTS leaves show-preview's preview drawn" fail; why_dead
+fi
+
+# ctrl-o's preview is always on, and the same `hidden` kept it from ever
+# drawing.  The reset goes before @interdimux-fzf-opts, though, so a `hidden`
+# put THERE on purpose still hides it -- in ctrl-o, and in the navigator even
+# with show-preview on.  The preview's left border is drawn in the same frame as
+# the prompt line's match count, so that line, once it has a count, says which.
+mkdir -p "$TMPD/pw/pwproj"
+printf '# pwproj\nPWMARK first line\n' > "$TMPD/pw/pwproj/README.md"
+prompt_line() { # -> REPLY = the prompt line, once it shows a match count
+  local s
+  wait_for '^[^'$'\n'']* [0-9]+/[0-9]+' || return 1
+  s=$(screen); REPLY="${s%%$'\n'*}"
+}
+LAUNCH_MODE=--dirs launch 120 20 "INTERDIMUX_PROJECT_DIRS=$TMPD/pw" "FZF_DEFAULT_OPTS=--preview-window=hidden"
+if wait_for 'pwproj' && wait_for 'PWMARK'; then
+  report "a --preview-window=hidden in \$FZF_DEFAULT_OPTS leaves ctrl-o's preview drawn" pass
+else
+  report "a --preview-window=hidden in \$FZF_DEFAULT_OPTS leaves ctrl-o's preview drawn" fail; why_dead
+fi
+LAUNCH_MODE=--dirs launch 120 20 "INTERDIMUX_PROJECT_DIRS=$TMPD/pw" "INTERDIMUX_FZF_OPTS=--preview-window=hidden"
+if wait_for 'pwproj' && prompt_line; then
+  if [[ "$REPLY" != *│* ]]; then
+    report "a --preview-window=hidden in @interdimux-fzf-opts still hides ctrl-o's preview" pass
+  else
+    report "a --preview-window=hidden in @interdimux-fzf-opts still hides ctrl-o's preview" fail
+    ERRORS+="     prompt line: $(tr -s ' ' <<< "$REPLY" | head -c 100)"$'\n'
+  fi
+else
+  report "ctrl-o draws with --preview-window=hidden in @interdimux-fzf-opts" fail; why_dead
+fi
+launch 120 20 "INTERDIMUX_FZF_OPTS=--preview-window=hidden" INTERDIMUX_SHOW_PREVIEW=on
+if wait_for 'themeproj' && prompt_line; then
+  if [[ "$REPLY" != *│* ]]; then
+    report "...and the navigator's, with show-preview on" pass
+  else
+    report "...and the navigator's, with show-preview on" fail
+    ERRORS+="     prompt line: $(tr -s ' ' <<< "$REPLY" | head -c 100)"$'\n'
+  fi
+else
+  report "the navigator draws with --preview-window=hidden in @interdimux-fzf-opts" fail; why_dead
+fi
+tmux -L "$OUTER" kill-server 2>/dev/null || true
 
 # Every reset above is FATAL on an fzf that does not know it, and only the argv
 # shows which ones a given version is handed.  The versions are fzf's own:
