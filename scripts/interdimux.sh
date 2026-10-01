@@ -7822,6 +7822,11 @@ if [ "${1:-}" = "--dirs" ]; then
   [ -z "$dir_path" ] && exit 1
   # Physical path, so comparisons match finder output (which resolves symlinks)
   dir_path=$(cd "$dir_path" 2>/dev/null && pwd -P || echo "$dir_path")
+  # Removed since the list was built: refused, as the navigator's D row refuses
+  # it.  tmux takes `new-session -c <missing>` without a word and starts the
+  # shell in $HOME, so this became a session named after the directory, in the
+  # wrong place.  Exit 1 is the cancel, so the navigator reopens.
+  [ -d "$dir_path" ] || { imux_msg "directory '$dir_path' no longer exists"; exit 1; }
 
   record_dir_use "$dir_path"
   connect_dir "$dir_path"

@@ -164,6 +164,36 @@ check_on_a "the navigator's stderr report" "interdimux: stub-fzf: unknown option
 check_text "...with its '#S' as written, neither expanded nor doubled" \
   "interdimux: stub-fzf: unknown option #S-flag"
 
+# --- ctrl-o's accept on a directory that has gone ----------------------------------
+# Removed after the picker listed it.  tmux takes `new-session -c <missing>`
+# without a word and starts the shell in $HOME, so accepting it made a session
+# named after the directory, in the wrong place, and put the dead path at the
+# top of the recent list (BUG-99).  A stand-in fzf picks the row.
+mkdir -p "$TMPD/pickbin" "$TMPD/imuxgonedir"
+cat > "$TMPD/pickbin/fzf" <<'STUB'
+#!/usr/bin/env bash
+case "${1:-}" in --version) echo "0.74.0 (stub)"; exit 0 ;; esac
+cat >/dev/null
+printf '  ★  ~/imuxgonedir\t\t%s\n' "$IMUX_PICK"
+STUB
+chmod +x "$TMPD/pickbin/fzf"
+rmdir "$TMPD/imuxgonedir"
+rc=0
+PATH="$TMPD/pickbin:$PATH" IMUX_PICK="$TMPD/imuxgonedir" timeout 20 bash "$SCRIPT" --dirs </dev/null >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] && report "ctrl-o on a vanished directory cancels (exit 1: the navigator reopens)" pass \
+              || report "ctrl-o on a vanished directory cancels (exit 1: the navigator reopens; rc=$rc)" fail
+if I has-session -t '=imuxgonedir' 2>/dev/null; then
+  report "...and creates no session for it" fail
+else
+  report "...and creates no session for it" pass
+fi
+if grep -qxF "$TMPD/imuxgonedir" "$TMPD/data/interdimux/recent_dirs" 2>/dev/null; then
+  report "...nor records it as recent" fail
+else
+  report "...nor records it as recent" pass
+fi
+check_on_a "ctrl-o's vanished directory" "interdimux: directory '$TMPD/imuxgonedir' no longer exists"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then echo; printf '%s' "$ERRORS"; exit 1; fi
