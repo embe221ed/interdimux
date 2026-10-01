@@ -579,8 +579,9 @@ $ bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh --agents
 One line per pane (once, however many sessions show it, and none from a session
 `@interdimux-hide` keeps out), with six tab-separated columns: the pane id, a
 target for it, the agent, its state, since when (in epoch seconds; only Claude's
-registry says), and its description as the row has it. `-` is a value nothing
-gave. The columns keep their places: a new one only ever goes at the end.
+registry says), and its description as the row has it (but never cut short).
+`-` is a value nothing gave. The columns keep their places: a new one only ever
+goes at the end.
 
 States, comma-separated, keep only those panes (`--agents approve,input`), and
 `--count` prints how many, so a status line can say what the dashboard says —

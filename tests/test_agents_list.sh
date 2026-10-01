@@ -12,6 +12,9 @@
 #     the panes in: the oldest approval here is in the session listed LAST;
 #     one with no since (a Claude record with no statusUpdatedAt, which the
 #     row shows no age for) prints `-` and comes after every known one;
+#   * the description is the row's: none where the row drops it as a repeat
+#     of what it says already -- a published one that is the agent's name, a
+#     title that is the host name (tmux's default title);
 #   * each pane once, though a session group lists it again, and none from a
 #     session @interdimux-hide keeps out of the navigator;
 #   * --count prints how many, STATES keeps only those (through the
@@ -121,6 +124,8 @@ tin set -g @interdimux-hide 'scratch'
 tin set -p -t '=zz:wk' @agent_state working
 tin set -p -t '=zz:wk' @agent_desc 'Indexing'
 tin set -p -t '=zz:id' @agent_state idle
+# Published, but only the app's name again: the row shows none (row_desc_r).
+tin set -p -t '=zz:id' @agent_desc 'sleep'
 tin set -p -t '=zz:er' @agent_state error
 tin set -p -t '=zz:dn' @agent_state 'done'
 # A tab or a newline in a published description must not reach a line: the
@@ -213,6 +218,10 @@ same "--agents --count: every agent pane" "$(agents --count)" 13
 # The description is the row's: @interdimux-show-title decides it here too.
 same "show-title all: a title no rule knows is the description" \
   "$(INTERDIMUX_SHOW_TITLE=all bash "$SCRIPT" --agents 2>&1 | grep "^$CN$T")" "${L_CN}Just a title"
+# aider sets no title, so its title is tmux's default, the host name, which no
+# row shows: not as its description either.
+same "show-title all: a title that is the host name is no description" \
+  "$(INTERDIMUX_SHOW_TITLE=all bash "$SCRIPT" --agents 2>&1 | grep "^$AI$T")" "$L_AI"
 same "show-title off: no description" \
   "$(INTERDIMUX_SHOW_TITLE=off bash "$SCRIPT" --agents approve 2>&1)" \
   "$(printf '%s\n' "${L_CA%"$T"*}$T" "${L_CB%"$T"*}$T" "${L_CE%"$T"*}$T" "${L_CX%"$T"*}$T")"

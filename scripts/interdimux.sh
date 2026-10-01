@@ -6836,6 +6836,66 @@ agent_mark_r() {
   return 0
 }
 
+# What a row shows of the description $1 (agent_state_r's AS_DESC, which
+# @interdimux-show-title let by), in REPLY: empty when it only repeats what the
+# row says already.  $2 the resolved command, as agent_state_r had it; reads
+# AS_NAME and AS_PUBD, and CUR_HOST/CUR_HOST_SHORT (gather_targets).
+# cmd_field draws it and --agents prints it, so the two say the same.
+row_desc_r() {
+  REPLY="$1"
+  if [ "$AS_PUBD" = 1 ]; then
+    # Published text (@agent_desc, a plugin's option, an @option rule's DESC)
+    # is what its publisher meant to say: it is no stale title and no copy of
+    # the command line, so it is shown as it is -- only a bare repeat of the
+    # name goes.
+    [ "$REPLY" = "$AS_NAME" ] && REPLY=""
+    return 0
+  fi
+  # What only repeats the row: the app's own name, tmux's default title (the
+  # host name), a prompt of this host and, from a preexec hook, the command
+  # line itself.
+  #   * a prompt: `user@host:path` (bash, zsh; `@host.domain`, `[user@host]`
+  #     too) -- @host where the name ends there, so `web` does not hide a
+  #     container or remote host called `web-7d4b9c`.  fish, when SSH_TTY is
+  #     set, heads its prompt AND its command lines with `[host]`, the name
+  #     cut to 10 characters (fish_title).
+  #   * a command line: its first word, past VAR=x and sudo-like prefixes, is
+  #     argv0 -- or, for an interpreter, the script it runs.  A prefix that
+  #     is itself argv0 counts: `sudo docker run ...` on a sudo row.  A word
+  #     with a ':' before its last '/' is no command path but a prompt
+  #     (`deploy@web1:/etc/ssh`, `host:~/ssh`): its last directory is not
+  #     argv0 however it is spelled.
+  local desc="$1" raw="$2" a0 b r w cw=""
+  a0="${raw%% *}"; b="${a0##*/}"
+  r="$CUR_HOST_SHORT"
+  if [ "$desc" = "$AS_NAME" ] || [ "$desc" = "$CUR_HOST" ] || [ "$desc" = "$r" ] \
+     || { [ -n "$r" ] && [[ "$desc" == *"@$r" || "$desc" == *"@$r"[!A-Za-z0-9_-]* \
+                            || "$desc" == "[${r:0:10}]" || "$desc" == "[${r:0:10}] "* ]]; }; then
+    REPLY=""
+    return 0
+  fi
+  set -f
+  for w in $desc; do
+    cw="${w##*/}"; [[ "$w" == *:*/* ]] && cw=""
+    [ -n "$cw" ] && [ "$cw" = "${b#-}" ] && break
+    case "$w" in *=*|sudo|env|nohup|exec|time|command|builtin|noglob|nice) continue ;; esac
+    break
+  done
+  set +f
+  r=""
+  case "$b" in
+    node|nodejs|ruby|perl|php) r=1 ;;
+    python*) [[ "${b#python}" == *[!0123456789.]* ]] || r=1 ;;
+    lua*)    [[ "${b#lua}" == *[!0123456789.]* ]] || r=1 ;;
+  esac
+  [[ "$SHELL_NAMES" == *" ${b#-} "* ]] && r=1
+  if [ -n "$r" ]; then r="${raw#"$a0"}"; r="${r# }"; r="${r%% *}"; fi
+  if [ -n "$cw" ] && { [ "$cw" = "${b#-}" ] || { [ -n "$r" ] && [ "$cw" = "${r##*/}" ]; }; }; then
+    REPLY=""
+  fi
+  return 0
+}
+
 # The command field of a window or pane row, in REPLY.  The arguments are
 # agent_state_r's; it also reads CUR_HOST/CUR_HOST_SHORT from gather_targets.
 #
@@ -6851,7 +6911,7 @@ cmd_field() {
   AS_STATE=""   # the row's state, for the agents view's mark (agent_mark_r)
   format_command "$raw"
   [ "$AGENT_ON" = 1 ] && [ -n "$REPLY" ] || return 0
-  local fc="$REPLY" a0 b name state since desc rest r w cw=""
+  local fc="$REPLY" a0 b name state since desc rest r
   # The row nothing can be added to, known in a few tests instead of through
   # agent_state_r: no option published for the pane, no registry record for
   # it, not an agent, and no title -- or one that no title rule for the app
@@ -6875,60 +6935,13 @@ cmd_field() {
     fi
   fi
   agent_state_r "$@" || { REPLY="$fc"; return 0; }
-  name="$AS_NAME" state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
-  a0="${raw%% *}"; b="${a0##*/}"
+  state="$AS_STATE" since="$AS_SINCE" desc="$AS_DESC"
   case "$SHOW_TITLE" in
     off)   desc="" ;;
     known) [ "$AS_KNOWN" = 1 ] || desc="" ;;
   esac
-  if [ -n "$desc" ] && [ "$AS_PUBD" = 1 ]; then
-    # Published text (@agent_desc, a plugin's option, an @option rule's DESC)
-    # is what its publisher meant to say: it is no stale title and no copy of
-    # the command line, so it is shown as it is -- only a bare repeat of the
-    # name goes.
-    [ "$desc" = "$name" ] && desc=""
-    if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
-  elif [ -n "$desc" ]; then
-    # What only repeats the row: the app's own name, tmux's default title (the
-    # host name), a prompt of this host and, from a preexec hook, the command
-    # line itself.
-    #   * a prompt: `user@host:path` (bash, zsh; `@host.domain`, `[user@host]`
-    #     too) -- @host where the name ends there, so `web` does not hide a
-    #     container or remote host called `web-7d4b9c`.  fish, when SSH_TTY is
-    #     set, heads its prompt AND its command lines with `[host]`, the name
-    #     cut to 10 characters (fish_title).
-    #   * a command line: its first word, past VAR=x and sudo-like prefixes, is
-    #     argv0 -- or, for an interpreter, the script it runs.  A prefix that
-    #     is itself argv0 counts: `sudo docker run ...` on a sudo row.  A word
-    #     with a ':' before its last '/' is no command path but a prompt
-    #     (`deploy@web1:/etc/ssh`, `host:~/ssh`): its last directory is not
-    #     argv0 however it is spelled.
-    r="$CUR_HOST_SHORT"
-    if [ "$desc" = "$name" ] || [ "$desc" = "$CUR_HOST" ] || [ "$desc" = "$r" ] \
-       || { [ -n "$r" ] && [[ "$desc" == *"@$r" || "$desc" == *"@$r"[!A-Za-z0-9_-]* \
-                              || "$desc" == "[${r:0:10}]" || "$desc" == "[${r:0:10}] "* ]]; }; then
-      desc=""
-    else
-      set -f
-      for w in $desc; do
-        cw="${w##*/}"; [[ "$w" == *:*/* ]] && cw=""
-        [ -n "$cw" ] && [ "$cw" = "${b#-}" ] && break
-        case "$w" in *=*|sudo|env|nohup|exec|time|command|builtin|noglob|nice) continue ;; esac
-        break
-      done
-      set +f
-      r=""
-      case "$b" in
-        node|nodejs|ruby|perl|php) r=1 ;;
-        python*) [[ "${b#python}" == *[!0123456789.]* ]] || r=1 ;;
-        lua*)    [[ "${b#lua}" == *[!0123456789.]* ]] || r=1 ;;
-      esac
-      [[ "$SHELL_NAMES" == *" ${b#-} "* ]] && r=1
-      if [ -n "$r" ]; then r="${raw#"$a0"}"; r="${r# }"; r="${r%% *}"; fi
-      if [ -n "$cw" ] && { [ "$cw" = "${b#-}" ] || { [ -n "$r" ] && [ "$cw" = "${r##*/}" ]; }; }; then
-        desc=""
-      fi
-    fi
+  if [ -n "$desc" ]; then
+    row_desc_r "$desc" "$raw"; desc="$REPLY"
     if [ "${#desc}" -gt "$TITLE_MAX" ]; then desc="${desc:0:TITLE_MAX-1}…"; fi
   fi
   if [ "$AS_AGENT" = 0 ] && [ -z "$desc" ]; then REPLY="$fc"; return 0; fi
@@ -7046,7 +7059,9 @@ aw_can_r() {
 #            while it names nothing but approve and input: past that, every
 #            pane is resolved and asked, as its row is.
 #   AW_LIST  set: each pane that counts is also handed to aw_row, which those
-#            modes define below --list, so that a list never parses it.
+#            modes define below --list, so that a list never parses it.  The
+#            RS line then also brings the host names (CUR_HOST, CUR_HOST_SHORT),
+#            which the description of a row is checked against (row_desc_r).
 AW_CLIENT="" AW_WANT=' approve input ' AW_LIST=""
 agents_waiting_r() {
   REPLY=0 AW_CLIENT=""
@@ -7054,7 +7069,7 @@ agents_waiting_r() {
   utf8_ctype_r   # the rows' character type (see gather_targets)
   [ -z "$REPLY" ] || local LC_CTYPE="$REPLY"
   REPLY=0
-  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e' a0 b v fast=1 wi="" pi=""
+  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e' mark=$'\x1e' a0 b v fast=1 wi="" pi=""
   local -a f=() lines=()
   local -A CLAUDE_BY_PANE=() aw_seen=()
   local AS_STATE_ONLY=1   # see agent_state_r: the count wants the state alone
@@ -7064,15 +7079,20 @@ agents_waiting_r() {
   title_ruleset
   state_optfmt_r
   fmt="#{session_name}${US}#{pane_id}${US}#{pane_pid}${US}#{pane_current_command}${US}#{pane_title}${US}$REPLY"
-  [ -z "$AW_LIST" ] || fmt="#{window_index}${US}#{pane_index}${US}$fmt"
-  all=$(tmux list-panes -a -F "$fmt" \; display-message -p "$rs" \; \
+  [ -z "$AW_LIST" ] || { fmt="#{window_index}${US}#{pane_index}${US}$fmt"; mark+="#{host}${US}#{host_short}"; }
+  all=$(tmux list-panes -a -F "$fmt" \; display-message -p "$mark" \; \
           display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} \
           '#{client_height} #{client_width} #S' 2>/dev/null)
   # Cut at the LAST RS (a command name may hold one), from the end: a
   # ${x#*pat} would be quadratic in its offset.
   rest="${all%"$rs"*}"
   if [ "$rest" != "$all" ]; then
-    AW_CLIENT="${all:${#rest}+1}"; AW_CLIENT="${AW_CLIENT#$'\n'}"; all="$rest"
+    AW_CLIENT="${all:${#rest}+1}"
+    if [ -n "$AW_LIST" ]; then
+      v="${AW_CLIENT%%$'\n'*}"; AW_CLIENT="${AW_CLIENT:${#v}}"
+      CUR_HOST="${v%%"$US"*}" CUR_HOST_SHORT="${v#*"$US"}"
+    fi
+    AW_CLIENT="${AW_CLIENT#$'\n'}"; all="$rest"
     if [[ "$AW_CLIENT" =~ ^([0-9]*)\ ([0-9]*)\ (.*)$ ]]; then
       cur="${BASH_REMATCH[3]}"   # a session with no client has no size, but has a name
       [ -n "${BASH_REMATCH[1]}" ] && [ -n "${BASH_REMATCH[2]}" ] || AW_CLIENT=""
@@ -7142,7 +7162,7 @@ agents_waiting_r() {
       [ "$AS_AGENT" = 1 ] || continue
     fi
     n=$(( n + 1 ))
-    [ -z "$AW_LIST" ] || aw_row "$n" "$pane" "${f[0]}" "$wi" "$pi"
+    [ -z "$AW_LIST" ] || aw_row "$n" "$pane" "${f[0]}" "$wi" "$pi" "$raw"
   done
   REPLY="$n"
 }
@@ -7890,7 +7910,8 @@ fi
 # or a since that is not known (only Claude's registry says since when).  The
 # target is spec_target's for the pane's row, `=session:=window.pane`, in the
 # first session that shows it, as the count takes it.  The description is the
-# row's, before @interdimux-title-max cuts it, and cleaned as a title is
+# row's (row_desc_r: none when it only repeats the name, the host or the
+# command), before @interdimux-title-max cuts it, and cleaned as a title is
 # (title_text_r): no tab or newline can reach a line.
 #
 # Most urgent first -- approve, input, error, done, working, idle, then a pane
@@ -7899,7 +7920,7 @@ fi
 # (an unknown one after every known one) and the pane's place in the list, so
 # nothing is sorted and nothing forks.
 AW_ROWS=()
-aw_row() { # $1 the pane's place, $2 its id, $3 session, $4 window, $5 pane index
+aw_row() { # $1 the pane's place, $2 its id, $3 session, $4 window, $5 pane index, $6 command
   local r s d="$AS_DESC"
   case "$AS_STATE" in
     approve) r=0 ;; input) r=1 ;; error) r=2 ;; done) r=3 ;; working) r=4 ;; idle) r=5 ;; *) r=6 ;;
@@ -7909,6 +7930,7 @@ aw_row() { # $1 the pane's place, $2 its id, $3 session, $4 window, $5 pane inde
   s="$AS_SINCE"
   case "$s" in ''|0|*[!0-9]*|???????????*) s="" ;; esac
   case "$SHOW_TITLE" in off) d="" ;; known) [ "$AS_KNOWN" = 1 ] || d="" ;; esac
+  [ -z "$d" ] || { row_desc_r "$d" "$6"; d="$REPLY"; }
   r=$(( r * 10**15 + 10#${s:-9999999999} * 10**5 + $1 ))
   AW_ROWS[r]="$2$US$3$US$4$US$5$US${AS_NAME//[[:cntrl:]]/?}	${AS_STATE:--}	${s:--}	$d"
 }
