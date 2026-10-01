@@ -32,6 +32,15 @@ esac
 
 set -euo pipefail
 
+# The navigator -- the one invocation without an argument -- takes an interrupt
+# that comes before its fzf has the terminal for a cancel, and a cancel exits 0,
+# as Esc does.  That is Ctrl-C pressed just as prefix+f opens the popup: killed
+# by the signal, the navigator failed, and a popup that closes by itself only
+# on a 0 (-EE, see --bind-keys) stayed up, blank but for '^C', until another
+# key.  Set this early because parsing the rest of the file is most of that
+# window.  The main loop replaces it (see there).
+[ $# != 0 ] || trap 'exit 0' INT
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -383,8 +392,13 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_close='-E'
   [ "$_bk_tvnum" -ge 306 ] && _bk_close='-EE -k'
 
+  # `exec`: the popup runs its command with default-shell -c, and the status it
+  # closes on is that shell's.  A /bin/sh that is dash forks bash and waits for
+  # it, and a Ctrl-C in a dialog, or as the popup opens, killed that sh too, so
+  # a navigator that had carried on (see its main loop) still left the popup
+  # held as a failure.  Exec'd, the navigator is what the popup runs.
   tmux bind-key "$_bk_nav" run-shell -bC \
-    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title_fmt\"$_bk_env $_bk_close \"bash '$SQ_SCRIPT_FMT'\""
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title_fmt\"$_bk_env $_bk_close \"exec bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
 
@@ -6133,8 +6147,10 @@ input_dialog() {
   local ifd
   if tty_fd; then ifd="$REPLY"; else REPLY=""; return 0; fi
   # On a real terminal, edit in raw/no-echo mode for the duration so fast keys
-  # arriving between reads aren't echoed over the box, and Ctrl-C cancels
-  # cleanly (delivered as a byte, not SIGINT).  Skipped for non-ttys.
+  # arriving between reads aren't echoed over the box.  Ctrl-C is a byte only
+  # between reads: bash's `read -N1` turns the signal back on while it waits
+  # for a key, so it is mostly a SIGINT, which --action traps (the navigator's
+  # main loop says what else it reaches).  Skipped for non-ttys.
   local saved_stty=""
   if [ -c "$tty_in" ]; then
     saved_stty=$(stty -g <"$tty_in" 2>/dev/null) || saved_stty=""
@@ -10045,13 +10061,14 @@ if [ "${1:-}" = "--launch" ]; then
       # contract); as a standalone popup that would bubble up through
       # display-popup to run-shell as a "returned 1" status message —
       # absorb it here
+      # The rest are exec'd, as prefix+f's is (see --bind-keys).
       dirs)   chrome+=(-e "INTERDIMUX_MODE=dirs"); cmd="bash '$sp' --dirs || true" ;;
       # Not a picker over tmux targets — its own list, its own handler.
-      jobs)   cmd="bash '$sp' --jobs" ;;
-      doctor) cmd="bash '$sp' --doctor-view" ;;
-      switch) cmd="bash '$sp'" ;;
-      agents) chrome+=(-e "INTERDIMUX_VIEW=agents"); cmd="bash '$sp'" ;;
-      *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="bash '$sp'" ;;
+      jobs)   cmd="exec bash '$sp' --jobs" ;;
+      doctor) cmd="exec bash '$sp' --doctor-view" ;;
+      switch) cmd="exec bash '$sp'" ;;
+      agents) chrome+=(-e "INTERDIMUX_VIEW=agents"); cmd="exec bash '$sp'" ;;
+      *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="exec bash '$sp'" ;;
     esac
   else
     env_fwd=$(build_env_fwd)
@@ -10309,7 +10326,7 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
       [ -n "$INTERDIMUX_CLIENT" ] && chrome+=(-e "INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT")
       env_fwd_flags
       chrome+=("${ENV_FWD_FLAGS[@]}")
-      cmd="bash '$sp' --dashboard"
+      cmd="exec bash '$sp' --dashboard"   # exec: see --bind-keys
     fi
     # Entries + 5: two border rows, the prompt, the rule under it, and the hint
     # bar.  MEASURED rather than guessed — the 12 entries show fully at -h 17,
@@ -10563,6 +10580,16 @@ fi
 
 LIST_CMD="bash '$SCRIPT_PATH' --list"
 ACTION_CMD="bash '$SCRIPT_PATH' --action"
+
+# From here on an interrupt is not the navigator's to act on.  Ctrl-C in a
+# dialog is a SIGINT even though the dialog turns the signal off: bash's own
+# `read -N1` turns it back on for each key it waits for.  It reaches every
+# process on the popup's terminal: the dialog, which cancels on it (--action
+# traps INT), fzf, which carries on, and this bash, which died of it while it
+# waited for fzf's output.  fzf outlived it, and when Esc then ended fzf the
+# popup (-EE) took the dead navigator's status for a failure and stayed up over
+# the old dialog; an Enter switched nothing.
+trap : INT
 
 while true; do
   : > "$RESUME_FILE"

@@ -181,6 +181,51 @@ closes "dashboard fallback, Esc" "launch --dashboard-launch" 'interdimux ❯' Es
 O resize-window -t '=drv:' -x 100 -y 30
 wait_for '[ "$(I display-message -c "$CL" -p "#{client_height}" 2>/dev/null)" = 30 ]' 50 || true
 
+# --- Ctrl-C is a cancel, never a failure ------------------------------------------
+# Ctrl-C in a dialog is a SIGINT to every process on the popup's terminal (see
+# the navigator's main loop): the dialog cancels on it, and the navigator, and
+# the /bin/sh that runs the popup's command, must carry on, or the popup is
+# held as a failure over the dead dialog once Esc or Enter ends fzf.
+closes "navigator, ^x, Ctrl-C, then Esc" "C-b f" '❯' "C-x wait:Kill%session C-c gone:Kill%session Escape"
+I has-session -t '=victim' 2>/dev/null \
+  && report "...and the Ctrl-C killed nothing" pass \
+  || report "...and the Ctrl-C killed nothing" fail
+closes "navigator, ^e, Ctrl-C, then Enter" "C-b f" '❯' "victim wait:▸%victim C-e wait:Rename%session C-c gone:Rename%session Enter"
+# ...and that Enter is still the navigator's: it switches
+[ "$(I list-clients -F '#{client_name} #{session_name}' | awk -v c="$CL" '$1 == c { print $2 }')" = victim ] \
+  && report "...and the Enter after it switches" pass \
+  || report "...and the Enter after it switches" fail
+I switch-client -c "$CL" -t '=host:' 2>/dev/null || true
+# And Ctrl-C as the popup opens, before fzf has the terminal.  Deterministic
+# with an fzf whose --version stalls, which the navigator asks when the binding
+# baked no version: one made with no fzf in sight.
+mkdir -p "$TMPD/slow"
+cat > "$TMPD/slow/fzf" <<STUB
+#!/usr/bin/env bash
+case "\${1:-}" in --version) : > '$TMPD/probing'; sleep 20 ;; esac
+exec '$(command -v fzf)' "\$@"
+STUB
+chmod +x "$TMPD/slow/fzf"
+PATH="$TMPD/nofzf" bash "$SCRIPT" --bind-keys
+I set-environment -g PATH "$TMPD/slow:$PATH0"
+rm -f "$TMPD/probing"
+key C-b f
+if wait_for '[ -e "$TMPD/probing" ]' 100; then
+  key C-c
+  if wait_for '! popup_up' 50; then
+    report "Ctrl-C as the navigator starts: the popup closes by itself" pass
+  else
+    report "Ctrl-C as the navigator starts: the popup closes by itself" fail
+    ERRORS+="    screen: $(cap | grep -v '^ *$' | head -6 | tr '\n' '|')"$'\n'
+    I display-popup -C -c "$CL" 2>/dev/null || true; wait_for '! popup_up' 30 || true
+  fi
+else
+  report "setup: the navigator asks the slow fzf its version" fail
+  I display-popup -C -c "$CL" 2>/dev/null || true; wait_for '! popup_up' 30 || true
+fi
+I set-environment -g PATH "$PATH0"
+PATH="$PATH0" bash "$SCRIPT" --bind-keys
+
 # --- a failure stays on screen until a key ---------------------------------------
 # "Stays" can only be shown as "has not gone": once the text is up and the
 # picker behind it has exited, it must survive a bounded wait for it to go.

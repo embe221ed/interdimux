@@ -928,7 +928,7 @@ if grep -q "ctrl-r:reload(bash '\$SQ_SCRIPT' --doctor)" "$SCRIPT"; then
 else
   report "...with a recheck binding" fail
 fi
-if grep -q "doctor) cmd=\"bash '\$sp' --doctor-view\"" "$SCRIPT"; then
+if grep -q "doctor) cmd=\"exec bash '\$sp' --doctor-view\"" "$SCRIPT"; then
   report "--launch doctor opens the viewer in a popup" pass
 else
   report "--launch doctor opens the viewer in a popup" fail
