@@ -7904,11 +7904,13 @@ aw_row() { # $1 the pane's place, $2 its id, $3 session, $4 window, $5 pane inde
   case "$AS_STATE" in
     approve) r=0 ;; input) r=1 ;; error) r=2 ;; done) r=3 ;; working) r=4 ;; idle) r=5 ;; *) r=6 ;;
   esac
+  # A record with no statusUpdatedAt says 0 (claude_registry_r), which the row
+  # shows no age for (age_of): unknown, not the oldest of all.
   s="$AS_SINCE"
-  case "$s" in ''|*[!0-9]*|???????????*) s=9999999999 ;; esac
+  case "$s" in ''|0|*[!0-9]*|???????????*) s="" ;; esac
   case "$SHOW_TITLE" in off) d="" ;; known) [ "$AS_KNOWN" = 1 ] || d="" ;; esac
-  r=$(( r * 10**15 + 10#$s * 10**5 + $1 ))
-  AW_ROWS[r]="$2$US$3$US$4$US$5$US${AS_NAME//[[:cntrl:]]/?}	${AS_STATE:--}	${AS_SINCE:--}	$d"
+  r=$(( r * 10**15 + 10#${s:-9999999999} * 10**5 + $1 ))
+  AW_ROWS[r]="$2$US$3$US$4$US$5$US${AS_NAME//[[:cntrl:]]/?}	${AS_STATE:--}	${s:--}	$d"
 }
 
 # STATE,STATE,... ($1) as AW_WANT; status 1 for a word that is no state.

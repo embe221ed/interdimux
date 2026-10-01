@@ -10,6 +10,8 @@
 #   * most urgent first (approve, input, error, done, working, idle), and
 #     within a state the one in it longest first -- whatever order tmux lists
 #     the panes in: the oldest approval here is in the session listed LAST;
+#     one with no since (a Claude record with no statusUpdatedAt, which the
+#     row shows no age for) prints `-` and comes after every known one;
 #   * each pane once, though a session group lists it again, and none from a
 #     session @interdimux-hide keeps out of the navigator;
 #   * --count prints how many, STATES keeps only those (through the
@@ -94,6 +96,7 @@ mk plain   'whatever'                                sleep  973
 mk claudeW '◐ Thinking it over'                      claude 972
 mk claudeD '✳ Refactor the store'                    claude 970
 mk claudeN 'Just a title'                            claude 969
+mk claudeE '✳ Old record'                            claude 968
 cat > "$TMPD/aider1" <<'EOF2'
 #!/usr/bin/env bash
 exec -a aider sleep 971
@@ -105,6 +108,7 @@ tin -f /dev/null new-session -d -s aa -x 120 -y 30 -c "$TMPD" "exec bash --norc 
 tin set -g default-command 'bash --norc --noprofile -i'
 tin new-window -d -t '=aa:' -n cb -c "$TMPD" "exec '$TMPD/claudeB'"
 tin new-window -d -t '=aa:' -n in -c "$TMPD" "exec '$TMPD/claudeC'"
+tin new-window -d -t '=aa:' -n ne -c "$TMPD" "exec '$TMPD/claudeE'"
 tin new-session -d -s zz -x 120 -y 30 -c "$TMPD" "exec bash --norc --noprofile -i"
 for w in ca:claudeA cx:codex1 wk:plain id:plain er:plain dn:plain vi:vim1 cw:claudeW ai:aider1 \
          cd:claudeD cn:claudeN; do
@@ -128,6 +132,7 @@ widx_of() { tin display-message -p -t "$1" '#{window_index}'; }
 title_is() { [ "$(tin display-message -p -t "$1" '#{pane_title}')" = "$2" ]; }
 settled() {
   title_is '=aa:cb' '✳ Review the API' && title_is '=aa:in' '✳ Pick a name' \
+    && title_is '=aa:ne' '✳ Old record' \
     && title_is '=zz:ca' '✳ Fix the parser' && title_is '=zz:cx' '[ ! ] Action Required | Add tests | proj' \
     && title_is '=scratch:' '[ ! ] Action Required | Hidden | proj' && title_is '=zz:vi' 'notes - VIM' \
     && title_is '=zz:cw' '◐ Thinking it over' && title_is '=zz:cd' '✳ Refactor the store' \
@@ -141,18 +146,21 @@ settled && report "the panes settled (titles set, argv final)" pass \
 
 # Claude's registry: A and B wait for a permission, A since longer (and in
 # the session tmux lists LAST); C asks a question; D is busy, which no title
-# of Claude's can say under tmux.  statusUpdatedAt is in ms.
-record() { # window, status, waitingFor, statusUpdatedAt
+# of Claude's can say under tmux.  E waits too, in a record with no
+# statusUpdatedAt at all, in the session tmux lists FIRST: since unknown, it
+# comes after A and B.  statusUpdatedAt is in ms.
+record() { # window, status, waitingFor, statusUpdatedAt (empty: none)
   local pane pid st
   pane=$(pane_of "$1"); pid=$(tin display-message -p -t "$1" '#{pane_pid}')
   read -r -a st < "/proc/$pid/stat"
-  printf '{"pid":%s,"sessionId":"x","cwd":"/tmp","startedAt":1,"procStart":"%s","version":"2.1.281","kind":"interactive","entrypoint":"cli","tmux":"t:@1.%s","name":"n","status":"%s","waitingFor":"%s","statusUpdatedAt":%s}' \
-    "$pid" "${st[21]}" "$pane" "$2" "$3" "$4" > "$INTERDIMUX_CLAUDE_DIR/sessions/$pid.json"
+  printf '{"pid":%s,"sessionId":"x","cwd":"/tmp","startedAt":1,"procStart":"%s","version":"2.1.281","kind":"interactive","entrypoint":"cli","tmux":"t:@1.%s","name":"n","status":"%s","waitingFor":"%s"%s}' \
+    "$pid" "${st[21]}" "$pane" "$2" "$3" "${4:+,\"statusUpdatedAt\":$4}" > "$INTERDIMUX_CLAUDE_DIR/sessions/$pid.json"
 }
 record '=zz:ca' waiting 'permission prompt' 1700000000000
 record '=aa:cb' waiting 'permission prompt' 1700000600000
 record '=aa:in' waiting 'input needed'      1700000300000
 record '=zz:cd' busy    ''                  1700000100000
+record '=aa:ne' waiting 'permission prompt' ''
 
 export TMUX="$(tin display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(pane_of '=aa:0')"
@@ -160,10 +168,12 @@ agents() { bash "$SCRIPT" --agents "$@" 2>"$TMPD/err"; }
 
 T=$'\t'
 CA=$(pane_of '=zz:ca') CB=$(pane_of '=aa:cb') CC=$(pane_of '=aa:in') CX=$(pane_of '=zz:cx')
+CE=$(pane_of '=aa:ne')
 WK=$(pane_of '=zz:wk') ID=$(pane_of '=zz:id') ER=$(pane_of '=zz:er') DN=$(pane_of '=zz:dn')
 CW=$(pane_of '=zz:cw') AI=$(pane_of '=zz:ai') CD=$(pane_of '=zz:cd') CN=$(pane_of '=zz:cn')
 L_CA="$CA$T=zz:=$(widx_of '=zz:ca').0${T}claude${T}approve${T}1700000000${T}Fix the parser"
 L_CB="$CB$T=aa:=$(widx_of '=aa:cb').0${T}claude${T}approve${T}1700000600${T}Review the API"
+L_CE="$CE$T=aa:=$(widx_of '=aa:ne').0${T}claude${T}approve${T}-${T}Old record"
 L_CX="$CX$T=zz:=$(widx_of '=zz:cx').0${T}codex${T}approve${T}-${T}Add tests"
 L_CC="$CC$T=aa:=$(widx_of '=aa:in').0${T}claude${T}input${T}1700000300${T}Pick a name"
 L_ER="$ER$T=zz:=$(widx_of '=zz:er').0${T}sleep${T}error${T}-${T}"
@@ -182,7 +192,7 @@ L_CD="$CD$T=zz:=$(widx_of '=zz:cd').0${T}claude${T}working${T}1700000100${T}Refa
 L_CN="$CN$T=zz:=$(widx_of '=zz:cn').0${T}claude${T}-${T}-${T}"
 
 # --- the listing -----------------------------------------------------------------
-want=$(printf '%s\n' "$L_CA" "$L_CB" "$L_CX" "$L_CC" "$L_ER" "$L_DN" "$L_CD" "$L_WK" "$L_CW" "$L_ID" "$L_AI" "$L_CN")
+want=$(printf '%s\n' "$L_CA" "$L_CB" "$L_CE" "$L_CX" "$L_CC" "$L_ER" "$L_DN" "$L_CD" "$L_WK" "$L_CW" "$L_ID" "$L_AI" "$L_CN")
 rc=0; got=$(agents) || rc=$?
 same "every agent pane once, most urgent first, the longest-waiting first within a state" "$got" "$want"
 same "...exit 0, and nothing on stderr" "$rc:$(cat "$TMPD/err")" "0:"
@@ -191,21 +201,21 @@ same "...six columns on every line: no tab or newline from a description" \
 
 # --- STATES and --count ------------------------------------------------------------
 same "--agents approve,input: those only, in the same order" \
-  "$(agents approve,input)" "$(printf '%s\n' "$L_CA" "$L_CB" "$L_CX" "$L_CC")"
+  "$(agents approve,input)" "$(printf '%s\n' "$L_CA" "$L_CB" "$L_CE" "$L_CX" "$L_CC")"
 same "--agents working,idle (no shortcut: every pane is asked, a title too)" \
   "$(agents working,idle)" "$(printf '%s\n' "$L_CD" "$L_WK" "$L_CW" "$L_ID")"
 same "--agents --count approve,input: the dashboard's count (the hidden session's codex is not in it)" \
-  "$(agents --count approve,input)" 4
-same "--agents --count approve" "$(agents --count approve)" 3
+  "$(agents --count approve,input)" 5
+same "--agents --count approve" "$(agents --count approve)" 4
 same "--agents --count done,error" "$(agents --count done,error)" 2
-same "--agents --count: every agent pane" "$(agents --count)" 12
+same "--agents --count: every agent pane" "$(agents --count)" 13
 
 # The description is the row's: @interdimux-show-title decides it here too.
 same "show-title all: a title no rule knows is the description" \
   "$(INTERDIMUX_SHOW_TITLE=all bash "$SCRIPT" --agents 2>&1 | grep "^$CN$T")" "${L_CN}Just a title"
 same "show-title off: no description" \
   "$(INTERDIMUX_SHOW_TITLE=off bash "$SCRIPT" --agents approve 2>&1)" \
-  "$(printf '%s\n' "${L_CA%"$T"*}$T" "${L_CB%"$T"*}$T" "${L_CX%"$T"*}$T")"
+  "$(printf '%s\n' "${L_CA%"$T"*}$T" "${L_CB%"$T"*}$T" "${L_CE%"$T"*}$T" "${L_CX%"$T"*}$T")"
 
 for bad in bogus approve,bogus ,approve --count=1; do
   rc=0; out=$(bash "$SCRIPT" --agents "$bad" 2>"$TMPD/err") || rc=$?
@@ -220,9 +230,9 @@ grep -q 'usage: --agents' "$TMPD/err" && report "...saying how it is used" pass 
 mkdir -p "$TMPD/onlytmux"
 ln -s "$(command -v tmux)" "$TMPD/onlytmux/tmux"
 rc=0; out=$(PATH="$TMPD/onlytmux" "$BASH" "$SCRIPT" --agents --count approve,input 2>"$TMPD/err") || rc=$?
-same "with no fzf on PATH, --agents --count still answers" "$rc:$out" "0:4"
+same "with no fzf on PATH, --agents --count still answers" "$rc:$out" "0:5"
 rc=0; out=$(PATH="$TMPD/onlytmux" "$BASH" "$SCRIPT" --agents approve 2>"$TMPD/err") || rc=$?
-same "...and so does the listing" "$rc:$out" "0:$(printf '%s\n' "$L_CA" "$L_CB" "$L_CX")"
+same "...and so does the listing" "$rc:$out" "0:$(printf '%s\n' "$L_CA" "$L_CB" "$L_CE" "$L_CX")"
 
 # --- bash 4.3, the floor -------------------------------------------------------------
 B43="${INTERDIMUX_OLD_BASH_DIR:-}/4.3/bash"
