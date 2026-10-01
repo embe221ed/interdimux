@@ -1503,6 +1503,33 @@ scan_dirs() {
   esac
 }
 
+# scan_dirs over many roots: scan_roots DEPTH FINDER ROOT...  ONE finder run
+# (and one sed) for all of them, where a loop over scan_dirs paid a fork of
+# each per root -- a deep search whose query matched 300 directories took ~7 s,
+# against 0.06 s for the one run (review PERF-08).  fd and find both apply the
+# depth to each root, and the callers only ever gather a SET of directories
+# (emit_sorted_tiers sorts and dedups), so it does not matter that one run
+# orders them differently, or repeats a nested root's.  $HOME keeps a run of
+# its own: its ~/Library prune is anchored to it, and fd's --exclude would
+# apply to every root.  In chunks, to stay clear of ARG_MAX.
+scan_roots() {
+  local depth="$1" finder="$2" r i
+  local -a roots=()
+  shift 2
+  for r in "$@"; do
+    if [ "$r" = "$HOME" ]; then scan_dirs "$r" "$depth" "$finder"
+    elif [ -d "$r" ]; then roots+=("$r")
+    fi
+  done
+  [ "${#roots[@]}" -gt 0 ] || return 0
+  for (( i = 0; i < ${#roots[@]}; i += 256 )); do
+    case "$finder" in
+      fd|fdfind) "$finder" --type d --max-depth "$depth" --absolute-path . "${roots[@]:i:256}" 2>/dev/null ;;
+      find) find "${roots[@]:i:256}" -maxdepth "$depth" -path '*/.*' -prune -o -type d -print 2>/dev/null ;;
+    esac
+  done | sed 's:/\{1,\}$::' || true
+}
+
 # Find dirs whose *name* contains the query, case-insensitively, using
 # the finder's native matching — much deeper reach than scanning
 # everything and filtering in bash.
@@ -4727,21 +4754,25 @@ if [ "${1:-}" = "--dirs-list" ]; then
           done
           [ "$anc" = "/" ] && continue
           [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
+          _roots=()
           while IFS= read -r d; do
             [ -z "$d" ] && continue
             if [[ "${d,,}" == "${qr,,}"* ]]; then
               collect_dir "$d"
-              while IFS= read -r sub; do
-                [ -z "$sub" ] && continue
-                collect_dir "$sub"
-              done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
+              _roots+=("$d")
             fi
           done < <(scan_dirs "$anc" "$stripped" "$finder")
+          # every completion's subtree in one finder run (scan_roots)
+          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+            [ -z "$sub" ] && continue
+            collect_dir "$sub"
+          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
         done
 
         if [[ "$query" != */* ]]; then
           # Name fragment (no slash): let the finder search for matching
           # dir names natively — reaches deep at low cost.
+          _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
             mapfile -t _matches < <(match_dirs "$sp" "$query" $((SCAN_DEPTH * 2)) "$finder" | sort)
@@ -4752,12 +4783,14 @@ if [ "${1:-}" = "--dirs-list" ]; then
               # A match inside an already-scanned match is covered
               [ -n "$_scanned_root" ] && [[ "$d" == "$_scanned_root"/* ]] && continue
               _scanned_root="$d"
-              while IFS= read -r sub; do
-                [ -z "$sub" ] && continue
-                collect_dir "$sub"
-              done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
+              _roots+=("$d")
             done
           done
+          # every match's subtree in one finder run (scan_roots)
+          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+            [ -z "$sub" ] && continue
+            collect_dir "$sub"
+          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
         else
           # Multi-component query: match it as a path substring against a
           # scan deep enough for it to appear, capped to keep the scan
@@ -4766,19 +4799,21 @@ if [ "${1:-}" = "--dirs-list" ]; then
           match_depth=$((1 + ${#slashes}))
           [ "$match_depth" -lt 2 ] && match_depth=2
           [ "$match_depth" -gt "$SCAN_DEPTH" ] && match_depth="$SCAN_DEPTH"
+          _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
             while IFS= read -r d; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               if [[ "${d,,}" == *"${query,,}"* ]]; then
                 collect_dir "$d"
-                while IFS= read -r sub; do
-                  [ -z "$sub" ] && continue
-                  collect_dir "$sub"
-                done < <(scan_dirs "$d" "$SCAN_DEPTH" "$finder")
+                _roots+=("$d")
               fi
             done < <(scan_dirs "$sp" "$match_depth" "$finder")
           done
+          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+            [ -z "$sub" ] && continue
+            collect_dir "$sub"
+          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
         fi
       fi
 

@@ -31,8 +31,8 @@
 #
 # The numbers are budgets.  A change that needs one more exec or fork on these
 # paths raises the number here, in the same commit, and says why; the per-row
-# cases are not numbers at all -- 3 directories or 30, the cost must be the
-# same.
+# and per-match cases are not numbers at all -- 3 directories or 30, the cost
+# must be the same.
 #
 # Each run gets the popup's environment (options primed, versions pinned) and
 # no controlling terminal (setsid), so term_cols has no tty to `stty`: under a
@@ -119,8 +119,8 @@ for _ in $(seq 1 100); do settled && break; sleep 0.1; done
 SOCK_PATH="$(tmux -L "$SOCK" display-message -p '#{socket_path}')"
 PANE="$(tmux -L "$SOCK" list-panes -t '=alpha:0' -F '#{pane_id}')"
 
-# Directory fixtures for the per-row cases: N project dirs, each with a
-# subdirectory.
+# Directory fixtures for the per-row and per-match cases: N project dirs, each
+# with a subdirectory, named so that `svc` matches every one of them.
 for n in 3 30; do
   for i in $(seq 1 "$n"); do mkdir -p "$TMPD/proj$n/svc-$i/src"; done
 done
@@ -220,9 +220,10 @@ check "--describe-create" "head=1 tmux=1 zoxide=1" 4
 run on FZF_NTH=1 -- --scope-prompt
 check "--scope-prompt" "" 1
 
-# --- the ctrl-o picker: nothing per row --------------------------------------
-# A row used to fork the whole script for its padding (review PERF-07): 3
-# directories or 30, the cost must be the same.
+# --- the ctrl-o picker: nothing per row, nothing per match -------------------
+# A row used to fork the whole script for its padding (review PERF-07), and a
+# deep search ran a finder and a sed for every directory its query matched
+# (review PERF-08): 3 directories or 30, the cost must be the same.
 same_cost() { # NAME ARGS... -- run with 3 and with 30 matching directories (@N@)
   local name="$1" t3 f3 rows3 rows30; shift
   run on INTERDIMUX_PROJECT_DIRS="$TMPD/proj3" -- "${@//@N@/3}"
@@ -238,6 +239,9 @@ same_cost() { # NAME ARGS... -- run with 3 and with 30 matching directories (@N@
   fi
 }
 same_cost "--dirs-list" --dirs-list
+same_cost "--dirs-list --deep svc (a name fragment)" --dirs-list --deep svc
+same_cost "--dirs-list --deep /src (a path fragment)" --dirs-list --deep /src
+same_cost "--dirs-list --deep .../sv (a path being typed)" --dirs-list --deep "$TMPD/proj@N@/sv"
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
