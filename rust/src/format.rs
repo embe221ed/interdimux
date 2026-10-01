@@ -1,18 +1,30 @@
 //! Smart command formatting: highlight the ssh host, or the file an editor has
 //! open; dim an idle shell; show argv0 (and an interpreter's script) by its
 //! basename.  A faithful port of bash `format_command`, including its
-//! flag-skipping tables and its "last positional wins" behaviour.
+//! flag-skipping tables.
 
 use crate::palette::{Palette, RST};
 use crate::proc::{is_idle_shell, is_shell};
 
-/// ssh/mosh flags that consume the following argument.
+/// Does the ssh/mosh flag word `w` (it starts with `-`) consume the following
+/// argument?  mosh's long options that take a value do.  Short flags are read
+/// as getopt reads them: bundled, and the first letter that takes a value takes
+/// the REST of the word (`-p2222`, `-oX=no`), or the next word when it is the
+/// last letter (`-NL 8080:h:80`, `-vp 2222`).  Since the host is the first word
+/// left over, a value this misses becomes the host (review BUG-36).  The same
+/// rule as the `case` in bash `format_command`.
 fn ssh_flag_takes_value(w: &str) -> bool {
-    matches!(
-        w,
-        "-b" | "-c" | "-D" | "-E" | "-e" | "-F" | "-I" | "-i" | "-J" | "-L" | "-l" | "-m"
-            | "-O" | "-o" | "-p" | "-Q" | "-R" | "-S" | "-W" | "-w"
-    )
+    if let Some(long) = w.strip_prefix("--") {
+        return matches!(
+            long,
+            "client" | "server" | "predict" | "port" | "family" | "ssh" | "bind-server"
+                | "experimental-remote-ip"
+        );
+    }
+    let letters = &w[1..];
+    let takes_value = |c: char| "BbcDEeFIiJLlmOoPpQRSWw".contains(c);
+    // ASCII letters, so "is the last" is a byte test
+    letters.find(takes_value).is_some_and(|i| i + 1 == letters.len())
 }
 
 /// Editor flags that consume the following argument.
@@ -52,6 +64,9 @@ pub fn format_command(cmd: &str, p: &Palette) -> (String, String) {
     let base = name.rsplit('/').next().unwrap_or(name);
     let args: Vec<&str> = cmd.split(' ').skip(1).filter(|s| !s.is_empty()).collect();
 
+    // The host is the FIRST word that is neither a flag nor a flag's value:
+    // `ssh [options] destination [command [argument ...]]`, and whatever follows
+    // the destination is the remote command (review BUG-36).
     if base == "ssh" || base == "mosh" {
         let mut host = "";
         let mut skip = false;
@@ -66,6 +81,7 @@ pub fn format_command(cmd: &str, p: &Palette) -> (String, String) {
                 }
             } else {
                 host = w;
+                break;
             }
         }
         if !host.is_empty() {
@@ -155,8 +171,48 @@ mod tests {
     fn ssh_flag_values_are_not_mistaken_for_the_host() {
         // -i takes a value; "key.pem" must not become the host
         assert_eq!(plain("ssh -i key.pem realhost"), "ssh realhost");
-        // last positional wins, matching bash
-        assert_eq!(plain("ssh a b"), "ssh b");
+    }
+
+    /// The destination is the first positional; what follows it is the remote
+    /// command, which used to take the label (review BUG-36).
+    #[test]
+    fn a_remote_command_does_not_take_the_hosts_place() {
+        assert_eq!(plain("ssh a b"), "ssh a");
+        assert_eq!(plain("ssh box tail -f /var/log/x"), "ssh box");
+        assert_eq!(plain("ssh -l alice host uptime"), "ssh host");
+        assert_eq!(plain("ssh -o StrictHostKeyChecking=no user@h1 sudo -i"), "ssh user@h1");
+        assert_eq!(plain("mosh me@box -- htop"), "mosh me@box");
+    }
+
+    /// With the first positional as the host, every flag value the table
+    /// misses takes the label.  Bundled short flags whose last letter takes a
+    /// value (a tunnel's `-NL`, `-vp`), `-B` and `-P`, and mosh's long options
+    /// must all give it back to the host, as they did when the last word won
+    /// (review BUG-36).
+    #[test]
+    fn flag_values_in_any_spelling_are_not_the_host() {
+        assert_eq!(plain("ssh -NL 8080:localhost:80 user@host"), "ssh user@host");
+        assert_eq!(plain("ssh -fNL 5432:db:5432 bastion"), "ssh bastion");
+        assert_eq!(plain("ssh -ND 1080 proxyhost"), "ssh proxyhost");
+        assert_eq!(plain("ssh -vp 2222 host"), "ssh host");
+        assert_eq!(plain("ssh -Ap 22 host ls"), "ssh host");
+        assert_eq!(plain("ssh -B eth0 host"), "ssh host");
+        assert_eq!(plain("ssh -P mytag host"), "ssh host");
+        // the value is the rest of the word: the next word is the host
+        assert_eq!(plain("ssh -p2222 host"), "ssh host");
+        assert_eq!(plain("ssh -oStrictHostKeyChecking=no host"), "ssh host");
+        assert_eq!(plain("ssh -pL host"), "ssh host");
+        // flags that take nothing, bundled
+        assert_eq!(plain("ssh -At jump"), "ssh jump");
+        assert_eq!(plain("ssh -46 host"), "ssh host");
+        assert_eq!(plain("mosh --port 60001 host"), "mosh host");
+        assert_eq!(plain("mosh --port=60001 host"), "mosh host");
+        assert_eq!(plain("mosh --ssh ssh host"), "mosh host");
+        assert_eq!(plain("mosh --predict always host"), "mosh host");
+        assert_eq!(plain("mosh --no-init host"), "mosh host");
+        // nothing left over: no host, so the plain command shows
+        assert_eq!(plain("ssh -L"), "ssh -L");
+        assert_eq!(plain("ssh --"), "ssh --");
     }
 
     #[test]

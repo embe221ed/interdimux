@@ -148,6 +148,47 @@ else
   echo "  (skipped the comparison: $BIN not built)"
 fi
 
+# --- 3. each directory is asked for a .git once per list ---------------------
+# Eight windows of one session in sibling directories, no repository anywhere
+# below $H/w.  Every cwd's walk passes through $H/w, $H, ... and /; a walk that
+# reaches a directory an earlier one went through takes its answer, so $H/w's
+# .git is looked up once (a stat for -d and one for -f) however many cwds sit
+# under it -- not eight times (review BUG-108).  At 94 columns -- 80% of a
+# 120-column terminal -- the 16-character session name, the 8-cell window floor
+# and the 31-cell path leave the 16-cell badge one cell short, so the squeeze
+# asks whether any row has a branch before it settles for the 14-cell one: the
+# walk that, on a tree with no branch at all, used to cost a full walk per cwd.
+# At 200 columns the badge is drawn and every row asks for its own branch.  The
+# control is that $H/w's .git is looked up at all.
+if ! command -v strace >/dev/null 2>&1 || ! strace -f -qq -o /dev/null true 2>/dev/null; then
+  echo "  (skipped the lookup count: needs strace, and permission to trace a child)"
+else
+  US=$'\x1f' RS=$'\x1e'
+  {
+    printf 'infra-deploy-s01%s1700000000%s8%s%s%s\n' "$US" "$US" "$US" "$US" "$H/w"
+    printf '%s\n' "$RS"
+    for w in 0 1 2 3 4 5 6 7; do
+      mkdir -p "$H/w/s1/abcdefghijklmnopqrs/win$w"
+      printf 'infra-deploy-s01%s%s%swin%s%s%s%szsh%s%s%s1%s0%s000\n' "$US" "$w" "$US" "$w" "$US" \
+        "$([ "$w" = 0 ] && echo 1 || echo 0)" "$US" "$US" "$H/w/s1/abcdefghijklmnopqrs/win$w" "$US" "$US" "$US"
+    done
+    printf '%s\n%s\n' "$RS" "$RS"
+    printf 'infra-deploy-s01%s0%s0\n' "$US" "$US"
+    printf '%s\n' "$RS"
+  } > "$TMPD/tree.dump"
+  for w in 94 200; do
+    INTERDIMUX_DUMP_IN="$TMPD/tree.dump" INTERDIMUX_USE_RUST=off FZF_COLUMNS="$w" \
+      strace -f -qq -e trace=%file -o "$TMPD/trace.$w" bash "$SCRIPT" --list > "$TMPD/rows.$w" 2>/dev/null || true
+    rows=$(grep -c 'W:infra-deploy-s01:' "$TMPD/rows.$w" || true)
+    looks=$(grep -cF "\"$H/w/.git\"" "$TMPD/trace.$w" || true)
+    if [ "$rows" = 8 ] && [ "$looks" -ge 1 ] && [ "$looks" -le 2 ]; then
+      report "at $w columns, eight cwds under one directory look up its .git once" pass
+    else
+      report "at $w columns, eight cwds under one directory look up its .git once (rows=$rows lookups=$looks)" fail
+    fi
+  done
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then

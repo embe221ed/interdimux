@@ -1431,11 +1431,25 @@ utf8_ctype_r() {
 #
 # One on a filesystem whose stat can block is offered WITHOUT the existence
 # check (is_remote_path) -- connect_dir reports it if it is gone.
+#
+# Every `read` of a line that can END in a raw path byte runs under LC_ALL=C,
+# as a prefix on the read alone.  Under a UTF-8 locale, bash 5's read takes a
+# line-final lead byte (0xC2-0xF4; a Latin-1 é is 0xE9) for the start of a
+# character and swallows the newline into it, so `caf\xe9` and the line after
+# it came back as ONE line, and the entry after a Latin-1 directory vanished
+# (review BUG-111).  The prefix scopes the C locale to that one read: the loop
+# body still counts characters.  It costs two setlocale(3) calls a line, so it
+# is only where a line can end in a path -- never on a window or pane line.
+# And its stderr goes to /dev/null: when LC_ALL names a locale that is not
+# installed, bash warns each time it puts LC_ALL back after the read, and in
+# the navigator stderr is ERR_FILE -- a line per read, on the status line and
+# in errors.log, where there was only bash's one warning at startup.  (Bash
+# 4.x warns after the redirection is undone, but its read never had the bug.)
 load_recent_dirs() {
   local d count=0
   local -A _recent_seen=()
   if [ -f "$RECENT_DIRS_FILE" ]; then
-    while IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
       [[ ${_recent_seen[$d]+x} ]] && continue
@@ -1449,7 +1463,7 @@ load_recent_dirs() {
   # Merge frecent dirs from zoxide when available
   if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
     local zcount=0
-    while IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
       [[ ${_recent_seen[$d]+x} ]] && continue
@@ -1484,7 +1498,7 @@ record_recent_dir() {
   [ -n "$tmp" ] || return 0
   if ! echo "$dir" > "$tmp" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
   if [ -f "$RECENT_DIRS_FILE" ]; then
-    while IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do   # LC_ALL=C: see load_recent_dirs
       [ "$d" = "$dir" ] && continue
       is_remote_path "$d" || [ -d "$d" ] || continue   # a stalled mount must not delay the switch
       echo "$d" >> "$tmp"
@@ -2149,15 +2163,16 @@ record_dir_use() {
   return 0
 }
 
-# Sort and emit arrays of dirs by tier (projects first, then others)
+# Sort and emit arrays of dirs by tier (projects first, then others).
+# LC_ALL=C on each read: see load_recent_dirs.
 emit_sorted_tiers() {
   if [ "${#_projects[@]}" -gt 0 ]; then
-    while IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
       emit_dir "$d" project ""
     done < <(printf '%s\n' "${_projects[@]}" | sort -u)
   fi
   if [ "${#_others[@]}" -gt 0 ]; then
-    while IFS= read -r d; do
+    while LC_ALL=C IFS= read -r d 2>/dev/null; do
       emit_dir "$d" dir ""
     done < <(printf '%s\n' "${_others[@]}" | sort -u)
   fi
@@ -2411,12 +2426,19 @@ build_process_table() {
   # pgid/tpgid ride along for pick_child: which child is the FOREGROUND job.
   # Every ps this runs on (procps, macOS, the BSDs) has both keywords, and args
   # stays last so it keeps its embedded spaces.
+  #
+  # -A, not -e: "every process" is -e only on procps and macOS.  On OpenBSD and
+  # NetBSD -e means "the environment too", printed in front of argv in the args
+  # column, and FreeBSD's selects no more than your own processes.  -ww: a BSD
+  # ps cuts that column to the terminal (COLUMNS, else the popup's tty on our
+  # stdin), and procps cuts it to COLUMNS (PORT-01, PORT-06).  rust/src/proc.rs
+  # runs the same command.
   while read -r pid ppid pgid tpgid args; do
     PS_ARGS[$pid]="$args"
     PS_PGID[$pid]="$pgid"
     PS_TPGID[$pid]="$tpgid"
     PS_CHILDREN[$ppid]+="$pid "
-  done < <(ps -eo pid=,ppid=,pgid=,tpgid=,args= 2>/dev/null)
+  done < <(ps -A -ww -o pid=,ppid=,pgid=,tpgid=,args= 2>/dev/null)
   return 0
 }
 
@@ -2670,6 +2692,13 @@ resolve_command() {
 # Git branch (pure bash — no subprocess per pane)
 # ---------------------------------------------------------------------------
 
+# Keyed by directory -- every directory a walk passed through, not only the cwd
+# it started from.  A walk from any of those directories would have gone the
+# same way from there, so each has the same answer, and a later walk stops at
+# the first of them it reaches.  Keyed by cwd alone, N cwds under one home
+# re-tested $HOME, /home and / N times each: on a tree with no repository,
+# every directory of every path, which _probe_has_branch pays in full wherever
+# the squeeze could keep the badge (review BUG-108).
 declare -A GIT_BRANCH_CACHE=()
 
 get_git_branch() {
@@ -2678,17 +2707,18 @@ get_git_branch() {
   [ "$SHOW_GIT_BRANCH" != "on" ] && return
   [ -z "$dir" ] && return
 
-  local _cache_key="$dir"
-  if [[ ${GIT_BRANCH_CACHE[$_cache_key]+x} ]]; then
-    REPLY="${GIT_BRANCH_CACHE[$_cache_key]}"
+  if [[ ${GIT_BRANCH_CACHE[$dir]+x} ]]; then
+    REPLY="${GIT_BRANCH_CACHE[$dir]}"
     return
   fi
 
   # Up to and INCLUDING "/", as git's own discovery walks (and rust/src/git.rs):
   # a repository at the root is a repository.  $b is the directory with its
   # trailing slash dropped, so the root's marker is "/.git", not "//.git".
-  local d="$dir" b _chk=1
+  local d="$dir" b _chk=1 branch=""
+  local -a _walked=()
   while [ -n "$d" ]; do
+    _walked+=("$d")
     # Never probe a filesystem whose stat can block (is_remote_path): the walk
     # stops there, badge-less, rather than stall the first paint.  Once a level
     # is below no blocking mount point at all, nothing above it is either, and
@@ -2734,22 +2764,25 @@ get_git_branch() {
       { read -r head_content < "$head_file"; } 2>/dev/null || :
       head_content="${head_content%$'\r'}"
       [ -n "$head_content" ] || break
-      local branch=""
       case "$head_content" in
         "ref: refs/heads/"*) branch="${head_content#ref: refs/heads/}" ;;
         *) branch="@${head_content:0:7}" ;;
       esac
-      GIT_BRANCH_CACHE["$_cache_key"]="$branch"
-      REPLY="$branch"
-      return
+      break
     fi
     [ "$d" = "/" ] && break
     case "$b" in */*) ;; *) break ;; esac   # relative: nothing above it to walk to
     d="${b%/*}"
     [ -n "$d" ] || d="/"
+    # An earlier walk went through here: what it found is this walk's answer.
+    if [[ ${GIT_BRANCH_CACHE[$d]+x} ]]; then
+      branch="${GIT_BRANCH_CACHE[$d]}"
+      break
+    fi
   done
 
-  GIT_BRANCH_CACHE["$_cache_key"]=""
+  for d in "${_walked[@]}"; do GIT_BRANCH_CACHE["$d"]="$branch"; done
+  REPLY="$branch"
 }
 
 # ---------------------------------------------------------------------------
@@ -2763,8 +2796,11 @@ get_git_branch() {
 #
 #   editors                       vim nvim vi nano emacs code hx helix micro
 #                                 kate gedit subl
-#   ssh flags taking a value      -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p
-#                                 -Q -R -S -W -w
+#   ssh flags taking a value      -B -b -c -D -E -e -F -I -i -J -L -l -m -O -o
+#                                 -P -p -Q -R -S -W -w (bundled as getopt
+#                                 bundles them), and mosh's --client --server
+#                                 --predict --port --family --ssh
+#                                 --bind-server --experimental-remote-ip
 #   editor flags taking a value   -u -U -s -S -p -c --cmd --listen
 #   interpreters (whose first     python and lua, each with an optional
 #   argument, when it is a path,  version of digits and dots; node nodejs ruby
@@ -2781,7 +2817,18 @@ format_command() {
   local old_set="$-"
   set -f
 
-  # SSH: highlight user@host
+  # SSH: highlight user@host -- the FIRST word that is neither a flag nor a
+  # flag's value.  ssh and mosh take `[options] destination [command ...]`, so
+  # the words after it are the remote command: taking the last one labelled
+  # `ssh box tail -f /var/log/x` as `ssh /var/log/x` (review BUG-36).  The argv
+  # comes space-joined, so a quoted flag value holding a space still splits.
+  #
+  # Taking the first such word makes the flag table matter: a value it
+  # misses becomes the host.  So short flags are read as getopt reads them --
+  # bundled, and the first letter that takes a value takes the REST of the
+  # word (`-p2222`, `-oX=no`), or the next word when it is the last letter
+  # (`-NL 8080:h:80`, `-vp 2222`).  A word that ends in a value letter takes
+  # the next one unless an earlier value letter already took that last one.
   case "$cmd_base" in
     ssh|mosh)
       local host="" skip_next=""
@@ -2794,9 +2841,14 @@ format_command() {
           continue
         fi
         case "$word" in
-          -[bcDEeFIiJLlmOopQRSWw]) skip_next=1 ;;
+          --client|--server|--predict|--port|--family|--ssh|--bind-server|--experimental-remote-ip)
+              skip_next=1 ;;
+          --*) ;;
+          -*[BbcDEeFIiJLlmOoPpQRSWw])
+              word="${word#-}"
+              [ -n "${word#*[BbcDEeFIiJLlmOoPpQRSWw]}" ] || skip_next=1 ;;
           -*) ;;
-          *)  host="$word" ;;
+          *)  host="$word"; break ;;
         esac
       done
       if [ -n "$host" ]; then
@@ -3234,7 +3286,8 @@ measure_widths() {
 # Does any window or pane row have a git branch to show?  The one question the
 # squeeze asks that reads files: each cwd is walked up to / (get_git_branch)
 # until one has a branch, so on a tree with none it is every directory of every
-# path -- plus the mount table, on the first walk step (is_remote_path).  It was
+# path, each once (a walk stops at a directory an earlier one went through) --
+# plus the mount table, on the first walk step (is_remote_path).  It was
 # asked up front in measure_widths, at every width; but it decides only whether
 # the path gives up cells to keep the badge, and at most widths the badge fits,
 # or goes, whatever the answer (at 80 columns it never matters).  So
@@ -3327,14 +3380,15 @@ compute_widths() {
   # session prefix cut to "my-pr…" makes `my-project shell` match nothing;
   # the path and the branch are display-only.  So:
   #
-  #   1. the path gives up cells down to PATH_KEEP to keep the git badge —
-  #      all or nothing: if that is not enough, the badge goes (snapped
-  #      straight to 0 — never left at 1..3, which would make
-  #      build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate) and the
-  #      path keeps its cells.  Only while some row actually HAS a branch; a
-  #      badge column that would be blank on every tree row goes first.
-  #      That is asked last, and only when the cells would be enough: it is
-  #      the one test here that reads files (_probe_has_branch).
+  #   1. the path gives up cells down to PATH_KEEP to keep the git badge,
+  #      and when that is not enough the badge narrows a tier (16, 14, 10)
+  #      and the path tries again.  Only when even 10 does not fit does the
+  #      badge go (snapped straight to 0 — never left at 1..3, which would
+  #      make build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate) and
+  #      the path keeps its cells.  Only while some row actually HAS a
+  #      branch; a badge column that would be blank on every tree row goes
+  #      first.  That is asked last, and only when the cells would be enough:
+  #      it is the one test here that reads files (_probe_has_branch).
   #   2. the path, down to PATH_FLOOR
   #   3. the session prefix, down to PFX_FLOOR
   #   4. the window name, down to WIN_FLOOR
@@ -3342,10 +3396,18 @@ compute_widths() {
   # The Z/!/# flags are never squeezed: their own slot, at most 4 cells.
   # Any deficit left after the floors lands on the flowing COMMAND column,
   # which fzf clips anyway.  rust/src/widths.rs is the same ladder.
+  #
+  # The narrower tiers matter on the most ordinary popup there is: 80% of a
+  # 120-column terminal is avail 86, where one 16-character session name took
+  # every badge off the list although a 14-cell one fitted (review BUG-108).
   local over give
   _squeeze_over; over=$REPLY
   if (( BADGE_W > 0 && over > 0 )); then
-    if (( PATH_W - PATH_KEEP >= over )) && _probe_has_branch; then
+    while (( BADGE_W > 0 && over > 0 && PATH_W - PATH_KEEP < over )); do
+      case $BADGE_W in 16) BADGE_W=14 ;; 14) BADGE_W=10 ;; *) BADGE_W=0 ;; esac
+      _squeeze_over; over=$REPLY
+    done
+    if (( BADGE_W > 0 )) && _probe_has_branch; then
       PATH_W=$(( PATH_W - over ))
     else
       BADGE_W=0
@@ -3842,7 +3904,7 @@ gather_targets() {
   # for anyone without the binary.
   #
   # The binary resolves full commands from /proc on Linux and from its own single
-  # `ps -eo` snapshot on macOS/BSD (or when INTERDIMUX_FORCE_PS=1), so it renders
+  # `ps -A` snapshot on macOS/BSD (or when INTERDIMUX_FORCE_PS=1), so it renders
   # correctly EVERYWHERE — it is preferred whenever it is present.  A binary that
   # fails or prints nothing falls through to the bash renderer below (the empty
   # `_imux_out` guard), so preferring it can never turn into an empty picker.
@@ -3971,8 +4033,12 @@ IMUX_SECTIONS
     # The key is field 2 since the name moved to the front (see _sfmt).  A line
     # tmux cut before its timestamp has an empty key, which sorts as 0 -- last,
     # for this one paint -- exactly as the Rust core's unwrap_or(0) does.
+    #
+    # LC_ALL=C on the read: #{session_path} ends the line, raw, and a Latin-1
+    # byte there joined the next session onto it -- which vanished from the
+    # list, and could be the one you are in (see load_recent_dirs).
     sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr)
-    while IFS= read -r line; do
+    while LC_ALL=C IFS= read -r line 2>/dev/null; do
       [ -z "$line" ] && continue
       sn_check="${line%%"$US"*}"
       if [ "$sn_check" = "$current_session" ]; then
@@ -4134,7 +4200,8 @@ IMUX_SECTIONS
   local -a _hf=()
   local -A AMARKED=()   # the agents view: panes already marked (agent_mark_r)
 
-  while IFS="$US" read -r sname sla swins sattach spath; do
+  # LC_ALL=C on the read: the line ends in #{session_path} (see the MRU pass).
+  while LC_ALL=C IFS="$US" read -r sname sla swins sattach spath 2>/dev/null; do
     [ -z "$sname" ] && continue
     [ -n "$spath" ] && SESSION_DIRS["$spath"]=1
     marker=" "
@@ -4713,6 +4780,9 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # handed it down -- see mounts_export).
   [ "$_MOUNTS_READ" = 1 ] || _mounts_read
 
+  # Each read of a finder's output is LC_ALL=C (see load_recent_dirs): a Latin-1
+  # directory took the next one into its row, which then spanned two lines.
+  # load_recent_dirs's own output is valid UTF-8, so it is read plainly.
   case "$mode" in
     default)
       while IFS= read -r d; do
@@ -4723,7 +4793,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
       _others=()
       for sp in "${search_paths[@]}"; do
         [ -d "$sp" ] || continue
-        while IFS= read -r d; do
+        while LC_ALL=C IFS= read -r d 2>/dev/null; do
           [ -z "$d" ] || [ "$d" = "$sp" ] && continue
           collect_dir "$d"
         done < <(scan_dirs "$sp" 1 "$finder")
@@ -4749,7 +4819,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
       if [ -z "$query" ]; then
         for sp in "${search_paths[@]}"; do
           [ -d "$sp" ] || continue
-          while IFS= read -r d; do
+          while LC_ALL=C IFS= read -r d 2>/dev/null; do
             [ -z "$d" ] || [ "$d" = "$sp" ] && continue
             collect_dir "$d"
           done < <(scan_dirs "$sp" 2 "$finder")
@@ -4770,7 +4840,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         for qr in "${query_roots[@]}"; do
           if [ -d "$qr" ]; then
             collect_dir "$qr"
-            while IFS= read -r d; do
+            while LC_ALL=C IFS= read -r d 2>/dev/null; do
               [ -z "$d" ] || [ "$d" = "$qr" ] && continue
               collect_dir "$d"
             done < <(scan_dirs "$qr" "$SCAN_DEPTH" "$finder")
@@ -4788,7 +4858,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
           [ "$anc" = "/" ] && continue
           [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
           _roots=()
-          while IFS= read -r d; do
+          while LC_ALL=C IFS= read -r d 2>/dev/null; do
             [ -z "$d" ] && continue
             if [[ "${d,,}" == "${qr,,}"* ]]; then
               collect_dir "$d"
@@ -4796,7 +4866,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
             fi
           done < <(scan_dirs "$anc" "$stripped" "$finder")
           # every completion's subtree in one finder run (scan_roots)
-          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+          [ "${#_roots[@]}" -gt 0 ] && while LC_ALL=C IFS= read -r sub 2>/dev/null; do
             [ -z "$sub" ] && continue
             collect_dir "$sub"
           done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
@@ -4820,7 +4890,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
             done
           done
           # every match's subtree in one finder run (scan_roots)
-          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+          [ "${#_roots[@]}" -gt 0 ] && while LC_ALL=C IFS= read -r sub 2>/dev/null; do
             [ -z "$sub" ] && continue
             collect_dir "$sub"
           done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
@@ -4835,7 +4905,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
           _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
-            while IFS= read -r d; do
+            while LC_ALL=C IFS= read -r d 2>/dev/null; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               if [[ "${d,,}" == *"${query,,}"* ]]; then
                 collect_dir "$d"
@@ -4843,7 +4913,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
               fi
             done < <(scan_dirs "$sp" "$match_depth" "$finder")
           done
-          [ "${#_roots[@]}" -gt 0 ] && while IFS= read -r sub; do
+          [ "${#_roots[@]}" -gt 0 ] && while LC_ALL=C IFS= read -r sub 2>/dev/null; do
             [ -z "$sub" ] && continue
             collect_dir "$sub"
           done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
@@ -4872,7 +4942,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
         _projects=()
         _others=()
         collect_dir "$scan_root"
-        while IFS= read -r d; do
+        while LC_ALL=C IFS= read -r d 2>/dev/null; do
           [ -z "$d" ] || [ "$d" = "$scan_root" ] && continue
           collect_dir "$d"
         done < <(scan_dirs "$scan_root" 2 "$finder")

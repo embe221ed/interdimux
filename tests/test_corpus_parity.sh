@@ -216,6 +216,29 @@ else
   fi
 fi
 
+# --- 3b. @interdimux-hide next to a Latin-1 start directory -------------------
+# The hide filter runs in the script, ahead of either renderer, over the same
+# session lines whose last field is a raw #{session_path}.  In latin1.dump two
+# of those end in a Latin-1 byte, each followed by another session; hiding any
+# one of them must hide exactly that session, in both renderers (review
+# BUG-111: bash's `read` had joined the line after such a path onto it).
+for h in cafe naive zulu; do
+  want=" "; for sn in cafe naive zulu after; do [ "$sn" = "$h" ] || want+="S:$sn "; done
+  render_script "$CORPUS/latin1.dump" 120 on off INTERDIMUX_HIDE="$h" > "$TMPD/hb" 2>/dev/null || true
+  got=" $(grep -o $'\tS:[^\t]*$' "$TMPD/hb" | tr -d '\t' | tr '\n' ' ')"
+  bad=""
+  [ "$got" = "$want" ] || bad+=" bash sessions:[$got] want [$want]"
+  if [ -x "$BIN" ]; then
+    render_script "$CORPUS/latin1.dump" 120 on on INTERDIMUX_HIDE="$h" > "$TMPD/hr" 2>/dev/null || true
+    cmp -s "$TMPD/hb" "$TMPD/hr" || bad+=" bash and rust differ"
+  fi
+  if [ -z "$bad" ]; then
+    report "latin1, @interdimux-hide '$h': exactly that session goes" pass
+  else
+    report "latin1, @interdimux-hide '$h': exactly that session goes ($bad)" fail
+  fi
+done
+
 # --- 4. the seam itself -------------------------------------------------------
 # INTERDIMUX_NO_BATCH selects the four-query fetch path; a dump serves that path
 # too, identically, rather than dropping through to tmux.

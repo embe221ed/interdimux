@@ -12,7 +12,8 @@ const WIN_FLOOR: usize = 8;
 const WIN_CEIL: usize = 40;
 const PATH_FLOOR: usize = 12;
 /// How far the path may shrink to keep the git badge on screen.  Below this the
-/// badge goes instead, and the path gets the room back.
+/// badge narrows a tier instead, and once even the narrowest does not fit it
+/// goes, and the path gets the room back.
 const PATH_KEEP: usize = 24;
 const PATH_CEIL: usize = 44;
 
@@ -106,11 +107,13 @@ pub fn compute(m: Maxima, cols: usize, preview_on: bool) -> Widths {
     // prefix cut to "my-pr…" makes `my-project shell` match nothing; the path
     // and the branch are display-only.  So:
     //
-    //   1. the path gives up cells down to PATH_KEEP to keep the git badge —
-    //      all or nothing: if that is not enough, the badge goes (snapped
-    //      straight to 0, never to a degenerate 1..3) and the path keeps its
-    //      cells.  Only while some row actually HAS a branch; a badge column
-    //      that would be blank on every tree row is simply the first to go.
+    //   1. the path gives up cells down to PATH_KEEP to keep the git badge,
+    //      and when that is not enough the badge narrows a tier (16, 14, 10)
+    //      and the path tries again.  Only when even the 10-cell badge does not
+    //      fit does it go — snapped straight to 0, never to a degenerate 1..3 —
+    //      and the path keeps its cells.  Only while some row actually HAS a
+    //      branch; a badge column that would be blank on every tree row is
+    //      simply the first to go.
     //   2. the path, down to PATH_FLOOR
     //   3. the session prefix, down to PFX_FLOOR
     //   4. the window name, down to WIN_FLOOR
@@ -119,10 +122,21 @@ pub fn compute(m: Maxima, cols: usize, preview_on: bool) -> Widths {
     // cells, and they are the part of the context column you act on.  Any
     // deficit left after the floors lands on the flowing command column, which
     // fzf clips anyway.
-    let o = over(ident, path, badge);
+    //
+    // The narrower tiers matter on the most ordinary popup there is: 80% of a
+    // 120-column terminal is avail 86, where one 16-character session name took
+    // every badge off the list although a 14-cell one fitted (review BUG-108).
+    let mut o = over(ident, path, badge);
     if badge > 0 && o > 0 {
-        let keep = if m.branch { PATH_KEEP } else { path };
-        if path.saturating_sub(keep) >= o {
+        while badge > 0 && path.saturating_sub(PATH_KEEP) < o {
+            badge = match badge {
+                16 => 14,
+                14 => 10,
+                _ => 0,
+            };
+            o = over(ident, path, badge);
+        }
+        if badge > 0 && m.branch {
             path -= o;
         } else {
             badge = 0;
@@ -218,26 +232,73 @@ mod tests {
         assert_eq!(row(&w), avail(96, false), "not one cell wasted");
     }
 
-    /// ...but only down to PATH_KEEP.  Past that the badge goes, and the path
-    /// gets back everything it gave for it.
+    /// ...but only down to PATH_KEEP.  Past that the badge narrows a tier and
+    /// the path tries again; only when even the 10-cell badge would starve the
+    /// path does the badge go, and the path gets back everything it gave for it.
     #[test]
     fn the_badge_goes_when_keeping_it_would_starve_the_path() {
-        for cols in 0..=300 {
-            for preview in [false, true] {
-                let mx = mb(10, 12, 44);
-                let w = compute(mx, cols, preview);
-                if w.badge > 0 {
-                    assert!(w.path >= PATH_KEEP, "cols={} kept the badge at path {}", cols, w.path);
-                } else if w.path < PATH_CEIL {
-                    // the badge is gone and the path was trimmed: it must be
-                    // trimmed only as far as the row needs, or it is at its floor
-                    assert!(
-                        row(&w) == avail(cols, preview) || w.path == PATH_FLOOR,
-                        "cols={} preview={} wasted cells: {:?}", cols, preview, w
-                    );
+        // The badge widths on offer at a given width: the tier the popup allows
+        // and the narrower ones (review BUG-108).
+        let tiers = |a: usize| -> &'static [usize] {
+            match a {
+                72.. => &[16, 14, 10],
+                52..=71 => &[14, 10],
+                40..=51 => &[10],
+                _ => &[],
+            }
+        };
+        for (sess, win, path, flags) in
+            [(10, 12, 44, 0), (16, 8, 31, 0), (16, 8, 31, 1), (14, 9, 26, 3), (16, 20, 18, 2)]
+        {
+            for cols in 0..=300 {
+                for preview in [false, true] {
+                    let mx = Maxima { flags, ..mb(sess, win, path) };
+                    let w = compute(mx, cols, preview);
+                    let a = avail(cols, preview);
+                    let ctx = format!("{:?} cols={} preview={} -> {:?}", mx, cols, preview, w);
+                    // The widest badge on offer that fits with the path cut no
+                    // shorter than PATH_KEEP, counted cell by cell: the row is
+                    // the identity, "│ ", the path, the flag slot, " " + badge,
+                    // the TAB and the command's minimum.
+                    let full_ident = IDENT_OV + sess.clamp(PFX_FLOOR, PFX_CEIL) + win.clamp(WIN_FLOOR, WIN_CEIL);
+                    let slot = if flags > 0 { 1 + flags } else { 0 };
+                    let fits = |b: usize| {
+                        full_ident + 2 + path.min(PATH_KEEP) + slot + 1 + b + 2 + CMD_MIN <= a
+                    };
+                    let want = tiers(a).iter().copied().find(|&b| fits(b)).unwrap_or(0);
+                    assert_eq!(w.badge, want, "not the widest badge that fits: {}", ctx);
+                    if w.badge > 0 {
+                        assert!(w.path >= PATH_KEEP.min(path), "kept the badge at a starved path: {}", ctx);
+                        assert!(
+                            w.path == path || row(&w) == a,
+                            "the path gave more cells than the badge needed: {}", ctx
+                        );
+                    } else if w.path < path {
+                        // the badge is gone and the path was trimmed: it must be
+                        // trimmed only as far as the row needs, or it is at its floor
+                        assert!(row(&w) == a || w.path == PATH_FLOOR, "wasted cells: {}", ctx);
+                    }
                 }
             }
         }
+    }
+
+    /// Review BUG-108: 80% of a 120-column terminal is a 94-column popup, avail
+    /// 86.  A 16-character session name and the 8-cell window floor make the
+    /// identity 30 cells, and a 31-cell path then left the 16-cell badge one
+    /// cell short of PATH_KEEP -- and every row lost its branch, although a
+    /// 14-cell badge at a 25-cell path fits exactly.  With a Z flag (a 2-cell
+    /// slot) 14 is two cells short, and 10 fits at a 27-cell path.
+    #[test]
+    fn a_long_session_name_narrows_the_badge_instead_of_dropping_it() {
+        let w = compute(mb(16, 8, 31), 94, false);
+        assert_eq!((w.badge, w.path), (14, 25), "{:?}", w);
+        assert_eq!(row(&w), avail(94, false), "not one cell wasted");
+        let w = compute(Maxima { flags: 1, ..mb(16, 8, 31) }, 94, false);
+        assert_eq!((w.badge, w.path), (10, 27), "{:?}", w);
+        assert_eq!(row(&w), avail(94, false), "not one cell wasted");
+        // the identity is untouched: the squeeze stopped at the first rung
+        assert_eq!((w.pfx, w.win), (16, 8));
     }
 
     /// Review BUG-02: the prefix is matched as displayed, so it outlasts the

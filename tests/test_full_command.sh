@@ -23,6 +23,15 @@
 #   control chars    ps replaced NUL/newline with a space and every other
 #                    non-printable with '?'.  Reading /proc raw loses that, and
 #                    a newline in argv splits the row, detaching its SPEC field.
+#   ps's flags       the ps backend (macOS/BSD, INTERDIMUX_FORCE_PS) must not
+#                    spell "every process" `-e`: that is procps' and macOS's
+#                    reading, but on OpenBSD and NetBSD -e means "and the
+#                    environment", which their ps prints IN FRONT of argv in
+#                    the command column, and on FreeBSD -e selects no more
+#                    than your own processes.  -A is "every process"
+#                    everywhere.  And without -ww a BSD ps cuts that column
+#                    to the terminal's width, COLUMNS first -- as procps does
+#                    with COLUMNS (PORT-01, PORT-06).
 
 set -euo pipefail
 
@@ -252,8 +261,55 @@ if [ "$ps_out" = "$now_out" ]; then
   report "/proc and ps backends resolve identically" pass
 else
   report "/proc and ps backends resolve identically" fail
-  ERRORS+="$(diff <(printf '%s\n' "$now_out") <(printf '%s\n' "$ps_out") | head -8)"$'\n'
+  ERRORS+="$(diff <(printf '%s\n' "$now_out") <(printf '%s\n' "$ps_out") | head -8 || true)"$'\n'
 fi
+
+# --- ...whatever the ps (PORT-01, PORT-06) ------------------------------------
+# A stand-in with OpenBSD's habits, first on PATH: -e prints the environment in
+# front of argv in the last column, and that column is cut to $COLUMNS (79
+# without it) unless -ww is given.  The listing itself is the real ps's.  And
+# the real ps under a narrow COLUMNS: procps cuts its output to it, piped or
+# not, unless -ww is given.  Both renderers' ps backends, against the /proc
+# answers above.
+REAL_PS=$(command -v ps)
+mkdir -p "$TMPD/bsdps"
+cat > "$TMPD/bsdps/ps" <<STUB
+#!/bin/sh
+env=0 ww=0 fmt=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) fmt="\$2"; shift ;;
+    -*o) case "\$1" in *e*) env=1 ;; esac; case "\$1" in *ww*) ww=1 ;; esac; fmt="\$2"; shift ;;
+    -*) case "\$1" in *e*) env=1 ;; esac; case "\$1" in *ww*) ww=1 ;; esac ;;
+  esac
+  shift
+done
+n=\$(printf '%s' "\$fmt" | tr -cd , | wc -c)
+"$REAL_PS" -A -ww -o "\$fmt" | awk -v n="\$n" -v env="\$env" -v ww="\$ww" -v w="\${COLUMNS:-79}" '{
+  line = \$0; pre = ""
+  for (i = 0; i < n; i++) { match(line, /^ *[^ ]+/); pre = pre substr(line, 1, RLENGTH); line = substr(line, RLENGTH + 1) }
+  if (env) line = " HOME=/home/x LOGNAME=x" line
+  line = pre line
+  if (!ww) line = substr(line, 1, w)
+  print line
+}'
+STUB
+chmod +x "$TMPD/bsdps/ps"
+for cfg in "default renderer:" "bash renderer:INTERDIMUX_USE_RUST=off"; do
+  for how in "an OpenBSD-style ps:PATH=$TMPD/bsdps:$PATH" "a 24-column COLUMNS:COLUMNS=24"; do
+    # shellcheck disable=SC2086  # the words are the point
+    got=$(env ${cfg#*:} "${how#*:}" INTERDIMUX_FORCE_PS=1 bash "$SCRIPT" --list 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | awk -F'\t' '{print $3"\t"$4}')
+    if [ -n "$got" ] && [ "$got" = "$now_out" ]; then
+      report "${cfg%%:*}, ps backend, ${how%%:*}: resolves as /proc does" pass
+    else
+      report "${cfg%%:*}, ps backend, ${how%%:*}: resolves as /proc does" fail
+      # `|| true`: diff exits 1 on a difference, and pipefail + set -e would
+      # end the suite here without a Results line
+      ERRORS+="$(diff <(printf '%s\n' "$now_out") <(printf '%s\n' "$got") | head -6 || true)"$'\n'
+    fi
+  done
+done
 
 echo
 echo "Results: $PASS passed, $FAIL failed"

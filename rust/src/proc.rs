@@ -14,7 +14,7 @@
 //!     native equivalent of the `/proc` path (see macproc.rs).  This is the
 //!     default off-Linux; it forks nothing.
 //!   * `ps` (other BSDs, when libproc can't read argv, or INTERDIMUX_FORCE_PS=1):
-//!     a single `ps -eo` snapshot built lazily, then walked in-process.  bash
+//!     a single `ps -A` snapshot built lazily, then walked in-process.  bash
 //!     used to do this walk itself and hand the Rust core nothing, which meant
 //!     the whole render fell back to bash on any host without `/proc`.  Owning
 //!     it here lets the fast renderer run everywhere.
@@ -91,7 +91,7 @@ pub fn sanitize(s: &str) -> String {
         .collect()
 }
 
-/// A one-shot `ps -eo pid=,ppid=,pgid=,tpgid=,args=` snapshot, parsed into the
+/// A one-shot `ps -A -ww -o pid=,ppid=,pgid=,tpgid=,args=` snapshot, parsed into the
 /// same maps bash builds (pid -> argv, pid -> (pgid, tpgid), ppid -> children).
 /// Children preserve ps output order so `first()` picks the same child bash's
 /// `${children%% *}` does.
@@ -103,10 +103,13 @@ struct PsTable {
 
 impl PsTable {
     fn snapshot() -> Option<PsTable> {
-        // The EXACT command bash forks, inheriting bash's environment, so any
-        // width-truncation ps applies is identical on both sides.
+        // The EXACT command bash forks, inheriting bash's environment, so the
+        // two stay byte-identical.  -A, not -e: on OpenBSD and NetBSD -e prints
+        // the environment in front of argv, and -ww keeps a BSD ps (or procps
+        // under COLUMNS) from cutting argv to a terminal's width (PORT-01,
+        // PORT-06; see bash build_process_table).
         let out = std::process::Command::new("ps")
-            .args(["-eo", "pid=,ppid=,pgid=,tpgid=,args="])
+            .args(["-A", "-ww", "-o", "pid=,ppid=,pgid=,tpgid=,args="])
             .output()
             .ok()?;
         // bash ignores ps's exit status and processes whatever it printed.
