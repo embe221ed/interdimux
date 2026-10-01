@@ -161,6 +161,7 @@ With no mode, runs the navigator.  It expects a tmux popup around it: prefix+f
 opens one (the plugin binds it), and so does `--launch switch`.
 
   --doctor                   check the setup; exits 1 if anything is wrong
+  --doctor --ack             mark the errors logged so far as seen
   --list                     print the navigator's rows
   --jump N                   switch to session #N, in the picker's own order
   --connect-dir DIR          switch to DIR's session, creating it if needed
@@ -184,6 +185,23 @@ case "${1:-}" in
   --help|-h) usage; exit 0 ;;
   --version) printf 'interdimux %s\n' "$VERSION"; exit 0 ;;
 esac
+
+# The navigator's children report into the navigator's error file.  fzf hands a
+# reload, transform or execute-silent child /dev/null as its stderr (measured on
+# 0.74.3), so a --list that failed on ^r, ^/, a resize or after an action was
+# neither shown nor logged, and an execute child's error was painted over its
+# own dialog.  The navigator exports the file its stderr goes to (see ERR_FILE),
+# and the modes its binds start -- all but the previews, whose stderr fzf shows
+# in the preview pane -- append to it, to be reported with the navigator's own
+# when it exits.  Only while the file exists: a child outliving the navigator
+# must not recreate it.
+if [ -n "${INTERDIMUX_ERR_FILE:-}" ]; then
+  case "${1:-}" in
+    --list|--action|--footer-for|--describe-create|--scope-prompt|--create-key|\
+    --create-from-query|--dirs|--dirs-list|--dirs-hints)
+      if [ -f "$INTERDIMUX_ERR_FILE" ]; then exec 2>>"$INTERDIMUX_ERR_FILE"; fi ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Key bindings (called once by interdimux.tmux at plugin load)
@@ -210,6 +228,12 @@ esac
 # from the tmux server's PATH (common: fzf is often only on PATH via a shell
 # rc), the preflight exits 1 — and doing that here would leave the user with NO
 # BINDINGS AT ALL, which is far worse than a popup that reports the error.
+#
+# The popup can report it because it is opened -EE -k (tmux >= 3.6): it closes
+# by itself only when its command exits 0, which every way out of a picker
+# does, and otherwise stays open with the error on it until any key.  With -E
+# it closed on any exit, so "fzf is not installed", an unknown option or a
+# crash flashed and vanished, and prefix+f seemed to do nothing (UX-75).
 if [ "${1:-}" = "--bind-keys" ]; then
   set +e
 
@@ -340,9 +364,13 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # the same idiom is wrong for colour-tree 0 or recent-limit 0.)
   _bk_w='#{?#{==:#{@interdimux-popup-width},},80%,#{@interdimux-popup-width}}'
   _bk_h='#{?#{==:#{@interdimux-popup-height},},75%,#{@interdimux-popup-height}}'
+  # -k is new in tmux 3.6, and an older display-popup refuses the whole command
+  # over a flag it does not know, so 3.4 and 3.5 keep -E.
+  _bk_close='-E'
+  [ "$_bk_tvnum" -ge 306 ] && _bk_close='-EE -k'
 
   tmux bind-key "$_bk_nav" run-shell -bC \
-    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title_fmt\"$_bk_env -E \"bash '$SQ_SCRIPT_FMT'\""
+    "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title_fmt\"$_bk_env $_bk_close \"bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
 
@@ -5411,6 +5439,20 @@ danger_style() {
 # forwarded into the popup by --launch.
 popup_accent() {
   tmux_ge 303 || return 0
+  # Only INSIDE a popup that is still there.  This is a display-popup with no
+  # command: in a popup it repaints the frame, but on a client with no popup
+  # open tmux OPENS one, running the default shell, and blocks in it until
+  # someone dismisses it.  INTERDIMUX_TITLE is set only by the popup launchers,
+  # so without it there is no popup -- a hand-written binding or run-shell
+  # running --action kill hung behind a shell popup before its dialog even drew
+  # (BUG-53).  (So a popup you open yourself, without the title, keeps its frame
+  # through a kill dialog: nothing else tells it from a pane.)  And a popup
+  # closed under a waiting dialog (display-popup -C, its session killed) hangs
+  # up the dialog's terminal, after which /dev/tty no longer opens: the
+  # orphaned dialog's cleanup repainted a popup that was gone, and so opened a
+  # shell one (BUG-52).
+  [ -n "${INTERDIMUX_TITLE:-}" ] || return 0
+  { : </dev/tty; } 2>/dev/null || return 0
   local style lines
   lines=$(popup_user_lines)
   if [ "$1" = "danger" ]; then style=$(danger_style "$lines"); else style=$(popup_user_style); fi
@@ -7241,17 +7283,12 @@ if [ "${1:-}" = "--action" ]; then
     # regular file (that is how the dialogs are tested), and > TRUNCATES it —
     # silently destroying everything the dialog drew.
     printf '\033[?25h' >>"$tty_out" 2>/dev/null
-    # Only touch the border when we are actually INSIDE a popup.  popup_accent
-    # issues `display-popup` with no -E: in a popup that repaints it, but with a
-    # client attached and no popup open tmux OPENS one running the default
-    # shell, and blocks until someone dismisses it.  INTERDIMUX_TITLE is set
-    # only by the popup launcher, so it is the marker for "we are in one".
-    if [ -n "${INTERDIMUX_TITLE:-}" ]; then
-      if [ "${INTERDIMUX_MODE:-switch}" = "kill" ]; then
-        popup_accent danger
-      else
-        popup_accent user
-      fi
+    # Outside a popup, or once it has closed, this does nothing: popup_accent
+    # checks for both itself.
+    if [ "${INTERDIMUX_MODE:-switch}" = "kill" ]; then
+      popup_accent danger
+    else
+      popup_accent user
     fi
   }
   trap '_action_cleanup; exit 130' INT TERM
@@ -8034,6 +8071,30 @@ if [ "${1:-}" = "--doctor" ]; then
   set +e
   _doc_fail=0
 
+  # `--doctor --ack`: the errors logged so far have been seen, so the check
+  # below stops failing on them (UX-17).  The log itself is kept; the marker
+  # is its newest entry's header.
+  #
+  # Text above the first header (a log cut by hand, or written by something
+  # else) counts as an entry of its own, under this stand-in header: counted
+  # as nothing, it was a red check that no --ack could clear.
+  _estart='== (before the first entry)'
+  if [ "${2:-}" = --ack ]; then
+    _ein=$(awk -v start="$_estart" '
+      !n && !/^== / { n = 1; h = start }
+      /^== / { n++; h = $0 }
+      END { if (n) { print n; print h } }' "$SCHED_LOGDIR/errors.log" 2>/dev/null)
+    if [ -z "$_ein" ]; then
+      echo "interdimux: no errors are logged"
+    elif printf '%s\n' "${_ein#*$'\n'}" > "$SCHED_LOGDIR/errors.seen" 2>/dev/null; then
+      echo "interdimux: ${_ein%%$'\n'*} logged error(s) acknowledged; --doctor fails again only on a new one"
+    else
+      echo "interdimux: cannot write $SCHED_LOGDIR/errors.seen" >&2
+      exit 1
+    fi
+    exit 0
+  fi
+
   # Buffered rather than streamed, so the SUMMARY can come first.  In a popup the
   # first line is the one you actually read, and "3 problems" up top is the whole
   # point of running this; a count at the bottom of a scrolling report is a count
@@ -8572,11 +8633,43 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # The navigator routes its stderr to a log rather than painting it over the
   # list, so this is the one place a past failure is still visible.
-  if [ -s "$SCHED_LOGDIR/errors.log" ]; then
-    _last=$(grep -c '^== ' "$SCHED_LOGDIR/errors.log" 2>/dev/null || echo 0)
-    _bad "the navigator has logged $_last error(s)"
-    _note "most recent: $(grep -A1 '^== ' "$SCHED_LOGDIR/errors.log" | tail -1)"
-    _note "full log: $SCHED_LOGDIR/errors.log"
+  #
+  # Only what is new is a problem, though.  Any entry at all used to keep this
+  # red for good -- months after its cause was fixed, which teaches you to
+  # ignore the check (UX-17).  `--doctor --ack` marks the log as seen by writing
+  # its newest entry's header to errors.seen; an entry after the last copy of
+  # that header is new, and with no marker, or the marked entry trimmed away,
+  # every entry is.  Seen ones are still reported, as a warning.  One awk pass:
+  # the entries (text above the first header is one, as for --ack), how many
+  # are new, and the newest one's header and first line.
+  _elog="$SCHED_LOGDIR/errors.log"
+  if [ -s "$_elog" ]; then
+    _eseen=""; { IFS= read -r _eseen < "$SCHED_LOGDIR/errors.seen"; } 2>/dev/null || :
+    _ein=$(awk -v seen="$_eseen" -v start="$_estart" '
+      !n && !/^== / { n = 1; h = start; if (h == seen) s = 1; want = 1 }
+      /^== / { n++; if ($0 == seen) s = n; h = $0; l = $0; want = 1; next }
+      want && /[^[:space:]]/ { l = $0; want = 0 }
+      END { print n + 0; print n - s; print h; print l }' "$_elog" 2>/dev/null)
+    { read -r _en; read -r _enew; IFS= read -r _ehdr; IFS= read -r _elast; } <<< "$_ein" || :
+    # "most recent: 2026-07-28 12:00:00 — <its first line>": the date is what
+    # says whether it is still news.
+    read -r _ _ed _et _ <<< "$_ehdr" || :
+    _eat="$_ed $_et — "
+    [[ "$_ed" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || _eat=""
+    if [ "${_enew:-0}" -gt 0 ] || [ "${_en:-0}" = 0 ]; then
+      _ewhat="error(s)"
+      [ "${_enew:-0}" -lt "${_en:-0}" ] && _ewhat="new error(s)"
+      _bad "the navigator has logged ${_enew:-0} $_ewhat"
+      _note "most recent: $_eat$_elast"
+      _note "full log: $_elog"
+      # The flag first: in the Health popup a long install path is cut off,
+      # and the note would end before it said what to run.
+      _note "acknowledge them with --doctor --ack: bash '$SCRIPT_PATH' --doctor --ack"
+    else
+      _warn "the navigator has logged $_en error(s), all acknowledged"
+      _note "most recent: $_eat$_elast"
+      _note "full log: $_elog"
+    fi
   else
     _ok "no navigator errors logged"
   fi
@@ -8626,9 +8719,28 @@ if [ "${1:-}" = "--doctor" ]; then
   if grep -q interdimux <<< "$_keytable"; then
     for _pair in "$_k:navigator" "$_dk:dashboard"; do
       _key="${_pair%%:*}"; _what="${_pair#*:}"
-      if awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k && /interdimux/ { f = 1 }
-                           END { exit !f }' <<< "$_keytable"; then
+      # ...and the fzf minor --bind-keys baked into it, if any (only prefix+f's
+      # carries one).
+      if _bfz=$(awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k && /interdimux/ {
+                                    f = 1
+                                    if (match($0, /INTERDIMUX_FZF_MINOR=[0-9]+/))
+                                      m = substr($0, RSTART + 21, RLENGTH - 21) }
+                                  END { if (f) print m; exit !f }' <<< "$_keytable"); then
         _ok "prefix+$_key opens the $_what"
+        # That number is fzf's version as it was when the plugin last loaded,
+        # and every fzf feature the picker uses is gated on it.  Nothing
+        # refreshes it: after an upgrade the new features stay off, and after
+        # a downgrade the picker asks the older fzf for options it refuses, and
+        # does not open (BUG-100).  The version judged above is the live one.
+        if [ -n "$_bfz" ] && [ -n "${_fzm:-}" ] && [ "$_bfz" != "$_fzm" ]; then
+          _bfv="0.$_bfz"; [ "$_bfz" = 999 ] && _bfv="1.x"
+          if [ "$_bfz" -gt "$_fzm" ]; then
+            _bad "prefix+$_key was set up for fzf $_bfv, newer than the fzf $_fzv the popups run — it may not open"
+          else
+            _warn "prefix+$_key was set up for fzf $_bfv, older than the fzf $_fzv the popups run — its newer features stay off"
+          fi
+          _note "reload the plugin, or run: bash '$SCRIPT_PATH' --bind-keys"
+        fi
       else
         _bad "prefix+$_key is not bound to the $_what"
         _note "reload the plugin, or run: bash '$SCRIPT_PATH' --bind-keys"
@@ -9541,8 +9653,12 @@ if [ "${1:-}" = "--launch" ]; then
   # -c: open on the client that asked.  Left to tmux it lands on the most
   # recently active client, which from a menu or a popup is not reliably this
   # one (keys pressed in an overlay do not count as activity).
+  # -EE -k: a picker that fails stays open with its error until a key, as
+  # prefix+f's does (see --bind-keys).
+  _close=(-E)
+  tmux_ge 306 && _close=(-EE -k)
   exec tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
-    ${chrome[@]+"${chrome[@]}"} -E "$cmd"
+    ${chrome[@]+"${chrome[@]}"} "${_close[@]}" "$cmd"
 fi
 
 # ---------------------------------------------------------------------------
@@ -9797,8 +9913,11 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     _pop_w=64 _pop_h=17
     [ "$_cli_w" -gt 0 ] && [ "$_cli_w" -lt "$_pop_w" ] && _pop_w="$_cli_w"
     [ "$_cli_h" -gt 0 ] && [ "$_cli_h" -lt "$_pop_h" ] && _pop_h="$_cli_h"
+    # Held open on a failure, as every other popup is (see --bind-keys).
+    _close=(-E)
+    tmux_ge 306 && _close=(-EE -k)
     tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
-      -E "$cmd"
+      "${_close[@]}" "$cmd"
   fi
   exit 0
 fi
@@ -9901,13 +10020,16 @@ INTERDIMUX_MODE="${INTERDIMUX_MODE:-switch}"
 # navigator: mktemp failed under `set -e` BEFORE stderr is routed to the log
 # below, so its message flashed in a popup that closed on the spot.  When even
 # the state dir will not take a file, say so on the status line, which outlives
-# the popup; --doctor checks both directories.
+# the popup, and in the popup, which a failure now holds open; --doctor checks
+# both directories.
 if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
   RESUME_FILE="$XDG_RUNTIME_DIR/interdimux-resume.$$"
 elif ! RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX" 2>/dev/null) \
   && ! { mkdir -p "$SCHED_LOGDIR" 2>/dev/null \
          && RESUME_FILE=$(mktemp "$SCHED_LOGDIR/resume.XXXXXX" 2>/dev/null); }; then
-  imux_msg "cannot create a scratch file in ${TMPDIR:-/tmp} or $SCHED_LOGDIR (see --doctor)"
+  _m="cannot create a scratch file in ${TMPDIR:-/tmp} or $SCHED_LOGDIR (see --doctor)"
+  imux_msg "$_m"
+  printf 'interdimux: %s\n' "$_m" >&2
   exit 1
 fi
 PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
@@ -9935,31 +10057,63 @@ export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
 # also lands in `tmux show-messages`) and the whole thing is appended to a log
 # that --doctor points at.
 #
-# Only on this path.  Child modes (--list, --preview, --action, --doctor …) keep
-# their real stderr: they are called by fzf, by the test suites, and by the user.
+# The children of the navigator's binds append to the same file: it is exported
+# for them (see the top of the file), so a reload that fails is reported too.
+# Hence >> here as well -- with > this fd keeps its own offset, and the
+# navigator's next line would overwrite what a child had appended.  Modes run
+# any other way (by the test suites, by the user) keep their real stderr.
 ERR_FILE="${RESUME_FILE}.err"
 if fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null; then
-  exec 2>"$ERR_FILE"
+  exec 2>>"$ERR_FILE"
+  export INTERDIMUX_ERR_FILE="$ERR_FILE"
 else
   ERR_FILE=""
+  unset INTERDIMUX_ERR_FILE
 fi
 
 _report_stderr() {
+  local rc=$? first="" log="$SCHED_LOGDIR/errors.log" size
   [ -n "$ERR_FILE" ] && [ -s "$ERR_FILE" ] || return 0
-  local first
-  { read -r first < "$ERR_FILE"; } 2>/dev/null || :
-  [ -n "$first" ] || return 0
+  # The first line that says something.  Stopping at a BLANK first line dropped
+  # the whole error, from the status line and from the log alike (BUG-104).
+  # (At the end of the file read fails but still hands back a last line that
+  # has no newline.)
+  { while read -r first && [ -z "$first" ]; do :; done < "$ERR_FILE"; } 2>/dev/null || :
+  # imux_msg says whose message it is, and a mode's own errors already do
+  # ("interdimux: INTERDIMUX_DUMP_IN: cannot read"): not "interdimux: " twice.
+  first="${first#interdimux: }"
   # A long line would be truncated by the status line anyway, so cut it where
   # it stays readable.  imux_msg escapes the '#'s -- after the cut, which
   # therefore cannot split a "##" pair and leave a lone '#' to start a format.
   [ "${#first}" -gt 160 ] && first="${first:0:157}…"
-  imux_msg "$first"
+  [ -z "$first" ] || imux_msg "$first"
   if mkdir -p "$SCHED_LOGDIR" 2>/dev/null; then
     {
       printf '== %s navigator stderr\n' "$(date '+%Y-%m-%d %H:%M:%S')"
       cat "$ERR_FILE"
-    } >> "$SCHED_LOGDIR/errors.log" 2>/dev/null || :
+    } >> "$log" 2>/dev/null || :
+    # Capped on write (UX-17): past 64 KB only the newest 50 entries are kept,
+    # so a failure that recurs for months cannot grow the log without bound,
+    # and nothing has to be run to clean it.  Here because this is the writer
+    # that can run on every open; the Rust core's refusal is logged once per
+    # binary, and trimmed with the rest.
+    size=$(wc -c < "$log" 2>/dev/null) || size=0
+    if [ "${size:-0}" -gt 65536 ]; then
+      awk 'NR == FNR { n += /^== /; next } /^== / { i++ } i > n - 50' "$log" "$log" \
+        > "$log.$$" 2>/dev/null && mv -f "$log.$$" "$log" 2>/dev/null
+      rm -f "$log.$$" 2>/dev/null
+    fi
   fi
+  # A navigator that FAILED also says why where you are looking.  The popup
+  # stays open on a failure (-EE, see --bind-keys) until a key closes it, and
+  # this file is all there is to say: fzf's complaint, or bash's.  Off the
+  # alternate screen and with the cursor back first, in case a dying fzf left
+  # its last frame up.
+  if [ "$rc" != 0 ]; then
+    printf '\033[?1049l\033[?25h'
+    tail -n 20 "$ERR_FILE"
+  fi 2>/dev/null
+  return 0
 }
 
 # The query (and match scope) the raw-mode `result` bind last answered, so it
@@ -10626,6 +10780,19 @@ while true; do
   fzf_rc=$?
   set -o pipefail
   set -e
+
+  # 0 is Enter, 1 a query that matched nothing, 130 Esc or ^c (and the abort
+  # that ends ^o).  Anything else is fzf failing -- 2 on its own error, 128+N
+  # killed by signal N -- which used to close the popup exactly as Esc does,
+  # leaving no trace of an OOM kill (BUG-106).  Said on stderr, so the exit
+  # report puts it on the status line and in errors.log.
+  #
+  # And the navigator fails with it, so the popup stays open and shows why
+  # (UX-75) rather than closing as if you had pressed Esc.
+  case "$fzf_rc" in
+    0|1|130) ;;
+    *) printf 'fzf exited with status %s\n' "$fzf_rc" >&2; exit 1 ;;
+  esac
 
   # ctrl-o cancelled the dir picker — reopen the navigator
   [ -s "$RESUME_FILE" ] && continue

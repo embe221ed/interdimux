@@ -105,6 +105,46 @@ else
   ERRORS+="$(doctor | sed -n '/key bindings/,/^$/p' | sed 's/^/    /' || true)"$'\n'
 fi
 
+# --- a binding set up for another fzf (BUG-100) ----------------------------------
+# --bind-keys bakes fzf's minor version into prefix+f, and every fzf feature the
+# picker uses is gated on it; nothing refreshes it until the plugin reloads.
+# Baked from a stand-in fzf on either side of the real one, which is what the
+# server's PATH -- and so the doctor -- finds.
+live_minor=$(fzf --version 2>/dev/null | awk '{print $1}' | cut -d. -f2)
+if [[ "${live_minor:-}" =~ ^[0-9]+$ ]] && [ "$live_minor" -gt 40 ]; then
+  bake_for() { # $1 = the minor version the stand-in reports
+    mkdir -p "$TMPD/fzf-$1"
+    printf '#!/bin/sh\necho "0.%s.0 (stub)"\n' "$1" > "$TMPD/fzf-$1/fzf"
+    chmod +x "$TMPD/fzf-$1/fzf"
+    PATH="$TMPD/fzf-$1:$PATH" bash "$SCRIPT" --bind-keys
+  }
+  old_m=$((live_minor - 1)) new_m=$((live_minor + 1))
+  bake_for "$old_m"
+  out=$(doctor)
+  if grep -q "⚠ prefix+f was set up for fzf 0.$old_m, older than the fzf 0.$live_minor" <<< "$out" \
+     && grep -q 'reload the plugin, or run:' <<< "$out"; then
+    report "a binding set up for an older fzf is a warning that says to reload" pass
+  else
+    report "a binding set up for an older fzf is a warning that says to reload" fail
+    ERRORS+="$(sed -n '/key bindings/,/^$/p' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+  fi
+  bake_for "$new_m"
+  out=$(doctor)
+  if grep -q "✗ prefix+f was set up for fzf 0.$new_m, newer than the fzf 0.$live_minor" <<< "$out" \
+     && [ "$(doctor_rc)" = 1 ]; then
+    report "...one set up for a newer fzf, which may not open, is a problem" pass
+  else
+    report "...one set up for a newer fzf, which may not open, is a problem" fail
+    ERRORS+="$(sed -n '/key bindings/,/^$/p' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+  fi
+  bash "$SCRIPT" --bind-keys
+  if grep -q 'was set up for fzf' <<< "$(doctor)"; then
+    report "...and one set up for the fzf the popups run says nothing" fail
+  else
+    report "...and one set up for the fzf the popups run says nothing" pass
+  fi
+fi
+
 # --- a missing binding is reported, not assumed ---------------------------------
 tmux -L "$SOCK" unbind-key f
 if doctor | grep -q '✗ prefix+f is not bound'; then
@@ -280,7 +320,98 @@ if grep -q 'something went wrong' <<< "$out"; then
 else
   report "...and it quotes the most recent one" fail
 fi
-rm -f "$XDG_STATE_HOME/interdimux/errors.log"
+
+# --- ...but a log you have seen does not keep it red for ever (UX-17) --------------
+# Any entry at all used to fail --doctor until the file was deleted by hand.
+# --doctor --ack marks what is logged as seen: still reported, as a warning,
+# and the check fails again on the next new entry only.  The verdict is
+# compared with the same report without the log, so nothing else in it counts.
+ELOG="$XDG_STATE_HOME/interdimux/errors.log"
+if grep -q 'most recent: 2026-01-01 00:00:00 — something went wrong' <<< "$out"; then
+  report "the most recent error is dated" pass
+else
+  report "the most recent error is dated" fail
+  ERRORS+="$(grep 'most recent' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+# The flag ahead of the install path: the Health popup cuts a long line off,
+# and a path that filled it hid the one thing the note is there to say.
+if grep -q -- "^ *acknowledge[^']*--doctor --ack" <<< "$out"; then
+  report "...and the report says how to acknowledge it, before the path" pass
+else
+  report "...and the report says how to acknowledge it, before the path" fail
+  ERRORS+="$(grep 'acknowledge' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+# a second entry, so that "everything so far" is more than the first one
+printf '== 2026-01-02 08:00:00 navigator stderr\nsomething else\n' >> "$ELOG"
+mv "$ELOG" "$TMPD/errors.held"; rc_clean=$(doctor_rc); mv "$TMPD/errors.held" "$ELOG"
+ack=$(bash "$SCRIPT" --doctor --ack 2>&1) && ack_rc=0 || ack_rc=$?
+if [ "$ack_rc" = 0 ] && grep -q '2 logged error(s) acknowledged' <<< "$ack"; then
+  report "--doctor --ack acknowledges the logged errors" pass
+else
+  report "--doctor --ack acknowledges the logged errors (rc=$ack_rc: $ack)" fail
+fi
+out=$(doctor)
+if grep -q '✗ the navigator has logged' <<< "$out"; then
+  report "an acknowledged error is no longer a problem" fail
+else
+  report "an acknowledged error is no longer a problem" pass
+fi
+if grep -q '⚠ the navigator has logged 2 error(s), all acknowledged' <<< "$out" \
+   && grep -q 'most recent: 2026-01-02 08:00:00 — something else' <<< "$out"; then
+  report "...but still reported, as a warning naming the most recent" pass
+else
+  report "...but still reported, as a warning naming the most recent" fail
+  ERRORS+="$(grep -A2 'navigator' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+if [ "$(doctor_rc)" = "$rc_clean" ]; then
+  report "...and does not fail --doctor (exit $rc_clean, as without the log)" pass
+else
+  report "...and does not fail --doctor (exit $rc_clean without the log)" fail
+fi
+[ "$(grep -c '^== ' "$ELOG")" = 2 ] \
+  && report "...and the log itself is kept" pass \
+  || report "...and the log itself is kept" fail
+printf '== 2026-02-02 10:11:12 navigator stderr\n\nsomething new\n' >> "$ELOG"
+out=$(doctor)
+if grep -q '✗ the navigator has logged 1 new error(s)' <<< "$out" \
+   && grep -q 'most recent: 2026-02-02 10:11:12 — something new' <<< "$out"; then
+  report "a new error after the acknowledgement fails it again, counted alone" pass
+else
+  report "a new error after the acknowledgement fails it again, counted alone" fail
+  ERRORS+="$(grep -A2 'navigator' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+# Text above the first entry header -- a log cut by hand, or written by
+# something else -- is an error like any other, and --ack must clear it too:
+# counted as no entries at all, it stayed red while --ack said "no errors are
+# logged".
+printf 'junk with no header\n' > "$ELOG"
+rm -f "$XDG_STATE_HOME/interdimux/errors.seen"
+out=$(doctor)
+if grep -q '✗ the navigator has logged 1 error(s)' <<< "$out" \
+   && grep -q 'most recent: junk with no header' <<< "$out"; then
+  report "text above the first entry is reported as an error" pass
+else
+  report "text above the first entry is reported as an error" fail
+  ERRORS+="$(grep -A2 'navigator' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+fi
+ack=$(bash "$SCRIPT" --doctor --ack 2>&1) && ack_rc=0 || ack_rc=$?
+if [ "$ack_rc" = 0 ] && grep -q '1 logged error(s) acknowledged' <<< "$ack" \
+   && [ "$(doctor_rc)" = "$rc_clean" ]; then
+  report "...which --doctor --ack acknowledges like any other" pass
+else
+  report "...which --doctor --ack acknowledges like any other (rc=$ack_rc: $ack)" fail
+fi
+printf '== 2026-03-03 09:00:00 navigator stderr\nafter the junk\n' >> "$ELOG"
+if grep -q '✗ the navigator has logged 1 new error(s)' <<< "$(doctor)"; then
+  report "...and an entry after it is new" pass
+else
+  report "...and an entry after it is new" fail
+fi
+rm -f "$ELOG" "$XDG_STATE_HOME/interdimux/errors.seen"
+ack=$(bash "$SCRIPT" --doctor --ack 2>&1) && ack_rc=0 || ack_rc=$?
+[ "$ack_rc" = 0 ] && grep -q 'no errors are logged' <<< "$ack" \
+  && report "--doctor --ack with nothing logged says so" pass \
+  || report "--doctor --ack with nothing logged says so (rc=$ack_rc: $ack)" fail
 
 # The whole point: an error must reach the log rather than the rendered rows.
 # Driven end to end, because the redirect happens in the navigator and a
