@@ -9878,7 +9878,10 @@ if [ -z "$IMUX_BIN" ] && { [ "$SHOW_GIT_BRANCH" = on ] || [ "$SHOW_DIRS" = on ];
   mounts_export
 elif [ -n "$IMUX_BIN" ]; then
   MOUNTS_FILE="${RESUME_FILE}.mounts"
-  rm -f "$MOUNTS_FILE" 2>/dev/null || :
+  # A builtin test first: the file exists only after PID reuse (a navigator
+  # that was SIGKILLed left it), and rm is a fork+exec (~4 ms) on the way to the
+  # first frame.  tests/test_exec_budget.sh holds that path to nothing but fzf.
+  if [ -e "$MOUNTS_FILE" ] || [ -L "$MOUNTS_FILE" ]; then rm -f "$MOUNTS_FILE" 2>/dev/null || :; fi
   export INTERDIMUX_MOUNTS_FILE="$MOUNTS_FILE"
 fi
 

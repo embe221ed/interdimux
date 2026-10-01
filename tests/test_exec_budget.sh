@@ -25,7 +25,9 @@
 #     the start of a line (1 run in ~50 lost one otherwise).
 #
 # COUNTS, not order: in the bash renderer `sort` runs on the left of the
-# pipeline at the moment fzf is exec'd on the right.
+# pipeline at the moment fzf is exec'd on the right.  The one order checked is
+# what runs before fzf on the Rust path, where the left side is only tmux and
+# the core (and its zoxide).
 #
 # The numbers are budgets.  A change that needs one more exec or fork on these
 # paths raises the number here, in the same commit, and says why.
@@ -162,15 +164,26 @@ renderers=(off); [ -x "$BIN" ] && renderers=(on off)
 for r in "${renderers[@]}"; do
   if [ "$r" = on ]; then
     label="Rust core"
-    # the gather's one tmux query, the core's zoxide, the EXIT trap's rm, and
-    # an rm of the core's mount-table file before fzf starts
-    want="FZF=1 rm=2 tmux=1 zoxide=1" forks=8
+    # the gather's one tmux query, the core's zoxide, the EXIT trap's rm
+    want="FZF=1 rm=1 tmux=1 zoxide=1" forks=8
   else
     label="bash renderer"
     # ...and the MRU sort
     want="FZF=1 rm=1 sort=1 tmux=1 zoxide=1" forks=10
   fi
   run "$r" -- ; check "navigator ($label)" "$want" "$forks"
+  if [ "$r" = on ]; then
+    # Before fzf starts, the navigator itself runs nothing: what the log holds
+    # ahead of FZF can only be the pipeline's left side, which runs alongside
+    # it.  (An `rm` of a file that exists only after PID reuse ran here,
+    # unconditionally, ~4 ms before every first frame -- review PERF-19.)
+    before=$(awk '$0 == "FZF" { exit } { print }' "$LOG" | grep -vxE 'tmux|zoxide' | tr '\n' ' ' || true)
+    if grep -qx FZF "$LOG" && [ -z "$before" ]; then
+      report "navigator ($label): nothing but the list's own query runs before fzf" pass
+    else
+      report "navigator ($label): nothing but the list's own query runs before fzf (got: $before)" fail
+    fi
+  fi
 done
 
 # --- --list: every reload ----------------------------------------------------
