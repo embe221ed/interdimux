@@ -11,13 +11,17 @@
 #     about two system calls per list.  So the number of read(2) calls must
 #     not grow with the titles' length.
 #   * the callbacks fzf runs while you type and move -- the preview, the
-#     footer, the zero-match description, the scope prompt -- never reach the
-#     agent layer (review R15).  bash parses a script as it runs it, so a
-#     callback that exits above those ~850 lines never parses them, and every
-#     one of them paid ~2 ms to parse code that only a list draws with.  The
-#     witness is bash's own execution trace (-x): the heavy agent layer's
-#     first top-level assignment, DEFAULT_TITLE_RULES, is in the trace of a --list and must
-#     not be in a callback's;
+#     footer, the zero-match description, the scope prompt, the ctrl-o
+#     picker's header -- never reach the agent layer (review R15).  bash
+#     parses a script as it runs it, so a callback that exits above those
+#     ~850 lines never parses them, and every one of them paid ~2 ms to parse
+#     code that only a list draws with.  The witness is bash's own execution
+#     trace (-x): the heavy agent layer's first top-level assignment,
+#     DEFAULT_TITLE_RULES, is in the trace of a --list and must not be in a
+#     callback's;
+#   * for the same reason the dashboard and the popups it opens (--launch,
+#     Health, Jobs) are dispatched before the ~77 KB of --doctor and the
+#     agents' modes, and --agents (a status line runs it) before --doctor;
 #   * the shortcut cmd_field takes for a row nothing can be added to (no
 #     option published, no registry record, not an agent, no title a rule
 #     reads -- review R09) is taken by no other row.  Each row below has
@@ -264,12 +268,50 @@ else
 fi
 traced "--session-name-for (the ctrl-o picker's badge)" "rc" \
   bash -x "$SCRIPT" --session-name-for "$(tmux -L "$SOCK" display-message -p -t '=rc:0' '#{pane_current_path}')"
+traced "--dirs-hints (the ctrl-o picker's header on ^r)" "create" \
+  bash -x "$SCRIPT" --dirs-hints
+traced "--dirs-hints deep (on ^f)" "deep search" \
+  bash -x "$SCRIPT" --dirs-hints deep svc
 # The witness is real: a list does reach it.
 env bash -x "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
 if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
   report "premise: --list does run the agent layer, and the trace shows it" pass
 else
   report "premise: --list does run the agent layer, and the trace shows it" fail
+fi
+
+# --- the modes below them -----------------------------------------------------
+# A mode no handler takes tests every dispatch in the file, in the order bash
+# parses them; a mode parses every section above its own test, on each run.
+env bash -x "$SCRIPT" --no-such-mode > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
+order=" $(sed -n "s/^+ '\[' --no-such-mode = \(--[a-z-]*\) ']'\$/\1/p" "$TMPD/cb.trace" | tr '\n' ' ')"
+# $1 = a mode -> REPLY: how many dispatch tests come before its own, or "".
+nth() {
+  local pre="${order%% "$1" *}" w=()
+  REPLY=""
+  [ "$pre" != "$order" ] || return 0
+  read -ra w <<< "$pre"
+  REPLY="${#w[@]}"
+}
+if grep -q "unknown mode '--no-such-mode'" "$TMPD/cb.trace"; then
+  report "premise: an unknown mode is refused after every dispatch test" pass
+else
+  report "premise: an unknown mode is refused after every dispatch test" fail
+fi
+nth --doctor; doc="$REPLY"; nth --agents; ag="$REPLY"; nth --agent-next; agn="$REPLY"
+for m in --doctor-view --launch --jobs-list --job-cancel --jobs --dashboard-launch --dashboard; do
+  nth "$m"
+  if [ -n "$REPLY" ] && [ -n "$doc" ] && [ -n "$ag" ] && [ -n "$agn" ] \
+     && [ "$REPLY" -lt "$doc" ] && [ "$REPLY" -lt "$ag" ] && [ "$REPLY" -lt "$agn" ]; then
+    report "$m: parses neither --doctor nor the agents' modes" pass
+  else
+    report "$m: parses neither --doctor nor the agents' modes (test #$REPLY; --doctor #$doc, --agents #$ag)" fail
+  fi
+done
+if [ -n "$doc" ] && [ -n "$ag" ] && [ -n "$agn" ] && [ "$ag" -lt "$doc" ] && [ "$agn" -lt "$doc" ]; then
+  report "--agents, --agent-next: parse no --doctor" pass
+else
+  report "--agents, --agent-next: parse no --doctor (tests #$ag, #$agn; --doctor #$doc)" fail
 fi
 
 echo

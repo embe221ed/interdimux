@@ -5477,10 +5477,11 @@ dlg_width() {
 }
 
 
-# The callbacks fzf runs while you type -- the hint bar, and above it the
-# create resolver and the ctrl-o badge -- sit before the scheduling modes and
-# the dialogs, which they never use: bash parses a script as it runs it, and
-# every line above a callback is parsed by each run of it (~35 us a KB).
+# The callbacks fzf runs while you type -- the hint bar and the ctrl-o
+# picker's header (--dirs-hints), and above them the create resolver and the
+# ctrl-o badge -- sit before the scheduling modes and the dialogs, which they
+# never use: bash parses a script as it runs it, and every line above a
+# callback is parsed by each run of it (~35 us a KB).
 
 # ---------------------------------------------------------------------------
 # Dynamic hint bar (called by fzf focus:transform-footer)
@@ -5546,6 +5547,27 @@ if [ "${1:-}" = "--hint-ladder" ]; then
   hint_set "${2:-}"
   hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
   printf '%s' "$REPLY"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Directory picker header (called by fzf transform-header)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--dirs-hints" ]; then
+  # 40, not the navigator's 50: this picker's preview is unconditional and 40%
+  # wide, and it is reached through an `execute` child that has inherited the
+  # navigator's FZF_PREVIEW_COLUMNS, so nothing here can be auto-detected.
+  HINT_PREVIEW_PCT=40
+  case "${2:-default}" in
+    # The deep/browse forms lead with a STATUS (the text being searched), not a
+    # hint, so they are left to truncate the way any status does — the escape
+    # hatch they would otherwise lose (^r) is on the prompt as well.
+    deep)   printf '%s%s\n' "$(hint '🔎 deep search' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
+    browse) printf '%s%s\n' "$(hint '⤷ browsing' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
+    *)      hint_bar_r enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1
+            [ -n "$REPLY" ] && printf '%s\n' "$REPLY" ;;
+  esac
   exit 0
 fi
 
@@ -6490,16 +6512,17 @@ info_flash() {
 }
 
 # The agent layer sits here -- below every callback fzf runs while you type or
-# move (--preview, --describe-create, --session-name-for, --footer-for and
-# --hint-ladder; --scope-prompt is at the top), and above the first mode that
-# draws rows (--action's swap picker, --list) -- because bash parses a script
-# as it runs it.  A callback that exits before this line never parses the ~850
-# lines below, which cost every one of them ~2 ms (review R15).  So no mode
-# dispatched above this line may run anything that uses it (gather_targets is
-# defined above but only ever run below), and a new callback belongs above it.
-# The agent NAMES (the tables, agent_of, VIEW) are further up: the preview and
-# the create resolver use them.  tests/test_render_cost.sh checks the
-# callbacks with bash's own trace (the witness: DEFAULT_TITLE_RULES below).
+# move (--preview, --describe-create, --session-name-for, --footer-for,
+# --hint-ladder and --dirs-hints; --scope-prompt is at the top), and above the
+# first mode that draws rows (--action's swap picker, --list) -- because bash
+# parses a script as it runs it.  A callback that exits before this line never
+# parses the ~850 lines below, which cost every one of them ~2 ms (review R15).
+# So no mode dispatched above this line may run anything that uses it
+# (gather_targets is defined above but only ever run below), and a new
+# callback belongs above it.  The agent NAMES (the tables, agent_of, VIEW) are
+# further up: the preview and the create resolver use them.
+# tests/test_render_cost.sh checks the callbacks with bash's own trace (the
+# witness: DEFAULT_TITLE_RULES below).
 
 # Rules: how what an app or a plugin tells tmux becomes a state word and a
 # description on the row.  One rule per line, two kinds:
@@ -8182,27 +8205,6 @@ if [ "${1:-}" = "--action" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Directory picker header (called by fzf transform-header)
-# ---------------------------------------------------------------------------
-
-if [ "${1:-}" = "--dirs-hints" ]; then
-  # 40, not the navigator's 50: this picker's preview is unconditional and 40%
-  # wide, and it is reached through an `execute` child that has inherited the
-  # navigator's FZF_PREVIEW_COLUMNS, so nothing here can be auto-detected.
-  HINT_PREVIEW_PCT=40
-  case "${2:-default}" in
-    # The deep/browse forms lead with a STATUS (the text being searched), not a
-    # hint, so they are left to truncate the way any status does — the escape
-    # hatch they would otherwise lose (^r) is on the prompt as well.
-    deep)   printf '%s%s\n' "$(hint '🔎 deep search' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
-    browse) printf '%s%s\n' "$(hint '⤷ browsing' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
-    *)      hint_bar_r enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1
-            [ -n "$REPLY" ] && printf '%s\n' "$REPLY" ;;
-  esac
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
 # New session from directory (ctrl-o)
 # ---------------------------------------------------------------------------
 #
@@ -8368,6 +8370,536 @@ if [ "${1:-}" = "--jump" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Popup launcher — single source of popup chrome (border, title, size)
+# ---------------------------------------------------------------------------
+
+# Script path with single quotes escaped, for embedding in tmux command
+# strings
+# (SQ_SCRIPT is precomputed next to SCRIPT_PATH — see the top of the file.)
+
+# Resolved options forwarded into the popup, so the navigator and every
+# fzf-spawned subprocess (header/preview/reload, which run on each
+# cursor move) skip the tmux option round-trips.
+env_fwd_vars() {
+  ENV_FWD=(
+    "INTERDIMUX_SHOW_PREVIEW=$SHOW_PREVIEW"
+    "INTERDIMUX_SHOW_FULL_COMMAND=$SHOW_FULL_COMMAND"
+    "INTERDIMUX_SHOW_GIT_BRANCH=$SHOW_GIT_BRANCH"
+    "INTERDIMUX_POPUP_WIDTH=$POPUP_WIDTH"
+    "INTERDIMUX_POPUP_HEIGHT=$POPUP_HEIGHT"
+    "INTERDIMUX_ORDER=$ORDER"
+    "INTERDIMUX_FZF_OPTS=$FZF_USER_OPTS"
+    "INTERDIMUX_RECENT_LIMIT=$RECENT_LIMIT"
+    "INTERDIMUX_SCAN_DEPTH=$SCAN_DEPTH"
+    "INTERDIMUX_USE_ZOXIDE=$USE_ZOXIDE"
+    "INTERDIMUX_DIRS_LIVE=$DIRS_LIVE"
+    "INTERDIMUX_PROJECT_MARKERS=$EXTRA_MARKERS"
+    "INTERDIMUX_STARTUP_COMMAND=$STARTUP_COMMAND"
+    "INTERDIMUX_HYDRATE=$HYDRATE"
+    "INTERDIMUX_SHOW_DIRS=$SHOW_DIRS"
+    "INTERDIMUX_DIRS_LIMIT=$DIRS_LIMIT"
+    "INTERDIMUX_RAW=$RAW_MODE"
+    "INTERDIMUX_HIDE=$HIDE_PATTERNS"
+    "INTERDIMUX_SESSION_RULE=$SESSION_RULE"
+    "INTERDIMUX_SCOPE_HIGHLIGHT=$SCOPE_HIGHLIGHT"
+    "INTERDIMUX_SHOW_TITLE=$SHOW_TITLE"
+    "INTERDIMUX_TITLE_MAX=$TITLE_MAX"
+    "INTERDIMUX_AGENTS=$AGENT_NAMES"
+    "INTERDIMUX_AGENT_ARGS=$AGENT_ARGS"
+    "INTERDIMUX_AGENT_STATE=$AGENT_STATE"
+    "INTERDIMUX_CLAUDE_DIR=$CLAUDE_DIR"
+    "INTERDIMUX_TITLE_RULES=$TITLE_RULES_FILE"
+    "INTERDIMUX_AGENT_SEPARATOR=$AGENT_SEPARATOR"
+    "INTERDIMUX_PROJECT_DIRS=$PROJECT_DIRS"
+    "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
+    "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
+    "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
+    "INTERDIMUX_COLOR_SSH=$COLOR_SSH"
+    "INTERDIMUX_COLOR_EDITOR=$COLOR_EDITOR"
+    "INTERDIMUX_COLOR_SUCCESS=$COLOR_SUCCESS"
+    "INTERDIMUX_COLOR_DANGER=$COLOR_DANGER"
+    "INTERDIMUX_COLOR_TREE=$COLOR_TREE"
+    "INTERDIMUX_COLOR_SEPARATOR=$COLOR_SEPARATOR"
+    "INTERDIMUX_COLOR_QUERY=$COLOR_QUERY"
+    "INTERDIMUX_COLOR_MATCH_CURRENT=$COLOR_MATCH_CURRENT"
+    "INTERDIMUX_COLOR_CURRENT_BG=$COLOR_CURRENT_BG"
+    "INTERDIMUX_COLOR_HEADER=$COLOR_HEADER"
+    "INTERDIMUX_COLOR_BORDER=$COLOR_BORDER"
+    "INTERDIMUX_COLOR_MENU_SEL_FG=$COLOR_MENU_SEL_FG"
+    "INTERDIMUX_FZF_MINOR=$FZF_MINOR"
+    "INTERDIMUX_TMUX_VNUM=$TMUX_VNUM"
+    # Tells the child that every option above was already resolved, so
+    # load_tmux_opts can skip its tmux round-trip even when a value is empty.
+    # Every get_opt env var MUST be forwarded above for this to be correct --
+    # tests/test_config_fwd.sh enforces that.
+    "INTERDIMUX_OPTS_PRIMED=1"
+  )
+}
+
+# On tmux >= 3.3 the vars ride in as display-popup -e flags — no shell
+# parsing at all, so a fish/dash default-shell can't break them.
+env_fwd_flags() {
+  local kv
+  ENV_FWD_FLAGS=()
+  env_fwd_vars
+  for kv in "${ENV_FWD[@]}"; do ENV_FWD_FLAGS+=(-e "$kv"); done
+}
+
+# tmux 3.2 fallback (no -e): an `env` prefix on the popup command — a
+# plain command word, so it also survives non-POSIX job shells.
+build_env_fwd() {
+  local kv out="env"
+  env_fwd_vars
+  # POSIX quoting, not %q — the popup command is run by a job shell we do not
+  # control, and an option value may hold a newline (@interdimux-startup-command
+  # is multi-line by design).  See shq().
+  for kv in "${ENV_FWD[@]}"; do shq "$kv"; out+=" $REPLY"; done
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# --doctor in a popup (the dashboard's Health entry)
+# ---------------------------------------------------------------------------
+#
+# fzf is the pager, not `less`: it is already a hard dependency, it is already
+# themed to match every other panel here, Esc already closes it, and search over
+# a health report is worth having rather than something to suppress.  On
+# fzf >= 0.74 --raw keeps the non-matching lines on screen, dimmed, so filtering
+# narrows the report instead of shredding the sections out of it.
+#
+# ^r re-runs the checks in place, which is the whole point after fixing one.
+if [ "${1:-}" = "--doctor-view" ]; then
+  set +e
+  _dv_extra=()
+  if fzf_ge 74; then
+    _dv_extra+=(--raw --gutter-raw=' ' --color="nomatch:${COLOR_TREE}:strip:dim")
+  fi
+  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
+  hint_flag '^r' recheck 2 esc close 1
+  # pipefail off for THIS pipeline, the same guard the other three pickers carry:
+  # --doctor exits 1 when it found a problem, and with pipefail on that status
+  # would mask fzf's.
+  set +o pipefail
+  bash "$SCRIPT_PATH" --doctor 2>&1 | fzf \
+    "${FZF_THEME[@]}" \
+    --no-sort \
+    --no-multi \
+    --prompt='health ❯ ' \
+    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
+    ${_dv_extra[@]+"${_dv_extra[@]}"} \
+    --bind="ctrl-r:reload(bash '$SQ_SCRIPT' --doctor)" \
+    >/dev/null 2>&1
+  set -o pipefail
+  exit 0
+fi
+
+if [ "${1:-}" = "--launch" ]; then
+  set +e
+  mode="${2:-switch}"
+
+  # The navigator's title names the session you are in, so there is a "you are
+  # here" anchor even once the current row has scrolled out of the list.  The
+  # baked prefix+f binding gets this from a tmux format for free; this path is
+  # already forking, so one more round-trip costs nothing that matters.
+  _cur_sess=$(tmux display-message -p ${CUR_T[@]+"${CUR_T[@]}"} '#S' 2>/dev/null) || _cur_sess=""
+  title=' interdimux '
+  [ -n "$_cur_sess" ] && title=" interdimux · $_cur_sess "
+  case "$mode" in
+    kill)   title=' interdimux · kill ' ;;
+    rename) title=' interdimux · rename ' ;;
+    zoom)   title=' interdimux · zoom ' ;;
+    swap)   title=' interdimux · swap ' ;;
+    detach) title=' interdimux · detach ' ;;
+    send)   title=' interdimux · send keys ' ;;
+    dirs)   title=' interdimux · new session ' ;;
+    schedule) title=' interdimux · schedule ' ;;
+    jobs)     title=' interdimux · scheduled jobs ' ;;
+    doctor)   title=' interdimux · health ' ;;
+    agents)   title=' interdimux · agents ' ;;
+  esac
+
+  # `agents` is the navigator in the agents view (VIEW): the panes that need
+  # you marked, and a QUERY typed for the user that matches exactly them,
+  # rather than a filtered list: raw mode dims the other rows so the tree
+  # keeps its shape, the cursor lands on the first match, and a keystroke
+  # widens it.  `^` and `|` are as old as fzf itself: no version split.
+
+  sp="$SQ_SCRIPT"
+  chrome=()
+  if tmux_ge 303; then
+    # Border style/lines are left to the user's popup-border-* options;
+    # only destructive modes recolour the frame
+    #
+    # The NAME is doubled, not the style: -T is a format, and a session named
+    # after a directory 'x#(cmd)' would run cmd here (see _bk_title_fmt).
+    # title itself stays raw for INTERDIMUX_TITLE, which popup_accent escapes.
+    chrome=(-T "${POPUP_TITLE_STYLE}${title//'#'/##}")
+    [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
+    # A popup gets the server's global TMUX_PANE — forward ours so
+    # current-target detection is exact.  It is the PRESSING pane only because
+    # every route here passes it explicitly (the bindings' TMUX_PANE=#{pane_id},
+    # the dashboard's baked items): run-shell itself hands over the server's
+    # global TMUX_PANE, which can belong to another server entirely.  The
+    # pressing client rides along for the same reason (see TMUX_C).
+    [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
+    [ -n "$INTERDIMUX_CLIENT" ] && chrome+=(-e "INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT")
+    env_fwd_flags
+    chrome+=("${ENV_FWD_FLAGS[@]}")
+    # The title rides along so popup_accent can re-send it (a style-only
+    # repaint on >= 3.6 would otherwise erase it)
+    chrome+=(-e "INTERDIMUX_TITLE=$title")
+    case "$mode" in
+      # --dirs exits non-zero on cancel (the navigator's ctrl-o resume
+      # contract); as a standalone popup that would bubble up through
+      # display-popup to run-shell as a "returned 1" status message —
+      # absorb it here
+      # The rest are exec'd, as prefix+f's is (see --bind-keys).
+      dirs)   chrome+=(-e "INTERDIMUX_MODE=dirs"); cmd="bash '$sp' --dirs || true" ;;
+      # Not a picker over tmux targets — its own list, its own handler.
+      jobs)   cmd="exec bash '$sp' --jobs" ;;
+      doctor) cmd="exec bash '$sp' --doctor-view" ;;
+      switch) cmd="exec bash '$sp'" ;;
+      agents) chrome+=(-e "INTERDIMUX_VIEW=agents"); cmd="exec bash '$sp'" ;;
+      *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="exec bash '$sp'" ;;
+    esac
+  else
+    env_fwd=$(build_env_fwd)
+    case "$mode" in
+      dirs)   cmd="$env_fwd bash '$sp' --dirs || true" ;;
+      jobs)   cmd="$env_fwd bash '$sp' --jobs" ;;
+      doctor) cmd="$env_fwd bash '$sp' --doctor-view" ;;
+      switch) cmd="$env_fwd bash '$sp'" ;;
+      agents) cmd="$env_fwd INTERDIMUX_VIEW=agents bash '$sp'" ;;
+      *)      cmd="$env_fwd INTERDIMUX_MODE=$mode bash '$sp'" ;;
+    esac
+  fi
+
+  # -c: open on the client that asked.  Left to tmux it lands on the most
+  # recently active client, which from a menu or a popup is not reliably this
+  # one (keys pressed in an overlay do not count as activity).
+  # -EE -k: a picker that fails stays open with its error until a key, as
+  # prefix+f's does (see --bind-keys).
+  _close=(-E)
+  tmux_ge 306 && _close=(-EE -k)
+  exec tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
+    ${chrome[@]+"${chrome[@]}"} "${_close[@]}" "$cmd"
+fi
+
+# ---------------------------------------------------------------------------
+# Scheduled jobs picker
+# ---------------------------------------------------------------------------
+#
+# Scheduling without a way to see and undo what you scheduled is a trap: the
+# only other exit is `atrm` on the command line, and by then you have to know
+# the queue letter.  Deliberately placed AFTER the dialog helpers — these blocks
+# execute during the top-to-bottom pass, so a handler above dlg_fit's definition
+# would call a function that does not exist yet.
+
+# Rows for the picker: "<display>\t<pane>\t<id>", the last field being what
+# {-1} hands to the cancel binding.
+if [ "${1:-}" = "--jobs-list" ]; then
+  set +e
+  command -v atq >/dev/null 2>&1 || exit 0
+  while IFS="$US" read -r _id _when _tgt _pane _desc; do
+    [ -n "$_id" ] || continue
+    # Pad the FITTED text, not the raw text: %-20s counts escape bytes as
+    # columns, and a CJK session name draws at twice the width bash measures.
+    dlg_fit "$_when" 18; _c1="$REPLY"; dlg_width "$_c1"
+    printf -v _p1 '%*s' $(( 18 - REPLY )) ''
+    dlg_fit "$_tgt" 20; _c2="$REPLY"; dlg_width "$_c2"
+    printf -v _p2 '%*s' $(( 20 - REPLY )) ''
+    printf '%s%s%s%s  %s%s%s%s  %s\t%s\t%s\n' \
+      "$ACCENT_ESC" "$_c1" "$_p1" "$RST" \
+      "$DIM" "$_c2" "$_p2" "$RST" \
+      "$_desc" "$_pane" "$_id"
+  done < <(sched_rows)
+  exit 0
+fi
+
+if [ "${1:-}" = "--job-cancel" ]; then
+  set +e
+  _jid="${2:-}"
+  [ -n "$_jid" ] || exit 0
+  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
+  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
+  trap 'printf "\033[?25h" >>"$tty_out" 2>/dev/null' EXIT
+
+  _when="" _tgt="" _desc=""
+  while IFS="$US" read -r _i _w _t _p _d; do
+    [ "$_i" = "$_jid" ] && { _when="$_w"; _tgt="$_t"; _desc="$_d"; break; }
+  done < <(sched_rows)
+  if [ -z "$_when" ]; then
+    info_flash "$BOLD_AMBER" "Cancel" "Job $_jid is no longer queued."
+    dialog_close
+    exit 0
+  fi
+
+  if confirm_dialog "$BOLD_AMBER" "Cancel job ${_jid}?" \
+       "${DIM}${_when} →${RST} ${_tgt}" "${DIM}\$${RST} ${_desc}"; then
+    # Through --sched-cancel so the "never touch a job outside our own queue"
+    # guard stays in one place.
+    if bash "$SCRIPT_PATH" --sched-cancel "$_jid" >/dev/null 2>&1; then
+      dialog_status "${GREEN}✓ cancelled${RST}"
+    else
+      dialog_status "${RED}✗ could not cancel job ${_jid}${RST}"
+    fi
+    sleep 0.35
+  fi
+  dialog_close
+  exit 0
+fi
+
+if [ "${1:-}" = "--jobs" ]; then
+  set +e
+  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
+  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
+  if ! command -v atq >/dev/null 2>&1; then
+    info_flash "$BOLD_AMBER" "Scheduled jobs" "'at' is not installed." \
+      "Scheduling beyond a minute needs it."
+    dialog_close
+    exit 0
+  fi
+  _jl="bash '$SQ_SCRIPT' --jobs-list"
+  # Read once, not twice: --jobs-list costs an `at -c` per job, and the
+  # emptiness check and the picker want the same rows.
+  _jrows=$(bash "$SCRIPT_PATH" --jobs-list)
+  if [ -z "$_jrows" ]; then
+    info_flash "$BOLD_AMBER" "Scheduled jobs" "Nothing is scheduled." \
+      "Schedule one from the dashboard."
+    dialog_close
+    exit 0
+  fi
+  _jwait=""
+  fzf_ge 74 && _jwait="wait+"
+  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
+  hint_flag enter cancel 3 ^r reload 1 esc quit 2
+  # Same guard as the other two pickers: under `set -o pipefail` an accept that
+  # closes the pipe early makes the producer's SIGPIPE (141) mask fzf's status.
+  # Nothing reads that status here, but the invariant is the point — the next
+  # picker to be pasted from this one inherits the shape.
+  set +o pipefail
+  printf '%s\n' "$_jrows" | fzf \
+    "${FZF_THEME[@]}" \
+    --delimiter=$'\t' \
+    --with-nth=1 \
+    --no-sort \
+    --prompt='jobs ❯ ' \
+    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
+    --bind="enter:${_jwait}execute(bash '$SQ_SCRIPT' --job-cancel {-1})+reload($_jl)" \
+    --bind="ctrl-r:reload($_jl)" \
+    >/dev/null 2>&1
+  set -o pipefail
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+# The "who pressed the key" prefix for a `run-shell … --launch X` the dashboard
+# builds, in REPLY: "TMUX_PANE=%N INTERDIMUX_CLIENT=<client> ", either part
+# omitted when unknown.
+#
+# run-shell does NOT pass the pressing pane: its job gets the tmux SERVER's
+# global environment, whose TMUX_PANE is whatever the process that started the
+# server exported -- a pane of another server when it was started from inside
+# tmux.  The dashboard's own binding carries the right values, but every item
+# it launched dropped them, so a picker opened from prefix+g marked the wrong
+# session current (or none), ordered MRU against it, and could open on another
+# client.  Menu item commands are not expanded in the pressing client's
+# context, so the values are baked in as literals; both are checked against a
+# charset that needs no quoting in /bin/sh or tmux's parser.
+launch_env_prefix() {
+  REPLY=""
+  [[ "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] && REPLY+="TMUX_PANE=$TMUX_PANE "
+  [ -n "$INTERDIMUX_CLIENT" ] && REPLY+="INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT "
+  return 0
+}
+
+# Entry point for the prefix+g binding: a native styled menu on a client tall
+# enough for it, otherwise (short, or of unknown height) a compact fzf menu.
+if [ "${1:-}" = "--dashboard-launch" ]; then
+  set +e
+  sp="$SQ_SCRIPT"
+
+  # display-menu SILENTLY draws nothing and exits 0 when the menu is taller than
+  # the client.  Verified on 3.7b — no message, no error, prefix+g simply becomes
+  # a dead key.  MENU_ROWS (defined next to the other geometry helpers, because
+  # --doctor reports against it too) is items + 2 for the borders.
+  #
+  # The fzf fallback below has no such ceiling: its list scrolls.  So the tmux
+  # version is not the only thing that decides which one to draw.
+  #
+  # The Agents entry's count asks tmux for the panes and, in the same
+  # round-trip, for the client's size (AW_CLIENT); only without it is the size
+  # a round-trip of its own.  No native menu below 3.4, so no count there: the
+  # fzf fallback counts for itself.
+  _n_agents=0 AW_CLIENT=""
+  if tmux_ge 304 && [ "$AGENT_STATE" = on ]; then agents_waiting_r; _n_agents="$REPLY"; fi
+  if [ -n "$AW_CLIENT" ]; then
+    _cli_h="${AW_CLIENT%% *}" _cli_w="${AW_CLIENT#* }"; _cli_w="${_cli_w%% *}"
+  else
+    client_dims; _cli_h="${REPLY% *}" _cli_w="${REPLY#* }"
+  fi
+  # Unknown height takes the fallback, not the menu: a popup where a menu would
+  # have done is cosmetic, and a dead prefix+g is not.
+  if tmux_ge 304 && [ "$_cli_h" -ge "$MENU_ROWS" ]; then
+    # Menu item commands are re-parsed by tmux's command parser when
+    # selected: inside its double-quoted token, \ " $ are escapes and
+    # run-shell format-expands #{...} — escape those layers on top of
+    # the shell quoting so exotic install paths survive.
+    menu_sp="$SQ_SCRIPT_FMT"
+    menu_sp="${menu_sp//\\/\\\\}"
+    menu_sp="${menu_sp//\"/\\\"}"
+    menu_sp="${menu_sp//\$/\\\$}"
+    launch_env_prefix
+    _mp="${REPLY}bash '$menu_sp' --launch"
+
+    # A menu item whose name begins with '-' is DISABLED: tmux dims it and drops
+    # its key column (verified against 3.7b).  Offering Schedule on a box with no
+    # `at`, and answering the click with an error dialog, is worse than saying up
+    # front that it is unavailable.  The count rides in the Jobs label for the
+    # same reason — an empty picker is a wasted keypress.
+    #
+    # Two forks on the prefix+g path, which is not the hot path (prefix+f is) and
+    # already forks bash to get here.
+    _m_sched='Schedule' _m_jobs='-Jobs'
+    if command -v at >/dev/null 2>&1; then
+      _njobs=$(atq -q "$SCHED_QUEUE" 2>/dev/null | grep -c . || true)
+      case "$_njobs" in
+        ''|0) _m_jobs='-Jobs' ;;
+        *)    _m_jobs="Jobs ($_njobs)" ;;
+      esac
+    else
+      _m_sched='-Schedule (needs at)'
+      _m_jobs='-Jobs (needs at)'
+    fi
+    # Agents that wait on you (approve / input), counted above by the rows' own
+    # state logic (agents_waiting_r).  Greyed out when there are none, like
+    # Jobs -- a filter that finds nothing is a wasted keypress.  The key is `e`:
+    # display-menu spends g/G (and j/k, q) on moving about.
+    if [ "$AGENT_STATE" != on ]; then
+      _m_agents='-Agents (agent-state off)'
+    elif [ "$_n_agents" = 0 ]; then
+      _m_agents='-Agents'
+    elif [ "$_n_agents" = 1 ]; then
+      _m_agents='Agents (1 needs you)'
+    else
+      _m_agents="Agents ($_n_agents need you)"
+    fi
+    # Item names are FORMATS, so #[...] styles them.  Kill is the only entry here
+    # that destroys something; give it the same danger colour as the frame it
+    # turns red.
+    tmux display-menu -x C -y C ${TMUX_C[@]+"${TMUX_C[@]}"} \
+      -T '#[align=centre,bold] interdimux ' \
+      -H "bg=${MENU_SEL_BG},fg=${MENU_SEL_FG},bold" \
+      'Switch'      s "run-shell -b \"$_mp switch\"" \
+      "$_m_agents"  e "run-shell -b \"$_mp agents\"" \
+      'New session' n "run-shell -b \"$_mp dirs\"" \
+      '' \
+      'Rename'      r "run-shell -b \"$_mp rename\"" \
+      "#[fg=${POPUP_BORDER_DANGER}]Kill" i "run-shell -b \"$_mp kill\"" \
+      'Swap'        w "run-shell -b \"$_mp swap\"" \
+      'Zoom'        z "run-shell -b \"$_mp zoom\"" \
+      '' \
+      'Detach'      d "run-shell -b \"$_mp detach\"" \
+      'Send keys'   t "run-shell -b \"$_mp send\"" \
+      '' \
+      "$_m_sched"   a "run-shell -b \"$_mp schedule\"" \
+      "$_m_jobs"    o "run-shell -b \"$_mp jobs\"" \
+      '' \
+      'Health'      h "run-shell -b \"$_mp doctor\""
+  else
+    chrome=()
+    cmd="$(build_env_fwd) bash '$sp' --dashboard"
+    if tmux_ge 303; then
+      chrome=(-T "${POPUP_TITLE_STYLE} interdimux ")
+      [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
+      [ -n "$INTERDIMUX_CLIENT" ] && chrome+=(-e "INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT")
+      env_fwd_flags
+      chrome+=("${ENV_FWD_FLAGS[@]}")
+      cmd="exec bash '$sp' --dashboard"   # exec: see --bind-keys
+    fi
+    # Entries + 5: two border rows, the prompt, the rule under it, and the hint
+    # bar.  MEASURED rather than guessed — the 12 entries show fully at -h 17,
+    # and at 16 the last one scrolls away (as 11 did at 15, before Agents) —
+    # because the number that was here before was slack nothing could
+    # distinguish from any other slack, and the entry added last is the one a
+    # too-short popup scrolls away.  tests/test_dashboard.sh derives it
+    # from the item list and fails if the two drift, exactly as it does for
+    # MENU_ROWS.
+    #
+    # Clamped to the client, because display-popup does NOT clamp: it fails with
+    # "height too large" and draws nothing.  Verified — on a 14-row client `-h 14`
+    # succeeds and `-h 15` errors, so the limit is exactly the client's size.  A
+    # fixed 64x19 made this the same dead key as an oversized menu, reached by the
+    # other path.  fzf's list scrolls, so a short popup is merely cramped.
+    _pop_w=64 _pop_h=17
+    [ "$_cli_w" -gt 0 ] && [ "$_cli_w" -lt "$_pop_w" ] && _pop_w="$_cli_w"
+    [ "$_cli_h" -gt 0 ] && [ "$_cli_h" -lt "$_pop_h" ] && _pop_h="$_cli_h"
+    # Held open on a failure, as every other popup is (see --bind-keys).
+    _close=(-E)
+    tmux_ge 306 && _close=(-EE -k)
+    tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
+      "${_close[@]}" "$cmd"
+  fi
+  exit 0
+fi
+
+# fzf fallback menu (a client shorter than MENU_ROWS, or of unknown height)
+if [ "${1:-}" = "--dashboard" ]; then
+  set +e
+
+  # Agents: no disabled state in an fzf list, so the count goes in the
+  # description (the native menu greys the entry out instead).
+  if [ "$AGENT_STATE" != on ]; then
+    _fb_agents="Agents waiting on you (@interdimux-agent-state is off)"
+  else
+    agents_waiting_r
+    case "$REPLY" in
+      0) _fb_agents="No agent needs you now" ;;
+      1) _fb_agents="1 agent needs you (approve or input)" ;;
+      *) _fb_agents="$REPLY agents need you (approve or input)" ;;
+    esac
+  fi
+  items=$(printf "%s\t  ${BOLD_AMBER}%-14s${RST} ${DIM}%s${RST}\n" \
+    "switch" "Switch"       "Navigate & jump to target" \
+    "agents" "Agents"       "$_fb_agents" \
+    "dirs"   "New session"  "Create session from directory" \
+    "rename" "Rename"       "Rename a session or window" \
+    "kill"   "Kill"         "Remove sessions, windows, or panes" \
+    "zoom"   "Zoom"         "Toggle pane zoom" \
+    "swap"   "Swap"         "Swap windows or panes" \
+    "detach" "Detach"       "Detach clients from session" \
+    "send"   "Send keys"    "Send a command to a pane" \
+    "schedule" "Schedule"   "Run a command later, via at" \
+    "jobs"   "Jobs"         "See and cancel scheduled commands" \
+    "doctor" "Health"       "Check the setup, like :checkhealth")
+
+  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
+  hint_flag enter select 2 esc quit 1
+  choice=$(printf '%s\n' "$items" | fzf \
+    "${FZF_THEME[@]}" \
+    --no-sort \
+    --no-info \
+    --delimiter=$'\t' \
+    --with-nth=2 \
+    --prompt='interdimux ❯ ' \
+    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
+  ) || exit 0
+
+  action="${choice%%	*}"
+
+  # Launch the selected tool in a new popup via run-shell -b (popups
+  # can't nest, so this runs after the dashboard popup closes).  The pane and
+  # client this popup was opened for go along: run-shell would hand --launch
+  # the server's global TMUX_PANE instead (see launch_env_prefix).
+  launch_env_prefix
+  tmux run-shell -b "${REPLY}bash '$SQ_SCRIPT_FMT' --launch $action"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Agents from the command line: --agents, --agent-next
 # ---------------------------------------------------------------------------
 #
@@ -8375,7 +8907,8 @@ fi
 # Claude's registry state, which no tmux format can see.  Both modes walk the
 # panes with agents_waiting_r (one tmux call, the registry read, agent_state_r
 # per pane), so what they say is what the rows and the count say.  Down here,
-# below --list and --jump, so that no list parses them.
+# below --list and --jump and the dashboard's modes, so that no list, and
+# nothing the dashboard opens, parses them.
 #
 #   --agents [--count] [STATES]   one line per agent pane, tab-separated:
 #                                 pane id, target, agent, state, since (epoch
@@ -8485,94 +9018,6 @@ if [ "${1:-}" = "--agent-next" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Popup launcher — single source of popup chrome (border, title, size)
-# ---------------------------------------------------------------------------
-
-# Script path with single quotes escaped, for embedding in tmux command
-# strings
-# (SQ_SCRIPT is precomputed next to SCRIPT_PATH — see the top of the file.)
-
-# Resolved options forwarded into the popup, so the navigator and every
-# fzf-spawned subprocess (header/preview/reload, which run on each
-# cursor move) skip the tmux option round-trips.
-env_fwd_vars() {
-  ENV_FWD=(
-    "INTERDIMUX_SHOW_PREVIEW=$SHOW_PREVIEW"
-    "INTERDIMUX_SHOW_FULL_COMMAND=$SHOW_FULL_COMMAND"
-    "INTERDIMUX_SHOW_GIT_BRANCH=$SHOW_GIT_BRANCH"
-    "INTERDIMUX_POPUP_WIDTH=$POPUP_WIDTH"
-    "INTERDIMUX_POPUP_HEIGHT=$POPUP_HEIGHT"
-    "INTERDIMUX_ORDER=$ORDER"
-    "INTERDIMUX_FZF_OPTS=$FZF_USER_OPTS"
-    "INTERDIMUX_RECENT_LIMIT=$RECENT_LIMIT"
-    "INTERDIMUX_SCAN_DEPTH=$SCAN_DEPTH"
-    "INTERDIMUX_USE_ZOXIDE=$USE_ZOXIDE"
-    "INTERDIMUX_DIRS_LIVE=$DIRS_LIVE"
-    "INTERDIMUX_PROJECT_MARKERS=$EXTRA_MARKERS"
-    "INTERDIMUX_STARTUP_COMMAND=$STARTUP_COMMAND"
-    "INTERDIMUX_HYDRATE=$HYDRATE"
-    "INTERDIMUX_SHOW_DIRS=$SHOW_DIRS"
-    "INTERDIMUX_DIRS_LIMIT=$DIRS_LIMIT"
-    "INTERDIMUX_RAW=$RAW_MODE"
-    "INTERDIMUX_HIDE=$HIDE_PATTERNS"
-    "INTERDIMUX_SESSION_RULE=$SESSION_RULE"
-    "INTERDIMUX_SCOPE_HIGHLIGHT=$SCOPE_HIGHLIGHT"
-    "INTERDIMUX_SHOW_TITLE=$SHOW_TITLE"
-    "INTERDIMUX_TITLE_MAX=$TITLE_MAX"
-    "INTERDIMUX_AGENTS=$AGENT_NAMES"
-    "INTERDIMUX_AGENT_ARGS=$AGENT_ARGS"
-    "INTERDIMUX_AGENT_STATE=$AGENT_STATE"
-    "INTERDIMUX_CLAUDE_DIR=$CLAUDE_DIR"
-    "INTERDIMUX_TITLE_RULES=$TITLE_RULES_FILE"
-    "INTERDIMUX_AGENT_SEPARATOR=$AGENT_SEPARATOR"
-    "INTERDIMUX_PROJECT_DIRS=$PROJECT_DIRS"
-    "INTERDIMUX_COLOR_ACCENT=$COLOR_ACCENT"
-    "INTERDIMUX_COLOR_PATH=$COLOR_PATH"
-    "INTERDIMUX_COLOR_GIT=$COLOR_GIT"
-    "INTERDIMUX_COLOR_SSH=$COLOR_SSH"
-    "INTERDIMUX_COLOR_EDITOR=$COLOR_EDITOR"
-    "INTERDIMUX_COLOR_SUCCESS=$COLOR_SUCCESS"
-    "INTERDIMUX_COLOR_DANGER=$COLOR_DANGER"
-    "INTERDIMUX_COLOR_TREE=$COLOR_TREE"
-    "INTERDIMUX_COLOR_SEPARATOR=$COLOR_SEPARATOR"
-    "INTERDIMUX_COLOR_QUERY=$COLOR_QUERY"
-    "INTERDIMUX_COLOR_MATCH_CURRENT=$COLOR_MATCH_CURRENT"
-    "INTERDIMUX_COLOR_CURRENT_BG=$COLOR_CURRENT_BG"
-    "INTERDIMUX_COLOR_HEADER=$COLOR_HEADER"
-    "INTERDIMUX_COLOR_BORDER=$COLOR_BORDER"
-    "INTERDIMUX_COLOR_MENU_SEL_FG=$COLOR_MENU_SEL_FG"
-    "INTERDIMUX_FZF_MINOR=$FZF_MINOR"
-    "INTERDIMUX_TMUX_VNUM=$TMUX_VNUM"
-    # Tells the child that every option above was already resolved, so
-    # load_tmux_opts can skip its tmux round-trip even when a value is empty.
-    # Every get_opt env var MUST be forwarded above for this to be correct --
-    # tests/test_config_fwd.sh enforces that.
-    "INTERDIMUX_OPTS_PRIMED=1"
-  )
-}
-
-# On tmux >= 3.3 the vars ride in as display-popup -e flags — no shell
-# parsing at all, so a fish/dash default-shell can't break them.
-env_fwd_flags() {
-  local kv
-  ENV_FWD_FLAGS=()
-  env_fwd_vars
-  for kv in "${ENV_FWD[@]}"; do ENV_FWD_FLAGS+=(-e "$kv"); done
-}
-
-# tmux 3.2 fallback (no -e): an `env` prefix on the popup command — a
-# plain command word, so it also survives non-POSIX job shells.
-build_env_fwd() {
-  local kv out="env"
-  env_fwd_vars
-  # POSIX quoting, not %q — the popup command is run by a job shell we do not
-  # control, and an option value may hold a newline (@interdimux-startup-command
-  # is multi-line by design).  See shq().
-  for kv in "${ENV_FWD[@]}"; do shq "$kv"; out+=" $REPLY"; done
-  printf '%s' "$out"
-}
-
-# ---------------------------------------------------------------------------
 # --doctor — tell the user what is wrong instead of failing quietly
 # ---------------------------------------------------------------------------
 #
@@ -8592,6 +9037,11 @@ build_env_fwd() {
 # Deliberately NOT part of the startup path: the hot path already validates the
 # three numeric options it would otherwise crash on, and nothing else here is
 # worth a millisecond on every open.
+#
+# And the last mode before the navigator: this is ~77 KB, and bash parses a
+# script as it runs it, so every mode dispatched below it parsed all of it on
+# each run -- ~2.8 ms that the dashboard, its menu's --launch, Health and Jobs
+# paid for nothing.  tests/test_render_cost.sh checks the order.
 if [ "${1:-}" = "--doctor" ]; then
   set +e
   _doc_fail=0
@@ -10067,448 +10517,6 @@ if [ "${1:-}" = "--doctor" ]; then
   printf '\033[2mrun again from the dashboard: prefix + %s, then Health\033[0m\n' "${_dk:-g}"
 
   [ "$_doc_fail" = 1 ] && exit 1
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# --doctor in a popup (the dashboard's Health entry)
-# ---------------------------------------------------------------------------
-#
-# fzf is the pager, not `less`: it is already a hard dependency, it is already
-# themed to match every other panel here, Esc already closes it, and search over
-# a health report is worth having rather than something to suppress.  On
-# fzf >= 0.74 --raw keeps the non-matching lines on screen, dimmed, so filtering
-# narrows the report instead of shredding the sections out of it.
-#
-# ^r re-runs the checks in place, which is the whole point after fixing one.
-if [ "${1:-}" = "--doctor-view" ]; then
-  set +e
-  _dv_extra=()
-  if fzf_ge 74; then
-    _dv_extra+=(--raw --gutter-raw=' ' --color="nomatch:${COLOR_TREE}:strip:dim")
-  fi
-  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
-  hint_flag '^r' recheck 2 esc close 1
-  # pipefail off for THIS pipeline, the same guard the other three pickers carry:
-  # --doctor exits 1 when it found a problem, and with pipefail on that status
-  # would mask fzf's.
-  set +o pipefail
-  bash "$SCRIPT_PATH" --doctor 2>&1 | fzf \
-    "${FZF_THEME[@]}" \
-    --no-sort \
-    --no-multi \
-    --prompt='health ❯ ' \
-    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
-    ${_dv_extra[@]+"${_dv_extra[@]}"} \
-    --bind="ctrl-r:reload(bash '$SQ_SCRIPT' --doctor)" \
-    >/dev/null 2>&1
-  set -o pipefail
-  exit 0
-fi
-
-if [ "${1:-}" = "--launch" ]; then
-  set +e
-  mode="${2:-switch}"
-
-  # The navigator's title names the session you are in, so there is a "you are
-  # here" anchor even once the current row has scrolled out of the list.  The
-  # baked prefix+f binding gets this from a tmux format for free; this path is
-  # already forking, so one more round-trip costs nothing that matters.
-  _cur_sess=$(tmux display-message -p ${CUR_T[@]+"${CUR_T[@]}"} '#S' 2>/dev/null) || _cur_sess=""
-  title=' interdimux '
-  [ -n "$_cur_sess" ] && title=" interdimux · $_cur_sess "
-  case "$mode" in
-    kill)   title=' interdimux · kill ' ;;
-    rename) title=' interdimux · rename ' ;;
-    zoom)   title=' interdimux · zoom ' ;;
-    swap)   title=' interdimux · swap ' ;;
-    detach) title=' interdimux · detach ' ;;
-    send)   title=' interdimux · send keys ' ;;
-    dirs)   title=' interdimux · new session ' ;;
-    schedule) title=' interdimux · schedule ' ;;
-    jobs)     title=' interdimux · scheduled jobs ' ;;
-    doctor)   title=' interdimux · health ' ;;
-    agents)   title=' interdimux · agents ' ;;
-  esac
-
-  # `agents` is the navigator in the agents view (VIEW): the panes that need
-  # you marked, and a QUERY typed for the user that matches exactly them,
-  # rather than a filtered list: raw mode dims the other rows so the tree
-  # keeps its shape, the cursor lands on the first match, and a keystroke
-  # widens it.  `^` and `|` are as old as fzf itself: no version split.
-
-  sp="$SQ_SCRIPT"
-  chrome=()
-  if tmux_ge 303; then
-    # Border style/lines are left to the user's popup-border-* options;
-    # only destructive modes recolour the frame
-    #
-    # The NAME is doubled, not the style: -T is a format, and a session named
-    # after a directory 'x#(cmd)' would run cmd here (see _bk_title_fmt).
-    # title itself stays raw for INTERDIMUX_TITLE, which popup_accent escapes.
-    chrome=(-T "${POPUP_TITLE_STYLE}${title//'#'/##}")
-    [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
-    # A popup gets the server's global TMUX_PANE — forward ours so
-    # current-target detection is exact.  It is the PRESSING pane only because
-    # every route here passes it explicitly (the bindings' TMUX_PANE=#{pane_id},
-    # the dashboard's baked items): run-shell itself hands over the server's
-    # global TMUX_PANE, which can belong to another server entirely.  The
-    # pressing client rides along for the same reason (see TMUX_C).
-    [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
-    [ -n "$INTERDIMUX_CLIENT" ] && chrome+=(-e "INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT")
-    env_fwd_flags
-    chrome+=("${ENV_FWD_FLAGS[@]}")
-    # The title rides along so popup_accent can re-send it (a style-only
-    # repaint on >= 3.6 would otherwise erase it)
-    chrome+=(-e "INTERDIMUX_TITLE=$title")
-    case "$mode" in
-      # --dirs exits non-zero on cancel (the navigator's ctrl-o resume
-      # contract); as a standalone popup that would bubble up through
-      # display-popup to run-shell as a "returned 1" status message —
-      # absorb it here
-      # The rest are exec'd, as prefix+f's is (see --bind-keys).
-      dirs)   chrome+=(-e "INTERDIMUX_MODE=dirs"); cmd="bash '$sp' --dirs || true" ;;
-      # Not a picker over tmux targets — its own list, its own handler.
-      jobs)   cmd="exec bash '$sp' --jobs" ;;
-      doctor) cmd="exec bash '$sp' --doctor-view" ;;
-      switch) cmd="exec bash '$sp'" ;;
-      agents) chrome+=(-e "INTERDIMUX_VIEW=agents"); cmd="exec bash '$sp'" ;;
-      *)      chrome+=(-e "INTERDIMUX_MODE=$mode"); cmd="exec bash '$sp'" ;;
-    esac
-  else
-    env_fwd=$(build_env_fwd)
-    case "$mode" in
-      dirs)   cmd="$env_fwd bash '$sp' --dirs || true" ;;
-      jobs)   cmd="$env_fwd bash '$sp' --jobs" ;;
-      doctor) cmd="$env_fwd bash '$sp' --doctor-view" ;;
-      switch) cmd="$env_fwd bash '$sp'" ;;
-      agents) cmd="$env_fwd INTERDIMUX_VIEW=agents bash '$sp'" ;;
-      *)      cmd="$env_fwd INTERDIMUX_MODE=$mode bash '$sp'" ;;
-    esac
-  fi
-
-  # -c: open on the client that asked.  Left to tmux it lands on the most
-  # recently active client, which from a menu or a popup is not reliably this
-  # one (keys pressed in an overlay do not count as activity).
-  # -EE -k: a picker that fails stays open with its error until a key, as
-  # prefix+f's does (see --bind-keys).
-  _close=(-E)
-  tmux_ge 306 && _close=(-EE -k)
-  exec tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$POPUP_WIDTH" -h "$POPUP_HEIGHT" \
-    ${chrome[@]+"${chrome[@]}"} "${_close[@]}" "$cmd"
-fi
-
-# ---------------------------------------------------------------------------
-# Scheduled jobs picker
-# ---------------------------------------------------------------------------
-#
-# Scheduling without a way to see and undo what you scheduled is a trap: the
-# only other exit is `atrm` on the command line, and by then you have to know
-# the queue letter.  Deliberately placed AFTER the dialog helpers — these blocks
-# execute during the top-to-bottom pass, so a handler above dlg_fit's definition
-# would call a function that does not exist yet.
-
-# Rows for the picker: "<display>\t<pane>\t<id>", the last field being what
-# {-1} hands to the cancel binding.
-if [ "${1:-}" = "--jobs-list" ]; then
-  set +e
-  command -v atq >/dev/null 2>&1 || exit 0
-  while IFS="$US" read -r _id _when _tgt _pane _desc; do
-    [ -n "$_id" ] || continue
-    # Pad the FITTED text, not the raw text: %-20s counts escape bytes as
-    # columns, and a CJK session name draws at twice the width bash measures.
-    dlg_fit "$_when" 18; _c1="$REPLY"; dlg_width "$_c1"
-    printf -v _p1 '%*s' $(( 18 - REPLY )) ''
-    dlg_fit "$_tgt" 20; _c2="$REPLY"; dlg_width "$_c2"
-    printf -v _p2 '%*s' $(( 20 - REPLY )) ''
-    printf '%s%s%s%s  %s%s%s%s  %s\t%s\t%s\n' \
-      "$ACCENT_ESC" "$_c1" "$_p1" "$RST" \
-      "$DIM" "$_c2" "$_p2" "$RST" \
-      "$_desc" "$_pane" "$_id"
-  done < <(sched_rows)
-  exit 0
-fi
-
-if [ "${1:-}" = "--job-cancel" ]; then
-  set +e
-  _jid="${2:-}"
-  [ -n "$_jid" ] || exit 0
-  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
-  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
-  trap 'printf "\033[?25h" >>"$tty_out" 2>/dev/null' EXIT
-
-  _when="" _tgt="" _desc=""
-  while IFS="$US" read -r _i _w _t _p _d; do
-    [ "$_i" = "$_jid" ] && { _when="$_w"; _tgt="$_t"; _desc="$_d"; break; }
-  done < <(sched_rows)
-  if [ -z "$_when" ]; then
-    info_flash "$BOLD_AMBER" "Cancel" "Job $_jid is no longer queued."
-    dialog_close
-    exit 0
-  fi
-
-  if confirm_dialog "$BOLD_AMBER" "Cancel job ${_jid}?" \
-       "${DIM}${_when} →${RST} ${_tgt}" "${DIM}\$${RST} ${_desc}"; then
-    # Through --sched-cancel so the "never touch a job outside our own queue"
-    # guard stays in one place.
-    if bash "$SCRIPT_PATH" --sched-cancel "$_jid" >/dev/null 2>&1; then
-      dialog_status "${GREEN}✓ cancelled${RST}"
-    else
-      dialog_status "${RED}✗ could not cancel job ${_jid}${RST}"
-    fi
-    sleep 0.35
-  fi
-  dialog_close
-  exit 0
-fi
-
-if [ "${1:-}" = "--jobs" ]; then
-  set +e
-  tty_in="${INTERDIMUX_TTY_IN:-${INTERDIMUX_TTY:-/dev/tty}}"
-  tty_out="${INTERDIMUX_TTY_OUT:-${INTERDIMUX_TTY:-/dev/tty}}"
-  if ! command -v atq >/dev/null 2>&1; then
-    info_flash "$BOLD_AMBER" "Scheduled jobs" "'at' is not installed." \
-      "Scheduling beyond a minute needs it."
-    dialog_close
-    exit 0
-  fi
-  _jl="bash '$SQ_SCRIPT' --jobs-list"
-  # Read once, not twice: --jobs-list costs an `at -c` per job, and the
-  # emptiness check and the picker want the same rows.
-  _jrows=$(bash "$SCRIPT_PATH" --jobs-list)
-  if [ -z "$_jrows" ]; then
-    info_flash "$BOLD_AMBER" "Scheduled jobs" "Nothing is scheduled." \
-      "Schedule one from the dashboard."
-    dialog_close
-    exit 0
-  fi
-  _jwait=""
-  fzf_ge 74 && _jwait="wait+"
-  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
-  hint_flag enter cancel 3 ^r reload 1 esc quit 2
-  # Same guard as the other two pickers: under `set -o pipefail` an accept that
-  # closes the pipe early makes the producer's SIGPIPE (141) mask fzf's status.
-  # Nothing reads that status here, but the invariant is the point — the next
-  # picker to be pasted from this one inherits the shape.
-  set +o pipefail
-  printf '%s\n' "$_jrows" | fzf \
-    "${FZF_THEME[@]}" \
-    --delimiter=$'\t' \
-    --with-nth=1 \
-    --no-sort \
-    --prompt='jobs ❯ ' \
-    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
-    --bind="enter:${_jwait}execute(bash '$SQ_SCRIPT' --job-cancel {-1})+reload($_jl)" \
-    --bind="ctrl-r:reload($_jl)" \
-    >/dev/null 2>&1
-  set -o pipefail
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Dashboard
-# ---------------------------------------------------------------------------
-
-# The "who pressed the key" prefix for a `run-shell … --launch X` the dashboard
-# builds, in REPLY: "TMUX_PANE=%N INTERDIMUX_CLIENT=<client> ", either part
-# omitted when unknown.
-#
-# run-shell does NOT pass the pressing pane: its job gets the tmux SERVER's
-# global environment, whose TMUX_PANE is whatever the process that started the
-# server exported -- a pane of another server when it was started from inside
-# tmux.  The dashboard's own binding carries the right values, but every item
-# it launched dropped them, so a picker opened from prefix+g marked the wrong
-# session current (or none), ordered MRU against it, and could open on another
-# client.  Menu item commands are not expanded in the pressing client's
-# context, so the values are baked in as literals; both are checked against a
-# charset that needs no quoting in /bin/sh or tmux's parser.
-launch_env_prefix() {
-  REPLY=""
-  [[ "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] && REPLY+="TMUX_PANE=$TMUX_PANE "
-  [ -n "$INTERDIMUX_CLIENT" ] && REPLY+="INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT "
-  return 0
-}
-
-# Entry point for the prefix+g binding: a native styled menu on a client tall
-# enough for it, otherwise (short, or of unknown height) a compact fzf menu.
-if [ "${1:-}" = "--dashboard-launch" ]; then
-  set +e
-  sp="$SQ_SCRIPT"
-
-  # display-menu SILENTLY draws nothing and exits 0 when the menu is taller than
-  # the client.  Verified on 3.7b — no message, no error, prefix+g simply becomes
-  # a dead key.  MENU_ROWS (defined next to the other geometry helpers, because
-  # --doctor reports against it too) is items + 2 for the borders.
-  #
-  # The fzf fallback below has no such ceiling: its list scrolls.  So the tmux
-  # version is not the only thing that decides which one to draw.
-  #
-  # The Agents entry's count asks tmux for the panes and, in the same
-  # round-trip, for the client's size (AW_CLIENT); only without it is the size
-  # a round-trip of its own.  No native menu below 3.4, so no count there: the
-  # fzf fallback counts for itself.
-  _n_agents=0 AW_CLIENT=""
-  if tmux_ge 304 && [ "$AGENT_STATE" = on ]; then agents_waiting_r; _n_agents="$REPLY"; fi
-  if [ -n "$AW_CLIENT" ]; then
-    _cli_h="${AW_CLIENT%% *}" _cli_w="${AW_CLIENT#* }"; _cli_w="${_cli_w%% *}"
-  else
-    client_dims; _cli_h="${REPLY% *}" _cli_w="${REPLY#* }"
-  fi
-  # Unknown height takes the fallback, not the menu: a popup where a menu would
-  # have done is cosmetic, and a dead prefix+g is not.
-  if tmux_ge 304 && [ "$_cli_h" -ge "$MENU_ROWS" ]; then
-    # Menu item commands are re-parsed by tmux's command parser when
-    # selected: inside its double-quoted token, \ " $ are escapes and
-    # run-shell format-expands #{...} — escape those layers on top of
-    # the shell quoting so exotic install paths survive.
-    menu_sp="$SQ_SCRIPT_FMT"
-    menu_sp="${menu_sp//\\/\\\\}"
-    menu_sp="${menu_sp//\"/\\\"}"
-    menu_sp="${menu_sp//\$/\\\$}"
-    launch_env_prefix
-    _mp="${REPLY}bash '$menu_sp' --launch"
-
-    # A menu item whose name begins with '-' is DISABLED: tmux dims it and drops
-    # its key column (verified against 3.7b).  Offering Schedule on a box with no
-    # `at`, and answering the click with an error dialog, is worse than saying up
-    # front that it is unavailable.  The count rides in the Jobs label for the
-    # same reason — an empty picker is a wasted keypress.
-    #
-    # Two forks on the prefix+g path, which is not the hot path (prefix+f is) and
-    # already forks bash to get here.
-    _m_sched='Schedule' _m_jobs='-Jobs'
-    if command -v at >/dev/null 2>&1; then
-      _njobs=$(atq -q "$SCHED_QUEUE" 2>/dev/null | grep -c . || true)
-      case "$_njobs" in
-        ''|0) _m_jobs='-Jobs' ;;
-        *)    _m_jobs="Jobs ($_njobs)" ;;
-      esac
-    else
-      _m_sched='-Schedule (needs at)'
-      _m_jobs='-Jobs (needs at)'
-    fi
-    # Agents that wait on you (approve / input), counted above by the rows' own
-    # state logic (agents_waiting_r).  Greyed out when there are none, like
-    # Jobs -- a filter that finds nothing is a wasted keypress.  The key is `e`:
-    # display-menu spends g/G (and j/k, q) on moving about.
-    if [ "$AGENT_STATE" != on ]; then
-      _m_agents='-Agents (agent-state off)'
-    elif [ "$_n_agents" = 0 ]; then
-      _m_agents='-Agents'
-    elif [ "$_n_agents" = 1 ]; then
-      _m_agents='Agents (1 needs you)'
-    else
-      _m_agents="Agents ($_n_agents need you)"
-    fi
-    # Item names are FORMATS, so #[...] styles them.  Kill is the only entry here
-    # that destroys something; give it the same danger colour as the frame it
-    # turns red.
-    tmux display-menu -x C -y C ${TMUX_C[@]+"${TMUX_C[@]}"} \
-      -T '#[align=centre,bold] interdimux ' \
-      -H "bg=${MENU_SEL_BG},fg=${MENU_SEL_FG},bold" \
-      'Switch'      s "run-shell -b \"$_mp switch\"" \
-      "$_m_agents"  e "run-shell -b \"$_mp agents\"" \
-      'New session' n "run-shell -b \"$_mp dirs\"" \
-      '' \
-      'Rename'      r "run-shell -b \"$_mp rename\"" \
-      "#[fg=${POPUP_BORDER_DANGER}]Kill" i "run-shell -b \"$_mp kill\"" \
-      'Swap'        w "run-shell -b \"$_mp swap\"" \
-      'Zoom'        z "run-shell -b \"$_mp zoom\"" \
-      '' \
-      'Detach'      d "run-shell -b \"$_mp detach\"" \
-      'Send keys'   t "run-shell -b \"$_mp send\"" \
-      '' \
-      "$_m_sched"   a "run-shell -b \"$_mp schedule\"" \
-      "$_m_jobs"    o "run-shell -b \"$_mp jobs\"" \
-      '' \
-      'Health'      h "run-shell -b \"$_mp doctor\""
-  else
-    chrome=()
-    cmd="$(build_env_fwd) bash '$sp' --dashboard"
-    if tmux_ge 303; then
-      chrome=(-T "${POPUP_TITLE_STYLE} interdimux ")
-      [ -n "${TMUX_PANE:-}" ] && chrome+=(-e "TMUX_PANE=$TMUX_PANE")
-      [ -n "$INTERDIMUX_CLIENT" ] && chrome+=(-e "INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT")
-      env_fwd_flags
-      chrome+=("${ENV_FWD_FLAGS[@]}")
-      cmd="exec bash '$sp' --dashboard"   # exec: see --bind-keys
-    fi
-    # Entries + 5: two border rows, the prompt, the rule under it, and the hint
-    # bar.  MEASURED rather than guessed — the 12 entries show fully at -h 17,
-    # and at 16 the last one scrolls away (as 11 did at 15, before Agents) —
-    # because the number that was here before was slack nothing could
-    # distinguish from any other slack, and the entry added last is the one a
-    # too-short popup scrolls away.  tests/test_dashboard.sh derives it
-    # from the item list and fails if the two drift, exactly as it does for
-    # MENU_ROWS.
-    #
-    # Clamped to the client, because display-popup does NOT clamp: it fails with
-    # "height too large" and draws nothing.  Verified — on a 14-row client `-h 14`
-    # succeeds and `-h 15` errors, so the limit is exactly the client's size.  A
-    # fixed 64x19 made this the same dead key as an oversized menu, reached by the
-    # other path.  fzf's list scrolls, so a short popup is merely cramped.
-    _pop_w=64 _pop_h=17
-    [ "$_cli_w" -gt 0 ] && [ "$_cli_w" -lt "$_pop_w" ] && _pop_w="$_cli_w"
-    [ "$_cli_h" -gt 0 ] && [ "$_cli_h" -lt "$_pop_h" ] && _pop_h="$_cli_h"
-    # Held open on a failure, as every other popup is (see --bind-keys).
-    _close=(-E)
-    tmux_ge 306 && _close=(-EE -k)
-    tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -w "$_pop_w" -h "$_pop_h" ${chrome[@]+"${chrome[@]}"} \
-      "${_close[@]}" "$cmd"
-  fi
-  exit 0
-fi
-
-# fzf fallback menu (a client shorter than MENU_ROWS, or of unknown height)
-if [ "${1:-}" = "--dashboard" ]; then
-  set +e
-
-  # Agents: no disabled state in an fzf list, so the count goes in the
-  # description (the native menu greys the entry out instead).
-  if [ "$AGENT_STATE" != on ]; then
-    _fb_agents="Agents waiting on you (@interdimux-agent-state is off)"
-  else
-    agents_waiting_r
-    case "$REPLY" in
-      0) _fb_agents="No agent needs you now" ;;
-      1) _fb_agents="1 agent needs you (approve or input)" ;;
-      *) _fb_agents="$REPLY agents need you (approve or input)" ;;
-    esac
-  fi
-  items=$(printf "%s\t  ${BOLD_AMBER}%-14s${RST} ${DIM}%s${RST}\n" \
-    "switch" "Switch"       "Navigate & jump to target" \
-    "agents" "Agents"       "$_fb_agents" \
-    "dirs"   "New session"  "Create session from directory" \
-    "rename" "Rename"       "Rename a session or window" \
-    "kill"   "Kill"         "Remove sessions, windows, or panes" \
-    "zoom"   "Zoom"         "Toggle pane zoom" \
-    "swap"   "Swap"         "Swap windows or panes" \
-    "detach" "Detach"       "Detach clients from session" \
-    "send"   "Send keys"    "Send a command to a pane" \
-    "schedule" "Schedule"   "Run a command later, via at" \
-    "jobs"   "Jobs"         "See and cancel scheduled commands" \
-    "doctor" "Health"       "Check the setup, like :checkhealth")
-
-  HINT_PREVIEW_PCT=0   # no preview here, and an execute child inherits the navigator's
-  hint_flag enter select 2 esc quit 1
-  choice=$(printf '%s\n' "$items" | fzf \
-    "${FZF_THEME[@]}" \
-    --no-sort \
-    --no-info \
-    --delimiter=$'\t' \
-    --with-nth=2 \
-    --prompt='interdimux ❯ ' \
-    ${HINT_FLAG[@]+"${HINT_FLAG[@]}"} \
-  ) || exit 0
-
-  action="${choice%%	*}"
-
-  # Launch the selected tool in a new popup via run-shell -b (popups
-  # can't nest, so this runs after the dashboard popup closes).  The pane and
-  # client this popup was opened for go along: run-shell would hand --launch
-  # the server's global TMUX_PANE instead (see launch_env_prefix).
-  launch_env_prefix
-  tmux run-shell -b "${REPLY}bash '$SQ_SCRIPT_FMT' --launch $action"
   exit 0
 fi
 
