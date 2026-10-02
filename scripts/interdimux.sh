@@ -10616,12 +10616,18 @@ _report_stderr() {
     # so a failure that recurs for months cannot grow the log without bound,
     # and nothing has to be run to clean it.  Here because this is the writer
     # that can run on every open; the Rust core's refusal is logged once per
-    # binary, and trimmed with the rest.
+    # binary, and trimmed with the rest.  Of those 50, only as many of the
+    # newest as fit in 32 KB (always the newest one): with long entries 50 of
+    # them were still past 64 KB, and every later error trimmed again, two
+    # awk passes and a rename before the popup could close.
     size=$(wc -c < "$log" 2>/dev/null) || size=0
     if [ "${size:-0}" -gt 65536 ]; then
-      awk 'NR == FNR { n += /^== /; next } /^== / { i++ } i > n - 50' "$log" "$log" \
-        > "$log.$$" 2>/dev/null && mv -f "$log.$$" "$log" 2>/dev/null
-      rm -f "$log.$$" 2>/dev/null
+      LC_ALL=C awk '
+        NR == FNR { n += /^== /; s[n] += length($0) + 1; next }
+        FNR == 1 { k = n; t = s[n]; while (k > 1 && n - k < 49 && t + s[k - 1] <= 32768) { k--; t += s[k] } }
+        /^== / { i++ }
+        i >= k' "$log" "$log" > "$log.$$" 2>/dev/null && mv -f "$log.$$" "$log" 2>/dev/null \
+        || rm -f "$log.$$" 2>/dev/null
     fi
   fi
   # A navigator that FAILED also says why where you are looking.  The popup

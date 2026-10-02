@@ -275,7 +275,9 @@ for st in 130 1 0; do
 done
 
 # --- the log is capped when it is written (UX-17) -----------------------------------
-# It only ever grew.  Past 64 KB the writer keeps the newest 50 entries.
+# It only ever grew.  Past 64 KB the writer keeps the newest 50 entries, and of
+# those only as many of the newest as fit in 32 KB, so that it does not trim
+# again on every later error.
 seed_log() { # $1 = entries, $2 = characters of text in each
   local i pad
   printf -v pad '%*s' "$2" ''; pad="${pad// /x}"
@@ -284,10 +286,10 @@ seed_log() { # $1 = entries, $2 = characters of text in each
     printf '== 2026-01-01 00:00:00 navigator stderr\nseeded-%03d %s\n' "$i" "$pad"
   done > "$LOG"
 }
-seed_log 60 1200          # ~74 KB
+seed_log 200 400          # ~88 KB, the newest 50 ~23 KB
 run_nav exit2 keep
 n=$(grep -c '^== ' "$LOG" 2>/dev/null || true)
-if [ "$n" = 50 ] && ! grep -q '^seeded-011 ' "$LOG" && grep -q '^seeded-012 ' "$LOG"; then
+if [ "$n" = 50 ] && ! grep -q '^seeded-151 ' "$LOG" && grep -q '^seeded-152 ' "$LOG"; then
   report "a log past 64 KB is cut to its newest 50 entries" pass
 else
   report "a log past 64 KB is cut to its newest 50 entries (has $n)" fail
@@ -297,6 +299,20 @@ if [ "$(tail -n 1 "$LOG")" = 'fzf exited with status 2' ]; then
 else
   report "...the new one last" fail
 fi
+seed_log 60 1200          # ~74 KB, the newest 50 ~62 KB
+run_nav exit2 keep
+n=$(grep -c '^== ' "$LOG" 2>/dev/null || true)
+size=$(wc -c < "$LOG")
+if [ "$size" -le 32768 ] && [ "$n" -ge 20 ] && [ "$(tail -n 1 "$LOG")" = 'fzf exited with status 2' ] \
+   && grep -q '^seeded-060 ' "$LOG"; then
+  report "...or as many of the newest as fit in 32 KB" pass
+else
+  report "...or as many of the newest as fit in 32 KB (has $n, $size bytes)" fail
+fi
+run_nav exit2 keep
+[ "$(grep -c '^== ' "$LOG" 2>/dev/null || true)" = $(( n + 1 )) ] \
+  && report "...so the next error is appended, not trimmed again" pass \
+  || report "...so the next error is appended, not trimmed again" fail
 seed_log 60 10            # ~3 KB
 run_nav exit2 keep
 n=$(grep -c '^== ' "$LOG" 2>/dev/null || true)

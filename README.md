@@ -741,7 +741,8 @@ with the popup, which is how several silent failures stayed silent. `--doctor`
 reports the log and quotes the most recent entry, dated. Once you have dealt
 with what it logged, `interdimux.sh --doctor --ack` marks it as seen: `--doctor`
 then mentions it as a warning and fails again only on a newer entry. Past
-64 KB the log keeps its newest 50 entries. A picker that fails outright
+64 KB the log keeps its newest 50 entries, or fewer when long ones would
+pass 32 KB. A picker that fails outright
 — fzf missing from the tmux server's `PATH`, an option fzf refuses, a crash —
 keeps its popup open with the error on it until you press a key, where it used
 to flash shut and leave `prefix+f` looking dead.
