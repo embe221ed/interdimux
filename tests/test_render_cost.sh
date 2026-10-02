@@ -19,9 +19,12 @@
 #     trace (-x): the heavy agent layer's first top-level assignment,
 #     DEFAULT_TITLE_RULES, is in the trace of a --list and must not be in a
 #     callback's;
-#   * for the same reason the dashboard and the popups it opens (--launch,
-#     Health, Jobs) are dispatched before the ~77 KB of --doctor and the
-#     agents' modes, and --agents (a status line runs it) before --doctor;
+#     The callbacks and the scheduling modes never parse the rows' renderer
+#     either (gather_targets: bash -v echoes what bash reads), a list never
+#     parses the dashboard's agent count, and the dashboard and the popups it
+#     opens (--launch, Health, Jobs) are dispatched before the ~77 KB of
+#     --doctor and the agents' modes, and --agents (a status line runs it)
+#     before --doctor;
 #   * the shortcut cmd_field takes for a row nothing can be added to (no
 #     option published, no registry record, not an agent, no title a rule
 #     reads -- review R09) is taken by no other row.  Each row below has
@@ -236,29 +239,39 @@ export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1
        XDG_DATA_HOME="$TMPD/data" XDG_STATE_HOME="$TMPD/state" XDG_CONFIG_HOME="$TMPD/config" \
        INTERDIMUX_USE_ZOXIDE=off FZF_COLUMNS=120
 # $1 = label, $2 = what its output must contain (the callback did its job),
-# then the arguments; env assignments go first, as `env` takes them.
+# then the arguments; env assignments go first, as `env` takes them.  Run with
+# -xv: -v echoes each line as bash reads it, so the trace also says what was
+# PARSED, and the rows' renderer (gather_targets, ~45 KB that only a list
+# runs) must not be among it.
 traced() {
   local label="$1" expect="$2"; shift 2   # not `want`: an array of that name is above
   env "$@" > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
   if ! grep -qF -- "$expect" "$TMPD/cb.out"; then
     report "$label: runs (its output has '$expect')" fail
-    ERRORS+="      out: $(head -c 300 "$TMPD/cb.out")"$'\n'"      err: $(grep -v '^+' "$TMPD/cb.trace" | head -3)"$'\n'
-  elif grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace"; then
+    ERRORS+="      out: $(head -c 300 "$TMPD/cb.out")"$'\n'"      err: $(grep -v '^+' "$TMPD/cb.trace" | tail -3)"$'\n'
+    return 0
+  fi
+  if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace"; then
     report "$label: never reaches the agent layer" fail
   else
     report "$label: never reaches the agent layer" pass
   fi
+  if grep -qx 'gather_targets() {' "$TMPD/cb.trace"; then
+    report "$label: never parses the rows' renderer" fail
+  else
+    report "$label: never parses the rows' renderer" pass
+  fi
 }
 traced "--preview (every cursor move)" "rc:1" \
-  bash -x "$SCRIPT" --preview 'W:rc:1'
+  bash -xv "$SCRIPT" --preview 'W:rc:1'
 traced "--footer-for (every move and keystroke)" "enter" \
-  bash -x "$SCRIPT" --footer-for 'W:rc:1'
+  bash -xv "$SCRIPT" --footer-for 'W:rc:1'
 traced "--footer-for with a query typed" "newproj" \
-  FZF_QUERY=newproj FZF_MATCH_COUNT=2 bash -x "$SCRIPT" --footer-for 'W:rc:1'
+  FZF_QUERY=newproj FZF_MATCH_COUNT=2 bash -xv "$SCRIPT" --footer-for 'W:rc:1'
 traced "--describe-create (every keystroke with no match)" "newproj" \
-  bash -x "$SCRIPT" --describe-create newproj
+  bash -xv "$SCRIPT" --describe-create newproj
 traced "--scope-prompt (ctrl-])" "name" \
-  FZF_NTH=1 bash -x "$SCRIPT" --scope-prompt
+  FZF_NTH=1 bash -xv "$SCRIPT" --scope-prompt
 # ...which needs nothing at all, and answers before the preflight: parsing down
 # to where it used to sit cost it ~20 ms, for one word.
 if grep -q '^+ FZF_MINOR=0' "$TMPD/cb.trace"; then
@@ -267,17 +280,32 @@ else
   report "--scope-prompt: answers before the preflight" pass
 fi
 traced "--session-name-for (the ctrl-o picker's badge)" "rc" \
-  bash -x "$SCRIPT" --session-name-for "$(tmux -L "$SOCK" display-message -p -t '=rc:0' '#{pane_current_path}')"
+  bash -xv "$SCRIPT" --session-name-for "$(tmux -L "$SOCK" display-message -p -t '=rc:0' '#{pane_current_path}')"
 traced "--dirs-hints (the ctrl-o picker's header on ^r)" "create" \
-  bash -x "$SCRIPT" --dirs-hints
+  bash -xv "$SCRIPT" --dirs-hints
 traced "--dirs-hints deep (on ^f)" "deep search" \
-  bash -x "$SCRIPT" --dirs-hints deep svc
-# The witness is real: a list does reach it.
-env bash -x "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
-if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
-  report "premise: --list does run the agent layer, and the trace shows it" pass
+  bash -xv "$SCRIPT" --dirs-hints deep svc
+# Not a callback, but below them for the same reason: the scheduling modes
+# draw no row either.  (An atq that knows of no job: nothing is ever queued.)
+mkdir -p "$TMPD/noat"
+printf '#!/bin/sh\nexit 0\n' > "$TMPD/noat/atq"
+chmod +x "$TMPD/noat/atq"
+traced "--sched-list (the scheduling modes)" "no scheduled keys" \
+  PATH="$TMPD/noat:$PATH" bash -xv "$SCRIPT" --sched-list
+# The witnesses are real: a list does reach the agent layer, and parse the
+# renderer.  It parses no more than it draws with, though: the dashboard's
+# count of the agents that need you is below it.
+env bash -xv "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
+if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -qx 'gather_targets() {' "$TMPD/cb.trace" \
+   && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
+  report "premise: --list does run the agent layer and parse the renderer, and the trace shows it" pass
 else
-  report "premise: --list does run the agent layer, and the trace shows it" fail
+  report "premise: --list does run the agent layer and parse the renderer, and the trace shows it" fail
+fi
+if grep -qx 'agents_waiting_r() {' "$TMPD/cb.trace"; then
+  report "--list (^r, and after every action): never parses the dashboard's agent count" fail
+else
+  report "--list (^r, and after every action): never parses the dashboard's agent count" pass
 fi
 
 # --- the modes below them -----------------------------------------------------

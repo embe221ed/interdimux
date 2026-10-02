@@ -3675,6 +3675,1327 @@ trim_path() {
 }
 
 # ---------------------------------------------------------------------------
+# Preview command (called by fzf --preview)
+# ---------------------------------------------------------------------------
+
+# Rule line sized to the preview pane
+preview_rule() {
+  local w="${FZF_PREVIEW_COLUMNS:-60}" label="${1:-}" bar
+  [[ "$w" =~ ^[0-9]+$ ]] || w=60
+  [ "$w" -gt 2 ] && w=$(( w - 2 ))
+  printf -v bar '%*s' "$w" ''
+  bar="${bar// /─}"
+  if [ -n "$label" ]; then
+    local rest=$(( w - ${#label} - 4 ))
+    [ "$rest" -lt 0 ] && rest=0
+    printf "${DIM_TREE}── ${DIM_PATH}%s ${DIM_TREE}%s${RST}\n" \
+      "$label" "${bar:0:rest}"
+  else
+    printf "${DIM_TREE}%s${RST}\n" "$bar"
+  fi
+}
+
+# Text $1, dim, cut into lines as wide as the preview's rule (the preview
+# window does not wrap): an agent's command line under the header.
+preview_wrapped() {
+  local w="${FZF_PREVIEW_COLUMNS:-60}" t="$1"
+  [[ "$w" =~ ^[0-9]+$ ]] || w=60
+  [ "$w" -gt 2 ] && w=$(( w - 2 ))
+  [ "$w" -ge 1 ] || w=60
+  while [ -n "$t" ]; do
+    printf "${DIM}%s${RST}\n" "${t:0:w}"
+    t="${t:w}"
+  done
+}
+
+# Print captured pane content with trailing blank lines removed
+print_capture() {
+  local content="$1" last
+  while [ -n "$content" ]; do
+    last="${content##*$'\n'}"
+    case "$last" in
+      *[![:space:]]*) break ;;
+    esac
+    [ "$last" = "$content" ] && { content=""; break; }
+    content="${content%$'\n'*}"
+  done
+  [ -n "$content" ] && printf '%s\n' "$content"
+}
+
+if [ "${1:-}" = "--preview" ]; then
+  set +e
+  spec="$2"
+  spec="${spec%%	*}"
+  parse_spec "$spec"
+
+  # Directory rows preview the directory itself, not a tmux target.
+  if [ "$SPEC_TYPE" = "D" ]; then
+    exec bash "$SCRIPT_PATH" --dirs-preview "$SPEC_DIR"
+  fi
+
+  spec_target_r; target="$REPLY"
+
+  # ONE tmux client per preview (review PERF-06): each costs ~5 ms of connect
+  # and teardown, on every cursor move, and a session row's preview made three.
+  # The sections are framed by RS, as gather_targets' are, and the capture goes
+  # LAST: the substitution then strips its trailing newlines exactly as the
+  # capture's own did, and the RS appended before the split keeps an empty
+  # capture a field.  Nothing in a capture can be an RS (tmux keeps no control
+  # bytes in its grid), and nothing in the header before it either, but a
+  # pane's cwd can hold one, so what lies between is joined back on RS.
+  # INTERDIMUX_NO_BATCH runs the commands one at a time, as gather_targets.
+  RS=$'\x1e'
+  pv_parts=()
+  case "$SPEC_TYPE" in
+    S)
+      s_fmt="#{session_windows}${US}#{?session_attached,attached,detached}"
+      w_fmt="#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}"
+      # $target is spec_target's session form ("=name:", or "$ID:" for a name
+      # no '=' form can reach), which resolves to the session's active pane.
+      # A failed command ends a command list, so a session that went away (or
+      # anything else short of all three sections) asks again one at a time.
+      if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+        pv_all=$(tmux display-message -p -t "$target" "$s_fmt" \; display-message -p "$RS" \
+          \; list-windows -t "$target" -F "$w_fmt" \; display-message -p "$RS" \
+          \; capture-pane -t "$target" -p -e -S -30 2>/dev/null)
+        set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
+      fi
+      if [ "${#pv_parts[@]}" -ge 3 ]; then
+        info="${pv_parts[0]}"
+        pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
+        IFS="$RS"; pv_wins="${pv_parts[*]:1:${#pv_parts[@]}-2}"; unset IFS
+        pv_wins="${pv_wins#$'\n'}"; pv_wins="${pv_wins%$'\n'}"
+      else
+        info=$(tmux display-message -p -t "$target" "$s_fmt" 2>/dev/null)
+        pv_wins=$(tmux list-windows -t "$target" -F "$w_fmt" 2>/dev/null)
+        pv_cap=$(tmux capture-pane -t "$target" -p -e -S -30 2>/dev/null)
+      fi
+      IFS="$US" read -r s_wins s_att <<< "$info"
+      printf "${BOLD_AMBER}▸ %s${RST}  ${DIM}%s win · %s${RST}\n" \
+        "$SPEC_SESSION" "${s_wins:-?}" "${s_att:-}"
+      preview_rule
+      [ -n "$pv_wins" ] && while IFS="$US" read -r wid wcmd wpath wact wpanes; do
+        # a line tmux cut short (see gather_targets) has no pane count
+        case "$wpanes" in ''|*[!0-9]*) wpanes=1 ;; esac
+        marker=" "
+        [ "$wact" = "1" ] && marker="${MARKER_COLOR}*${RST}"
+        wpath="${wpath/#$HOME/\~}"
+        dpad_r "$wid" 16; wid="$REPLY"
+        dpad_r "$wcmd" 14
+        printf ' %s %s%s%s %s%s%s %s%s%s' \
+          "$marker" "$BOLD" "$wid" "$RST" \
+          "$DIM_CMD" "$REPLY" "$RST" \
+          "$DIM_PATH" "$wpath" "$RST"
+        [ "$wpanes" -gt 1 ] && printf '  \033[2m(%s panes)\033[0m' "$wpanes"
+        printf '\n'
+      done <<< "$pv_wins"
+      echo ""
+      preview_rule "active pane"
+      print_capture "$pv_cap" || echo "(no active pane)"
+      ;;
+    *)
+      # Checked by index as well (spec_at): a stale row must not preview the
+      # window that merely took its number as a NAME.  Captured by the IDs the
+      # check found, so tmux resolves the row once -- or, batched, captured by
+      # the row's own target in the same command list as the check, and kept
+      # only when the check passes.  has-session fails for a target that is
+      # gone, so an empty answer is spec_at's own "gone": nothing to redo.
+      p_pid="" p_cmd="" p_path="" p_look="" p_args="" pv_cap="" pv_at=()
+      p_fmt="#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"
+      if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
+        pv_all=$(tmux has-session -t "$target" \; display-message -p -t "$target" "$SPEC_AT_FMT$p_fmt" \
+          \; display-message -p "$RS" \; capture-pane -t "$target" -p -e -S -50 2>/dev/null)
+        set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
+        pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
+        IFS="$RS"; pv_at=("${pv_parts[*]:0:${#pv_parts[@]}-1}"); unset IFS
+      fi
+      if spec_at "$target" "$p_fmt" ${pv_at[@]+"${pv_at[@]}"}; then
+        IFS="$US" read -r p_pid p_cmd p_path <<< "$REPLY"
+        target="$SPEC_AT"
+      else
+        target="$NO_SUCH_TARGET" pv_cap=""
+      fi
+      # An agent's row is headed by the agent and, once it shows a state or a
+      # description, drops its arguments (cmd_field).  The header names it the
+      # same way (`codex`, not tmux's `node`), and the line under it is its
+      # command line with them (`codex resume <id>`).  Only an interpreter or
+      # an agent's own name can be an agent, so no other pane pays for the
+      # lookup (a /proc read; one ps without /proc).
+      if [ -n "$AGENT_KNOWN" ] && [ -n "$p_pid" ]; then
+        case "$p_cmd" in
+          node|nodejs|python*) p_look=1 ;;
+          *) [[ "$AGENT_KNOWN" == *" $p_cmd "* ]] && p_look=1 ;;
+        esac
+        if [ -n "$p_look" ]; then
+          [ "$SHOW_FULL_COMMAND" = on ] && build_process_table
+          resolve_command "$p_cmd" "$p_pid"
+          agent_of "$REPLY"
+          if [ -n "$AG_NAME" ]; then
+            p_cmd="$AG_NAME"
+            [ -n "$AG_REST" ] && p_args="$AG_NAME$AG_REST"
+          fi
+        fi
+      fi
+      p_path="${p_path/#$HOME/\~}"
+      if [ "$SPEC_TYPE" = "W" ]; then
+        printf "${BOLD_AMBER}%s:%s${RST}" "$SPEC_SESSION" "$SPEC_WIDX"
+      else
+        printf "${BOLD_AMBER}%s:%s.%s${RST}" "$SPEC_SESSION" "$SPEC_WIDX" "$SPEC_PIDX"
+      fi
+      printf "  ${DIM_CMD}%s${RST} ${DIM}·${RST} ${DIM_PATH}%s${RST}\n" \
+        "${p_cmd:-?}" "${p_path:-?}"
+      [ -n "$p_args" ] && preview_wrapped "$p_args"
+      preview_rule
+      [ -n "${INTERDIMUX_NO_BATCH:-}" ] && pv_cap=$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)
+      print_capture "$pv_cap" || echo "(cannot capture pane)"
+      ;;
+  esac
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Directory preview (called by fzf --preview for dir picker)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--dirs-preview" ]; then
+  set +e
+  dir="$2"
+  [ -d "$dir" ] || { echo "(directory not found)"; exit 0; }
+
+  display_path="${dir/#$HOME/\~}"
+  printf "${BOLD_AMBER}%s${RST}\n" "$(basename "$dir")"
+  printf '\033[2m%s\033[0m\n\n' "$display_path"
+
+  detect_project_type "$dir"
+  [ -n "$REPLY" ] && printf "  ${GREEN}Type:${RST} %s\n" "$REPLY"
+
+  if [ -d "$dir/.git" ]; then
+    head_file="$dir/.git/HEAD"
+    if [ -f "$head_file" ]; then
+      read -r head_content < "$head_file" 2>/dev/null || head_content=""
+      case "$head_content" in
+        "ref: refs/heads/"*) printf "  ${DIM_GIT}Branch:${RST} %s\n" "${head_content#ref: refs/heads/}" ;;
+        ?*) printf "  ${DIM_GIT}Branch:${RST} @%s\n" "${head_content:0:7}" ;;
+      esac
+    fi
+
+    # Bound the two git forks.  `head -200` bounds the OUTPUT, not the work:
+    # `git status` still walks the whole tree before emitting anything, and this
+    # runs on every cursor move in the picker.  Measured on a 30,000-file repo
+    # with a warm page cache: 60-70 ms — tolerable, but it scales with the tree
+    # and a cold cache or a network filesystem has no ceiling at all.  A repo
+    # with submodules is worse still, since the scan recurses into each one.
+    #
+    # `timeout` is coreutils and not guaranteed present; without it the calls
+    # stay unbounded, which is exactly today's behaviour.
+    _git_to=""
+    command -v timeout >/dev/null 2>&1 && _git_to="timeout 1"
+
+    last_commit=$($_git_to git -C "$dir" --no-optional-locks log -1 --oneline 2>/dev/null || true)
+    [ -n "$last_commit" ] && printf "  ${DIM_PATH}Commit:${RST} %s\n" "$last_commit"
+
+    changed=$($_git_to git -C "$dir" --no-optional-locks status --porcelain --ignore-submodules 2>/dev/null | head -200 | wc -l | tr -d ' ')
+    [ "$changed" -eq 200 ] && changed="200+"
+    [ "$changed" != "0" ] && printf "  ${DIM_CMD}Changes:${RST} %s files\n" "$changed"
+  fi
+
+  for readme in README.md README.rst README.txt README; do
+    if [ -f "$dir/$readme" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          ""|\#*|=*|-*) continue ;;
+          *) printf '\n  \033[2m%s\033[0m\n' "$line"; break ;;
+        esac
+      done < "$dir/$readme"
+      break
+    fi
+  done
+
+  echo ""
+  preview_rule "contents"
+  ls -1p "$dir" 2>/dev/null | head -20
+
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Directory list generation (called by fzf reload for dir picker)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--dirs-list" ]; then
+  set +e
+  shift
+  mode="default"
+  query=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      # shift defensively: "shift 2" with one argument left shifts
+      # nothing (and this loop runs under set +e), which would spin
+      # forever on a trailing --deep/--scan
+      --deep) mode="deep"; query="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+      --scan) mode="scan"; query="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+      *) shift ;;
+    esac
+  done
+
+  finder=$(resolve_finder)
+  [ -z "$finder" ] && { echo "interdimux: no directory finder available" >&2; exit 1; }
+
+  mapfile -t search_paths < <(resolve_search_paths)
+  [ ${#search_paths[@]} -eq 0 ] && search_paths=("$HOME")
+
+  declare -A seen=()
+
+  # Which directories already have a session, and which one (IDEAS #7).
+  #
+  # Enter on such a row switches rather than creates -- connect_dir finds the
+  # session first -- but the picker gave no sign of that, so "new session" on a
+  # directory you already had open looked like it had done nothing.  Naming the
+  # session is the useful half: it tells you where you are about to land.
+  #
+  # So the badge is dir_session's answer, from the same table and the same code
+  # Enter goes through (resolve_session_name): a row is badged exactly when Enter
+  # would switch, and with the session it would switch to.  It used to be a map
+  # of its own, keyed on each session's start directory AND on its active
+  # window's cwd, whatever the session was called -- so ~/repo said "→ foo" for
+  # a `tmux new -s foo` started there (or one merely passing through), and Enter
+  # created a second session, `repo`.  One list-sessions for the whole list;
+  # the per-row lookup is in-process.
+  load_session_table
+
+  # Path column width derived from the popup (list pane is ~60% with the
+  # 40% preview open)
+  term_cols_r
+  DIRS_PATH_W=$(( REPLY * 55 / 100 - 10 ))
+  [ "$DIRS_PATH_W" -lt 28 ] && DIRS_PATH_W=28
+  [ "$DIRS_PATH_W" -gt 64 ] && DIRS_PATH_W=64
+
+  # Output format (tab-delimited, 3 fields): DISPLAY <TAB> BADGE <TAB> PATH
+  # The path spec sits last (same reasoning as gather_targets); the badge
+  # column is excluded from fzf match scope.
+  emit_dir() {
+    local dir="$1" tier="$2"
+    # A tab in the path can't be represented in the tab-delimited row
+    # (the selection would resolve to the post-tab fragment) — skip it
+    case "$dir" in *$'\t'*) return ;; esac
+    [[ ${seen[$dir]+x} ]] && return
+    seen["$dir"]=1
+    # The display copy only: $dir itself, raw, is the spec Enter opens.
+    # Sanitised the way the navigator's rows are (build_ctx_field): an ESC in a
+    # directory's name reached the picker as a live escape sequence that hid
+    # the name and recoloured the row, and dpad_r counted the bytes the terminal
+    # swallowed, so the badge column moved left.
+    local display_path="${dir/#$HOME/\~}"
+    sanitize_args "$display_path"; display_path="$REPLY"
+    trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
+    dpad_r "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
+
+    # Already open?  Say so, and say WHERE -- the badge column is outside fzf's
+    # match scope, so the session name is display-only and cannot skew results.
+    dir_session "$dir"
+    if [ -n "$DIR_SID" ]; then
+      printf '  %s▸%s  %s\t%s→%s %s%s%s\t%s\n' \
+        "$BOLD_AMBER" "$RST" "$display_path" \
+        "$DIM" "$RST" "$ACCENT_ESC" "$REPLY" "$RST" "$dir"
+      return
+    fi
+
+    # The type badge is on the ★ tier too.  These are the directories you use
+    # most, and they were the only ones without it -- a ◆ row showed "Rust" and
+    # the same directory, once it became recent, showed nothing.  detect_project_type
+    # is a handful of `[ -f ]` tests and this is the ctrl-o picker, not the hot path.
+    local type_badge=""
+    case "$tier" in
+      recent|project)
+        detect_project_type "$dir"
+        [ -n "$REPLY" ] && type_badge="${DIM}${REPLY}${RST}"
+        ;;
+    esac
+
+    case "$tier" in
+      recent)
+        printf '  %s★%s  %s\t%s\t%s\n' \
+          "$BOLD_AMBER" "$RST" "$display_path" "$type_badge" "$dir"
+        ;;
+      project)
+        printf "  ${GREEN}◆${RST}  %s\t%s\t%s\n" \
+          "$display_path" "$type_badge" "$dir"
+        ;;
+      dir)
+        printf '  %s·%s  %s\t\t%s\n' \
+          "$DIM" "$RST" "$display_path" "$dir"
+        ;;
+    esac
+  }
+
+  # Classified HERE, in the parent: the `< <(load_recent_dirs)` below runs in a
+  # subshell, which would parse the mount table for itself and then this
+  # process again for detect_project_type (a no-op when ctrl-o's picker has
+  # handed it down -- see mounts_export).
+  [ "$_MOUNTS_READ" = 1 ] || _mounts_read
+
+  # A finder's output is taken with mapfile, never a plain read (see
+  # load_recent_dirs): a Latin-1 directory took the next one into its row,
+  # which then spanned two lines.  load_recent_dirs's own output is valid
+  # UTF-8, so it is read plainly.
+  #
+  # collect_scan ROOT DEPTH [PREFIX]: collect_dir each directory ROOT's scan
+  # finds -- with PREFIX, only those it begins, which also go on _roots for the
+  # caller's one scan_roots run over all their subtrees -- and scan once more if
+  # ignore files above ROOT hid them all (fd_parents_hide).
+  collect_scan() {
+    local d n=0
+    local -a _found=()
+    mapfile -t _found < <(scan_dirs "$1" "$2" "$finder")
+    for d in ${_found[@]+"${_found[@]}"}; do
+      [ -z "$d" ] || [ "$d" = "$1" ] && continue
+      n=1
+      if [ $# = 2 ]; then
+        collect_dir "$d"
+      elif [[ "${d,,}" == "${3,,}"* ]]; then
+        collect_dir "$d"
+        _roots+=("$d")
+      fi
+    done
+    [ "$n" = 1 ] || ! fd_parents_hide "$1" "$finder" || collect_scan "$@"
+  }
+
+  # collect_dir every directory in the subtrees of _roots, in one finder run
+  # (scan_roots).
+  collect_subtrees() {
+    local sub
+    local -a _found=()
+    [ "${#_roots[@]}" -gt 0 ] || return 0
+    mapfile -t _found < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
+    for sub in ${_found[@]+"${_found[@]}"}; do
+      [ -z "$sub" ] && continue
+      collect_dir "$sub"
+    done
+  }
+
+  case "$mode" in
+    default)
+      while IFS= read -r d; do
+        [ -n "$d" ] && emit_dir "$d" recent ""
+      done < <(load_recent_dirs)
+
+      _projects=()
+      _others=()
+      for sp in "${search_paths[@]}"; do
+        [ -d "$sp" ] || continue
+        collect_scan "$sp" 1
+      done
+      emit_sorted_tiers
+      ;;
+
+    deep)
+      # Deep scan: increase depth on directories matching the query.
+      # If query is empty, scan all search paths at depth 2.
+      # All query matching is case-insensitive (like fzf's own filtering).
+      expanded="${query/#\~/$HOME}"
+      while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ -z "$query" ] || [[ "${d,,}" == *"${expanded,,}"* ]]; then
+          emit_dir "$d" recent ""
+        fi
+      done < <(load_recent_dirs)
+
+      _projects=()
+      _others=()
+
+      if [ -z "$query" ]; then
+        for sp in "${search_paths[@]}"; do
+          [ -d "$sp" ] || continue
+          collect_scan "$sp" 2
+        done
+      else
+        # Try the query as a literal path first: if relative, resolve
+        # against $HOME and each search path.  Any existing directory is
+        # scanned directly at depth 3.
+        query_roots=()
+        if [[ "$expanded" == /* ]]; then
+          query_roots+=("$expanded")
+        else
+          query_roots+=("$HOME/$expanded")
+          for sp in "${search_paths[@]}"; do
+            query_roots+=("$sp/$expanded")
+          done
+        fi
+        for qr in "${query_roots[@]}"; do
+          if [ -d "$qr" ]; then
+            collect_dir "$qr"
+            collect_scan "$qr" "$SCAN_DEPTH"
+            continue
+          fi
+          # Partially typed path: walk up to the deepest existing
+          # ancestor, then scan it for dirs completing the typed prefix.
+          anc="$qr"
+          stripped=0
+          while [ "$anc" != "/" ] && [ ! -d "$anc" ]; do
+            anc="${anc%/*}"
+            [ -z "$anc" ] && anc="/"
+            stripped=$((stripped + 1))
+          done
+          [ "$anc" = "/" ] && continue
+          [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
+          _roots=()
+          collect_scan "$anc" "$stripped" "$qr"
+          # every completion's subtree in one finder run (scan_roots)
+          collect_subtrees
+        done
+
+        if [[ "$query" != */* ]]; then
+          # Name fragment (no slash): let the finder search for matching
+          # dir names natively — reaches deep at low cost.
+          _roots=()
+          for sp in "${search_paths[@]}"; do
+            [ -d "$sp" ] || continue
+            mapfile -t _matches < <(match_dirs "$sp" "$query" $((SCAN_DEPTH * 2)) "$finder" | sort)
+            _scanned_root=""
+            for d in ${_matches[@]+"${_matches[@]}"}; do
+              [ -z "$d" ] || [ "$d" = "$sp" ] && continue
+              collect_dir "$d"
+              # A match inside an already-scanned match is covered
+              [ -n "$_scanned_root" ] && [[ "$d" == "$_scanned_root"/* ]] && continue
+              _scanned_root="$d"
+              _roots+=("$d")
+            done
+          done
+          # every match's subtree in one finder run (scan_roots)
+          collect_subtrees
+        else
+          # Multi-component query: match it as a path substring against a
+          # scan deep enough for it to appear, capped to keep the scan
+          # cheap.  (Real paths are handled by the query_roots pass above.)
+          slashes="${query//[^\/]/}"
+          match_depth=$((1 + ${#slashes}))
+          [ "$match_depth" -lt 2 ] && match_depth=2
+          [ "$match_depth" -gt "$SCAN_DEPTH" ] && match_depth="$SCAN_DEPTH"
+          _roots=()
+          for sp in "${search_paths[@]}"; do
+            [ -d "$sp" ] || continue
+            mapfile -t _scanned < <(scan_dirs "$sp" "$match_depth" "$finder")
+            for d in ${_scanned[@]+"${_scanned[@]}"}; do
+              [ -z "$d" ] || [ "$d" = "$sp" ] && continue
+              if [[ "${d,,}" == *"${query,,}"* ]]; then
+                collect_dir "$d"
+                _roots+=("$d")
+              fi
+            done
+          done
+          collect_subtrees
+        fi
+      fi
+
+      emit_sorted_tiers
+      ;;
+
+    scan)
+      scan_root=""
+
+      if [ -n "$query" ] && [ -d "$query" ]; then
+        scan_root="$query"
+      elif [ -n "$query" ]; then
+        expanded="${query/#\~/$HOME}"
+        if [ -d "$expanded" ]; then
+          scan_root="$expanded"
+        else
+          parent="$(dirname "$expanded")"
+          [ -d "$parent" ] && scan_root="$parent"
+        fi
+      fi
+
+      if [ -n "$scan_root" ]; then
+        _projects=()
+        _others=()
+        collect_dir "$scan_root"
+        collect_scan "$scan_root" 2
+        emit_sorted_tiers
+      fi
+      ;;
+  esac
+
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Session name resolution (exposed for tests)
+# ---------------------------------------------------------------------------
+
+# Open a directory as a session (create + hydrate + switch, or just switch).
+# Exposed so it is bindable directly — `bind-key o run-shell -b "bash … \
+# --connect-dir ~/code/api"` — and so tests can exercise hydration without
+# driving a picker.
+
+# Find-or-create: turn a query that matched nothing into a session.
+# The query is resolved as a path first, then through zoxide, then falls back to
+# $HOME.  Factored out of the navigator's accept path so raw mode can invoke it
+# from inside fzf (see the `zero`/enter transform below), where there is no exit
+# code to signal "nothing matched".
+
+# A query with fzf's search syntax taken out: the words a session is named
+# from.  Sets REPLY (empty when nothing is left).
+#
+# fzf reads a query as space-separated terms, each of which may carry
+# operators: a leading ' (exact), ^ (prefix) or ! (not), a trailing $ (suffix),
+# and 'word' (exact on word boundaries).  None of that is part of a name, but
+# the create took the query literally (review UX-54).  fzf's own exact syntax
+# is the instinctive escape from a scattered match -- `'docs` does reach zero
+# matches -- and Enter then made a session called `'docs`.  So every term loses
+# its operators, and the empty terms that leaves (runs of spaces, a lone `'`)
+# are dropped, the way fzf drops them: `docs ` names `docs`, not `docs-`, and
+# a query of blanks names nothing.  resolve_create_target calls this, so the
+# bar that announces a name and the create that makes it cannot disagree.
+#
+# Two more pieces of fzf's syntax (review R05).  A term that is exactly `|` is
+# fzf's OR, and a query with one is a filter -- `foo | bar` made `foo-|-bar`,
+# and any edit of the agents view's query (a trailing space, one more word)
+# offered and made junk like `approve-|-input-qqq` in ~ -- so it names
+# nothing, and QW_OR=1 says why.  And `\ ` is a space INSIDE a term, not
+# between two: `my\ proj` is one term, and names `my-proj` (not `my\-proj`);
+# `~/my\ dir` is that directory.  (`foo |bar` is a literal term to fzf too.)
+QW_OR=0 QW_WHY=""
+query_words_r() {
+  local rest="$1" t="" lead out="" c
+  local -a terms=()
+  QW_OR=0
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      '\ '*) t+=" "; rest="${rest:2}" ;;
+      ' '*)  terms+=("$t"); t=""; rest="${rest:1}" ;;
+      *)     c="${rest%%[\\ ]*}"; [ -n "$c" ] || c="${rest:0:1}"
+             t+="$c"; rest="${rest:${#c}}" ;;
+    esac
+  done
+  terms+=("$t")
+  for t in "${terms[@]}"; do
+    if [ "$t" = "|" ]; then QW_OR=1; REPLY=""; return 0; fi
+    lead="${t%%[!\'^!]*}"          # the leading run of ' ^ !
+    t="${t#"$lead"}"
+    t="${t%\$}"
+    case "$lead" in *\'*) t="${t%\'}" ;; esac
+    [ -n "$t" ] && out+="${out:+ }$t"
+  done
+  REPLY="$out"
+}
+
+# What a query WOULD become.  Sets CREATE_DIR / CREATE_NAME / CREATE_SRC;
+# returns 1 when the query cannot produce a session at all, with QW_WHY saying
+# why when there is more to say than "nothing left of it": `or` (a `|` term,
+# see query_words_r) or `mark` (the agents view's query, see VIEW).
+#
+# $2 = `name`: only CREATE_NAME is wanted (the bar's alt-enter entry, and
+# --create-key, which asks whether there is one).  The name of a query that is
+# not a directory is the query itself, whatever zoxide says, so the zoxide
+# lookup -- a subshell and two execs, on every keystroke of a typed query
+# (review R21) -- is skipped, and CREATE_DIR / CREATE_SRC are left empty.
+#
+# One resolver for both the header and the accept, because they used to derive
+# the name independently and disagreed: describe_create did a plain
+# `basename | tr`, while the accept went through resolve_session_name, which
+# DISAMBIGUATES against existing sessions.  With a session "api" already open at
+# ~/work/api, typing ~/other/api showed "create api" and created "other-api".
+# The header is the only thing telling the user what Enter does, so it has to be
+# derived from the same code that does it.
+resolve_create_target() {
+  local query expanded mode="${2:-}"
+  CREATE_DIR=""; CREATE_NAME=""; CREATE_SRC=""; QW_WHY=""
+  # The agents view's query is a filter, never a name: while one of its mark
+  # terms is in the query, whatever else was typed, it names nothing -- for
+  # every caller, the bar's create-key entry and alt-enter too, not only Enter.
+  # (Its `|` alone covers most edits; this covers the rest.)
+  if [ -n "$VIEW" ]; then
+    # Anywhere, not only as a term of its own: with both blanks around the
+    # `|` deleted, `^!|^?` is ONE fzf term that still matches the marks, and
+    # it named a session `|^?` (the G2 checker).
+    case "$1" in *'^!'*|*'^?'*) QW_WHY=mark; return 1 ;; esac
+  fi
+  query_words_r "$1"; query="$REPLY"
+  [ "$QW_OR" = 1 ] && QW_WHY=or
+  [ -n "$query" ] || return 1
+  expanded="${query/#\~/$HOME}"
+  if [ -d "$expanded" ] && CREATE_DIR=$(cd "$expanded" 2>/dev/null && pwd -P); then
+    CREATE_SRC="path"
+    # the PHYSICAL path, so a symlinked query names the session after where it
+    # actually lands -- describe_create used the unresolved one
+    CREATE_NAME=$(resolve_session_name "$CREATE_DIR")
+  elif [ "$mode" = name ]; then
+    CREATE_DIR=""
+    CREATE_NAME="${query//[.: \/]/-}"
+  else
+    CREATE_DIR=""
+    if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
+      CREATE_DIR=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
+    fi
+    if [ -d "$CREATE_DIR" ]; then CREATE_SRC="zoxide"; else CREATE_DIR="$HOME"; CREATE_SRC="home"; fi
+    # What `tr '.: /' '----'` did, without its two forks: the bar's create-key
+    # entry runs this on every keystroke of a typed query.
+    CREATE_NAME="${query//[.: \/]/-}"
+  fi
+  [ -n "$CREATE_NAME" ] || return 1
+  return 0
+}
+
+# Sets REPLY to the session name; prints nothing.
+#
+# A query that names nothing -- blanks, only fzf syntax, an OR, the agents
+# view's query when no agent waits any more -- creates nothing, quietly
+# (REPLY stays empty): it is a filter, and the bar has said so
+# (describe_create).  Returns 1 only when a create was tried and failed.
+create_from_query() {
+  local query="$1"
+  REPLY=""
+  resolve_create_target "$query" || return 0
+  # session_id_of, not has-session "=name": the same exact match connect_dir
+  # uses, so a query like "$0" is not mistaken for session ID 0.
+  session_id_of "$CREATE_NAME"
+  if [ -z "$REPLY" ]; then
+    record_dir_use "$CREATE_DIR"
+  fi
+  connect_dir "$CREATE_DIR" "$CREATE_NAME" || return 1
+  REPLY="$CREATE_NAME"
+  return 0
+}
+
+# "switch to", not "create", when the name already exists -- that is what
+# connect_dir does, and promising a new session it will not make is the same
+# class of lie as naming the wrong one.  After resolve_create_target; sets REPLY.
+create_verb_r() {
+  session_id_of "$CREATE_NAME"
+  if [ -n "$REPLY" ]; then REPLY="switch to"; else REPLY="create"; fi
+}
+
+# The create key's entry in the hint bar while a query is typed and rows match
+# (review UX-54): alt-enter creates from the query whatever the match count, and
+# a scattered match holding the cursor is exactly when the user needs to be told
+# so.  Same resolver and verb as describe_create, so it names what alt-enter
+# will make, styled like every other entry in the bar.  Sets REPLY (empty when
+# the query names nothing) and REPLY_W, its width in cells -- dlg_width, since
+# the name is whatever was typed, wide characters included.
+create_key_hint_r() {
+  local h
+  REPLY="" REPLY_W=0
+  resolve_create_target "$1" name || return 0
+  create_verb_r
+  hint_r 'M-⏎' "$REPLY $CREATE_NAME"; h="$REPLY"
+  dlg_width "$h"; REPLY_W="$REPLY"
+  REPLY="$h"
+  return 0
+}
+
+# What find-or-create WOULD do for a query, as a human-readable string.  Used by
+# the zero-match header so the feature stops being invisible (IDEAS #1) and a
+# typo cannot silently create junk.
+describe_create() {
+  local query="$1" verb
+  REPLY=""
+  # A query that names nothing gets no announcement, only the reason when
+  # there is one worth giving: Enter does nothing here, and says so.
+  if ! resolve_create_target "$query"; then
+    if [ "$QW_WHY" = mark ] && [ "$query" = "$AGENTS_QUERY" ]; then
+      hint_r '∅' 'no agent is waiting on you' esc quit
+    elif [ "$QW_WHY" = mark ]; then
+      hint_r '∅' 'no waiting agent matches' esc quit
+    elif [ "$QW_WHY" = or ]; then
+      hint_r '∅' 'a query with | is a filter, not a name' esc quit
+    fi
+    return 0
+  fi
+  create_verb_r; verb="$REPLY"
+  printf -v REPLY '%s%s%s%s %s%s %sin %s%s %s(%s)%s' \
+    "$ACCENT_ESC" "$verb" "$RST" "$DIM" "$RST$ACCENT_ESC$CREATE_NAME" "$RST" \
+    "$DIM" "$RST$DIM${CREATE_DIR/#$HOME/\~}" "$RST" "$DIM" "$CREATE_SRC" "$RST"
+  return 0
+}
+
+if [ "${1:-}" = "--create-from-query" ]; then
+  set +e
+  create_from_query "${2:-}" || {
+    imux_msg "could not create a session from '${2:-}'"
+    exit 1
+  }
+  exit 0
+fi
+
+if [ "${1:-}" = "--describe-create" ]; then
+  set +e
+  describe_create "${2:-}"
+  printf '%s\n' "$REPLY"
+  exit 0
+fi
+
+# The navigator's alt-enter (review UX-54), as the fzf action it runs: create
+# from the query in FZF_QUERY whatever it matches, or nothing at all when the
+# query names no session.  The bind already skips an empty query without a
+# process; this is for one that is only fzf syntax or blanks (`'`, `!`, `  `),
+# which the bar gives no create entry either, so the key does what the bar
+# says: nothing, with the navigator still open.  The action reads the query
+# from the environment again when it runs, never from this text, for the
+# quoting reason the raw-mode Enter gives.
+if [ "${1:-}" = "--create-key" ]; then
+  set +e
+  resolve_create_target "${FZF_QUERY:-}" name \
+    && printf '%s\n' "execute(bash '$SQ_SCRIPT' --create-from-query \"\$FZF_QUERY\")+abort"
+  exit 0
+fi
+
+if [ "${1:-}" = "--connect-dir" ]; then
+  set +e
+  cd_dir="${2:-}"
+  [ -n "$cd_dir" ] || { echo "interdimux: --connect-dir needs a directory" >&2; exit 1; }
+  [ -d "$cd_dir" ] || { echo "interdimux: no such directory: $cd_dir" >&2; exit 1; }
+  # Physical path, so it matches the finder output the dir picker produces
+  cd_dir=$(cd "$cd_dir" 2>/dev/null && pwd -P) || exit 1
+  record_dir_use "$cd_dir"
+  connect_dir "$cd_dir" || exit 1
+  exit 0
+fi
+
+if [ "${1:-}" = "--session-name-for" ]; then
+  set +e
+  resolve_session_name "$2"
+  echo
+  exit 0
+fi
+
+# Display cells for a string, ignoring SGR escapes.  Sets REPLY.  The dialogs'
+# measure, defined ahead of them because the hint bar's create entry -- a
+# callback, see below -- measures a typed name with it.
+#
+# Bash measures CHARACTERS (${#s}), and the dialogs sized themselves with that:
+# a session named with 26 CJK characters produced a title 87 cells wide inside a
+# 66-cell box, obliterating the right border (measured with tmux's own
+# #{cursor_x}).  The list has had a proper measurement since the Rust core; the
+# dialogs had not.
+#
+# Deliberately CONSERVATIVE rather than exact, because the two errors are not
+# symmetric: over-counting makes the box a little wide, under-counting lets text
+# run off it.  Per character —
+#
+#   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
+#   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
+#   combining marks (Latin, symbol, kana), ZWJ,   0
+#     U+FE00-FE0E, medial and final Hangul
+#     jamo, the Hangul filler U+3164
+#   everything else                               1
+#
+# so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
+# 2 — wide, never narrow.  A regional indicator is 1: tmux draws one alone in
+# one cell and a pair (a flag) in two, so a flag is exact too.  Exact cluster
+# handling lives in the Rust core, where it is on the path that needs it, and
+# the input field's per-character rules in _dlg_cw.
+#
+# "Wide" and "0" are what tmux draws (measured on 3.7b, every code point of
+# U+1100-11FF, U+2000-30FF, U+FE00-FE0F and U+1F000-1FAFF, against
+# #{cursor_x}).  The medial and final jamo -- U+1160-11FF, and the assigned
+# parts of U+D7B0-D7FF (the unassigned D7C7-D7CA and D7FC-D7FF draw one) --
+# are 0 on any cell: tmux joins them to the cell before, the way it joins a
+# mark, and one it cannot join is dropped.  That is how macOS stores a Korean
+# name (NFD, 한 as U+1112 U+1161 U+11AB), one wide cell a syllable; counted one
+# each, the field's cursor drifted two cells right per syllable.  Below
+# U+2E80 that is a scattering of emoji -- ✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ and ~60 more -- which
+# counted 1 for the 2 tmux draws, so three of them typed into Send keys left
+# the cursor three cells short, and a long command with a few in it ran
+# through the border.  U+1F000-1FAFF stays wide throughout, bar the regional
+# indicators: its text-style symbols (🖥 🛠) are drawn narrow, but they come
+# with a U+FE0F nearly always, and a range with holes would under-count every
+# emoji a newer Unicode adds.
+#
+# `printf %d "'<char>"` yields the codepoint with no fork; the dialogs are short
+# strings on the action path, so per-character work is affordable here.
+dlg_width() {
+  # `len` is assigned separately for the same reason dlg_fit does it: bash
+  # expands every word of a `local` command before performing any of its
+  # assignments, so ${#s} on this line would read the OUTER s.
+  local s="$1" i=0 n=0 ch cp j len
+  len=${#s}
+  while [ "$i" -lt "$len" ]; do
+    ch="${s:i:1}"
+    if [ "$ch" = $'\033' ]; then
+      j=$(( i + 1 ))
+      while [ "$j" -lt "$len" ] && [[ "${s:j:1}" != [a-zA-Z] ]]; do j=$(( j + 1 )); done
+      i=$(( j + 1 ))
+      continue
+    fi
+    printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
+    if (( cp < 0x300 )); then
+      n=$(( n + 1 ))
+    elif (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || (cp >= 0xfe00 && cp <= 0xfe0e) \
+         || (cp >= 0x20d0 && cp <= 0x20f0) || (cp >= 0x302a && cp <= 0x302d) \
+         || cp == 0x3099 || cp == 0x309a || (cp >= 0x1160 && cp <= 0x11ff) \
+         || (cp >= 0xd7b0 && cp <= 0xd7c6) || (cp >= 0xd7cb && cp <= 0xd7fb) || cp == 0x3164 )); then
+      :
+    elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
+         || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
+         || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) \
+         || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) \
+         || (cp >= 0x1f000 && cp <= 0x1f1e5) || (cp >= 0x1f200 && cp <= 0x1f2ff) \
+         || (cp >= 0x20000 && cp <= 0x3fffd) )); then
+      n=$(( n + 2 ))
+    elif (( cp >= 0x231a && cp <= 0x2b55 && ( cp <= 0x231b || cp == 0x2329 || cp == 0x232a \
+         || (cp >= 0x23e9 && cp <= 0x23ec) || cp == 0x23f0 || cp == 0x23f3 || cp == 0x25fd \
+         || cp == 0x25fe || cp == 0x2614 || cp == 0x2615 || cp == 0x261d \
+         || (cp >= 0x2648 && cp <= 0x2653) || cp == 0x267f || cp == 0x2693 || cp == 0x26a1 \
+         || cp == 0x26aa || cp == 0x26ab || cp == 0x26bd || cp == 0x26be || cp == 0x26c4 \
+         || cp == 0x26c5 || cp == 0x26ce || cp == 0x26d4 || cp == 0x26ea || cp == 0x26f2 \
+         || cp == 0x26f3 || cp == 0x26f5 || cp == 0x26f9 || cp == 0x26fa || cp == 0x26fd \
+         || cp == 0x2705 || (cp >= 0x270a && cp <= 0x270d) || cp == 0x2728 || cp == 0x274c \
+         || cp == 0x274e || (cp >= 0x2753 && cp <= 0x2755) || cp == 0x2757 \
+         || (cp >= 0x2795 && cp <= 0x2797) || cp == 0x27b0 || cp == 0x27bf || cp == 0x2b1b \
+         || cp == 0x2b1c || cp == 0x2b50 || cp == 0x2b55 ) )); then
+      n=$(( n + 2 ))
+    else
+      n=$(( n + 1 ))
+    fi
+    i=$(( i + 1 ))
+  done
+  REPLY="$n"
+}
+
+
+# The callbacks fzf runs while you type -- the hint bar and the ctrl-o
+# picker's header (--dirs-hints), and above them the create resolver and the
+# ctrl-o badge -- sit before the scheduling modes, the rows' renderer
+# (gather_targets) and the dialogs, which they never use: bash parses a script
+# as it runs it, and every line above a callback is parsed by each run of it
+# (~35 us a KB).
+
+# ---------------------------------------------------------------------------
+# Dynamic hint bar (called by fzf focus:transform-footer)
+# ---------------------------------------------------------------------------
+#
+# The fallback path only: the navigator normally answers this with an inline
+# POSIX snippet over pre-packed env vars, because a focus bind fires on every
+# cursor move and re-exec'ing this script there cost ~17 ms a move.  This
+# handler is what runs on fzf too old for --with-shell, or when the user
+# supplied their own --with-shell in @interdimux-fzf-opts.
+#
+# It is the more CORRECT of the two by construction — being a real child it sees
+# the live FZF_COLUMNS and FZF_PREVIEW_COLUMNS, so it re-tiers on anything.  The
+# inline snippet reads the same two variables to stay level with it.
+
+if [ "${1:-}" = "--footer-for" ]; then
+  # Zero matches: Enter creates a session, so the bar announces that instead of
+  # a row's hints -- exactly what the navigator's inline dispatcher prints there
+  # (it runs --describe-create), so the two paths cannot disagree.  fzf exports
+  # the count and the query from 0.46; below that this cannot know, and the bar
+  # stays the generic one.
+  if [ "${FZF_MATCH_COUNT:-}" = 0 ]; then
+    set +e
+    describe_create "${FZF_QUERY:-}"
+    printf '%s\n' "$REPLY"
+    exit 0
+  fi
+  spec="${2:-}"
+  spec="${spec%%	*}"
+  hint_set "${spec%%:*}"
+  # A typed query with rows matching: alt-enter would create from it, and the
+  # bar says what, after the row's own hints (review UX-54).  Those get the
+  # width that is left, dropping entries by their usual priority; the create
+  # entry goes only when it does not fit on its own.  From fzf 0.63, where the
+  # navigator runs this in the background on every keystroke (see _hint_bind);
+  # below that nothing asks on each keystroke, so the name would go stale.
+  if [ -n "${FZF_QUERY:-}" ] && fzf_ge 63; then
+    set +e
+    create_key_hint_r "$FZF_QUERY"
+    _ck="$REPLY" _ckw="$REPLY_W"
+    hint_cols; _w="$REPLY"
+    if [ -n "$_ck" ] && [ "$_ckw" -le "$_w" ]; then
+      hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+      hint_pick $(( _w - _ckw - 2 )) "$REPLY"
+      if [ -n "$REPLY" ]; then REPLY+="  $_ck"; else REPLY="$_ck"; fi
+      printf '%s\n' "$REPLY"
+      exit 0
+    fi
+  fi
+  hint_bar_r ${HINT_SET[@]+"${HINT_SET[@]}"}
+  # Nothing, not a bare newline: an EMPTY transform removes the footer section
+  # and the list reflows into the row, where "\n" leaves a blank bar drawn.
+  [ -n "$REPLY" ] && printf '%s\n' "$REPLY"
+  exit 0
+fi
+
+# The packed width ladder for one row type ("W:line|W:line|…|0:") — what the
+# navigator exports for its inline snippet.  This exists so the tests can drive
+# that snippet with exactly the environment the navigator would hand it, rather
+# than a hand-copied duplicate; a duplicate is precisely what stopped matching
+# the last time this pair drifted.
+if [ "${1:-}" = "--hint-ladder" ]; then
+  hint_set "${2:-}"
+  hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+  printf '%s' "$REPLY"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Directory picker header (called by fzf transform-header)
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--dirs-hints" ]; then
+  # 40, not the navigator's 50: this picker's preview is unconditional and 40%
+  # wide, and it is reached through an `execute` child that has inherited the
+  # navigator's FZF_PREVIEW_COLUMNS, so nothing here can be auto-detected.
+  HINT_PREVIEW_PCT=40
+  case "${2:-default}" in
+    # The deep/browse forms lead with a STATUS (the text being searched), not a
+    # hint, so they are left to truncate the way any status does — the escape
+    # hatch they would otherwise lose (^r) is on the prompt as well.
+    deep)   printf '%s%s\n' "$(hint '🔎 deep search' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
+    browse) printf '%s%s\n' "$(hint '⤷ browsing' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
+    *)      hint_bar_r enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1
+            [ -n "$REPLY" ] && printf '%s\n' "$REPLY" ;;
+  esac
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Scheduled keys — send a command to a pane at a future time
+# ---------------------------------------------------------------------------
+#
+#   interdimux.sh --send-at "17:30"        <target> <command...>
+#   interdimux.sh --send-in 90             <target> <command...>
+#   interdimux.sh --sched-list
+#   interdimux.sh --sched-cancel <id>
+#
+# <target> is any tmux target ("%3", "mysess:1.0", "=name:") or "." for the
+# current pane.  It is resolved to a pane id NOW, so the job survives the pane
+# being renamed or moved.
+#
+# THE DANGEROUS PART, and why every job carries a guard: **pane ids are recycled
+# across a tmux server restart.**  Verified — schedule for session alpha's %0,
+# restart the server, and %0 is now some other session's pane; the keys land
+# there.  For a scheduled `make deploy` or `rm -rf build/` that is data loss, not
+# a cosmetic bug.  Each job therefore records the server pid at submit time and
+# refuses to fire if it no longer matches.
+#
+# Backends: `at` for >= 1 minute (it has a hard one-minute floor and silently
+# truncates seconds), and tmux's own `run-shell -b -d` below that.
+
+SCHED_LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/interdimux"
+SCHED_LOG="$SCHED_LOGDIR/scheduled.log"
+SCHED_QUEUE=i   # a dedicated at queue: bare `atq` lists EVERY queue and would
+                # mix in the user's own jobs.  Never uppercase — that switches
+                # to batch semantics that wait for a low load average.
+
+# `-M` ("never mail") is a GNU at extension; BSD at (macOS) has no such flag and
+# aborts option parsing with "illegal option -- M" before it reads the job — so
+# every submit failed on macOS with exactly that message.  We still want it where
+# it exists: the job body redirects all output to a log, so with no -m either at
+# defaults to "mail only if there was output" = no mail, but -M also silences the
+# one edge case the redirect can't (atd failing to open the log at all).  Probe
+# once, with no timespec so neither variant can submit a job while we ask, and
+# cache the answer.  The pattern matches BSD's "illegal option -- M" and glibc's
+# "invalid option -- 'M'" alike; GNU at ACCEPTS -M, so its no-timespec error is
+# about the time, never the option, and the probe correctly yields "-M".
+at_mail_flag() {
+  if [ -z "${_AT_MFLAG+x}" ]; then
+    # Capture the message, don't pipe it: `at -M` EXITS NON-ZERO here on both
+    # variants (BSD rejects the option, GNU errors on the missing timespec), and
+    # under this script's `set -o pipefail` a `... | grep` would inherit at's
+    # failure and answer "GNU" on every host.  Only the text tells them apart:
+    # BSD prints "illegal option -- M", glibc "invalid option -- 'M'"; GNU at
+    # accepts -M, so its error names the time, never the option.
+    local _probe
+    _probe=$(LC_ALL=C at -M </dev/null 2>&1)
+    case "$_probe" in
+      *'ption -- '*M*) _AT_MFLAG="" ;;   # BSD/macOS at: -M rejected, rely on the log redirect
+      *)               _AT_MFLAG="-M" ;; # GNU at: -M accepted
+    esac
+  fi
+  printf '%s' "$_AT_MFLAG"
+}
+
+# The state of the daemon that RUNS queued `at` jobs, echoed as up|down|unknown.
+# Without an active runner `at` still ACCEPTS and queues jobs — submission
+# succeeds — but nothing ever fires them: the silent scheduled-deploy-that-never-
+# happens.  The runner, and how you ask after it, differ by OS:
+#   Linux (atd):  a persistent process, so `pgrep -x atd` is the tell.
+#   macOS (atrun): launchd spawns /usr/libexec/atrun on a 30s StartInterval and
+#     it exits between ticks, so it is NOT a persistent process — pgrep is blind
+#     to it, and `launchctl list com.apple.atrun` returns 113 for a SYSTEM-domain
+#     job unless you are root (the check that wrongly read "disabled" even once it
+#     was enabled).  `launchctl print system/<label>` reads the system domain
+#     WITHOUT root and exits 0 only when the job is bootstrapped = will run on its
+#     interval; 113 when it is not.  Verified against a real firing.  Key on the
+#     EXIT CODE, never on "state = running" — atrun is "not running" at most
+#     instants by design.  macOS ships atrun disabled by default.  (Bootstrapped
+#     is not quite "enabled": a job you `launchctl disable` while still loaded can
+#     print 0 yet not run.  That is a deliberate, self-inflicted state; the common
+#     enabled/disabled cases both map correctly, so we accept the tiny blind spot
+#     rather than pay a second launchctl round-trip on every schedule.)
+#   BSD / no pgrep:  the runner is cron's own atrun and there is no atd process to
+#     find, or we simply cannot look — report "unknown" and never cry wolf, rather
+#     than assert a false "down" the way a bare pgrep check would.
+# INTERDIMUX_AT_DAEMON overrides the probe (up|down|unknown) so tests can drive
+# every branch without a machine-global daemon toggle.
+at_daemon_state() {
+  case "${INTERDIMUX_AT_DAEMON:-}" in
+    up|on|1|yes)   printf up;      return ;;
+    down|off|0|no) printf down;    return ;;
+    unknown)       printf unknown; return ;;
+  esac
+  case "$(uname -s)" in
+    Darwin)
+      if launchctl print system/com.apple.atrun >/dev/null 2>&1; then printf up; else printf down; fi ;;
+    Linux)
+      command -v pgrep >/dev/null 2>&1 || { printf unknown; return; }
+      if pgrep -x atd >/dev/null 2>&1; then printf up; else printf down; fi ;;
+    *) printf unknown ;;
+  esac
+}
+
+# The one-time command that enables at's job-runner.  Only ever shown for a
+# CONFIRMED-down runner, which is macOS or Linux — BSD/unknown never reaches here.
+# macOS `load -w` is nominally deprecated but still works (verified — a job fired
+# afterwards).
+at_enable_hint() {
+  case "$(uname -s)" in
+    Darwin) printf '%s' 'sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.atrun.plist' ;;
+    Linux)  printf '%s' 'sudo systemctl enable --now atd' ;;
+    *)      printf '%s' "ensure your system's at job-runner (atd, or cron's atrun) is enabled" ;;
+  esac
+}
+
+# Resolve a user-supplied target to a stable pane id, plus the socket and the
+# server pid the job will be validated against.  Sets SCHED_PANE/SOCK/SRVPID.
+sched_resolve() {
+  local target="$1"
+  [ "$target" = "." ] && target="${TMUX_PANE:-}"
+  # Never without a target: tmux would pick "the current pane" itself, which
+  # outside a pane is the most recently active session's -- a pane nobody named.
+  # An empty -t is no help: tmux reads -t '' exactly as no -t at all.
+  [ -n "$target" ] || return 1
+  local info
+  info=$(tmux display-message -p -t "$target" \
+        '#{pane_id}'"$US"'#{socket_path}'"$US"'#{pid}'"$US"'#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || return 1
+  IFS="$US" read -r SCHED_PANE SCHED_SOCK SCHED_SRVPID SCHED_LABEL <<< "$info"
+  [ -n "$SCHED_PANE" ] || return 1
+  return 0
+}
+
+# The script an at job runs.  Everything it needs is baked in: at snapshots the
+# submitting environment, so an inherited $TMUX would be a STALE pointer to a
+# possibly-dead server — the socket is passed explicitly and the inherited value
+# ignored.
+sched_job_body() {
+  local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
+  # POSIX quoting, not %q: atd replays this body under /bin/sh.  See shq().
+  local q_logdir q_log q_sock q_want q_pane q_label q_send
+  shq "$SCHED_LOGDIR"; q_logdir="$REPLY"
+  shq "$SCHED_LOG";    q_log="$REPLY"
+  shq "$sock";         q_sock="$REPLY"
+  shq "$srvpid";       q_want="$REPLY"
+  shq "$pane";         q_pane="$REPLY"
+  # The label too: it is a session name, which can come from a directory name
+  # and hold a '"', a backtick or '$(' -- spliced into a live line, it ran when
+  # the job fired.  printf, not echo: dash's echo reads '\c' and '\n' in it.
+  shq "$label";        q_label="$REPLY"
+  # the whole send, as send_input does it (see there): a lone key name is
+  # pressed, any other text survives tmux's argv parser with a trailing ';'
+  # intact, and a pane left in copy-mode still runs the command
+  sh_send_input 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
+  # One field per line, each "rest of line".  The single-line form packed all
+  # three into "pane=… target=… desc=…", which stops being parseable the moment
+  # a session name contains a space or the literal "desc=" — and tmux allows
+  # both.  The marker line keeps its trailing text so `grep '^# imux:v1 '` still
+  # identifies one of our jobs.
+  local q_desc
+  q_desc=$(printf '%s' "$keys" | tr '\n' ' ')
+  printf '%s\n' \
+    "# imux:v1 interdimux scheduled keys" \
+    "# imux-pane: ${pane}" \
+    "# imux-target: ${label}" \
+    "# imux-desc: ${q_desc}" \
+    "# atd tries to MAIL a job's output.  With no MTA installed that output is" \
+    "# destroyed and leaves only 'Exec failed for mail command' in the journal --" \
+    "# which reads exactly like 'my job never ran'.  Log instead of discarding." \
+    "# Probed first, with true: exec and ':' are special builtins, and a failed" \
+    "# redirection on one ends a POSIX sh on the spot -- before the send." \
+    "if mkdir -p ${q_logdir} 2>/dev/null && true 2>/dev/null >>${q_log}; then" \
+    "  exec >>${q_log} 2>&1" \
+    "else" \
+    "  exec >/dev/null 2>&1" \
+    "fi" \
+    "printf '== %s firing for %s (%s)\\n' \"\$(date '+%Y-%m-%d %H:%M:%S')\" ${q_label} ${q_pane}" \
+    "sock=${q_sock}" \
+    "want=${q_want}" \
+    "pane=${q_pane}" \
+    "got=\$(tmux -S \"\$sock\" display-message -p '#{pid}' 2>/dev/null) || exit 0" \
+    "if [ \"\$got\" != \"\$want\" ]; then" \
+    "  # the server restarted: pane ids have been recycled and \$pane may now" \
+    "  # belong to a completely different session.  Refuse rather than misfire." \
+    "  tmux -S \"\$sock\" display-message 'interdimux: scheduled keys skipped (tmux restarted)' 2>/dev/null" \
+    "  exit 0" \
+    "fi" \
+    "${q_send} 2>/dev/null"
+}
+
+# One line per queued interdimux job:  id US when US target US pane US desc
+#
+# --sched-list (human columns), the Jobs picker, and the cancel dialog all read
+# this, so the `at -c` parsing lives in exactly one place.
+#
+# Two things this gets right that the inline version did not:
+#   * atq's default time column starts with the DAY NAME, so `sort -k2` ordered
+#     jobs Fri < Mon < Sat rather than chronologically.  GNU -o gives a sortable
+#     "YYYY-MM-DD HH:MM" stamp.  BSD at (macOS) has no -o and prints a ctime-style
+#     "<dow> <mon> <dd> HH:MM:SS <YYYY>" in job-id order, so reformat it to that
+#     same sortable stamp with `date -j -f` and sort by it — the Jobs list stays
+#     chronological on macOS too, and its when-column stays narrow instead of
+#     carrying a day name and seconds.
+#   * the header fields are read positionally from their own lines, so a session
+#     name containing a space or "desc=" cannot shift them.
+sched_rows() {
+  local rows id when ln pane target desc seen
+  if rows=$(atq -q "$SCHED_QUEUE" -o '%Y-%m-%d %H:%M' 2>/dev/null); then
+    rows=$(printf '%s\n' "$rows" | sort -k2)
+  else
+    rows=$(atq -q "$SCHED_QUEUE" 2>/dev/null | while IFS=$'\t' read -r id when; do
+      [ -n "$id" ] || continue
+      # BSD `date -j -f` parses the ctime string; keep the original on the off
+      # chance a future BSD atq changes format, so a row is never dropped.
+      when=$(date -j -f '%a %b %d %T %Y' "$when" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '%s' "$when")
+      printf '%s\t%s\n' "$id" "$when"
+    done | sort -k2)
+  fi
+  while IFS=$'\t' read -r id when; do
+    [ -n "$id" ] || continue
+    when="${when%" $SCHED_QUEUE "*}"     # drop the trailing "<queue> <user>"
+    pane="" target="" desc="" seen=0
+    while IFS= read -r ln; do
+      # at -c replays the whole submitting environment first, and one of those
+      # values could contain a line that looks like a header field.  Only trust
+      # what follows our own marker, and stop at the first line that is not one.
+      if [ "$seen" = 0 ]; then
+        case "$ln" in '# imux:v1 '*) seen=1 ;; esac
+        continue
+      fi
+      case "$ln" in
+        '# imux-pane: '*)   pane="${ln#\# imux-pane: }" ;;
+        '# imux-target: '*) target="${ln#\# imux-target: }" ;;
+        '# imux-desc: '*)   desc="${ln#\# imux-desc: }" ;;
+        *) break ;;
+      esac
+    done < <(at -c "$id" 2>/dev/null)
+    printf '%s\n' "$id$US$when$US${target:-?}$US${pane:-?}$US${desc:-?}"
+  done < <(printf '%s\n' "$rows")
+}
+
+if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
+  set +e
+  _mode="$1"; _when="${2:-}"; _target="${3:-}"; shift 3 2>/dev/null || true
+  _keys="$*"
+  if [ -z "$_when" ] || [ -z "$_target" ] || [ -z "$_keys" ]; then
+    echo "interdimux: usage: $_mode <when> <target> <command...>" >&2
+    exit 2
+  fi
+  # '.' is the pane this runs in, and only TMUX_PANE says which: from cron, an
+  # ssh command or env -i there is none, and "no such target" would not say why.
+  if [ "$_target" = "." ] && [ -z "${TMUX_PANE:-}" ]; then
+    echo "interdimux: '.' means the current pane, but TMUX_PANE is not set (run this from inside a tmux pane, or name the target)" >&2
+    exit 1
+  fi
+  if ! sched_resolve "$_target"; then
+    echo "interdimux: no such target: $_target" >&2
+    exit 1
+  fi
+
+  # Sub-minute delays: at cannot express them (it truncates the seconds field),
+  # but tmux can.  Caveat, verified: a pending run-shell -d does NOT keep the
+  # server alive — if the last session closes, the job is lost silently.
+  if [ "$_mode" = "--send-in" ] && [[ "$_when" =~ ^[0-9]+$ ]] && [ "$_when" -lt 60 ]; then
+    # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
+    # sh_send_input quotes the keys itself, after protecting a trailing ';', and
+    # decides from the text AS TYPED whether it is a key to press (C-#, say).
+    shq "$SCHED_SOCK"; _q_sock="$REPLY"
+    shq "$SCHED_PANE"; _q_pane="$REPLY"
+    sh_send_input "tmux -S $_q_sock" "$_q_pane" "$_keys"
+    # run-shell FORMAT-EXPANDS its argument before /bin/sh ever sees it, so a
+    # '#H' or '#{...}' in the user's command is substituted by tmux — verified:
+    # "echo host-is-#H" arrived as "echo host-is-krootabulon".  Worse, the
+    # substituted text is not re-quoted, so a pane title could inject shell.
+    # '##' is tmux's escape for a literal '#'; applied to the whole command, so
+    # a '#' in the socket path is not expanded either.
+    tmux run-shell -b -d "$_when" "${REPLY//\#/##}" \
+      2>/dev/null \
+      && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
+      || { echo "interdimux: could not schedule" >&2; exit 1; }
+    exit 0
+  fi
+
+  command -v at >/dev/null 2>&1 || { echo "interdimux: 'at' is not installed" >&2; exit 1; }
+  case "$_mode" in
+    --send-in) _spec="now + $_when minutes"; [[ "$_when" =~ ^[0-9]+$ ]] && _spec="now + $(( (_when + 59) / 60 )) minutes" ;;
+    *)         _spec="$_when" ;;
+  esac
+  # Submit from / : at bakes the submitting directory into the job and aborts
+  # with "Execution directory inaccessible" if it is gone by firing time.
+  # $_mflag is "-M" only where at accepts it (GNU); empty on BSD/macOS, so it
+  # word-splits away and never reaches at as a bogus argument.
+  _mflag=$(at_mail_flag)
+  # 2>/dev/null on the WRITER, and it is load-bearing.  at parses its time from
+  # argv and exits before ever reading stdin, so a bad spec closes this pipe
+  # under the body.  Where SIGPIPE is at its default the writer dies silently;
+  # where SIGPIPE is IGNORED (a systemd unit -- IgnoreSIGPIPE defaults to true --
+  # or a GitHub Actions step) it does not die, and bash prints "printf: write
+  # error: Broken pipe" once per failed write: measured 49,917 lines.  Those go
+  # to OUR stderr, not into $_out, and they arrive while the pipeline is still
+  # running -- ahead of the `printf '%s\n' "$_out" >&2` below.  The caller picks
+  # the first non-"interdimux:" line as the message to show, so without this the
+  # schedule dialog reports a truncated path instead of at's "syntax error.
+  # Last token seen: ...".  The body is pure printf; it has no other stderr.
+  _out=$(cd / && sched_job_body "$SCHED_PANE" "$SCHED_SOCK" "$SCHED_SRVPID" "$SCHED_LABEL" "$_keys" 2>/dev/null \
+         | at $_mflag -q "$SCHED_QUEUE" $_spec 2>&1)
+  if [ $? -ne 0 ]; then
+    printf '%s\n' "$_out" >&2
+    echo "interdimux: at rejected the time spec '$_spec'" >&2
+    exit 1
+  fi
+  printf 'interdimux: %s -> %s (%s)\n' \
+    "$(printf '%s' "$_out" | sed -n 's/^job \([0-9]*\) at \(.*\)$/job \1 at \2/p' | head -1)" \
+    "$SCHED_LABEL" "$SCHED_PANE"
+  # The job is QUEUED, not guaranteed to fire: with at's job-runner inactive
+  # (atd on Linux; atrun on macOS, which ships disabled) it sits in the queue
+  # forever.  Warn, never fail — the success line above stays on stdout so the
+  # dashboard and tests still parse it, and a queued job is a real job; refusing
+  # a submit on a check we cannot make authoritative on every host would be worse
+  # than the heads-up.
+  if [ "$(at_daemon_state)" = down ]; then
+    echo "interdimux: heads-up — at's job-runner is not active, so this will queue but not fire." >&2
+    echo "  enable it: $(at_enable_hint)" >&2
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "--sched-list" ]; then
+  set +e
+  command -v atq >/dev/null 2>&1 || { echo "interdimux: 'at' is not installed" >&2; exit 1; }
+  _n=0
+  while IFS="$US" read -r _id _when _tgt _pane _desc; do
+    [ -n "$_id" ] || continue
+    _n=$((_n + 1))
+    printf '%-6s %-18s %-22s %-6s %s\n' "$_id" "$_when" "$_tgt" "$_pane" "$_desc"
+  done < <(sched_rows)
+  [ "$_n" -eq 0 ] && echo "interdimux: no scheduled keys"
+  exit 0
+fi
+
+if [ "${1:-}" = "--sched-cancel" ]; then
+  set +e
+  _id="${2:-}"
+  [ -n "$_id" ] || { echo "interdimux: usage: --sched-cancel <id>" >&2; exit 2; }
+  # Only ever cancel jobs from our own queue, so a mistyped id cannot delete
+  # one of the user's unrelated at jobs.
+  if ! atq -q "$SCHED_QUEUE" 2>/dev/null | awk '{print $1}' | grep -qx "$_id"; then
+    echo "interdimux: no scheduled job $_id (see --sched-list)" >&2
+    exit 1
+  fi
+  atrm "$_id" 2>/dev/null && echo "interdimux: cancelled job $_id"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Gather targets (tree layout)
 # ---------------------------------------------------------------------------
 #
@@ -3691,6 +5012,10 @@ trim_path() {
 #   S:session_name
 #   W:session_name:window_index
 #   P:session_name:window_index:pane_index
+#
+# Down here, below the callbacks and the scheduling modes, none of which draws
+# a row: bash parses a script as it runs it, and these ~45 KB cost each of
+# them ~1.6 ms a run while they sat above the preview.
 
 # Path, then the Z/!/# flag slot, then the git badge, padded into the
 # CONTEXT column.  The flags are a column of their own (FLAG_W cells, sized
@@ -4596,1326 +5921,6 @@ IMUX_SECTIONS
 
   emit_dir_rows
 }
-
-# ---------------------------------------------------------------------------
-# Preview command (called by fzf --preview)
-# ---------------------------------------------------------------------------
-
-# Rule line sized to the preview pane
-preview_rule() {
-  local w="${FZF_PREVIEW_COLUMNS:-60}" label="${1:-}" bar
-  [[ "$w" =~ ^[0-9]+$ ]] || w=60
-  [ "$w" -gt 2 ] && w=$(( w - 2 ))
-  printf -v bar '%*s' "$w" ''
-  bar="${bar// /─}"
-  if [ -n "$label" ]; then
-    local rest=$(( w - ${#label} - 4 ))
-    [ "$rest" -lt 0 ] && rest=0
-    printf "${DIM_TREE}── ${DIM_PATH}%s ${DIM_TREE}%s${RST}\n" \
-      "$label" "${bar:0:rest}"
-  else
-    printf "${DIM_TREE}%s${RST}\n" "$bar"
-  fi
-}
-
-# Text $1, dim, cut into lines as wide as the preview's rule (the preview
-# window does not wrap): an agent's command line under the header.
-preview_wrapped() {
-  local w="${FZF_PREVIEW_COLUMNS:-60}" t="$1"
-  [[ "$w" =~ ^[0-9]+$ ]] || w=60
-  [ "$w" -gt 2 ] && w=$(( w - 2 ))
-  [ "$w" -ge 1 ] || w=60
-  while [ -n "$t" ]; do
-    printf "${DIM}%s${RST}\n" "${t:0:w}"
-    t="${t:w}"
-  done
-}
-
-# Print captured pane content with trailing blank lines removed
-print_capture() {
-  local content="$1" last
-  while [ -n "$content" ]; do
-    last="${content##*$'\n'}"
-    case "$last" in
-      *[![:space:]]*) break ;;
-    esac
-    [ "$last" = "$content" ] && { content=""; break; }
-    content="${content%$'\n'*}"
-  done
-  [ -n "$content" ] && printf '%s\n' "$content"
-}
-
-if [ "${1:-}" = "--preview" ]; then
-  set +e
-  spec="$2"
-  spec="${spec%%	*}"
-  parse_spec "$spec"
-
-  # Directory rows preview the directory itself, not a tmux target.
-  if [ "$SPEC_TYPE" = "D" ]; then
-    exec bash "$SCRIPT_PATH" --dirs-preview "$SPEC_DIR"
-  fi
-
-  spec_target_r; target="$REPLY"
-
-  # ONE tmux client per preview (review PERF-06): each costs ~5 ms of connect
-  # and teardown, on every cursor move, and a session row's preview made three.
-  # The sections are framed by RS, as gather_targets' are, and the capture goes
-  # LAST: the substitution then strips its trailing newlines exactly as the
-  # capture's own did, and the RS appended before the split keeps an empty
-  # capture a field.  Nothing in a capture can be an RS (tmux keeps no control
-  # bytes in its grid), and nothing in the header before it either, but a
-  # pane's cwd can hold one, so what lies between is joined back on RS.
-  # INTERDIMUX_NO_BATCH runs the commands one at a time, as gather_targets.
-  RS=$'\x1e'
-  pv_parts=()
-  case "$SPEC_TYPE" in
-    S)
-      s_fmt="#{session_windows}${US}#{?session_attached,attached,detached}"
-      w_fmt="#{window_index}:#{window_name}${US}#{pane_current_command}${US}#{pane_current_path}${US}#{window_active}${US}#{window_panes}"
-      # $target is spec_target's session form ("=name:", or "$ID:" for a name
-      # no '=' form can reach), which resolves to the session's active pane.
-      # A failed command ends a command list, so a session that went away (or
-      # anything else short of all three sections) asks again one at a time.
-      if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
-        pv_all=$(tmux display-message -p -t "$target" "$s_fmt" \; display-message -p "$RS" \
-          \; list-windows -t "$target" -F "$w_fmt" \; display-message -p "$RS" \
-          \; capture-pane -t "$target" -p -e -S -30 2>/dev/null)
-        set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
-      fi
-      if [ "${#pv_parts[@]}" -ge 3 ]; then
-        info="${pv_parts[0]}"
-        pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
-        IFS="$RS"; pv_wins="${pv_parts[*]:1:${#pv_parts[@]}-2}"; unset IFS
-        pv_wins="${pv_wins#$'\n'}"; pv_wins="${pv_wins%$'\n'}"
-      else
-        info=$(tmux display-message -p -t "$target" "$s_fmt" 2>/dev/null)
-        pv_wins=$(tmux list-windows -t "$target" -F "$w_fmt" 2>/dev/null)
-        pv_cap=$(tmux capture-pane -t "$target" -p -e -S -30 2>/dev/null)
-      fi
-      IFS="$US" read -r s_wins s_att <<< "$info"
-      printf "${BOLD_AMBER}▸ %s${RST}  ${DIM}%s win · %s${RST}\n" \
-        "$SPEC_SESSION" "${s_wins:-?}" "${s_att:-}"
-      preview_rule
-      [ -n "$pv_wins" ] && while IFS="$US" read -r wid wcmd wpath wact wpanes; do
-        # a line tmux cut short (see gather_targets) has no pane count
-        case "$wpanes" in ''|*[!0-9]*) wpanes=1 ;; esac
-        marker=" "
-        [ "$wact" = "1" ] && marker="${MARKER_COLOR}*${RST}"
-        wpath="${wpath/#$HOME/\~}"
-        dpad_r "$wid" 16; wid="$REPLY"
-        dpad_r "$wcmd" 14
-        printf ' %s %s%s%s %s%s%s %s%s%s' \
-          "$marker" "$BOLD" "$wid" "$RST" \
-          "$DIM_CMD" "$REPLY" "$RST" \
-          "$DIM_PATH" "$wpath" "$RST"
-        [ "$wpanes" -gt 1 ] && printf '  \033[2m(%s panes)\033[0m' "$wpanes"
-        printf '\n'
-      done <<< "$pv_wins"
-      echo ""
-      preview_rule "active pane"
-      print_capture "$pv_cap" || echo "(no active pane)"
-      ;;
-    *)
-      # Checked by index as well (spec_at): a stale row must not preview the
-      # window that merely took its number as a NAME.  Captured by the IDs the
-      # check found, so tmux resolves the row once -- or, batched, captured by
-      # the row's own target in the same command list as the check, and kept
-      # only when the check passes.  has-session fails for a target that is
-      # gone, so an empty answer is spec_at's own "gone": nothing to redo.
-      p_pid="" p_cmd="" p_path="" p_look="" p_args="" pv_cap="" pv_at=()
-      p_fmt="#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"
-      if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
-        pv_all=$(tmux has-session -t "$target" \; display-message -p -t "$target" "$SPEC_AT_FMT$p_fmt" \
-          \; display-message -p "$RS" \; capture-pane -t "$target" -p -e -S -50 2>/dev/null)
-        set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
-        pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
-        IFS="$RS"; pv_at=("${pv_parts[*]:0:${#pv_parts[@]}-1}"); unset IFS
-      fi
-      if spec_at "$target" "$p_fmt" ${pv_at[@]+"${pv_at[@]}"}; then
-        IFS="$US" read -r p_pid p_cmd p_path <<< "$REPLY"
-        target="$SPEC_AT"
-      else
-        target="$NO_SUCH_TARGET" pv_cap=""
-      fi
-      # An agent's row is headed by the agent and, once it shows a state or a
-      # description, drops its arguments (cmd_field).  The header names it the
-      # same way (`codex`, not tmux's `node`), and the line under it is its
-      # command line with them (`codex resume <id>`).  Only an interpreter or
-      # an agent's own name can be an agent, so no other pane pays for the
-      # lookup (a /proc read; one ps without /proc).
-      if [ -n "$AGENT_KNOWN" ] && [ -n "$p_pid" ]; then
-        case "$p_cmd" in
-          node|nodejs|python*) p_look=1 ;;
-          *) [[ "$AGENT_KNOWN" == *" $p_cmd "* ]] && p_look=1 ;;
-        esac
-        if [ -n "$p_look" ]; then
-          [ "$SHOW_FULL_COMMAND" = on ] && build_process_table
-          resolve_command "$p_cmd" "$p_pid"
-          agent_of "$REPLY"
-          if [ -n "$AG_NAME" ]; then
-            p_cmd="$AG_NAME"
-            [ -n "$AG_REST" ] && p_args="$AG_NAME$AG_REST"
-          fi
-        fi
-      fi
-      p_path="${p_path/#$HOME/\~}"
-      if [ "$SPEC_TYPE" = "W" ]; then
-        printf "${BOLD_AMBER}%s:%s${RST}" "$SPEC_SESSION" "$SPEC_WIDX"
-      else
-        printf "${BOLD_AMBER}%s:%s.%s${RST}" "$SPEC_SESSION" "$SPEC_WIDX" "$SPEC_PIDX"
-      fi
-      printf "  ${DIM_CMD}%s${RST} ${DIM}·${RST} ${DIM_PATH}%s${RST}\n" \
-        "${p_cmd:-?}" "${p_path:-?}"
-      [ -n "$p_args" ] && preview_wrapped "$p_args"
-      preview_rule
-      [ -n "${INTERDIMUX_NO_BATCH:-}" ] && pv_cap=$(tmux capture-pane -t "$target" -p -e -S -50 2>/dev/null)
-      print_capture "$pv_cap" || echo "(cannot capture pane)"
-      ;;
-  esac
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Directory preview (called by fzf --preview for dir picker)
-# ---------------------------------------------------------------------------
-
-if [ "${1:-}" = "--dirs-preview" ]; then
-  set +e
-  dir="$2"
-  [ -d "$dir" ] || { echo "(directory not found)"; exit 0; }
-
-  display_path="${dir/#$HOME/\~}"
-  printf "${BOLD_AMBER}%s${RST}\n" "$(basename "$dir")"
-  printf '\033[2m%s\033[0m\n\n' "$display_path"
-
-  detect_project_type "$dir"
-  [ -n "$REPLY" ] && printf "  ${GREEN}Type:${RST} %s\n" "$REPLY"
-
-  if [ -d "$dir/.git" ]; then
-    head_file="$dir/.git/HEAD"
-    if [ -f "$head_file" ]; then
-      read -r head_content < "$head_file" 2>/dev/null || head_content=""
-      case "$head_content" in
-        "ref: refs/heads/"*) printf "  ${DIM_GIT}Branch:${RST} %s\n" "${head_content#ref: refs/heads/}" ;;
-        ?*) printf "  ${DIM_GIT}Branch:${RST} @%s\n" "${head_content:0:7}" ;;
-      esac
-    fi
-
-    # Bound the two git forks.  `head -200` bounds the OUTPUT, not the work:
-    # `git status` still walks the whole tree before emitting anything, and this
-    # runs on every cursor move in the picker.  Measured on a 30,000-file repo
-    # with a warm page cache: 60-70 ms — tolerable, but it scales with the tree
-    # and a cold cache or a network filesystem has no ceiling at all.  A repo
-    # with submodules is worse still, since the scan recurses into each one.
-    #
-    # `timeout` is coreutils and not guaranteed present; without it the calls
-    # stay unbounded, which is exactly today's behaviour.
-    _git_to=""
-    command -v timeout >/dev/null 2>&1 && _git_to="timeout 1"
-
-    last_commit=$($_git_to git -C "$dir" --no-optional-locks log -1 --oneline 2>/dev/null || true)
-    [ -n "$last_commit" ] && printf "  ${DIM_PATH}Commit:${RST} %s\n" "$last_commit"
-
-    changed=$($_git_to git -C "$dir" --no-optional-locks status --porcelain --ignore-submodules 2>/dev/null | head -200 | wc -l | tr -d ' ')
-    [ "$changed" -eq 200 ] && changed="200+"
-    [ "$changed" != "0" ] && printf "  ${DIM_CMD}Changes:${RST} %s files\n" "$changed"
-  fi
-
-  for readme in README.md README.rst README.txt README; do
-    if [ -f "$dir/$readme" ]; then
-      while IFS= read -r line; do
-        case "$line" in
-          ""|\#*|=*|-*) continue ;;
-          *) printf '\n  \033[2m%s\033[0m\n' "$line"; break ;;
-        esac
-      done < "$dir/$readme"
-      break
-    fi
-  done
-
-  echo ""
-  preview_rule "contents"
-  ls -1p "$dir" 2>/dev/null | head -20
-
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Directory list generation (called by fzf reload for dir picker)
-# ---------------------------------------------------------------------------
-
-if [ "${1:-}" = "--dirs-list" ]; then
-  set +e
-  shift
-  mode="default"
-  query=""
-
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      # shift defensively: "shift 2" with one argument left shifts
-      # nothing (and this loop runs under set +e), which would spin
-      # forever on a trailing --deep/--scan
-      --deep) mode="deep"; query="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
-      --scan) mode="scan"; query="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
-      *) shift ;;
-    esac
-  done
-
-  finder=$(resolve_finder)
-  [ -z "$finder" ] && { echo "interdimux: no directory finder available" >&2; exit 1; }
-
-  mapfile -t search_paths < <(resolve_search_paths)
-  [ ${#search_paths[@]} -eq 0 ] && search_paths=("$HOME")
-
-  declare -A seen=()
-
-  # Which directories already have a session, and which one (IDEAS #7).
-  #
-  # Enter on such a row switches rather than creates -- connect_dir finds the
-  # session first -- but the picker gave no sign of that, so "new session" on a
-  # directory you already had open looked like it had done nothing.  Naming the
-  # session is the useful half: it tells you where you are about to land.
-  #
-  # So the badge is dir_session's answer, from the same table and the same code
-  # Enter goes through (resolve_session_name): a row is badged exactly when Enter
-  # would switch, and with the session it would switch to.  It used to be a map
-  # of its own, keyed on each session's start directory AND on its active
-  # window's cwd, whatever the session was called -- so ~/repo said "→ foo" for
-  # a `tmux new -s foo` started there (or one merely passing through), and Enter
-  # created a second session, `repo`.  One list-sessions for the whole list;
-  # the per-row lookup is in-process.
-  load_session_table
-
-  # Path column width derived from the popup (list pane is ~60% with the
-  # 40% preview open)
-  term_cols_r
-  DIRS_PATH_W=$(( REPLY * 55 / 100 - 10 ))
-  [ "$DIRS_PATH_W" -lt 28 ] && DIRS_PATH_W=28
-  [ "$DIRS_PATH_W" -gt 64 ] && DIRS_PATH_W=64
-
-  # Output format (tab-delimited, 3 fields): DISPLAY <TAB> BADGE <TAB> PATH
-  # The path spec sits last (same reasoning as gather_targets); the badge
-  # column is excluded from fzf match scope.
-  emit_dir() {
-    local dir="$1" tier="$2"
-    # A tab in the path can't be represented in the tab-delimited row
-    # (the selection would resolve to the post-tab fragment) — skip it
-    case "$dir" in *$'\t'*) return ;; esac
-    [[ ${seen[$dir]+x} ]] && return
-    seen["$dir"]=1
-    # The display copy only: $dir itself, raw, is the spec Enter opens.
-    # Sanitised the way the navigator's rows are (build_ctx_field): an ESC in a
-    # directory's name reached the picker as a live escape sequence that hid
-    # the name and recoloured the row, and dpad_r counted the bytes the terminal
-    # swallowed, so the badge column moved left.
-    local display_path="${dir/#$HOME/\~}"
-    sanitize_args "$display_path"; display_path="$REPLY"
-    trim_path "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
-    dpad_r "$display_path" "$DIRS_PATH_W"; display_path="$REPLY"
-
-    # Already open?  Say so, and say WHERE -- the badge column is outside fzf's
-    # match scope, so the session name is display-only and cannot skew results.
-    dir_session "$dir"
-    if [ -n "$DIR_SID" ]; then
-      printf '  %s▸%s  %s\t%s→%s %s%s%s\t%s\n' \
-        "$BOLD_AMBER" "$RST" "$display_path" \
-        "$DIM" "$RST" "$ACCENT_ESC" "$REPLY" "$RST" "$dir"
-      return
-    fi
-
-    # The type badge is on the ★ tier too.  These are the directories you use
-    # most, and they were the only ones without it -- a ◆ row showed "Rust" and
-    # the same directory, once it became recent, showed nothing.  detect_project_type
-    # is a handful of `[ -f ]` tests and this is the ctrl-o picker, not the hot path.
-    local type_badge=""
-    case "$tier" in
-      recent|project)
-        detect_project_type "$dir"
-        [ -n "$REPLY" ] && type_badge="${DIM}${REPLY}${RST}"
-        ;;
-    esac
-
-    case "$tier" in
-      recent)
-        printf '  %s★%s  %s\t%s\t%s\n' \
-          "$BOLD_AMBER" "$RST" "$display_path" "$type_badge" "$dir"
-        ;;
-      project)
-        printf "  ${GREEN}◆${RST}  %s\t%s\t%s\n" \
-          "$display_path" "$type_badge" "$dir"
-        ;;
-      dir)
-        printf '  %s·%s  %s\t\t%s\n' \
-          "$DIM" "$RST" "$display_path" "$dir"
-        ;;
-    esac
-  }
-
-  # Classified HERE, in the parent: the `< <(load_recent_dirs)` below runs in a
-  # subshell, which would parse the mount table for itself and then this
-  # process again for detect_project_type (a no-op when ctrl-o's picker has
-  # handed it down -- see mounts_export).
-  [ "$_MOUNTS_READ" = 1 ] || _mounts_read
-
-  # A finder's output is taken with mapfile, never a plain read (see
-  # load_recent_dirs): a Latin-1 directory took the next one into its row,
-  # which then spanned two lines.  load_recent_dirs's own output is valid
-  # UTF-8, so it is read plainly.
-  #
-  # collect_scan ROOT DEPTH [PREFIX]: collect_dir each directory ROOT's scan
-  # finds -- with PREFIX, only those it begins, which also go on _roots for the
-  # caller's one scan_roots run over all their subtrees -- and scan once more if
-  # ignore files above ROOT hid them all (fd_parents_hide).
-  collect_scan() {
-    local d n=0
-    local -a _found=()
-    mapfile -t _found < <(scan_dirs "$1" "$2" "$finder")
-    for d in ${_found[@]+"${_found[@]}"}; do
-      [ -z "$d" ] || [ "$d" = "$1" ] && continue
-      n=1
-      if [ $# = 2 ]; then
-        collect_dir "$d"
-      elif [[ "${d,,}" == "${3,,}"* ]]; then
-        collect_dir "$d"
-        _roots+=("$d")
-      fi
-    done
-    [ "$n" = 1 ] || ! fd_parents_hide "$1" "$finder" || collect_scan "$@"
-  }
-
-  # collect_dir every directory in the subtrees of _roots, in one finder run
-  # (scan_roots).
-  collect_subtrees() {
-    local sub
-    local -a _found=()
-    [ "${#_roots[@]}" -gt 0 ] || return 0
-    mapfile -t _found < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
-    for sub in ${_found[@]+"${_found[@]}"}; do
-      [ -z "$sub" ] && continue
-      collect_dir "$sub"
-    done
-  }
-
-  case "$mode" in
-    default)
-      while IFS= read -r d; do
-        [ -n "$d" ] && emit_dir "$d" recent ""
-      done < <(load_recent_dirs)
-
-      _projects=()
-      _others=()
-      for sp in "${search_paths[@]}"; do
-        [ -d "$sp" ] || continue
-        collect_scan "$sp" 1
-      done
-      emit_sorted_tiers
-      ;;
-
-    deep)
-      # Deep scan: increase depth on directories matching the query.
-      # If query is empty, scan all search paths at depth 2.
-      # All query matching is case-insensitive (like fzf's own filtering).
-      expanded="${query/#\~/$HOME}"
-      while IFS= read -r d; do
-        [ -n "$d" ] || continue
-        if [ -z "$query" ] || [[ "${d,,}" == *"${expanded,,}"* ]]; then
-          emit_dir "$d" recent ""
-        fi
-      done < <(load_recent_dirs)
-
-      _projects=()
-      _others=()
-
-      if [ -z "$query" ]; then
-        for sp in "${search_paths[@]}"; do
-          [ -d "$sp" ] || continue
-          collect_scan "$sp" 2
-        done
-      else
-        # Try the query as a literal path first: if relative, resolve
-        # against $HOME and each search path.  Any existing directory is
-        # scanned directly at depth 3.
-        query_roots=()
-        if [[ "$expanded" == /* ]]; then
-          query_roots+=("$expanded")
-        else
-          query_roots+=("$HOME/$expanded")
-          for sp in "${search_paths[@]}"; do
-            query_roots+=("$sp/$expanded")
-          done
-        fi
-        for qr in "${query_roots[@]}"; do
-          if [ -d "$qr" ]; then
-            collect_dir "$qr"
-            collect_scan "$qr" "$SCAN_DEPTH"
-            continue
-          fi
-          # Partially typed path: walk up to the deepest existing
-          # ancestor, then scan it for dirs completing the typed prefix.
-          anc="$qr"
-          stripped=0
-          while [ "$anc" != "/" ] && [ ! -d "$anc" ]; do
-            anc="${anc%/*}"
-            [ -z "$anc" ] && anc="/"
-            stripped=$((stripped + 1))
-          done
-          [ "$anc" = "/" ] && continue
-          [ "$stripped" -gt "$SCAN_DEPTH" ] && continue
-          _roots=()
-          collect_scan "$anc" "$stripped" "$qr"
-          # every completion's subtree in one finder run (scan_roots)
-          collect_subtrees
-        done
-
-        if [[ "$query" != */* ]]; then
-          # Name fragment (no slash): let the finder search for matching
-          # dir names natively — reaches deep at low cost.
-          _roots=()
-          for sp in "${search_paths[@]}"; do
-            [ -d "$sp" ] || continue
-            mapfile -t _matches < <(match_dirs "$sp" "$query" $((SCAN_DEPTH * 2)) "$finder" | sort)
-            _scanned_root=""
-            for d in ${_matches[@]+"${_matches[@]}"}; do
-              [ -z "$d" ] || [ "$d" = "$sp" ] && continue
-              collect_dir "$d"
-              # A match inside an already-scanned match is covered
-              [ -n "$_scanned_root" ] && [[ "$d" == "$_scanned_root"/* ]] && continue
-              _scanned_root="$d"
-              _roots+=("$d")
-            done
-          done
-          # every match's subtree in one finder run (scan_roots)
-          collect_subtrees
-        else
-          # Multi-component query: match it as a path substring against a
-          # scan deep enough for it to appear, capped to keep the scan
-          # cheap.  (Real paths are handled by the query_roots pass above.)
-          slashes="${query//[^\/]/}"
-          match_depth=$((1 + ${#slashes}))
-          [ "$match_depth" -lt 2 ] && match_depth=2
-          [ "$match_depth" -gt "$SCAN_DEPTH" ] && match_depth="$SCAN_DEPTH"
-          _roots=()
-          for sp in "${search_paths[@]}"; do
-            [ -d "$sp" ] || continue
-            mapfile -t _scanned < <(scan_dirs "$sp" "$match_depth" "$finder")
-            for d in ${_scanned[@]+"${_scanned[@]}"}; do
-              [ -z "$d" ] || [ "$d" = "$sp" ] && continue
-              if [[ "${d,,}" == *"${query,,}"* ]]; then
-                collect_dir "$d"
-                _roots+=("$d")
-              fi
-            done
-          done
-          collect_subtrees
-        fi
-      fi
-
-      emit_sorted_tiers
-      ;;
-
-    scan)
-      scan_root=""
-
-      if [ -n "$query" ] && [ -d "$query" ]; then
-        scan_root="$query"
-      elif [ -n "$query" ]; then
-        expanded="${query/#\~/$HOME}"
-        if [ -d "$expanded" ]; then
-          scan_root="$expanded"
-        else
-          parent="$(dirname "$expanded")"
-          [ -d "$parent" ] && scan_root="$parent"
-        fi
-      fi
-
-      if [ -n "$scan_root" ]; then
-        _projects=()
-        _others=()
-        collect_dir "$scan_root"
-        collect_scan "$scan_root" 2
-        emit_sorted_tiers
-      fi
-      ;;
-  esac
-
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Session name resolution (exposed for tests)
-# ---------------------------------------------------------------------------
-
-# Open a directory as a session (create + hydrate + switch, or just switch).
-# Exposed so it is bindable directly — `bind-key o run-shell -b "bash … \
-# --connect-dir ~/code/api"` — and so tests can exercise hydration without
-# driving a picker.
-
-# Find-or-create: turn a query that matched nothing into a session.
-# The query is resolved as a path first, then through zoxide, then falls back to
-# $HOME.  Factored out of the navigator's accept path so raw mode can invoke it
-# from inside fzf (see the `zero`/enter transform below), where there is no exit
-# code to signal "nothing matched".
-
-# A query with fzf's search syntax taken out: the words a session is named
-# from.  Sets REPLY (empty when nothing is left).
-#
-# fzf reads a query as space-separated terms, each of which may carry
-# operators: a leading ' (exact), ^ (prefix) or ! (not), a trailing $ (suffix),
-# and 'word' (exact on word boundaries).  None of that is part of a name, but
-# the create took the query literally (review UX-54).  fzf's own exact syntax
-# is the instinctive escape from a scattered match -- `'docs` does reach zero
-# matches -- and Enter then made a session called `'docs`.  So every term loses
-# its operators, and the empty terms that leaves (runs of spaces, a lone `'`)
-# are dropped, the way fzf drops them: `docs ` names `docs`, not `docs-`, and
-# a query of blanks names nothing.  resolve_create_target calls this, so the
-# bar that announces a name and the create that makes it cannot disagree.
-#
-# Two more pieces of fzf's syntax (review R05).  A term that is exactly `|` is
-# fzf's OR, and a query with one is a filter -- `foo | bar` made `foo-|-bar`,
-# and any edit of the agents view's query (a trailing space, one more word)
-# offered and made junk like `approve-|-input-qqq` in ~ -- so it names
-# nothing, and QW_OR=1 says why.  And `\ ` is a space INSIDE a term, not
-# between two: `my\ proj` is one term, and names `my-proj` (not `my\-proj`);
-# `~/my\ dir` is that directory.  (`foo |bar` is a literal term to fzf too.)
-QW_OR=0 QW_WHY=""
-query_words_r() {
-  local rest="$1" t="" lead out="" c
-  local -a terms=()
-  QW_OR=0
-  while [ -n "$rest" ]; do
-    case "$rest" in
-      '\ '*) t+=" "; rest="${rest:2}" ;;
-      ' '*)  terms+=("$t"); t=""; rest="${rest:1}" ;;
-      *)     c="${rest%%[\\ ]*}"; [ -n "$c" ] || c="${rest:0:1}"
-             t+="$c"; rest="${rest:${#c}}" ;;
-    esac
-  done
-  terms+=("$t")
-  for t in "${terms[@]}"; do
-    if [ "$t" = "|" ]; then QW_OR=1; REPLY=""; return 0; fi
-    lead="${t%%[!\'^!]*}"          # the leading run of ' ^ !
-    t="${t#"$lead"}"
-    t="${t%\$}"
-    case "$lead" in *\'*) t="${t%\'}" ;; esac
-    [ -n "$t" ] && out+="${out:+ }$t"
-  done
-  REPLY="$out"
-}
-
-# What a query WOULD become.  Sets CREATE_DIR / CREATE_NAME / CREATE_SRC;
-# returns 1 when the query cannot produce a session at all, with QW_WHY saying
-# why when there is more to say than "nothing left of it": `or` (a `|` term,
-# see query_words_r) or `mark` (the agents view's query, see VIEW).
-#
-# $2 = `name`: only CREATE_NAME is wanted (the bar's alt-enter entry, and
-# --create-key, which asks whether there is one).  The name of a query that is
-# not a directory is the query itself, whatever zoxide says, so the zoxide
-# lookup -- a subshell and two execs, on every keystroke of a typed query
-# (review R21) -- is skipped, and CREATE_DIR / CREATE_SRC are left empty.
-#
-# One resolver for both the header and the accept, because they used to derive
-# the name independently and disagreed: describe_create did a plain
-# `basename | tr`, while the accept went through resolve_session_name, which
-# DISAMBIGUATES against existing sessions.  With a session "api" already open at
-# ~/work/api, typing ~/other/api showed "create api" and created "other-api".
-# The header is the only thing telling the user what Enter does, so it has to be
-# derived from the same code that does it.
-resolve_create_target() {
-  local query expanded mode="${2:-}"
-  CREATE_DIR=""; CREATE_NAME=""; CREATE_SRC=""; QW_WHY=""
-  # The agents view's query is a filter, never a name: while one of its mark
-  # terms is in the query, whatever else was typed, it names nothing -- for
-  # every caller, the bar's create-key entry and alt-enter too, not only Enter.
-  # (Its `|` alone covers most edits; this covers the rest.)
-  if [ -n "$VIEW" ]; then
-    # Anywhere, not only as a term of its own: with both blanks around the
-    # `|` deleted, `^!|^?` is ONE fzf term that still matches the marks, and
-    # it named a session `|^?` (the G2 checker).
-    case "$1" in *'^!'*|*'^?'*) QW_WHY=mark; return 1 ;; esac
-  fi
-  query_words_r "$1"; query="$REPLY"
-  [ "$QW_OR" = 1 ] && QW_WHY=or
-  [ -n "$query" ] || return 1
-  expanded="${query/#\~/$HOME}"
-  if [ -d "$expanded" ] && CREATE_DIR=$(cd "$expanded" 2>/dev/null && pwd -P); then
-    CREATE_SRC="path"
-    # the PHYSICAL path, so a symlinked query names the session after where it
-    # actually lands -- describe_create used the unresolved one
-    CREATE_NAME=$(resolve_session_name "$CREATE_DIR")
-  elif [ "$mode" = name ]; then
-    CREATE_DIR=""
-    CREATE_NAME="${query//[.: \/]/-}"
-  else
-    CREATE_DIR=""
-    if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
-      CREATE_DIR=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
-    fi
-    if [ -d "$CREATE_DIR" ]; then CREATE_SRC="zoxide"; else CREATE_DIR="$HOME"; CREATE_SRC="home"; fi
-    # What `tr '.: /' '----'` did, without its two forks: the bar's create-key
-    # entry runs this on every keystroke of a typed query.
-    CREATE_NAME="${query//[.: \/]/-}"
-  fi
-  [ -n "$CREATE_NAME" ] || return 1
-  return 0
-}
-
-# Sets REPLY to the session name; prints nothing.
-#
-# A query that names nothing -- blanks, only fzf syntax, an OR, the agents
-# view's query when no agent waits any more -- creates nothing, quietly
-# (REPLY stays empty): it is a filter, and the bar has said so
-# (describe_create).  Returns 1 only when a create was tried and failed.
-create_from_query() {
-  local query="$1"
-  REPLY=""
-  resolve_create_target "$query" || return 0
-  # session_id_of, not has-session "=name": the same exact match connect_dir
-  # uses, so a query like "$0" is not mistaken for session ID 0.
-  session_id_of "$CREATE_NAME"
-  if [ -z "$REPLY" ]; then
-    record_dir_use "$CREATE_DIR"
-  fi
-  connect_dir "$CREATE_DIR" "$CREATE_NAME" || return 1
-  REPLY="$CREATE_NAME"
-  return 0
-}
-
-# "switch to", not "create", when the name already exists -- that is what
-# connect_dir does, and promising a new session it will not make is the same
-# class of lie as naming the wrong one.  After resolve_create_target; sets REPLY.
-create_verb_r() {
-  session_id_of "$CREATE_NAME"
-  if [ -n "$REPLY" ]; then REPLY="switch to"; else REPLY="create"; fi
-}
-
-# The create key's entry in the hint bar while a query is typed and rows match
-# (review UX-54): alt-enter creates from the query whatever the match count, and
-# a scattered match holding the cursor is exactly when the user needs to be told
-# so.  Same resolver and verb as describe_create, so it names what alt-enter
-# will make, styled like every other entry in the bar.  Sets REPLY (empty when
-# the query names nothing) and REPLY_W, its width in cells -- dlg_width, since
-# the name is whatever was typed, wide characters included.
-create_key_hint_r() {
-  local h
-  REPLY="" REPLY_W=0
-  resolve_create_target "$1" name || return 0
-  create_verb_r
-  hint_r 'M-⏎' "$REPLY $CREATE_NAME"; h="$REPLY"
-  dlg_width "$h"; REPLY_W="$REPLY"
-  REPLY="$h"
-  return 0
-}
-
-# What find-or-create WOULD do for a query, as a human-readable string.  Used by
-# the zero-match header so the feature stops being invisible (IDEAS #1) and a
-# typo cannot silently create junk.
-describe_create() {
-  local query="$1" verb
-  REPLY=""
-  # A query that names nothing gets no announcement, only the reason when
-  # there is one worth giving: Enter does nothing here, and says so.
-  if ! resolve_create_target "$query"; then
-    if [ "$QW_WHY" = mark ] && [ "$query" = "$AGENTS_QUERY" ]; then
-      hint_r '∅' 'no agent is waiting on you' esc quit
-    elif [ "$QW_WHY" = mark ]; then
-      hint_r '∅' 'no waiting agent matches' esc quit
-    elif [ "$QW_WHY" = or ]; then
-      hint_r '∅' 'a query with | is a filter, not a name' esc quit
-    fi
-    return 0
-  fi
-  create_verb_r; verb="$REPLY"
-  printf -v REPLY '%s%s%s%s %s%s %sin %s%s %s(%s)%s' \
-    "$ACCENT_ESC" "$verb" "$RST" "$DIM" "$RST$ACCENT_ESC$CREATE_NAME" "$RST" \
-    "$DIM" "$RST$DIM${CREATE_DIR/#$HOME/\~}" "$RST" "$DIM" "$CREATE_SRC" "$RST"
-  return 0
-}
-
-if [ "${1:-}" = "--create-from-query" ]; then
-  set +e
-  create_from_query "${2:-}" || {
-    imux_msg "could not create a session from '${2:-}'"
-    exit 1
-  }
-  exit 0
-fi
-
-if [ "${1:-}" = "--describe-create" ]; then
-  set +e
-  describe_create "${2:-}"
-  printf '%s\n' "$REPLY"
-  exit 0
-fi
-
-# The navigator's alt-enter (review UX-54), as the fzf action it runs: create
-# from the query in FZF_QUERY whatever it matches, or nothing at all when the
-# query names no session.  The bind already skips an empty query without a
-# process; this is for one that is only fzf syntax or blanks (`'`, `!`, `  `),
-# which the bar gives no create entry either, so the key does what the bar
-# says: nothing, with the navigator still open.  The action reads the query
-# from the environment again when it runs, never from this text, for the
-# quoting reason the raw-mode Enter gives.
-if [ "${1:-}" = "--create-key" ]; then
-  set +e
-  resolve_create_target "${FZF_QUERY:-}" name \
-    && printf '%s\n' "execute(bash '$SQ_SCRIPT' --create-from-query \"\$FZF_QUERY\")+abort"
-  exit 0
-fi
-
-if [ "${1:-}" = "--connect-dir" ]; then
-  set +e
-  cd_dir="${2:-}"
-  [ -n "$cd_dir" ] || { echo "interdimux: --connect-dir needs a directory" >&2; exit 1; }
-  [ -d "$cd_dir" ] || { echo "interdimux: no such directory: $cd_dir" >&2; exit 1; }
-  # Physical path, so it matches the finder output the dir picker produces
-  cd_dir=$(cd "$cd_dir" 2>/dev/null && pwd -P) || exit 1
-  record_dir_use "$cd_dir"
-  connect_dir "$cd_dir" || exit 1
-  exit 0
-fi
-
-if [ "${1:-}" = "--session-name-for" ]; then
-  set +e
-  resolve_session_name "$2"
-  echo
-  exit 0
-fi
-
-# Display cells for a string, ignoring SGR escapes.  Sets REPLY.  The dialogs'
-# measure, defined ahead of them because the hint bar's create entry -- a
-# callback, see below -- measures a typed name with it.
-#
-# Bash measures CHARACTERS (${#s}), and the dialogs sized themselves with that:
-# a session named with 26 CJK characters produced a title 87 cells wide inside a
-# 66-cell box, obliterating the right border (measured with tmux's own
-# #{cursor_x}).  The list has had a proper measurement since the Rust core; the
-# dialogs had not.
-#
-# Deliberately CONSERVATIVE rather than exact, because the two errors are not
-# symmetric: over-counting makes the box a little wide, under-counting lets text
-# run off it.  Per character —
-#
-#   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
-#   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
-#   combining marks (Latin, symbol, kana), ZWJ,   0
-#     U+FE00-FE0E, medial and final Hangul
-#     jamo, the Hangul filler U+3164
-#   everything else                               1
-#
-# so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
-# 2 — wide, never narrow.  A regional indicator is 1: tmux draws one alone in
-# one cell and a pair (a flag) in two, so a flag is exact too.  Exact cluster
-# handling lives in the Rust core, where it is on the path that needs it, and
-# the input field's per-character rules in _dlg_cw.
-#
-# "Wide" and "0" are what tmux draws (measured on 3.7b, every code point of
-# U+1100-11FF, U+2000-30FF, U+FE00-FE0F and U+1F000-1FAFF, against
-# #{cursor_x}).  The medial and final jamo -- U+1160-11FF, and the assigned
-# parts of U+D7B0-D7FF (the unassigned D7C7-D7CA and D7FC-D7FF draw one) --
-# are 0 on any cell: tmux joins them to the cell before, the way it joins a
-# mark, and one it cannot join is dropped.  That is how macOS stores a Korean
-# name (NFD, 한 as U+1112 U+1161 U+11AB), one wide cell a syllable; counted one
-# each, the field's cursor drifted two cells right per syllable.  Below
-# U+2E80 that is a scattering of emoji -- ✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ and ~60 more -- which
-# counted 1 for the 2 tmux draws, so three of them typed into Send keys left
-# the cursor three cells short, and a long command with a few in it ran
-# through the border.  U+1F000-1FAFF stays wide throughout, bar the regional
-# indicators: its text-style symbols (🖥 🛠) are drawn narrow, but they come
-# with a U+FE0F nearly always, and a range with holes would under-count every
-# emoji a newer Unicode adds.
-#
-# `printf %d "'<char>"` yields the codepoint with no fork; the dialogs are short
-# strings on the action path, so per-character work is affordable here.
-dlg_width() {
-  # `len` is assigned separately for the same reason dlg_fit does it: bash
-  # expands every word of a `local` command before performing any of its
-  # assignments, so ${#s} on this line would read the OUTER s.
-  local s="$1" i=0 n=0 ch cp j len
-  len=${#s}
-  while [ "$i" -lt "$len" ]; do
-    ch="${s:i:1}"
-    if [ "$ch" = $'\033' ]; then
-      j=$(( i + 1 ))
-      while [ "$j" -lt "$len" ] && [[ "${s:j:1}" != [a-zA-Z] ]]; do j=$(( j + 1 )); done
-      i=$(( j + 1 ))
-      continue
-    fi
-    printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
-    if (( cp < 0x300 )); then
-      n=$(( n + 1 ))
-    elif (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || (cp >= 0xfe00 && cp <= 0xfe0e) \
-         || (cp >= 0x20d0 && cp <= 0x20f0) || (cp >= 0x302a && cp <= 0x302d) \
-         || cp == 0x3099 || cp == 0x309a || (cp >= 0x1160 && cp <= 0x11ff) \
-         || (cp >= 0xd7b0 && cp <= 0xd7c6) || (cp >= 0xd7cb && cp <= 0xd7fb) || cp == 0x3164 )); then
-      :
-    elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
-         || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
-         || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) \
-         || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) \
-         || (cp >= 0x1f000 && cp <= 0x1f1e5) || (cp >= 0x1f200 && cp <= 0x1f2ff) \
-         || (cp >= 0x20000 && cp <= 0x3fffd) )); then
-      n=$(( n + 2 ))
-    elif (( cp >= 0x231a && cp <= 0x2b55 && ( cp <= 0x231b || cp == 0x2329 || cp == 0x232a \
-         || (cp >= 0x23e9 && cp <= 0x23ec) || cp == 0x23f0 || cp == 0x23f3 || cp == 0x25fd \
-         || cp == 0x25fe || cp == 0x2614 || cp == 0x2615 || cp == 0x261d \
-         || (cp >= 0x2648 && cp <= 0x2653) || cp == 0x267f || cp == 0x2693 || cp == 0x26a1 \
-         || cp == 0x26aa || cp == 0x26ab || cp == 0x26bd || cp == 0x26be || cp == 0x26c4 \
-         || cp == 0x26c5 || cp == 0x26ce || cp == 0x26d4 || cp == 0x26ea || cp == 0x26f2 \
-         || cp == 0x26f3 || cp == 0x26f5 || cp == 0x26f9 || cp == 0x26fa || cp == 0x26fd \
-         || cp == 0x2705 || (cp >= 0x270a && cp <= 0x270d) || cp == 0x2728 || cp == 0x274c \
-         || cp == 0x274e || (cp >= 0x2753 && cp <= 0x2755) || cp == 0x2757 \
-         || (cp >= 0x2795 && cp <= 0x2797) || cp == 0x27b0 || cp == 0x27bf || cp == 0x2b1b \
-         || cp == 0x2b1c || cp == 0x2b50 || cp == 0x2b55 ) )); then
-      n=$(( n + 2 ))
-    else
-      n=$(( n + 1 ))
-    fi
-    i=$(( i + 1 ))
-  done
-  REPLY="$n"
-}
-
-
-# The callbacks fzf runs while you type -- the hint bar and the ctrl-o
-# picker's header (--dirs-hints), and above them the create resolver and the
-# ctrl-o badge -- sit before the scheduling modes and the dialogs, which they
-# never use: bash parses a script as it runs it, and every line above a
-# callback is parsed by each run of it (~35 us a KB).
-
-# ---------------------------------------------------------------------------
-# Dynamic hint bar (called by fzf focus:transform-footer)
-# ---------------------------------------------------------------------------
-#
-# The fallback path only: the navigator normally answers this with an inline
-# POSIX snippet over pre-packed env vars, because a focus bind fires on every
-# cursor move and re-exec'ing this script there cost ~17 ms a move.  This
-# handler is what runs on fzf too old for --with-shell, or when the user
-# supplied their own --with-shell in @interdimux-fzf-opts.
-#
-# It is the more CORRECT of the two by construction — being a real child it sees
-# the live FZF_COLUMNS and FZF_PREVIEW_COLUMNS, so it re-tiers on anything.  The
-# inline snippet reads the same two variables to stay level with it.
-
-if [ "${1:-}" = "--footer-for" ]; then
-  # Zero matches: Enter creates a session, so the bar announces that instead of
-  # a row's hints -- exactly what the navigator's inline dispatcher prints there
-  # (it runs --describe-create), so the two paths cannot disagree.  fzf exports
-  # the count and the query from 0.46; below that this cannot know, and the bar
-  # stays the generic one.
-  if [ "${FZF_MATCH_COUNT:-}" = 0 ]; then
-    set +e
-    describe_create "${FZF_QUERY:-}"
-    printf '%s\n' "$REPLY"
-    exit 0
-  fi
-  spec="${2:-}"
-  spec="${spec%%	*}"
-  hint_set "${spec%%:*}"
-  # A typed query with rows matching: alt-enter would create from it, and the
-  # bar says what, after the row's own hints (review UX-54).  Those get the
-  # width that is left, dropping entries by their usual priority; the create
-  # entry goes only when it does not fit on its own.  From fzf 0.63, where the
-  # navigator runs this in the background on every keystroke (see _hint_bind);
-  # below that nothing asks on each keystroke, so the name would go stale.
-  if [ -n "${FZF_QUERY:-}" ] && fzf_ge 63; then
-    set +e
-    create_key_hint_r "$FZF_QUERY"
-    _ck="$REPLY" _ckw="$REPLY_W"
-    hint_cols; _w="$REPLY"
-    if [ -n "$_ck" ] && [ "$_ckw" -le "$_w" ]; then
-      hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
-      hint_pick $(( _w - _ckw - 2 )) "$REPLY"
-      if [ -n "$REPLY" ]; then REPLY+="  $_ck"; else REPLY="$_ck"; fi
-      printf '%s\n' "$REPLY"
-      exit 0
-    fi
-  fi
-  hint_bar_r ${HINT_SET[@]+"${HINT_SET[@]}"}
-  # Nothing, not a bare newline: an EMPTY transform removes the footer section
-  # and the list reflows into the row, where "\n" leaves a blank bar drawn.
-  [ -n "$REPLY" ] && printf '%s\n' "$REPLY"
-  exit 0
-fi
-
-# The packed width ladder for one row type ("W:line|W:line|…|0:") — what the
-# navigator exports for its inline snippet.  This exists so the tests can drive
-# that snippet with exactly the environment the navigator would hand it, rather
-# than a hand-copied duplicate; a duplicate is precisely what stopped matching
-# the last time this pair drifted.
-if [ "${1:-}" = "--hint-ladder" ]; then
-  hint_set "${2:-}"
-  hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
-  printf '%s' "$REPLY"
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Directory picker header (called by fzf transform-header)
-# ---------------------------------------------------------------------------
-
-if [ "${1:-}" = "--dirs-hints" ]; then
-  # 40, not the navigator's 50: this picker's preview is unconditional and 40%
-  # wide, and it is reached through an `execute` child that has inherited the
-  # navigator's FZF_PREVIEW_COLUMNS, so nothing here can be auto-detected.
-  HINT_PREVIEW_PCT=40
-  case "${2:-default}" in
-    # The deep/browse forms lead with a STATUS (the text being searched), not a
-    # hint, so they are left to truncate the way any status does — the escape
-    # hatch they would otherwise lose (^r) is on the prompt as well.
-    deep)   printf '%s%s\n' "$(hint '🔎 deep search' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
-    browse) printf '%s%s\n' "$(hint '⤷ browsing' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
-    *)      hint_bar_r enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1
-            [ -n "$REPLY" ] && printf '%s\n' "$REPLY" ;;
-  esac
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Scheduled keys — send a command to a pane at a future time
-# ---------------------------------------------------------------------------
-#
-#   interdimux.sh --send-at "17:30"        <target> <command...>
-#   interdimux.sh --send-in 90             <target> <command...>
-#   interdimux.sh --sched-list
-#   interdimux.sh --sched-cancel <id>
-#
-# <target> is any tmux target ("%3", "mysess:1.0", "=name:") or "." for the
-# current pane.  It is resolved to a pane id NOW, so the job survives the pane
-# being renamed or moved.
-#
-# THE DANGEROUS PART, and why every job carries a guard: **pane ids are recycled
-# across a tmux server restart.**  Verified — schedule for session alpha's %0,
-# restart the server, and %0 is now some other session's pane; the keys land
-# there.  For a scheduled `make deploy` or `rm -rf build/` that is data loss, not
-# a cosmetic bug.  Each job therefore records the server pid at submit time and
-# refuses to fire if it no longer matches.
-#
-# Backends: `at` for >= 1 minute (it has a hard one-minute floor and silently
-# truncates seconds), and tmux's own `run-shell -b -d` below that.
-
-SCHED_LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/interdimux"
-SCHED_LOG="$SCHED_LOGDIR/scheduled.log"
-SCHED_QUEUE=i   # a dedicated at queue: bare `atq` lists EVERY queue and would
-                # mix in the user's own jobs.  Never uppercase — that switches
-                # to batch semantics that wait for a low load average.
-
-# `-M` ("never mail") is a GNU at extension; BSD at (macOS) has no such flag and
-# aborts option parsing with "illegal option -- M" before it reads the job — so
-# every submit failed on macOS with exactly that message.  We still want it where
-# it exists: the job body redirects all output to a log, so with no -m either at
-# defaults to "mail only if there was output" = no mail, but -M also silences the
-# one edge case the redirect can't (atd failing to open the log at all).  Probe
-# once, with no timespec so neither variant can submit a job while we ask, and
-# cache the answer.  The pattern matches BSD's "illegal option -- M" and glibc's
-# "invalid option -- 'M'" alike; GNU at ACCEPTS -M, so its no-timespec error is
-# about the time, never the option, and the probe correctly yields "-M".
-at_mail_flag() {
-  if [ -z "${_AT_MFLAG+x}" ]; then
-    # Capture the message, don't pipe it: `at -M` EXITS NON-ZERO here on both
-    # variants (BSD rejects the option, GNU errors on the missing timespec), and
-    # under this script's `set -o pipefail` a `... | grep` would inherit at's
-    # failure and answer "GNU" on every host.  Only the text tells them apart:
-    # BSD prints "illegal option -- M", glibc "invalid option -- 'M'"; GNU at
-    # accepts -M, so its error names the time, never the option.
-    local _probe
-    _probe=$(LC_ALL=C at -M </dev/null 2>&1)
-    case "$_probe" in
-      *'ption -- '*M*) _AT_MFLAG="" ;;   # BSD/macOS at: -M rejected, rely on the log redirect
-      *)               _AT_MFLAG="-M" ;; # GNU at: -M accepted
-    esac
-  fi
-  printf '%s' "$_AT_MFLAG"
-}
-
-# The state of the daemon that RUNS queued `at` jobs, echoed as up|down|unknown.
-# Without an active runner `at` still ACCEPTS and queues jobs — submission
-# succeeds — but nothing ever fires them: the silent scheduled-deploy-that-never-
-# happens.  The runner, and how you ask after it, differ by OS:
-#   Linux (atd):  a persistent process, so `pgrep -x atd` is the tell.
-#   macOS (atrun): launchd spawns /usr/libexec/atrun on a 30s StartInterval and
-#     it exits between ticks, so it is NOT a persistent process — pgrep is blind
-#     to it, and `launchctl list com.apple.atrun` returns 113 for a SYSTEM-domain
-#     job unless you are root (the check that wrongly read "disabled" even once it
-#     was enabled).  `launchctl print system/<label>` reads the system domain
-#     WITHOUT root and exits 0 only when the job is bootstrapped = will run on its
-#     interval; 113 when it is not.  Verified against a real firing.  Key on the
-#     EXIT CODE, never on "state = running" — atrun is "not running" at most
-#     instants by design.  macOS ships atrun disabled by default.  (Bootstrapped
-#     is not quite "enabled": a job you `launchctl disable` while still loaded can
-#     print 0 yet not run.  That is a deliberate, self-inflicted state; the common
-#     enabled/disabled cases both map correctly, so we accept the tiny blind spot
-#     rather than pay a second launchctl round-trip on every schedule.)
-#   BSD / no pgrep:  the runner is cron's own atrun and there is no atd process to
-#     find, or we simply cannot look — report "unknown" and never cry wolf, rather
-#     than assert a false "down" the way a bare pgrep check would.
-# INTERDIMUX_AT_DAEMON overrides the probe (up|down|unknown) so tests can drive
-# every branch without a machine-global daemon toggle.
-at_daemon_state() {
-  case "${INTERDIMUX_AT_DAEMON:-}" in
-    up|on|1|yes)   printf up;      return ;;
-    down|off|0|no) printf down;    return ;;
-    unknown)       printf unknown; return ;;
-  esac
-  case "$(uname -s)" in
-    Darwin)
-      if launchctl print system/com.apple.atrun >/dev/null 2>&1; then printf up; else printf down; fi ;;
-    Linux)
-      command -v pgrep >/dev/null 2>&1 || { printf unknown; return; }
-      if pgrep -x atd >/dev/null 2>&1; then printf up; else printf down; fi ;;
-    *) printf unknown ;;
-  esac
-}
-
-# The one-time command that enables at's job-runner.  Only ever shown for a
-# CONFIRMED-down runner, which is macOS or Linux — BSD/unknown never reaches here.
-# macOS `load -w` is nominally deprecated but still works (verified — a job fired
-# afterwards).
-at_enable_hint() {
-  case "$(uname -s)" in
-    Darwin) printf '%s' 'sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.atrun.plist' ;;
-    Linux)  printf '%s' 'sudo systemctl enable --now atd' ;;
-    *)      printf '%s' "ensure your system's at job-runner (atd, or cron's atrun) is enabled" ;;
-  esac
-}
-
-# Resolve a user-supplied target to a stable pane id, plus the socket and the
-# server pid the job will be validated against.  Sets SCHED_PANE/SOCK/SRVPID.
-sched_resolve() {
-  local target="$1"
-  [ "$target" = "." ] && target="${TMUX_PANE:-}"
-  # Never without a target: tmux would pick "the current pane" itself, which
-  # outside a pane is the most recently active session's -- a pane nobody named.
-  # An empty -t is no help: tmux reads -t '' exactly as no -t at all.
-  [ -n "$target" ] || return 1
-  local info
-  info=$(tmux display-message -p -t "$target" \
-        '#{pane_id}'"$US"'#{socket_path}'"$US"'#{pid}'"$US"'#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null) || return 1
-  IFS="$US" read -r SCHED_PANE SCHED_SOCK SCHED_SRVPID SCHED_LABEL <<< "$info"
-  [ -n "$SCHED_PANE" ] || return 1
-  return 0
-}
-
-# The script an at job runs.  Everything it needs is baked in: at snapshots the
-# submitting environment, so an inherited $TMUX would be a STALE pointer to a
-# possibly-dead server — the socket is passed explicitly and the inherited value
-# ignored.
-sched_job_body() {
-  local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
-  # POSIX quoting, not %q: atd replays this body under /bin/sh.  See shq().
-  local q_logdir q_log q_sock q_want q_pane q_label q_send
-  shq "$SCHED_LOGDIR"; q_logdir="$REPLY"
-  shq "$SCHED_LOG";    q_log="$REPLY"
-  shq "$sock";         q_sock="$REPLY"
-  shq "$srvpid";       q_want="$REPLY"
-  shq "$pane";         q_pane="$REPLY"
-  # The label too: it is a session name, which can come from a directory name
-  # and hold a '"', a backtick or '$(' -- spliced into a live line, it ran when
-  # the job fired.  printf, not echo: dash's echo reads '\c' and '\n' in it.
-  shq "$label";        q_label="$REPLY"
-  # the whole send, as send_input does it (see there): a lone key name is
-  # pressed, any other text survives tmux's argv parser with a trailing ';'
-  # intact, and a pane left in copy-mode still runs the command
-  sh_send_input 'tmux -S "$sock"' '"$pane"' "$keys"; q_send="$REPLY"
-  # One field per line, each "rest of line".  The single-line form packed all
-  # three into "pane=… target=… desc=…", which stops being parseable the moment
-  # a session name contains a space or the literal "desc=" — and tmux allows
-  # both.  The marker line keeps its trailing text so `grep '^# imux:v1 '` still
-  # identifies one of our jobs.
-  local q_desc
-  q_desc=$(printf '%s' "$keys" | tr '\n' ' ')
-  printf '%s\n' \
-    "# imux:v1 interdimux scheduled keys" \
-    "# imux-pane: ${pane}" \
-    "# imux-target: ${label}" \
-    "# imux-desc: ${q_desc}" \
-    "# atd tries to MAIL a job's output.  With no MTA installed that output is" \
-    "# destroyed and leaves only 'Exec failed for mail command' in the journal --" \
-    "# which reads exactly like 'my job never ran'.  Log instead of discarding." \
-    "# Probed first, with true: exec and ':' are special builtins, and a failed" \
-    "# redirection on one ends a POSIX sh on the spot -- before the send." \
-    "if mkdir -p ${q_logdir} 2>/dev/null && true 2>/dev/null >>${q_log}; then" \
-    "  exec >>${q_log} 2>&1" \
-    "else" \
-    "  exec >/dev/null 2>&1" \
-    "fi" \
-    "printf '== %s firing for %s (%s)\\n' \"\$(date '+%Y-%m-%d %H:%M:%S')\" ${q_label} ${q_pane}" \
-    "sock=${q_sock}" \
-    "want=${q_want}" \
-    "pane=${q_pane}" \
-    "got=\$(tmux -S \"\$sock\" display-message -p '#{pid}' 2>/dev/null) || exit 0" \
-    "if [ \"\$got\" != \"\$want\" ]; then" \
-    "  # the server restarted: pane ids have been recycled and \$pane may now" \
-    "  # belong to a completely different session.  Refuse rather than misfire." \
-    "  tmux -S \"\$sock\" display-message 'interdimux: scheduled keys skipped (tmux restarted)' 2>/dev/null" \
-    "  exit 0" \
-    "fi" \
-    "${q_send} 2>/dev/null"
-}
-
-# One line per queued interdimux job:  id US when US target US pane US desc
-#
-# --sched-list (human columns), the Jobs picker, and the cancel dialog all read
-# this, so the `at -c` parsing lives in exactly one place.
-#
-# Two things this gets right that the inline version did not:
-#   * atq's default time column starts with the DAY NAME, so `sort -k2` ordered
-#     jobs Fri < Mon < Sat rather than chronologically.  GNU -o gives a sortable
-#     "YYYY-MM-DD HH:MM" stamp.  BSD at (macOS) has no -o and prints a ctime-style
-#     "<dow> <mon> <dd> HH:MM:SS <YYYY>" in job-id order, so reformat it to that
-#     same sortable stamp with `date -j -f` and sort by it — the Jobs list stays
-#     chronological on macOS too, and its when-column stays narrow instead of
-#     carrying a day name and seconds.
-#   * the header fields are read positionally from their own lines, so a session
-#     name containing a space or "desc=" cannot shift them.
-sched_rows() {
-  local rows id when ln pane target desc seen
-  if rows=$(atq -q "$SCHED_QUEUE" -o '%Y-%m-%d %H:%M' 2>/dev/null); then
-    rows=$(printf '%s\n' "$rows" | sort -k2)
-  else
-    rows=$(atq -q "$SCHED_QUEUE" 2>/dev/null | while IFS=$'\t' read -r id when; do
-      [ -n "$id" ] || continue
-      # BSD `date -j -f` parses the ctime string; keep the original on the off
-      # chance a future BSD atq changes format, so a row is never dropped.
-      when=$(date -j -f '%a %b %d %T %Y' "$when" '+%Y-%m-%d %H:%M' 2>/dev/null || printf '%s' "$when")
-      printf '%s\t%s\n' "$id" "$when"
-    done | sort -k2)
-  fi
-  while IFS=$'\t' read -r id when; do
-    [ -n "$id" ] || continue
-    when="${when%" $SCHED_QUEUE "*}"     # drop the trailing "<queue> <user>"
-    pane="" target="" desc="" seen=0
-    while IFS= read -r ln; do
-      # at -c replays the whole submitting environment first, and one of those
-      # values could contain a line that looks like a header field.  Only trust
-      # what follows our own marker, and stop at the first line that is not one.
-      if [ "$seen" = 0 ]; then
-        case "$ln" in '# imux:v1 '*) seen=1 ;; esac
-        continue
-      fi
-      case "$ln" in
-        '# imux-pane: '*)   pane="${ln#\# imux-pane: }" ;;
-        '# imux-target: '*) target="${ln#\# imux-target: }" ;;
-        '# imux-desc: '*)   desc="${ln#\# imux-desc: }" ;;
-        *) break ;;
-      esac
-    done < <(at -c "$id" 2>/dev/null)
-    printf '%s\n' "$id$US$when$US${target:-?}$US${pane:-?}$US${desc:-?}"
-  done < <(printf '%s\n' "$rows")
-}
-
-if [ "${1:-}" = "--send-at" ] || [ "${1:-}" = "--send-in" ]; then
-  set +e
-  _mode="$1"; _when="${2:-}"; _target="${3:-}"; shift 3 2>/dev/null || true
-  _keys="$*"
-  if [ -z "$_when" ] || [ -z "$_target" ] || [ -z "$_keys" ]; then
-    echo "interdimux: usage: $_mode <when> <target> <command...>" >&2
-    exit 2
-  fi
-  # '.' is the pane this runs in, and only TMUX_PANE says which: from cron, an
-  # ssh command or env -i there is none, and "no such target" would not say why.
-  if [ "$_target" = "." ] && [ -z "${TMUX_PANE:-}" ]; then
-    echo "interdimux: '.' means the current pane, but TMUX_PANE is not set (run this from inside a tmux pane, or name the target)" >&2
-    exit 1
-  fi
-  if ! sched_resolve "$_target"; then
-    echo "interdimux: no such target: $_target" >&2
-    exit 1
-  fi
-
-  # Sub-minute delays: at cannot express them (it truncates the seconds field),
-  # but tmux can.  Caveat, verified: a pending run-shell -d does NOT keep the
-  # server alive — if the last session closes, the job is lost silently.
-  if [ "$_mode" = "--send-in" ] && [[ "$_when" =~ ^[0-9]+$ ]] && [ "$_when" -lt 60 ]; then
-    # POSIX quoting: tmux hands this to /bin/sh, which is dash here.  See shq().
-    # sh_send_input quotes the keys itself, after protecting a trailing ';', and
-    # decides from the text AS TYPED whether it is a key to press (C-#, say).
-    shq "$SCHED_SOCK"; _q_sock="$REPLY"
-    shq "$SCHED_PANE"; _q_pane="$REPLY"
-    sh_send_input "tmux -S $_q_sock" "$_q_pane" "$_keys"
-    # run-shell FORMAT-EXPANDS its argument before /bin/sh ever sees it, so a
-    # '#H' or '#{...}' in the user's command is substituted by tmux — verified:
-    # "echo host-is-#H" arrived as "echo host-is-krootabulon".  Worse, the
-    # substituted text is not re-quoted, so a pane title could inject shell.
-    # '##' is tmux's escape for a literal '#'; applied to the whole command, so
-    # a '#' in the socket path is not expanded either.
-    tmux run-shell -b -d "$_when" "${REPLY//\#/##}" \
-      2>/dev/null \
-      && echo "interdimux: in ${_when}s -> $SCHED_LABEL ($SCHED_PANE)  [tmux timer; lost if the server exits]" \
-      || { echo "interdimux: could not schedule" >&2; exit 1; }
-    exit 0
-  fi
-
-  command -v at >/dev/null 2>&1 || { echo "interdimux: 'at' is not installed" >&2; exit 1; }
-  case "$_mode" in
-    --send-in) _spec="now + $_when minutes"; [[ "$_when" =~ ^[0-9]+$ ]] && _spec="now + $(( (_when + 59) / 60 )) minutes" ;;
-    *)         _spec="$_when" ;;
-  esac
-  # Submit from / : at bakes the submitting directory into the job and aborts
-  # with "Execution directory inaccessible" if it is gone by firing time.
-  # $_mflag is "-M" only where at accepts it (GNU); empty on BSD/macOS, so it
-  # word-splits away and never reaches at as a bogus argument.
-  _mflag=$(at_mail_flag)
-  # 2>/dev/null on the WRITER, and it is load-bearing.  at parses its time from
-  # argv and exits before ever reading stdin, so a bad spec closes this pipe
-  # under the body.  Where SIGPIPE is at its default the writer dies silently;
-  # where SIGPIPE is IGNORED (a systemd unit -- IgnoreSIGPIPE defaults to true --
-  # or a GitHub Actions step) it does not die, and bash prints "printf: write
-  # error: Broken pipe" once per failed write: measured 49,917 lines.  Those go
-  # to OUR stderr, not into $_out, and they arrive while the pipeline is still
-  # running -- ahead of the `printf '%s\n' "$_out" >&2` below.  The caller picks
-  # the first non-"interdimux:" line as the message to show, so without this the
-  # schedule dialog reports a truncated path instead of at's "syntax error.
-  # Last token seen: ...".  The body is pure printf; it has no other stderr.
-  _out=$(cd / && sched_job_body "$SCHED_PANE" "$SCHED_SOCK" "$SCHED_SRVPID" "$SCHED_LABEL" "$_keys" 2>/dev/null \
-         | at $_mflag -q "$SCHED_QUEUE" $_spec 2>&1)
-  if [ $? -ne 0 ]; then
-    printf '%s\n' "$_out" >&2
-    echo "interdimux: at rejected the time spec '$_spec'" >&2
-    exit 1
-  fi
-  printf 'interdimux: %s -> %s (%s)\n' \
-    "$(printf '%s' "$_out" | sed -n 's/^job \([0-9]*\) at \(.*\)$/job \1 at \2/p' | head -1)" \
-    "$SCHED_LABEL" "$SCHED_PANE"
-  # The job is QUEUED, not guaranteed to fire: with at's job-runner inactive
-  # (atd on Linux; atrun on macOS, which ships disabled) it sits in the queue
-  # forever.  Warn, never fail — the success line above stays on stdout so the
-  # dashboard and tests still parse it, and a queued job is a real job; refusing
-  # a submit on a check we cannot make authoritative on every host would be worse
-  # than the heads-up.
-  if [ "$(at_daemon_state)" = down ]; then
-    echo "interdimux: heads-up — at's job-runner is not active, so this will queue but not fire." >&2
-    echo "  enable it: $(at_enable_hint)" >&2
-  fi
-  exit 0
-fi
-
-if [ "${1:-}" = "--sched-list" ]; then
-  set +e
-  command -v atq >/dev/null 2>&1 || { echo "interdimux: 'at' is not installed" >&2; exit 1; }
-  _n=0
-  while IFS="$US" read -r _id _when _tgt _pane _desc; do
-    [ -n "$_id" ] || continue
-    _n=$((_n + 1))
-    printf '%-6s %-18s %-22s %-6s %s\n' "$_id" "$_when" "$_tgt" "$_pane" "$_desc"
-  done < <(sched_rows)
-  [ "$_n" -eq 0 ] && echo "interdimux: no scheduled keys"
-  exit 0
-fi
-
-if [ "${1:-}" = "--sched-cancel" ]; then
-  set +e
-  _id="${2:-}"
-  [ -n "$_id" ] || { echo "interdimux: usage: --sched-cancel <id>" >&2; exit 2; }
-  # Only ever cancel jobs from our own queue, so a mistyped id cannot delete
-  # one of the user's unrelated at jobs.
-  if ! atq -q "$SCHED_QUEUE" 2>/dev/null | awk '{print $1}' | grep -qx "$_id"; then
-    echo "interdimux: no scheduled job $_id (see --sched-list)" >&2
-    exit 1
-  fi
-  atrm "$_id" 2>/dev/null && echo "interdimux: cancelled job $_id"
-  exit 0
-fi
 
 # ---------------------------------------------------------------------------
 # Dialogs (drawn on the popup tty while fzf is suspended by execute)
@@ -7403,171 +7408,6 @@ aw_can_r() {
   done
 }
 
-# How many agents need you -- a pane whose state is `approve` or `input` -- in
-# REPLY: the dashboard's Agents entry.  Counted per PANE, so an agent counts
-# once however many rows show it: a window row repeats its active pane's, and
-# `list-panes -a` prints a pane once for every session that holds its window
-# -- a session group (`tmux new -t work`) or a linked window counted one agent
-# two or three times (review R06).
-#
-# The state is agent_state_r's, the function the rows are drawn with, over the
-# inputs the navigator's batched query gives them.  Only those, for prefix+g's
-# sake: ONE tmux call (a list-panes of id, pid, current command, title and the
-# published options), the registry read, and no rendering.  The command is
-# resolved as the rows resolve it (resolve_command) only where the state can
-# depend on it:
-#   * an interpreter (node, nodejs, python*), because the agent is named by
-#     the script it runs: `node .../bin/codex` is codex, and codex titles say
-#     `approve`;
-#   * a pane Claude's registry or a published option speaks for, because that
-#     state shows only on a row that is not an idle shell -- and a wrapper
-#     script (`sh ./my-agent`, see the README) is a shell to tmux's
-#     #{pane_current_command}.
-# Anywhere else #{pane_current_command} stands in, by its basename: argv0's
-# basename is what names the row, and tmux strips the directory only from an
-# argv0 that starts with `/` -- `./codex` and `target/release/codex` came
-# through whole, found no rules, and a waiting agent went uncounted (review
-# R12).  (The one difference left is a stopped agent in the background of a
-# shell at its prompt, whose last title the row reads.)
-#
-# Most panes are decided before agent_state_r, the expensive part (review R08:
-# prefix+g opened 30-47 ms later on a server of ssh panes):
-#   * a registry record that applies and says anything but approve or input:
-#     the registry is the first source that speaks, so nothing else can make
-#     that pane wait;
-#   * a pane with neither a record nor an option: only a title RULE can give
-#     it a state, so only an app one of whose rules says approve or input is
-#     looked at (AW_CAN).  ssh, docker, kubectl and the other remote shells
-#     have title rules, none with a state, and Claude's say only `working`:
-#     they used to cost a full title parse each, for a count they could never
-#     reach.  AW_CAN needs no rule index (DEFAULT_AW_CAN, and the user's own
-#     rules), so a list of shells and remote panes never loads the rules.
-#
-# Sessions @interdimux-hide keeps out of the navigator are left out here too,
-# so the entry never promises an agent the navigator will not show.  The
-# per-pane dedupe comes after that filter, so a pane linked into a hidden and
-# a visible session still counts, from its visible line.
-#
-# The same call also answers, last, where the pressing client is: AW_CLIENT is
-# "<height> <width> <session>" -- the session for the hide rule (the current
-# one is never hidden), the size for the dashboard, which would otherwise have
-# spent a round-trip of its own on it.  Empty when that lookup failed (a stale
-# target: the one command here that can, hence last) or was never made.
-#
-# --agents and --agent-next walk the panes with this too, through two globals:
-#   AW_WANT  the states that count, " approve input " for the dashboard; empty,
-#            every agent pane (AS_AGENT).  The two shortcuts above hold only
-#            while it names nothing but approve and input: past that, every
-#            pane is resolved and asked, as its row is.
-#   AW_LIST  set: each pane that counts is also handed to aw_row, which those
-#            modes define below --list, so that a list never parses it.  The
-#            RS line then also brings the host names (CUR_HOST, CUR_HOST_SHORT),
-#            which the description of a row is checked against (row_desc_r).
-AW_CLIENT="" AW_WANT=' approve input ' AW_LIST=""
-agents_waiting_r() {
-  REPLY=0 AW_CLIENT=""
-  [ "$AGENT_ON" = 1 ] && { [ "$AGENT_STATE" = on ] || [ -z "$AW_WANT" ]; } || return 0
-  utf8_ctype_r   # the rows' character type (see gather_targets)
-  [ -z "$REPLY" ] || local LC_CTYPE="$REPLY"
-  REPLY=0
-  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e' mark=$'\x1e' a0 b v fast=1 wi="" pi=""
-  local -a f=() lines=()
-  local -A CLAUDE_BY_PANE=() aw_seen=()
-  local AS_STATE_ONLY=1   # see agent_state_r: the count wants the state alone
-  v="${AW_WANT// approve / }"; v="${v// input / }"
-  [ -n "$AW_WANT" ] && [[ "$v" != *[!\ ]* ]] || fast=0
-  [ "$fast" = 1 ] && [ -z "$AW_LIST" ] || AS_STATE_ONLY=""
-  title_ruleset
-  state_optfmt_r
-  fmt="#{session_name}${US}#{pane_id}${US}#{pane_pid}${US}#{pane_current_command}${US}#{pane_title}${US}$REPLY"
-  [ -z "$AW_LIST" ] || { fmt="#{window_index}${US}#{pane_index}${US}$fmt"; mark+="#{host}${US}#{host_short}"; }
-  all=$(tmux list-panes -a -F "$fmt" \; display-message -p "$mark" \; \
-          display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} \
-          '#{client_height} #{client_width} #S' 2>/dev/null)
-  # Cut at the LAST RS (a command name may hold one), from the end: a
-  # ${x#*pat} would be quadratic in its offset.
-  rest="${all%"$rs"*}"
-  if [ "$rest" != "$all" ]; then
-    AW_CLIENT="${all:${#rest}+1}"
-    if [ -n "$AW_LIST" ]; then
-      v="${AW_CLIENT%%$'\n'*}"; AW_CLIENT="${AW_CLIENT:${#v}}"
-      CUR_HOST="${v%%"$US"*}" CUR_HOST_SHORT="${v#*"$US"}"
-    fi
-    AW_CLIENT="${AW_CLIENT#$'\n'}"; all="$rest"
-    if [[ "$AW_CLIENT" =~ ^([0-9]*)\ ([0-9]*)\ (.*)$ ]]; then
-      cur="${BASH_REMATCH[3]}"   # a session with no client has no size, but has a name
-      [ -n "${BASH_REMATCH[1]}" ] && [ -n "${BASH_REMATCH[2]}" ] || AW_CLIENT=""
-    else
-      AW_CLIENT=""
-    fi
-  fi
-  [ -n "$all" ] || return 0
-  claude_registry_r
-  if [ -n "$CLAUDE_REG" ]; then
-    while IFS= read -r line; do
-      [[ "$line" == %*"$US"* ]] && CLAUDE_BY_PANE["${line%%"$US"*}"]="${line#*"$US"}"
-    done <<< "$CLAUDE_REG"
-  fi
-  set -f; IFS=$'\n'; lines=($all); unset IFS; set +f
-  for line in ${lines[@]+"${lines[@]}"}; do
-    # set -f per line: agent_state_r's option rules turn it back off.
-    set -f; IFS="$US"; f=($line$US); unset IFS; set +f   # the appended US: see gather_targets
-    [ -z "$AW_LIST" ] || { wi="${f[0]-}" pi="${f[1]-}"; f=("${f[@]:2}"); }
-    pane="${f[1]-}"
-    case "$pane" in %[0-9]*) ;; *) continue ;; esac
-    case "$pane" in %*[!0-9]*) continue ;; esac
-    if [ -n "${HIDE_PATTERNS:-}" ] && [ "${f[0]}" != "$cur" ]; then
-      set -f
-      for hp in $HIDE_PATTERNS; do
-        # shellcheck disable=SC2254  # the pattern is a glob by design
-        case "${f[0]}" in $hp) set +f; continue 2 ;; esac
-      done
-      set +f
-    fi
-    # One pane, one count, however many sessions show it.
-    [[ ${aw_seen[$pane]+x} ]] && continue
-    aw_seen[$pane]=1
-    # A line tmux cut short (see gather_targets) keeps its row, but its pid is
-    # never read.
-    pid="${f[2]-}"; [ "${#f[@]}" -eq 6 ] || pid=""
-    pcc="${f[3]-}" raw="${f[3]-}" res=0
-    a0="${pcc%% *}"; b="${a0##*/}"
-    # A record that applies (agent_state_r's test) and says anything but
-    # approve or input (AW_WANT) decides it: the registry speaks first.
-    v="${CLAUDE_BY_PANE[$pane]-}"
-    if [ -n "$v" ] && [ -n "$AW_WANT" ] && { [ -z "${v%%"$US"*}" ] || [ "${v%%"$US"*}" = "$pid" ]; }; then
-      v="${v#*"$US"}"
-      [[ "$AW_WANT" == *" ${v%%"$US"*} "* ]] || continue
-    fi
-    case "$b" in
-      ''|node|nodejs|python*) res=1 ;;
-      *) if [ "$fast" = 0 ] || [ -n "${CLAUDE_BY_PANE[$pane]-}" ] || [[ "${f[5]-}" == *[!$GS]* ]]; then res=1; fi ;;
-    esac
-    if [ "$res" = 1 ]; then
-      [ "$pt" = 1 ] || { [ "$SHOW_FULL_COMMAND" = on ] && build_process_table; pt=1; }
-      resolve_command "$pcc" "$pid"; raw="$REPLY"
-    else
-      # Neither a record nor an option: only the title can give it a state, and
-      # only through a title rule for its app that says approve or input.  Most
-      # panes (shells, editors, remote shells) have none, and are passed over
-      # here, before the call -- a bash function call is most of what a pane
-      # costs.  The app is named as agent_state_r names it: argv0's basename.
-      [ -n "${f[4]-}" ] || continue
-      [ -n "$AW_CAN" ] || aw_can_r
-      [[ "$AW_CAN" == *" ${b#-} "* || "$AW_CAN" == *" * "* ]] || continue
-    fi
-    agent_state_r "$raw" "$pid" "$pane" "${f[4]-}" "${f[5]-}" || continue
-    if [ -n "$AW_WANT" ]; then
-      [[ -n "$AS_STATE" && "$AW_WANT" == *" $AS_STATE "* ]] || continue
-    else
-      [ "$AS_AGENT" = 1 ] || continue
-    fi
-    n=$(( n + 1 ))
-    [ -z "$AW_LIST" ] || aw_row "$n" "$pane" "${f[0]}" "$wi" "$pi" "$raw"
-  done
-  REPLY="$n"
-}
-
 # _dlg_esc FD -- the rest of a key whose ESC input_dialog has just read from FD,
 # applied to its buffer (buf, cw and pos are its locals, as in _dlg_remeasure).
 # Returns non-zero to cancel the dialog: for a lone ESC -- nothing after it
@@ -8695,6 +8535,176 @@ fi
 # ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
+
+# How many agents need you -- a pane whose state is `approve` or `input` -- in
+# REPLY: the dashboard's Agents entry.  Counted per PANE, so an agent counts
+# once however many rows show it: a window row repeats its active pane's, and
+# `list-panes -a` prints a pane once for every session that holds its window
+# -- a session group (`tmux new -t work`) or a linked window counted one agent
+# two or three times (review R06).
+#
+# The state is agent_state_r's, the function the rows are drawn with, over the
+# inputs the navigator's batched query gives them.  Only those, for prefix+g's
+# sake: ONE tmux call (a list-panes of id, pid, current command, title and the
+# published options), the registry read, and no rendering.  The command is
+# resolved as the rows resolve it (resolve_command) only where the state can
+# depend on it:
+#   * an interpreter (node, nodejs, python*), because the agent is named by
+#     the script it runs: `node .../bin/codex` is codex, and codex titles say
+#     `approve`;
+#   * a pane Claude's registry or a published option speaks for, because that
+#     state shows only on a row that is not an idle shell -- and a wrapper
+#     script (`sh ./my-agent`, see the README) is a shell to tmux's
+#     #{pane_current_command}.
+# Anywhere else #{pane_current_command} stands in, by its basename: argv0's
+# basename is what names the row, and tmux strips the directory only from an
+# argv0 that starts with `/` -- `./codex` and `target/release/codex` came
+# through whole, found no rules, and a waiting agent went uncounted (review
+# R12).  (The one difference left is a stopped agent in the background of a
+# shell at its prompt, whose last title the row reads.)
+#
+# Most panes are decided before agent_state_r, the expensive part (review R08:
+# prefix+g opened 30-47 ms later on a server of ssh panes):
+#   * a registry record that applies and says anything but approve or input:
+#     the registry is the first source that speaks, so nothing else can make
+#     that pane wait;
+#   * a pane with neither a record nor an option: only a title RULE can give
+#     it a state, so only an app one of whose rules says approve or input is
+#     looked at (AW_CAN).  ssh, docker, kubectl and the other remote shells
+#     have title rules, none with a state, and Claude's say only `working`:
+#     they used to cost a full title parse each, for a count they could never
+#     reach.  AW_CAN needs no rule index (DEFAULT_AW_CAN, and the user's own
+#     rules), so a list of shells and remote panes never loads the rules.
+#
+# Sessions @interdimux-hide keeps out of the navigator are left out here too,
+# so the entry never promises an agent the navigator will not show.  The
+# per-pane dedupe comes after that filter, so a pane linked into a hidden and
+# a visible session still counts, from its visible line.
+#
+# The same call also answers, last, where the pressing client is: AW_CLIENT is
+# "<height> <width> <session>" -- the session for the hide rule (the current
+# one is never hidden), the size for the dashboard, which would otherwise have
+# spent a round-trip of its own on it.  Empty when that lookup failed (a stale
+# target: the one command here that can, hence last) or was never made.
+#
+# --agents and --agent-next walk the panes with this too, through two globals:
+#   AW_WANT  the states that count, " approve input " for the dashboard; empty,
+#            every agent pane (AS_AGENT).  The two shortcuts above hold only
+#            while it names nothing but approve and input: past that, every
+#            pane is resolved and asked, as its row is.
+#   AW_LIST  set: each pane that counts is also handed to aw_row, which those
+#            modes define below --list, so that a list never parses it.  The
+#            RS line then also brings the host names (CUR_HOST, CUR_HOST_SHORT),
+#            which the description of a row is checked against (row_desc_r).
+#
+# Here with the dashboard, not with the rest of the agent layer above --action,
+# for the same reason: only the dashboard and the agents' modes count, and
+# --action, the ctrl-o picker, --list and --jump parsed these ~8 KB on every
+# run while they sat up there.
+AW_CLIENT="" AW_WANT=' approve input ' AW_LIST=""
+agents_waiting_r() {
+  REPLY=0 AW_CLIENT=""
+  [ "$AGENT_ON" = 1 ] && { [ "$AGENT_STATE" = on ] || [ -z "$AW_WANT" ]; } || return 0
+  utf8_ctype_r   # the rows' character type (see gather_targets)
+  [ -z "$REPLY" ] || local LC_CTYPE="$REPLY"
+  REPLY=0
+  local fmt all rest cur="" line pane pid pcc raw res hp n=0 pt=0 rs=$'\x1e' mark=$'\x1e' a0 b v fast=1 wi="" pi=""
+  local -a f=() lines=()
+  local -A CLAUDE_BY_PANE=() aw_seen=()
+  local AS_STATE_ONLY=1   # see agent_state_r: the count wants the state alone
+  v="${AW_WANT// approve / }"; v="${v// input / }"
+  [ -n "$AW_WANT" ] && [[ "$v" != *[!\ ]* ]] || fast=0
+  [ "$fast" = 1 ] && [ -z "$AW_LIST" ] || AS_STATE_ONLY=""
+  title_ruleset
+  state_optfmt_r
+  fmt="#{session_name}${US}#{pane_id}${US}#{pane_pid}${US}#{pane_current_command}${US}#{pane_title}${US}$REPLY"
+  [ -z "$AW_LIST" ] || { fmt="#{window_index}${US}#{pane_index}${US}$fmt"; mark+="#{host}${US}#{host_short}"; }
+  all=$(tmux list-panes -a -F "$fmt" \; display-message -p "$mark" \; \
+          display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} \
+          '#{client_height} #{client_width} #S' 2>/dev/null)
+  # Cut at the LAST RS (a command name may hold one), from the end: a
+  # ${x#*pat} would be quadratic in its offset.
+  rest="${all%"$rs"*}"
+  if [ "$rest" != "$all" ]; then
+    AW_CLIENT="${all:${#rest}+1}"
+    if [ -n "$AW_LIST" ]; then
+      v="${AW_CLIENT%%$'\n'*}"; AW_CLIENT="${AW_CLIENT:${#v}}"
+      CUR_HOST="${v%%"$US"*}" CUR_HOST_SHORT="${v#*"$US"}"
+    fi
+    AW_CLIENT="${AW_CLIENT#$'\n'}"; all="$rest"
+    if [[ "$AW_CLIENT" =~ ^([0-9]*)\ ([0-9]*)\ (.*)$ ]]; then
+      cur="${BASH_REMATCH[3]}"   # a session with no client has no size, but has a name
+      [ -n "${BASH_REMATCH[1]}" ] && [ -n "${BASH_REMATCH[2]}" ] || AW_CLIENT=""
+    else
+      AW_CLIENT=""
+    fi
+  fi
+  [ -n "$all" ] || return 0
+  claude_registry_r
+  if [ -n "$CLAUDE_REG" ]; then
+    while IFS= read -r line; do
+      [[ "$line" == %*"$US"* ]] && CLAUDE_BY_PANE["${line%%"$US"*}"]="${line#*"$US"}"
+    done <<< "$CLAUDE_REG"
+  fi
+  set -f; IFS=$'\n'; lines=($all); unset IFS; set +f
+  for line in ${lines[@]+"${lines[@]}"}; do
+    # set -f per line: agent_state_r's option rules turn it back off.
+    set -f; IFS="$US"; f=($line$US); unset IFS; set +f   # the appended US: see gather_targets
+    [ -z "$AW_LIST" ] || { wi="${f[0]-}" pi="${f[1]-}"; f=("${f[@]:2}"); }
+    pane="${f[1]-}"
+    case "$pane" in %[0-9]*) ;; *) continue ;; esac
+    case "$pane" in %*[!0-9]*) continue ;; esac
+    if [ -n "${HIDE_PATTERNS:-}" ] && [ "${f[0]}" != "$cur" ]; then
+      set -f
+      for hp in $HIDE_PATTERNS; do
+        # shellcheck disable=SC2254  # the pattern is a glob by design
+        case "${f[0]}" in $hp) set +f; continue 2 ;; esac
+      done
+      set +f
+    fi
+    # One pane, one count, however many sessions show it.
+    [[ ${aw_seen[$pane]+x} ]] && continue
+    aw_seen[$pane]=1
+    # A line tmux cut short (see gather_targets) keeps its row, but its pid is
+    # never read.
+    pid="${f[2]-}"; [ "${#f[@]}" -eq 6 ] || pid=""
+    pcc="${f[3]-}" raw="${f[3]-}" res=0
+    a0="${pcc%% *}"; b="${a0##*/}"
+    # A record that applies (agent_state_r's test) and says anything but
+    # approve or input (AW_WANT) decides it: the registry speaks first.
+    v="${CLAUDE_BY_PANE[$pane]-}"
+    if [ -n "$v" ] && [ -n "$AW_WANT" ] && { [ -z "${v%%"$US"*}" ] || [ "${v%%"$US"*}" = "$pid" ]; }; then
+      v="${v#*"$US"}"
+      [[ "$AW_WANT" == *" ${v%%"$US"*} "* ]] || continue
+    fi
+    case "$b" in
+      ''|node|nodejs|python*) res=1 ;;
+      *) if [ "$fast" = 0 ] || [ -n "${CLAUDE_BY_PANE[$pane]-}" ] || [[ "${f[5]-}" == *[!$GS]* ]]; then res=1; fi ;;
+    esac
+    if [ "$res" = 1 ]; then
+      [ "$pt" = 1 ] || { [ "$SHOW_FULL_COMMAND" = on ] && build_process_table; pt=1; }
+      resolve_command "$pcc" "$pid"; raw="$REPLY"
+    else
+      # Neither a record nor an option: only the title can give it a state, and
+      # only through a title rule for its app that says approve or input.  Most
+      # panes (shells, editors, remote shells) have none, and are passed over
+      # here, before the call -- a bash function call is most of what a pane
+      # costs.  The app is named as agent_state_r names it: argv0's basename.
+      [ -n "${f[4]-}" ] || continue
+      [ -n "$AW_CAN" ] || aw_can_r
+      [[ "$AW_CAN" == *" ${b#-} "* || "$AW_CAN" == *" * "* ]] || continue
+    fi
+    agent_state_r "$raw" "$pid" "$pane" "${f[4]-}" "${f[5]-}" || continue
+    if [ -n "$AW_WANT" ]; then
+      [[ -n "$AS_STATE" && "$AW_WANT" == *" $AS_STATE "* ]] || continue
+    else
+      [ "$AS_AGENT" = 1 ] || continue
+    fi
+    n=$(( n + 1 ))
+    [ -z "$AW_LIST" ] || aw_row "$n" "$pane" "${f[0]}" "$wi" "$pi" "$raw"
+  done
+  REPLY="$n"
+}
 
 # The "who pressed the key" prefix for a `run-shell … --launch X` the dashboard
 # builds, in REPLY: "TMUX_PANE=%N INTERDIMUX_CLIENT=<client> ", either part
