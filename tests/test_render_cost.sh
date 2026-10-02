@@ -255,6 +255,13 @@ traced "--describe-create (every keystroke with no match)" "newproj" \
   bash -x "$SCRIPT" --describe-create newproj
 traced "--scope-prompt (ctrl-])" "name" \
   FZF_NTH=1 bash -x "$SCRIPT" --scope-prompt
+# ...which needs nothing at all, and answers before the preflight: parsing down
+# to where it used to sit cost it ~20 ms, for one word.
+if grep -q '^+ FZF_MINOR=0' "$TMPD/cb.trace"; then
+  report "--scope-prompt: answers before the preflight" fail
+else
+  report "--scope-prompt: answers before the preflight" pass
+fi
 traced "--session-name-for (the ctrl-o picker's badge)" "rc" \
   bash -x "$SCRIPT" --session-name-for "$(tmux -L "$SOCK" display-message -p -t '=rc:0' '#{pane_current_path}')"
 # The witness is real: a list does reach it.

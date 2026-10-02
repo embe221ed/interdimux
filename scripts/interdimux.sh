@@ -218,6 +218,31 @@ if [ -n "${INTERDIMUX_ERR_FILE:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Match-scope prompt (called by fzf change-nth:transform-prompt, >= 0.58)
+# ---------------------------------------------------------------------------
+#
+# Answered here, before the rest of the file is even parsed: it needs nothing
+# from it, and further down this callback paid ~20 ms of parsing to print a
+# word -- more with every line added above it.  (The navigator answers it
+# inline where fzf can; this is the fallback, see INLINE_CALLBACKS.)
+
+if [ "${1:-}" = "--scope-prompt" ]; then
+  # Every state the ctrl-] cycle can reach must have a label.  The fifth,
+  # "1,3" (identity + command, skipping the path), had none and fell through to
+  # a bare "❯ " -- indistinguishable from the unset state, so the one scope that
+  # is not self-evident was also the one the prompt would not name.
+  case "${FZF_NTH:-}" in
+    1)     echo 'name ❯ ' ;;
+    2)     echo 'path ❯ ' ;;
+    3)     echo 'cmd ❯ ' ;;
+    1,2,3) echo 'all ❯ ' ;;
+    1,3)   echo 'name+cmd ❯ ' ;;
+    *)     echo '❯ ' ;;
+  esac
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Key bindings (called once by interdimux.tmux at plugin load)
 # ---------------------------------------------------------------------------
 #
@@ -5305,6 +5330,223 @@ describe_create() {
   return 0
 }
 
+if [ "${1:-}" = "--create-from-query" ]; then
+  set +e
+  create_from_query "${2:-}" || {
+    imux_msg "could not create a session from '${2:-}'"
+    exit 1
+  }
+  exit 0
+fi
+
+if [ "${1:-}" = "--describe-create" ]; then
+  set +e
+  describe_create "${2:-}"
+  printf '%s\n' "$REPLY"
+  exit 0
+fi
+
+# The navigator's alt-enter (review UX-54), as the fzf action it runs: create
+# from the query in FZF_QUERY whatever it matches, or nothing at all when the
+# query names no session.  The bind already skips an empty query without a
+# process; this is for one that is only fzf syntax or blanks (`'`, `!`, `  `),
+# which the bar gives no create entry either, so the key does what the bar
+# says: nothing, with the navigator still open.  The action reads the query
+# from the environment again when it runs, never from this text, for the
+# quoting reason the raw-mode Enter gives.
+if [ "${1:-}" = "--create-key" ]; then
+  set +e
+  resolve_create_target "${FZF_QUERY:-}" name \
+    && printf '%s\n' "execute(bash '$SQ_SCRIPT' --create-from-query \"\$FZF_QUERY\")+abort"
+  exit 0
+fi
+
+if [ "${1:-}" = "--connect-dir" ]; then
+  set +e
+  cd_dir="${2:-}"
+  [ -n "$cd_dir" ] || { echo "interdimux: --connect-dir needs a directory" >&2; exit 1; }
+  [ -d "$cd_dir" ] || { echo "interdimux: no such directory: $cd_dir" >&2; exit 1; }
+  # Physical path, so it matches the finder output the dir picker produces
+  cd_dir=$(cd "$cd_dir" 2>/dev/null && pwd -P) || exit 1
+  record_dir_use "$cd_dir"
+  connect_dir "$cd_dir" || exit 1
+  exit 0
+fi
+
+if [ "${1:-}" = "--session-name-for" ]; then
+  set +e
+  resolve_session_name "$2"
+  echo
+  exit 0
+fi
+
+# Display cells for a string, ignoring SGR escapes.  Sets REPLY.  The dialogs'
+# measure, defined ahead of them because the hint bar's create entry -- a
+# callback, see below -- measures a typed name with it.
+#
+# Bash measures CHARACTERS (${#s}), and the dialogs sized themselves with that:
+# a session named with 26 CJK characters produced a title 87 cells wide inside a
+# 66-cell box, obliterating the right border (measured with tmux's own
+# #{cursor_x}).  The list has had a proper measurement since the Rust core; the
+# dialogs had not.
+#
+# Deliberately CONSERVATIVE rather than exact, because the two errors are not
+# symmetric: over-counting makes the box a little wide, under-counting lets text
+# run off it.  Per character —
+#
+#   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
+#   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
+#   combining marks (Latin, symbol, kana), ZWJ,   0
+#     U+FE00-FE0E, medial and final Hangul
+#     jamo, the Hangul filler U+3164
+#   everything else                               1
+#
+# so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
+# 2 — wide, never narrow.  A regional indicator is 1: tmux draws one alone in
+# one cell and a pair (a flag) in two, so a flag is exact too.  Exact cluster
+# handling lives in the Rust core, where it is on the path that needs it, and
+# the input field's per-character rules in _dlg_cw.
+#
+# "Wide" and "0" are what tmux draws (measured on 3.7b, every code point of
+# U+1100-11FF, U+2000-30FF, U+FE00-FE0F and U+1F000-1FAFF, against
+# #{cursor_x}).  The medial and final jamo -- U+1160-11FF, and the assigned
+# parts of U+D7B0-D7FF (the unassigned D7C7-D7CA and D7FC-D7FF draw one) --
+# are 0 on any cell: tmux joins them to the cell before, the way it joins a
+# mark, and one it cannot join is dropped.  That is how macOS stores a Korean
+# name (NFD, 한 as U+1112 U+1161 U+11AB), one wide cell a syllable; counted one
+# each, the field's cursor drifted two cells right per syllable.  Below
+# U+2E80 that is a scattering of emoji -- ✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ and ~60 more -- which
+# counted 1 for the 2 tmux draws, so three of them typed into Send keys left
+# the cursor three cells short, and a long command with a few in it ran
+# through the border.  U+1F000-1FAFF stays wide throughout, bar the regional
+# indicators: its text-style symbols (🖥 🛠) are drawn narrow, but they come
+# with a U+FE0F nearly always, and a range with holes would under-count every
+# emoji a newer Unicode adds.
+#
+# `printf %d "'<char>"` yields the codepoint with no fork; the dialogs are short
+# strings on the action path, so per-character work is affordable here.
+dlg_width() {
+  # `len` is assigned separately for the same reason dlg_fit does it: bash
+  # expands every word of a `local` command before performing any of its
+  # assignments, so ${#s} on this line would read the OUTER s.
+  local s="$1" i=0 n=0 ch cp j len
+  len=${#s}
+  while [ "$i" -lt "$len" ]; do
+    ch="${s:i:1}"
+    if [ "$ch" = $'\033' ]; then
+      j=$(( i + 1 ))
+      while [ "$j" -lt "$len" ] && [[ "${s:j:1}" != [a-zA-Z] ]]; do j=$(( j + 1 )); done
+      i=$(( j + 1 ))
+      continue
+    fi
+    printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
+    if (( cp < 0x300 )); then
+      n=$(( n + 1 ))
+    elif (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || (cp >= 0xfe00 && cp <= 0xfe0e) \
+         || (cp >= 0x20d0 && cp <= 0x20f0) || (cp >= 0x302a && cp <= 0x302d) \
+         || cp == 0x3099 || cp == 0x309a || (cp >= 0x1160 && cp <= 0x11ff) \
+         || (cp >= 0xd7b0 && cp <= 0xd7c6) || (cp >= 0xd7cb && cp <= 0xd7fb) || cp == 0x3164 )); then
+      :
+    elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
+         || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
+         || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) \
+         || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) \
+         || (cp >= 0x1f000 && cp <= 0x1f1e5) || (cp >= 0x1f200 && cp <= 0x1f2ff) \
+         || (cp >= 0x20000 && cp <= 0x3fffd) )); then
+      n=$(( n + 2 ))
+    elif (( cp >= 0x231a && cp <= 0x2b55 && ( cp <= 0x231b || cp == 0x2329 || cp == 0x232a \
+         || (cp >= 0x23e9 && cp <= 0x23ec) || cp == 0x23f0 || cp == 0x23f3 || cp == 0x25fd \
+         || cp == 0x25fe || cp == 0x2614 || cp == 0x2615 || cp == 0x261d \
+         || (cp >= 0x2648 && cp <= 0x2653) || cp == 0x267f || cp == 0x2693 || cp == 0x26a1 \
+         || cp == 0x26aa || cp == 0x26ab || cp == 0x26bd || cp == 0x26be || cp == 0x26c4 \
+         || cp == 0x26c5 || cp == 0x26ce || cp == 0x26d4 || cp == 0x26ea || cp == 0x26f2 \
+         || cp == 0x26f3 || cp == 0x26f5 || cp == 0x26f9 || cp == 0x26fa || cp == 0x26fd \
+         || cp == 0x2705 || (cp >= 0x270a && cp <= 0x270d) || cp == 0x2728 || cp == 0x274c \
+         || cp == 0x274e || (cp >= 0x2753 && cp <= 0x2755) || cp == 0x2757 \
+         || (cp >= 0x2795 && cp <= 0x2797) || cp == 0x27b0 || cp == 0x27bf || cp == 0x2b1b \
+         || cp == 0x2b1c || cp == 0x2b50 || cp == 0x2b55 ) )); then
+      n=$(( n + 2 ))
+    else
+      n=$(( n + 1 ))
+    fi
+    i=$(( i + 1 ))
+  done
+  REPLY="$n"
+}
+
+
+# The callbacks fzf runs while you type -- the hint bar, and above it the
+# create resolver and the ctrl-o badge -- sit before the scheduling modes and
+# the dialogs, which they never use: bash parses a script as it runs it, and
+# every line above a callback is parsed by each run of it (~35 us a KB).
+
+# ---------------------------------------------------------------------------
+# Dynamic hint bar (called by fzf focus:transform-footer)
+# ---------------------------------------------------------------------------
+#
+# The fallback path only: the navigator normally answers this with an inline
+# POSIX snippet over pre-packed env vars, because a focus bind fires on every
+# cursor move and re-exec'ing this script there cost ~17 ms a move.  This
+# handler is what runs on fzf too old for --with-shell, or when the user
+# supplied their own --with-shell in @interdimux-fzf-opts.
+#
+# It is the more CORRECT of the two by construction — being a real child it sees
+# the live FZF_COLUMNS and FZF_PREVIEW_COLUMNS, so it re-tiers on anything.  The
+# inline snippet reads the same two variables to stay level with it.
+
+if [ "${1:-}" = "--footer-for" ]; then
+  # Zero matches: Enter creates a session, so the bar announces that instead of
+  # a row's hints -- exactly what the navigator's inline dispatcher prints there
+  # (it runs --describe-create), so the two paths cannot disagree.  fzf exports
+  # the count and the query from 0.46; below that this cannot know, and the bar
+  # stays the generic one.
+  if [ "${FZF_MATCH_COUNT:-}" = 0 ]; then
+    set +e
+    describe_create "${FZF_QUERY:-}"
+    printf '%s\n' "$REPLY"
+    exit 0
+  fi
+  spec="${2:-}"
+  spec="${spec%%	*}"
+  hint_set "${spec%%:*}"
+  # A typed query with rows matching: alt-enter would create from it, and the
+  # bar says what, after the row's own hints (review UX-54).  Those get the
+  # width that is left, dropping entries by their usual priority; the create
+  # entry goes only when it does not fit on its own.  From fzf 0.63, where the
+  # navigator runs this in the background on every keystroke (see _hint_bind);
+  # below that nothing asks on each keystroke, so the name would go stale.
+  if [ -n "${FZF_QUERY:-}" ] && fzf_ge 63; then
+    set +e
+    create_key_hint_r "$FZF_QUERY"
+    _ck="$REPLY" _ckw="$REPLY_W"
+    hint_cols; _w="$REPLY"
+    if [ -n "$_ck" ] && [ "$_ckw" -le "$_w" ]; then
+      hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+      hint_pick $(( _w - _ckw - 2 )) "$REPLY"
+      if [ -n "$REPLY" ]; then REPLY+="  $_ck"; else REPLY="$_ck"; fi
+      printf '%s\n' "$REPLY"
+      exit 0
+    fi
+  fi
+  hint_bar_r ${HINT_SET[@]+"${HINT_SET[@]}"}
+  # Nothing, not a bare newline: an EMPTY transform removes the footer section
+  # and the list reflows into the row, where "\n" leaves a blank bar drawn.
+  [ -n "$REPLY" ] && printf '%s\n' "$REPLY"
+  exit 0
+fi
+
+# The packed width ladder for one row type ("W:line|W:line|…|0:") — what the
+# navigator exports for its inline snippet.  This exists so the tests can drive
+# that snippet with exactly the environment the navigator would hand it, rather
+# than a hand-copied duplicate; a duplicate is precisely what stopped matching
+# the last time this pair drifted.
+if [ "${1:-}" = "--hint-ladder" ]; then
+  hint_set "${2:-}"
+  hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+  printf '%s' "$REPLY"
+  exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # Scheduled keys — send a command to a pane at a future time
 # ---------------------------------------------------------------------------
@@ -5651,56 +5893,6 @@ if [ "${1:-}" = "--sched-cancel" ]; then
   exit 0
 fi
 
-if [ "${1:-}" = "--create-from-query" ]; then
-  set +e
-  create_from_query "${2:-}" || {
-    imux_msg "could not create a session from '${2:-}'"
-    exit 1
-  }
-  exit 0
-fi
-
-if [ "${1:-}" = "--describe-create" ]; then
-  set +e
-  describe_create "${2:-}"
-  printf '%s\n' "$REPLY"
-  exit 0
-fi
-
-# The navigator's alt-enter (review UX-54), as the fzf action it runs: create
-# from the query in FZF_QUERY whatever it matches, or nothing at all when the
-# query names no session.  The bind already skips an empty query without a
-# process; this is for one that is only fzf syntax or blanks (`'`, `!`, `  `),
-# which the bar gives no create entry either, so the key does what the bar
-# says: nothing, with the navigator still open.  The action reads the query
-# from the environment again when it runs, never from this text, for the
-# quoting reason the raw-mode Enter gives.
-if [ "${1:-}" = "--create-key" ]; then
-  set +e
-  resolve_create_target "${FZF_QUERY:-}" name \
-    && printf '%s\n' "execute(bash '$SQ_SCRIPT' --create-from-query \"\$FZF_QUERY\")+abort"
-  exit 0
-fi
-
-if [ "${1:-}" = "--connect-dir" ]; then
-  set +e
-  cd_dir="${2:-}"
-  [ -n "$cd_dir" ] || { echo "interdimux: --connect-dir needs a directory" >&2; exit 1; }
-  [ -d "$cd_dir" ] || { echo "interdimux: no such directory: $cd_dir" >&2; exit 1; }
-  # Physical path, so it matches the finder output the dir picker produces
-  cd_dir=$(cd "$cd_dir" 2>/dev/null && pwd -P) || exit 1
-  record_dir_use "$cd_dir"
-  connect_dir "$cd_dir" || exit 1
-  exit 0
-fi
-
-if [ "${1:-}" = "--session-name-for" ]; then
-  set +e
-  resolve_session_name "$2"
-  echo
-  exit 0
-fi
-
 # ---------------------------------------------------------------------------
 # Dialogs (drawn on the popup tty while fzf is suspended by execute)
 # ---------------------------------------------------------------------------
@@ -5796,98 +5988,6 @@ popup_accent() {
   # the most recently active client, and on any other client -- one with no
   # popup open -- a display-popup without -E OPENS a shell popup and blocks.
   tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -b "$lines" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
-}
-
-# Display cells for a string, ignoring SGR escapes.  Sets REPLY.
-#
-# Bash measures CHARACTERS (${#s}), and the dialogs sized themselves with that:
-# a session named with 26 CJK characters produced a title 87 cells wide inside a
-# 66-cell box, obliterating the right border (measured with tmux's own
-# #{cursor_x}).  The list has had a proper measurement since the Rust core; the
-# dialogs had not.
-#
-# Deliberately CONSERVATIVE rather than exact, because the two errors are not
-# symmetric: over-counting makes the box a little wide, under-counting lets text
-# run off it.  Per character —
-#
-#   wide ranges (CJK, Hangul, emoji, fullwidth)   2   exact
-#   U+FE0F emoji presentation                     1   exact for base+VS16 = 2
-#   combining marks (Latin, symbol, kana), ZWJ,   0
-#     U+FE00-FE0E, medial and final Hangul
-#     jamo, the Hangul filler U+3164
-#   everything else                               1
-#
-# so ❤️ and 日本 come out exact, while a ZWJ sequence like 👨‍💻 counts 4 instead of
-# 2 — wide, never narrow.  A regional indicator is 1: tmux draws one alone in
-# one cell and a pair (a flag) in two, so a flag is exact too.  Exact cluster
-# handling lives in the Rust core, where it is on the path that needs it, and
-# the input field's per-character rules in _dlg_cw.
-#
-# "Wide" and "0" are what tmux draws (measured on 3.7b, every code point of
-# U+1100-11FF, U+2000-30FF, U+FE00-FE0F and U+1F000-1FAFF, against
-# #{cursor_x}).  The medial and final jamo -- U+1160-11FF, and the assigned
-# parts of U+D7B0-D7FF (the unassigned D7C7-D7CA and D7FC-D7FF draw one) --
-# are 0 on any cell: tmux joins them to the cell before, the way it joins a
-# mark, and one it cannot join is dropped.  That is how macOS stores a Korean
-# name (NFD, 한 as U+1112 U+1161 U+11AB), one wide cell a syllable; counted one
-# each, the field's cursor drifted two cells right per syllable.  Below
-# U+2E80 that is a scattering of emoji -- ✅ ❌ ⭐ ⚡ ☕ ⌛ ⏰ and ~60 more -- which
-# counted 1 for the 2 tmux draws, so three of them typed into Send keys left
-# the cursor three cells short, and a long command with a few in it ran
-# through the border.  U+1F000-1FAFF stays wide throughout, bar the regional
-# indicators: its text-style symbols (🖥 🛠) are drawn narrow, but they come
-# with a U+FE0F nearly always, and a range with holes would under-count every
-# emoji a newer Unicode adds.
-#
-# `printf %d "'<char>"` yields the codepoint with no fork; the dialogs are short
-# strings on the action path, so per-character work is affordable here.
-dlg_width() {
-  # `len` is assigned separately for the same reason dlg_fit does it: bash
-  # expands every word of a `local` command before performing any of its
-  # assignments, so ${#s} on this line would read the OUTER s.
-  local s="$1" i=0 n=0 ch cp j len
-  len=${#s}
-  while [ "$i" -lt "$len" ]; do
-    ch="${s:i:1}"
-    if [ "$ch" = $'\033' ]; then
-      j=$(( i + 1 ))
-      while [ "$j" -lt "$len" ] && [[ "${s:j:1}" != [a-zA-Z] ]]; do j=$(( j + 1 )); done
-      i=$(( j + 1 ))
-      continue
-    fi
-    printf -v cp '%d' "'$ch" 2>/dev/null || cp=63
-    if (( cp < 0x300 )); then
-      n=$(( n + 1 ))
-    elif (( (cp >= 0x300 && cp <= 0x36f) || cp == 0x200d || (cp >= 0xfe00 && cp <= 0xfe0e) \
-         || (cp >= 0x20d0 && cp <= 0x20f0) || (cp >= 0x302a && cp <= 0x302d) \
-         || cp == 0x3099 || cp == 0x309a || (cp >= 0x1160 && cp <= 0x11ff) \
-         || (cp >= 0xd7b0 && cp <= 0xd7c6) || (cp >= 0xd7cb && cp <= 0xd7fb) || cp == 0x3164 )); then
-      :
-    elif (( (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) \
-         || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) \
-         || (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) \
-         || (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) \
-         || (cp >= 0x1f000 && cp <= 0x1f1e5) || (cp >= 0x1f200 && cp <= 0x1f2ff) \
-         || (cp >= 0x20000 && cp <= 0x3fffd) )); then
-      n=$(( n + 2 ))
-    elif (( cp >= 0x231a && cp <= 0x2b55 && ( cp <= 0x231b || cp == 0x2329 || cp == 0x232a \
-         || (cp >= 0x23e9 && cp <= 0x23ec) || cp == 0x23f0 || cp == 0x23f3 || cp == 0x25fd \
-         || cp == 0x25fe || cp == 0x2614 || cp == 0x2615 || cp == 0x261d \
-         || (cp >= 0x2648 && cp <= 0x2653) || cp == 0x267f || cp == 0x2693 || cp == 0x26a1 \
-         || cp == 0x26aa || cp == 0x26ab || cp == 0x26bd || cp == 0x26be || cp == 0x26c4 \
-         || cp == 0x26c5 || cp == 0x26ce || cp == 0x26d4 || cp == 0x26ea || cp == 0x26f2 \
-         || cp == 0x26f3 || cp == 0x26f5 || cp == 0x26f9 || cp == 0x26fa || cp == 0x26fd \
-         || cp == 0x2705 || (cp >= 0x270a && cp <= 0x270d) || cp == 0x2728 || cp == 0x274c \
-         || cp == 0x274e || (cp >= 0x2753 && cp <= 0x2755) || cp == 0x2757 \
-         || (cp >= 0x2795 && cp <= 0x2797) || cp == 0x27b0 || cp == 0x27bf || cp == 0x2b1b \
-         || cp == 0x2b1c || cp == 0x2b50 || cp == 0x2b55 ) )); then
-      n=$(( n + 2 ))
-    else
-      n=$(( n + 1 ))
-    fi
-    i=$(( i + 1 ))
-  done
-  REPLY="$n"
 }
 
 # Truncate a PRE-COLOURED string to a visible column budget, keeping its escape
@@ -6387,96 +6487,9 @@ info_flash() {
   dialog_close
 }
 
-# ---------------------------------------------------------------------------
-# Dynamic hint bar (called by fzf focus:transform-footer)
-# ---------------------------------------------------------------------------
-#
-# The fallback path only: the navigator normally answers this with an inline
-# POSIX snippet over pre-packed env vars, because a focus bind fires on every
-# cursor move and re-exec'ing this script there cost ~17 ms a move.  This
-# handler is what runs on fzf too old for --with-shell, or when the user
-# supplied their own --with-shell in @interdimux-fzf-opts.
-#
-# It is the more CORRECT of the two by construction — being a real child it sees
-# the live FZF_COLUMNS and FZF_PREVIEW_COLUMNS, so it re-tiers on anything.  The
-# inline snippet reads the same two variables to stay level with it.
-
-if [ "${1:-}" = "--footer-for" ]; then
-  # Zero matches: Enter creates a session, so the bar announces that instead of
-  # a row's hints -- exactly what the navigator's inline dispatcher prints there
-  # (it runs --describe-create), so the two paths cannot disagree.  fzf exports
-  # the count and the query from 0.46; below that this cannot know, and the bar
-  # stays the generic one.
-  if [ "${FZF_MATCH_COUNT:-}" = 0 ]; then
-    set +e
-    describe_create "${FZF_QUERY:-}"
-    printf '%s\n' "$REPLY"
-    exit 0
-  fi
-  spec="${2:-}"
-  spec="${spec%%	*}"
-  hint_set "${spec%%:*}"
-  # A typed query with rows matching: alt-enter would create from it, and the
-  # bar says what, after the row's own hints (review UX-54).  Those get the
-  # width that is left, dropping entries by their usual priority; the create
-  # entry goes only when it does not fit on its own.  From fzf 0.63, where the
-  # navigator runs this in the background on every keystroke (see _hint_bind);
-  # below that nothing asks on each keystroke, so the name would go stale.
-  if [ -n "${FZF_QUERY:-}" ] && fzf_ge 63; then
-    set +e
-    create_key_hint_r "$FZF_QUERY"
-    _ck="$REPLY" _ckw="$REPLY_W"
-    hint_cols; _w="$REPLY"
-    if [ -n "$_ck" ] && [ "$_ckw" -le "$_w" ]; then
-      hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
-      hint_pick $(( _w - _ckw - 2 )) "$REPLY"
-      if [ -n "$REPLY" ]; then REPLY+="  $_ck"; else REPLY="$_ck"; fi
-      printf '%s\n' "$REPLY"
-      exit 0
-    fi
-  fi
-  hint_bar_r ${HINT_SET[@]+"${HINT_SET[@]}"}
-  # Nothing, not a bare newline: an EMPTY transform removes the footer section
-  # and the list reflows into the row, where "\n" leaves a blank bar drawn.
-  [ -n "$REPLY" ] && printf '%s\n' "$REPLY"
-  exit 0
-fi
-
-# The packed width ladder for one row type ("W:line|W:line|…|0:") — what the
-# navigator exports for its inline snippet.  This exists so the tests can drive
-# that snippet with exactly the environment the navigator would hand it, rather
-# than a hand-copied duplicate; a duplicate is precisely what stopped matching
-# the last time this pair drifted.
-if [ "${1:-}" = "--hint-ladder" ]; then
-  hint_set "${2:-}"
-  hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
-  printf '%s' "$REPLY"
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Match-scope prompt (called by fzf change-nth:transform-prompt, >= 0.58)
-# ---------------------------------------------------------------------------
-
-if [ "${1:-}" = "--scope-prompt" ]; then
-  # Every state the ctrl-] cycle can reach must have a label.  The fifth,
-  # "1,3" (identity + command, skipping the path), had none and fell through to
-  # a bare "❯ " -- indistinguishable from the unset state, so the one scope that
-  # is not self-evident was also the one the prompt would not name.
-  case "${FZF_NTH:-}" in
-    1)     echo 'name ❯ ' ;;
-    2)     echo 'path ❯ ' ;;
-    3)     echo 'cmd ❯ ' ;;
-    1,2,3) echo 'all ❯ ' ;;
-    1,3)   echo 'name+cmd ❯ ' ;;
-    *)     echo '❯ ' ;;
-  esac
-  exit 0
-fi
-
 # The agent layer sits here -- below every callback fzf runs while you type or
-# move (--preview, --describe-create, --session-name-for, and --footer-for,
-# --hint-ladder and --scope-prompt just above), and above the first mode that
+# move (--preview, --describe-create, --session-name-for, --footer-for and
+# --hint-ladder; --scope-prompt is at the top), and above the first mode that
 # draws rows (--action's swap picker, --list) -- because bash parses a script
 # as it runs it.  A callback that exits before this line never parses the ~850
 # lines below, which cost every one of them ~2 ms (review R15).  So no mode
