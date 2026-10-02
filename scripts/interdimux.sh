@@ -4967,9 +4967,9 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # ignore files above ROOT hid them all (fd_parents_hide).
   collect_scan() {
     local d n=0
-    local -a _cs=()
-    mapfile -t _cs < <(scan_dirs "$1" "$2" "$finder")
-    for d in ${_cs[@]+"${_cs[@]}"}; do
+    local -a _found=()
+    mapfile -t _found < <(scan_dirs "$1" "$2" "$finder")
+    for d in ${_found[@]+"${_found[@]}"}; do
       [ -z "$d" ] || [ "$d" = "$1" ] && continue
       n=1
       if [ $# = 2 ]; then
@@ -4986,10 +4986,10 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # (scan_roots).
   collect_subtrees() {
     local sub
-    local -a _cs=()
+    local -a _found=()
     [ "${#_roots[@]}" -gt 0 ] || return 0
-    mapfile -t _cs < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
-    for sub in ${_cs[@]+"${_cs[@]}"}; do
+    mapfile -t _found < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
+    for sub in ${_found[@]+"${_found[@]}"}; do
       [ -z "$sub" ] && continue
       collect_dir "$sub"
     done
@@ -5096,8 +5096,8 @@ if [ "${1:-}" = "--dirs-list" ]; then
           _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
-            mapfile -t _cs < <(scan_dirs "$sp" "$match_depth" "$finder")
-            for d in ${_cs[@]+"${_cs[@]}"}; do
+            mapfile -t _scanned < <(scan_dirs "$sp" "$match_depth" "$finder")
+            for d in ${_scanned[@]+"${_scanned[@]}"}; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               if [[ "${d,,}" == *"${query,,}"* ]]; then
                 collect_dir "$d"
