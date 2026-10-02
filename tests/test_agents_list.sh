@@ -244,12 +244,16 @@ rc=0; out=$(PATH="$TMPD/onlytmux" "$BASH" "$SCRIPT" --agents approve 2>"$TMPD/er
 same "...and so does the listing" "$rc:$out" "0:$(printf '%s\n' "$L_CA" "$L_CB" "$L_CE" "$L_CX")"
 
 # --- bash 4.3, the floor -------------------------------------------------------------
+# A directory that was given but lacks it fails, as test_bash_floor does: the
+# version was promised (TEST-35).
 B43="${INTERDIMUX_OLD_BASH_DIR:-}/4.3/bash"
-if [ -n "${INTERDIMUX_OLD_BASH_DIR:-}" ] && [ -x "$B43" ]; then
+if [ -z "${INTERDIMUX_OLD_BASH_DIR:-}" ]; then
+  echo "  (skipped bash 4.3: \$INTERDIMUX_OLD_BASH_DIR is not set)"
+elif [ -x "$B43" ]; then
   same "bash 4.3 lists the same lines" "$("$B43" "$SCRIPT" --agents 2>&1)" "$want"
   same "...and counts the same" "$("$B43" "$SCRIPT" --agents --count working,idle 2>&1)" 4
 else
-  echo "  (skipped bash 4.3: not in \$INTERDIMUX_OLD_BASH_DIR)"
+  report "bash 4.3 is in \$INTERDIMUX_OLD_BASH_DIR (no $B43)" fail
 fi
 
 # --- a server with no agent ------------------------------------------------------------
