@@ -875,13 +875,36 @@ bash renderer ask whether any row has a git branch at 90-99 columns -- the
 default popup of a 120-column terminal -- where main never asked: its list
 was 16-22% slower there with identical rows, and the step was taken back.
 
-The merged tree, `bench.sh` against main (12 sessions / 40 windows / 90
-panes, 158x35), CPU median ms: first row 109.1 → 102.4, `--list` 72.1 → 70.8,
-the bash renderer's 331.6 → 323.5, previews of a session, a window and a pane
-68.5 / 38.2 / 37.7 → 30.3 / 30.8 / 29.0, `--dirs-list` 233.7 → 147.2,
-`--deep svc` 2419 → 518, `--scope-prompt` 21.2 → 5.5, `--hint-ladder` 19.7 →
-17.9; the footer, `--describe-create`, `--session-name-for`, `--dirs-preview`,
-`--doctor` and `bash -n` of the whole file within noise (-2.6% to +1.7%).
+The modes below the callbacks paid the same way, for ~44 KB in all: the
+dashboard, its menu's `--launch`, Health and Jobs parsed the ~77 KB of
+`--doctor` and the agents' modes; the scheduling modes and every callback
+the rows' renderer (`gather_targets`, ~45 KB), which only a list runs; and
+`--action`, the ctrl-o picker, `--list` and `--jump` the dashboard's count of
+the agents that need you -- none of it used. Each of those blocks now sits
+below its last user, moved whole: `--doctor` and the agents' modes last before
+the navigator, the renderer after the scheduling modes, the count in the
+dashboard's section, and `--dirs-hints` beside the hint bar.
+`tests/test_render_cost.sh` checks the order from bash's own trace (`-x` for
+what ran, `-v` for what was read). KB parsed before a mode's dispatch, main →
+now: a preview 195 → 168, the footer 271 → 204, `--send-at` 232 → 220,
+`--action` 322 → 342, `--list` 351 → 371, the dashboard 439 → 397, `--launch`
+430 → 378, `--dirs-hints` 345 → 207, and `--doctor` 357 → 411: last in the
+file, it is the one that parses the others now.
+
+The merged tree, `bench.sh -s all` against main (12 sessions / 40 windows / 90
+panes, 158x35), CPU median ms: first row 97.3 → 91.9, `--list` 65.3 → 61.7,
+the bash renderer's 306.0 → 296.5, previews of a session, a window and a pane
+65.5 / 36.8 / 33.8 → 27.6 / 26.6 / 24.0, the footer 29.2 → 25.8,
+`--session-name-for` 29.6 → 27.0, `--dirs-list` 185.4 → 113.8, `--deep svc`
+2208 → 475, `--dirs-preview` 52.5 → 49.8, `--hint-ladder` 20.1 → 16.4,
+`--scope-prompt` 21.2 → 5.6; `--describe-create` (-4.8%), `--doctor` (-1.1%)
+and the bash renderer's first row (-5.0%) within noise. `bash -n` of the whole
+file, which no mode does, is +5.7% (400 pairs): the file is 9% larger. Modes
+it has no scenario for, timed the same way on its fixture (60 pairs, a
+stand-in `at`): `--send-at` -4.1%, `--sched-list` -7.0%, `--jobs-list` -8.8%,
+`--launch` -7.8%, the ctrl-o picker -31%, its `--dirs-hints` -29%, `--jump`
+-4.4%; `--action`'s kill and rename dialogs, Health and the dashboard's fzf
+menu within noise.
 zoxide's own 5-10 ms now overlaps the core's render instead of following it;
 on a small server the render is short, so most of the query is still waited
 for.
