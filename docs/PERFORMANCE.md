@@ -863,13 +863,28 @@ process tree and the tmux server, median ms, main → after:
 | `--dirs-list` (ctrl-o) | 202 → 134 (-34%) | 184 → 116 |
 | `--dirs-list --deep svc`, 100 matches | 2695 → 585 (-78%) | 2320 → 543 |
 
-The hint bar, `--footer-for`, `--describe-create`, `--session-name-for`,
-`--dirs-preview`, `--doctor` and the bash renderer's `--list`: unchanged
-within noise: the ~95 lines added above the callbacks parse in no measurable
-time (`bash -n` of the script up to `--footer-for`, interleaved: 13.0-14.4 ms
-before and after). zoxide's own 5-10 ms now overlaps the core's render
-instead of following it; on a small server the render is short, so most of
-the query is still waited for.
+That table is the perf group's branch on its own, where ~95 lines were added
+above the callbacks and parsed in no measurable time. Merged, round 3 added
+~22 KB there, and bash parses a script as it runs it, so every run of a
+callback paid for them (~35 us a KB): `--scope-prompt` +5%, the footer,
+`--describe-create`, `--session-name-for` and `--hint-ladder` +2-6%, all the
+same sign. `--scope-prompt`, which needs nothing from the file, is now
+answered at its top, and the hint bar sits before the scheduling modes and the
+dialogs, which no callback uses. And BUG-108's narrower badge tiers had the
+bash renderer ask whether any row has a git branch at 90-99 columns -- the
+default popup of a 120-column terminal -- where main never asked: its list
+was 16-22% slower there with identical rows, and the step was taken back.
+
+The merged tree, `bench.sh` against main (12 sessions / 40 windows / 90
+panes, 158x35), CPU median ms: first row 109.1 → 102.4, `--list` 72.1 → 70.8,
+the bash renderer's 331.6 → 323.5, previews of a session, a window and a pane
+68.5 / 38.2 / 37.7 → 30.3 / 30.8 / 29.0, `--dirs-list` 233.7 → 147.2,
+`--deep svc` 2419 → 518, `--scope-prompt` 21.2 → 5.5, `--hint-ladder` 19.7 →
+17.9; the footer, `--describe-create`, `--session-name-for`, `--dirs-preview`,
+`--doctor` and `bash -n` of the whole file within noise (-2.6% to +1.7%).
+zoxide's own 5-10 ms now overlaps the core's render instead of following it;
+on a small server the render is short, so most of the query is still waited
+for.
 
 `tests/bench.sh [-n PAIRS] [-s SCENARIO,...] [REF]` is the in-repo A/B, with a
 scenario for every row above, on a smaller fixture (6 sessions x 4 windows, 30
