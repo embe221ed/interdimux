@@ -197,7 +197,13 @@ wait_until() { # $1 = tenths of a second, $2.. = a command that must succeed
   return 1
 }
 pane_at() { [ "$(tmux -L "$SOCK" display-message -p -t "$1" '#{pane_current_path}' 2>/dev/null)" = "$2" ]; }
-client_on() { [ "$(tmux -L "$SOCK" display-message -p -c "$CLIENT" '#{session_id}' 2>/dev/null)" = "$1" ]; }
+# From the client table: display-message -c only picks the client that shows
+# the message, and evaluates the format against the current pane -- taken from
+# an inherited TMUX_PANE, which on a young server names a pane here too.
+client_on() {
+  [ "$(tmux -L "$SOCK" list-clients -F '#{client_name} #{session_id}' 2>/dev/null \
+       | awk -v c="$CLIENT" '$1 == c { print $2 }')" = "$1" ]
+}
 # Opens $1 with --connect-dir from bootstrap.  Sets RC, NEW (the sessions that
 # appeared) and GONE (the ones that disappeared or were renamed).
 open_dir() {
