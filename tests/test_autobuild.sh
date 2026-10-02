@@ -155,7 +155,10 @@ env PATH="$CPATH" XDG_STATE_HOME="$STATE" CARGO_HOME="$TMPD/no-cargo-home" \
   "$REAL_TMUX" -f /dev/null -L "$SOCK" new-session -d -s main -x 120 -y 30 'sleep 900'
 export TMUX="$("$REAL_TMUX" -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$("$REAL_TMUX" -L "$SOCK" list-panes -a -F '#{pane_id}' | head -1)"
-"$REAL_TMUX" -f /dev/null -L "$OUTER" new-session -d -s drv -x 250 -y 12 \
+# Wide, because the failure message names the build log by its full path, and
+# the status line cuts it at the client's width: under a long $TMPDIR (an
+# agent's scratch directory) the end of it -- how to stop the builds -- was cut.
+"$REAL_TMUX" -f /dev/null -L "$OUTER" new-session -d -s drv -x 500 -y 12 \
   "env -u TMUX -u TMUX_PANE '$REAL_TMUX' -L '$SOCK' attach -t main"
 for _ in $(seq 1 100); do
   [ -n "$("$REAL_TMUX" -L "$SOCK" list-clients 2>/dev/null)" ] && break
