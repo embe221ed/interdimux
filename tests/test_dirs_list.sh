@@ -584,6 +584,26 @@ STUB
     report "fd: a ~/.fdignore still applies to the deep search and a browse" fail
   fi
   rm -rf "$FIX_HOME/.fdignore" "$FIX_HOME/work/tools/node_modules"
+
+  # The check runs on every scan that finds nothing, which every leaf does: a
+  # browse into a directory of 300 files with nothing above it that fd reads
+  # ignore files from must not stat each file to look for a subdirectory.
+  if ! command -v strace >/dev/null 2>&1 || ! strace -f -qq -o /dev/null true 2>/dev/null; then
+    printf '  - the leaf scan (skipped: needs strace, and permission to trace a child)\n'
+  else
+    mkdir -p "$TMPDIR_TEST/flat"
+    for i in $(seq 1 300); do : > "$TMPDIR_TEST/flat/zz-file-$i"; done
+    env -i PATH="$PATH" HOME="$FIX_HOME" XDG_DATA_HOME="$FIX_HOME/.local/share" \
+      TMUX="$TMPDIR_TEST/no-such-socket,0,0" INTERDIMUX_PROJECT_DIRS="$FIX_HOME/work" INTERDIMUX_USE_ZOXIDE=off \
+      strace -f -qq -e trace=%file -o "$TMPDIR_TEST/flat.trace" bash "$SCRIPT" --dirs-list --scan "$TMPDIR_TEST/flat" \
+      > "$TMPDIR_TEST/flat.out" 2>/dev/null || true
+    stats=$(grep -cF "$TMPDIR_TEST/flat/zz-file-" "$TMPDIR_TEST/flat.trace" || true)
+    if grep -q "$TMPDIR_TEST/flat" "$TMPDIR_TEST/flat.out" && [ "$stats" = 0 ]; then
+      report "fd: a leaf with nothing above it to hide it is not searched file by file" pass
+    else
+      report "fd: a leaf with nothing above it to hide it is not searched file by file ($stats stats)" fail
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------

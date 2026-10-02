@@ -1612,10 +1612,23 @@ _scan_prune() {
 # nothing is recorded, and the scans are what they were.  (One flag for the
 # rest of the list emptied every later root's scan on that fd, and listed
 # node_modules in the subtrees of matches inside a repo.)
+#
+# The first test is that some directory above ROOT has what fd reads ignore
+# files from -- a .git (with its .gitignore files and info/exclude), an
+# .ignore or an .fdignore -- a few stats, so that the empty scan of a leaf
+# directory pays nothing more where nothing can hide it.  The test for a
+# visible subdirectory that follows stats every entry, and a leaf with 5,000
+# files made a ^f literal path query 8% slower than on main.
 declare -A FD_NIP_REPOS=()
 fd_parents_hide() {
   local r="${1%/}" up d
-  [ -n "$r" ] && [ "$2" != find ] && compgen -G "$r/*/" >/dev/null || return 1
+  [ -n "$r" ] && [ "$2" != find ] || return 1
+  d="$r"
+  while case "$d" in */*) d="${d%/*}" ;; *) return 1 ;; esac; do
+    [ -e "${d:-/}/.git" ] || [ -e "${d:-/}/.ignore" ] || [ -e "${d:-/}/.fdignore" ] && break
+    [ -n "$d" ] || return 1
+  done
+  compgen -G "$r/*/" >/dev/null || return 1
   fd_nip_r "$r"
   [ "${#FD_NIP[@]}" = 0 ] || return 1   # it was scanned without them already
   up="${r%/*}"
