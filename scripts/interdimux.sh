@@ -3540,15 +3540,14 @@ compute_widths() {
   # session prefix cut to "my-pr…" makes `my-project shell` match nothing;
   # the path and the branch are display-only.  So:
   #
-  #   1. the path gives up cells down to PATH_KEEP to keep the git badge,
-  #      and when that is not enough the badge narrows a tier (16, 14, 10)
-  #      and the path tries again.  Only when even 10 does not fit does the
-  #      badge go (snapped straight to 0 — never left at 1..3, which would
-  #      make build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate) and
-  #      the path keeps its cells.  Only while some row actually HAS a
-  #      branch; a badge column that would be blank on every tree row goes
-  #      first.  That is asked last, and only when the cells would be enough:
-  #      it is the one test here that reads files (_probe_has_branch).
+  #   1. the path gives up cells down to PATH_KEEP to keep the git badge —
+  #      all or nothing: if that is not enough, the badge goes (snapped
+  #      straight to 0 — never left at 1..3, which would make
+  #      build_ctx_field's ${gbranch:0:BADGE_W-3} slice degenerate) and the
+  #      path keeps its cells.  Only while some row actually HAS a branch; a
+  #      badge column that would be blank on every tree row goes first.
+  #      That is asked last, and only when the cells would be enough: it is
+  #      the one test here that reads files (_probe_has_branch).
   #   2. the path, down to PATH_FLOOR
   #   3. the session prefix, down to PFX_FLOOR
   #   4. the window name, down to WIN_FLOOR
@@ -3556,18 +3555,10 @@ compute_widths() {
   # The Z/!/# flags are never squeezed: their own slot, at most 4 cells.
   # Any deficit left after the floors lands on the flowing COMMAND column,
   # which fzf clips anyway.  rust/src/widths.rs is the same ladder.
-  #
-  # The narrower tiers matter on the most ordinary popup there is: 80% of a
-  # 120-column terminal is avail 86, where one 16-character session name took
-  # every badge off the list although a 14-cell one fitted (review BUG-108).
   local over give
   _squeeze_over; over=$REPLY
   if (( BADGE_W > 0 && over > 0 )); then
-    while (( BADGE_W > 0 && over > 0 && PATH_W - PATH_KEEP < over )); do
-      case $BADGE_W in 16) BADGE_W=14 ;; 14) BADGE_W=10 ;; *) BADGE_W=0 ;; esac
-      _squeeze_over; over=$REPLY
-    done
-    if (( BADGE_W > 0 )) && _probe_has_branch; then
+    if (( PATH_W - PATH_KEEP >= over )) && _probe_has_branch; then
       PATH_W=$(( PATH_W - over ))
     else
       BADGE_W=0

@@ -411,9 +411,9 @@ still exists, so one stalled mount cannot hold up the list.
 - Panes only shown for multi-pane windows
 - Column widths adapt to the content and the popup width. When a row does not
   fit, what you only read gives way before what you type: the path shrinks
-  (to 24 cells) to keep the branch badge, then the badge narrows (to 14, then
-  10 cells), then it goes, then the path shrinks to 12 cells, and only then the
-  session prefix and, last, the window name
+  (to 24 cells) to keep the branch badge, then the badge goes, then the path
+  shrinks to 12 cells, and only then the session prefix and, last, the window
+  name
 
 ### Agents and pane titles
 

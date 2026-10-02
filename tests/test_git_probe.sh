@@ -153,13 +153,13 @@ fi
 # below $H/w.  Every cwd's walk passes through $H/w, $H, ... and /; a walk that
 # reaches a directory an earlier one went through takes its answer, so $H/w's
 # .git is looked up once (a stat for -d and one for -f) however many cwds sit
-# under it -- not eight times (review BUG-108).  At 94 columns -- 80% of a
-# 120-column terminal -- the 16-character session name, the 8-cell window floor
-# and the 31-cell path leave the 16-cell badge one cell short, so the squeeze
-# asks whether any row has a branch before it settles for the 14-cell one: the
-# walk that, on a tree with no branch at all, used to cost a full walk per cwd.
-# At 200 columns the badge is drawn and every row asks for its own branch.  The
-# control is that $H/w's .git is looked up at all.
+# under it -- not eight times (review BUG-108).  At 95 columns the
+# 16-character session name, the 8-cell window floor and the 31-cell path leave
+# the path just enough to give up for the 16-cell badge, so the squeeze asks
+# whether any row has a branch: the walk that, on a tree with no branch at all,
+# used to cost a full walk per cwd.  (At 94 the badge is one cell short and
+# goes without asking.)  At 200 columns the badge is drawn and every row asks
+# for its own branch.  The control is that $H/w's .git is looked up at all.
 if ! command -v strace >/dev/null 2>&1 || ! strace -f -qq -o /dev/null true 2>/dev/null; then
   echo "  (skipped the lookup count: needs strace, and permission to trace a child)"
 else
@@ -176,7 +176,7 @@ else
     printf 'infra-deploy-s01%s0%s0\n' "$US" "$US"
     printf '%s\n' "$RS"
   } > "$TMPD/tree.dump"
-  for w in 94 200; do
+  for w in 95 200; do
     INTERDIMUX_DUMP_IN="$TMPD/tree.dump" INTERDIMUX_USE_RUST=off FZF_COLUMNS="$w" \
       strace -f -qq -e trace=%file -o "$TMPD/trace.$w" bash "$SCRIPT" --list > "$TMPD/rows.$w" 2>/dev/null || true
     rows=$(grep -c 'W:infra-deploy-s01:' "$TMPD/rows.$w" || true)

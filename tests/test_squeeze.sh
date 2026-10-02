@@ -211,69 +211,6 @@ for r in $RENDERERS; do
   fi
 done
 
-# --- 3b. a long session name narrows the badge instead of dropping it ---------
-# 80% of a 120-column terminal is a 94-column popup.  A 16-character session
-# name with the 8-cell window floor, and a 31-cell path, left the 16-cell badge
-# one cell short -- and EVERY row lost its branch, although a 14-cell badge
-# fits; with a Z flag on a window, a 10-cell one does (review BUG-108).  Through
-# the dump seam (INTERDIMUX_DUMP_IN), so the geometry is exactly this one; the
-# branches come from real .git/HEAD files under the bench's HOME.
-mkdir -p "$H/projects/infra-terraform-prod/.git" "$H/code/api-svc/.git"
-printf 'ref: refs/heads/main\n'                > "$H/projects/infra-terraform-prod/.git/HEAD"
-printf 'ref: refs/heads/feature/auth-tokens\n' > "$H/code/api-svc/.git/HEAD"
-long_dump() { # $1 = the long session's window flags -> the dump's path
-  local US=$'\x1f' RS=$'\x1e' f="$TMPD/long-$1.dump"
-  {
-    printf '%s\n' "api-svc${US}1700000000${US}1${US}attached${US}$H/code/api-svc"
-    printf '%s\n' "infra-terraform-prod${US}1699999000${US}1${US}${US}$H/projects/infra-terraform-prod"
-    printf '%s\n' "$RS"
-    printf '%s\n' "api-svc${US}0${US}server${US}1${US}node${US}$H/code/api-svc${US}1${US}0${US}000"
-    printf '%s\n' "infra-terraform-prod${US}0${US}watch${US}1${US}zsh${US}$H/projects/infra-terraform-prod${US}1${US}0${US}$1"
-    printf '%s\n%s\n' "$RS" "$RS"
-    printf '%s\n' "api-svc${US}0${US}0"
-    printf '%s\n' "$RS"
-  } > "$f"
-  REPLY="$f"
-}
-for fl in 000 100; do
-  long_dump "$fl"; dump="$REPLY"
-  case "$fl" in 000) what="no flag" ;; *) what="a Z flag" ;; esac
-  for r in $RENDERERS; do
-    out=$(list "$r" 94 INTERDIMUX_DUMP_IN="$dump" INTERDIMUX_SHOW_FULL_COMMAND=off)
-    i=$(ctx_of "$out" 'W:infra-terraform-prod:0'); a=$(ctx_of "$out" 'W:api-svc:0')
-    if [[ "$i" == *'‹main›'* && "$a" == *'‹feature'* ]]; then
-      report "$r @ 94 cols, a 20-character session, $what: every row keeps its badge" pass
-    else
-      report "$r @ 94 cols, a 20-character session, $what: every row keeps its badge" fail
-      ERRORS+="     infra: $i"$'\n'"     api  : $a"$'\n'
-    fi
-  done
-done
-# and both renderers draw it identically, across the widths where the tiers turn
-# (the rust side counted, as section 5 does, so a fallback to bash cannot pass)
-if [ -x "$BIN" ]; then
-  bad="" rust_renders=0
-  : > "$CORE_RUNS"
-  for fl in 000 100; do
-    long_dump "$fl"; dump="$REPLY"
-    for w in 80 86 90 94 96 100 104 110 120; do
-      for pv in off on; do
-        b1=$(list bash "$w" INTERDIMUX_DUMP_IN="$dump" INTERDIMUX_SHOW_FULL_COMMAND=off INTERDIMUX_SHOW_PREVIEW=$pv)
-        rr=$(list rust "$w" INTERDIMUX_DUMP_IN="$dump" INTERDIMUX_SHOW_FULL_COMMAND=off INTERDIMUX_SHOW_PREVIEW=$pv)
-        rust_renders=$((rust_renders + 1))
-        [ -n "$b1" ] && [ "$b1" = "$rr" ] || bad+=" [$fl $w preview=$pv]"
-      done
-    done
-  done
-  [ "$(grep -cx 0 "$CORE_RUNS" || true)" -eq "$rust_renders" ] || bad+=" [the core did not draw every rust render]"
-  if [ -z "$bad" ]; then
-    report "rust and bash narrow the badge identically (80-120 cols, flag or not)" pass
-  else
-    report "rust and bash narrow the badge identically" fail
-    ERRORS+="     differs:$bad"$'\n'
-  fi
-fi
-
 # --- 4. the flags are a column: same x on every row, whatever the branch ------
 # Where a glyph lands is a question for the terminal, so ask one: write the row
 # up to the flag into a pane of a private server and read tmux's #{cursor_x}.
