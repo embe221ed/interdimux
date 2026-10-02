@@ -909,6 +909,21 @@ for _xrd in "" "$TMPD/derr/run"; do
     report "a run killed mid-check leaves no temp file behind ($_how): $_left" fail
   fi
 done
+# A run that is not cut short removes the file once.  The trap is only for one
+# that is: left set after the report's own rm, it ran rm a second time at every
+# exit, an exec --doctor did not have before the trap came.
+mkdir -p "$TMPD/derr/rmstub"
+: > "$TMPD/derr/rm.log"
+cat > "$TMPD/derr/rmstub/rm" <<STUB
+#!/bin/sh
+echo "rm \$*" >> "$TMPD/derr/rm.log"
+exec $(command -v rm) "\$@"
+STUB
+chmod +x "$TMPD/derr/rmstub/rm"
+env XDG_RUNTIME_DIR="$TMPD/derr/run" PATH="$TMPD/derr/rmstub:$PATH" bash "$SCRIPT" --doctor >/dev/null 2>&1 || true
+_rms=$(grep -c 'interdimux-doctor-err\.' "$TMPD/derr/rm.log" || true)
+[ "$_rms" = 1 ] && report "a run that finishes removes its stderr file with one rm" pass \
+                || report "a run that finishes removes its stderr file with one rm: $_rms" fail
 
 # --- the popup viewer ---------------------------------------------------------
 # The dashboard's Health entry runs --doctor-view, which pages the report through

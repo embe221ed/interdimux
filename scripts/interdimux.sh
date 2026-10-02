@@ -10015,7 +10015,9 @@ if [ "${1:-}" = "--doctor" ]; then
       _note "either a bug in --doctor, or a real complaint from a tool it called:"
       while IFS= read -r _el; do [ -n "$_el" ] && _note "$_el"; done < "$_derr"
     fi
-    rm -f "$_derr"
+    # The trap is only for a run cut short: left set, it would exec a second rm
+    # at exit for a file that is already gone.
+    rm -f "$_derr"; trap - EXIT
   fi
 
   # --- the report -------------------------------------------------------------
