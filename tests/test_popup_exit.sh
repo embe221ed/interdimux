@@ -227,6 +227,28 @@ else
 fi
 I set-environment -g PATH "$PATH0"
 PATH="$PATH0" bash "$SCRIPT" --bind-keys
+# The jobs picker too, held at its start by an atq that stalls.
+cat > "$TMPD/bin/atq" <<STUB
+#!/bin/sh
+[ -e '$TMPD/slowatq' ] && { : > '$TMPD/probing'; sleep 20; }
+exit 0
+STUB
+: > "$TMPD/slowatq"; rm -f "$TMPD/probing"
+launch --launch jobs
+if wait_for '[ -e "$TMPD/probing" ] && popup_up' 100; then
+  key C-c
+  if wait_for '! popup_up' 50; then
+    report "Ctrl-C as the jobs picker starts: the popup closes by itself" pass
+  else
+    report "Ctrl-C as the jobs picker starts: the popup closes by itself" fail
+    ERRORS+="    screen: $(cap | grep -v '^ *$' | head -6 | tr '\n' '|')"$'\n'
+    I display-popup -C -c "$CL" 2>/dev/null || true; wait_for '! popup_up' 30 || true
+  fi
+else
+  report "setup: the jobs picker asks the slow atq" fail
+  I display-popup -C -c "$CL" 2>/dev/null || true; wait_for '! popup_up' 30 || true
+fi
+rm -f "$TMPD/slowatq"
 
 # --- a failure stays on screen until a key ---------------------------------------
 # "Stays" can only be shown as "has not gone": once the text is up and the

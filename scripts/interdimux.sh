@@ -32,14 +32,16 @@ esac
 
 set -euo pipefail
 
-# The navigator -- the one invocation without an argument -- takes an interrupt
-# that comes before its fzf has the terminal for a cancel, and a cancel exits 0,
-# as Esc does.  That is Ctrl-C pressed just as prefix+f opens the popup: killed
-# by the signal, the navigator failed, and a popup that closes by itself only
-# on a 0 (-EE, see --bind-keys) stayed up, blank but for '^C', until another
-# key.  Set this early because parsing the rest of the file is most of that
-# window.  The main loop replaces it (see there).
-[ $# != 0 ] || trap 'exit 0' INT
+# What a popup runs -- the navigator (the one invocation without an argument),
+# the jobs picker, Health and the dashboard's fzf menu -- takes an interrupt
+# that comes before its fzf has the terminal for a cancel, and a cancel exits
+# 0, as Esc does.  That is Ctrl-C pressed just as the popup opens: killed by
+# the signal, the picker failed, and a popup that closes by itself only on a 0
+# (-EE, see --bind-keys) stayed up, blank but for '^C', until another key.  Set
+# this early because parsing the rest of the file is most of that window.  The
+# navigator's main loop replaces it (see there); the others end with exit 0
+# once their fzf has gone, which is when bash would run it anyway.
+case "${1:-}" in ''|--jobs|--doctor-view|--dashboard) trap 'exit 0' INT ;; esac
 
 # ---------------------------------------------------------------------------
 # Constants
