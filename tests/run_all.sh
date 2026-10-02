@@ -42,6 +42,15 @@ set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# The suites' navigators, popups and connects run in tmux servers the suites
+# start, and those inherit this environment.  Without a state and data dir of
+# their own, a suite that probed an error wrote it into the developer's own
+# errors.log (their Health turned red over a test), and a connect put a test
+# directory into their ctrl-o history.
+IMUX_TEST_XDG=$(mktemp -d "${TMPDIR:-/tmp}/interdimux-xdg.XXXXXX") || exit 2
+export XDG_STATE_HOME="$IMUX_TEST_XDG/state" XDG_DATA_HOME="$IMUX_TEST_XDG/data"
+trap 'rm -rf "$IMUX_TEST_XDG"' EXIT
+
 case "${IMUX_RENDERER:-}" in
   '') ;;
   rust) export INTERDIMUX_USE_RUST=on ;;
