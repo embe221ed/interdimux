@@ -453,6 +453,18 @@ else
   else
     report "fd: ...nor the deep search" fail
   fi
+  # ...nor the subtrees of its matches (scan_roots): one in a repo of its own,
+  # which ends the .gitignore files above it, and one in the dotfiles repo,
+  # which only a scan without them lists.
+  mkdir -p "$FIX_HOME/work/tools/CamelProj/src" "$FIX_HOME/work/tools/plainproj/sub"
+  out=$(dirs_list -- --deep 'camelproj')
+  out2=$(dirs_list -- --deep 'plainproj')
+  if has_spec "$out" work/tools/CamelProj/src && has_spec "$out2" work/tools/plainproj/sub; then
+    report "fd: ...nor the subtrees of its matches" pass
+  else
+    report "fd: ...nor the subtrees of its matches" fail
+  fi
+  rm -rf "$FIX_HOME/work/tools/CamelProj/src" "$FIX_HOME/work/tools/plainproj"
   out=$(dirs_list -- --deep "$FIX_HOME/work/too")
   if has_spec "$out" work/tools/CamelProj; then
     report "fd: ...nor a partly typed path" pass
@@ -468,8 +480,10 @@ else
 
   # An fd too old for --no-ignore-parent (before 8.3) refuses the whole command
   # line -- status 1 from its old argument parser, 2 from the new one.  Here
-  # that leaves the scan as it was, and the list still comes up.
-  mkdir -p "$TMPDIR_TEST/oldfd"
+  # that leaves the scan as it was, and the list still comes up -- with the
+  # scan rows of a second search root, outside the dotfiles repo, which a flag
+  # kept for the rest of the list once ~/work had wanted it emptied.
+  mkdir -p "$TMPDIR_TEST/oldfd" "$TMPDIR_TEST/elsewhere/x" "$TMPDIR_TEST/elsewhere/y"
   for rc in 1 2; do
     cat > "$TMPDIR_TEST/oldfd/fd" <<STUB
 #!/bin/sh
@@ -485,6 +499,31 @@ STUB
     else
       report "an fd that refuses --no-ignore-parent (status $rc) still lists" fail
     fi
+    for q in default "''"; do
+      if [ "$q" = default ]; then set --; else set -- --deep ''; fi
+      out=$(dirs_list PATH="$TMPDIR_TEST/oldfd:$PATH" \
+              INTERDIMUX_PROJECT_DIRS="$FIX_HOME/work:$TMPDIR_TEST/elsewhere" -- "$@")
+      if specs <<< "$out" | grep -qx "$TMPDIR_TEST/elsewhere/x" \
+         && specs <<< "$out" | grep -qx "$TMPDIR_TEST/elsewhere/y"; then
+        report "...and scans a second search root, after the hidden one ($q, status $rc)" pass
+      else
+        report "...and scans a second search root, after the hidden one ($q, status $rc)" fail
+      fi
+    done
+    set --
+    # ...and one in the same repo that its .gitignore does not hide: the repo
+    # is not marked for the flag that fd refuses.
+    printf '/work\n/work/**\n' > "$FIX_HOME/.gitignore"
+    mkdir -p "$FIX_HOME/Desktop/scan_only"
+    out=$(dirs_list PATH="$TMPDIR_TEST/oldfd:$PATH" \
+            INTERDIMUX_PROJECT_DIRS="$FIX_HOME/work:$FIX_HOME/Desktop" --)
+    if has_spec "$out" Desktop/scan_only; then
+      report "...and one in the same repo that is not hidden (status $rc)" pass
+    else
+      report "...and one in the same repo that is not hidden (status $rc)" fail
+    fi
+    printf '*\n' > "$FIX_HOME/.gitignore"
+    rm -rf "$FIX_HOME/Desktop/scan_only"
   done
   rm -rf "$FIX_HOME/.git" "$FIX_HOME/.gitignore"
 
@@ -520,7 +559,19 @@ STUB
   else
     report "fd: ...even where it ignores every subdirectory there is" fail
   fi
-  rm -rf "$mono"
+  # ...and the same with the dotfiles repo back: ~/work is then scanned without
+  # the files above it, but the repo inside it keeps its own.
+  mkdir -p "$FIX_HOME/.git"
+  printf '*\n' > "$FIX_HOME/.gitignore"
+  out=$(dirs_list -- --deep 'services')
+  out2=$(dirs_list -- --deep 'web')
+  if has_spec "$out" work/mono/services/web/src && has_spec "$out2" work/mono/services/web/src \
+     && [[ "$out$out2" != *node_modules* ]]; then
+    report "fd: ...also under a dotfiles repo whose .gitignore is '*'" pass
+  else
+    report "fd: ...also under a dotfiles repo whose .gitignore is '*'" fail
+  fi
+  rm -rf "$mono" "$FIX_HOME/.git" "$FIX_HOME/.gitignore"
 
   # A deliberate ~/.fdignore, which needs no repo.
   printf 'node_modules\n' > "$FIX_HOME/.fdignore"

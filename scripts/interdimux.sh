@@ -1596,20 +1596,60 @@ _scan_prune() {
 # `*` hides everything under $HOME the same way, and every scan came back
 # empty, silently, while the find backend listed it all.  fd_parents_hide ROOT
 # FINDER is asked only once ROOT's scan has found nothing.  When ROOT has a
-# visible subdirectory and is itself missing from its parent's listing, it sets
-# FD_NIP, and the rest of this list scans without those files
-# (--no-ignore-parent; an fd older than 8.3 refuses it and finds nothing, as
-# before).  A scan that found anything is untouched and costs nothing more, and
-# a directory that only its OWN ignore files empty stays empty.
-FD_NIP=()
+# visible subdirectory, is itself missing from its parent's listing, and a
+# scan of it without those files (--no-ignore-parent) finds a directory, it
+# records the repository that hides it: the nearest directory above ROOT with
+# a .git (fd_nip_r).  A scan that found anything is untouched and costs
+# nothing more, and a directory that only its OWN ignore files empty stays
+# empty.
+#
+# From then on the scans of this list that start in that repository go
+# without those files, and only they.  A repository inside it ends the
+# .gitignore files above it for fd, so a deep search's match in a repo of its
+# own keeps that repo's node_modules out of its subtree.  A search root
+# anywhere else keeps the ignore files above it.  And an fd older than 8.3,
+# which refuses the flag and with it the whole command line, fails the probe:
+# nothing is recorded, and the scans are what they were.  (One flag for the
+# rest of the list emptied every later root's scan on that fd, and listed
+# node_modules in the subtrees of matches inside a repo.)
+declare -A FD_NIP_REPOS=()
 fd_parents_hide() {
   local r="${1%/}" up d
-  [ -n "$r" ] && [ "$2" != find ] && [ "${#FD_NIP[@]}" = 0 ] && compgen -G "$r/*/" >/dev/null || return 1
+  [ -n "$r" ] && [ "$2" != find ] && compgen -G "$r/*/" >/dev/null || return 1
+  fd_nip_r "$r"
+  [ "${#FD_NIP[@]}" = 0 ] || return 1   # it was scanned without them already
   up="${r%/*}"
   while IFS= read -r d; do
     [ "${d%/}" = "$r" ] && return 1
   done < <("$2" --hidden --max-depth 1 --fixed-strings --absolute-path -- "${r##*/}" "${up:-/}" 2>/dev/null)
-  FD_NIP=(--no-ignore-parent)
+  [ -n "$("$2" --no-ignore-parent --type d --max-depth 1 --max-results 1 . "$r" 2>/dev/null)" ] || return 1
+  _git_top_r "$r"
+  FD_NIP_REPOS["$REPLY"]=1
+}
+
+# REPLY: the nearest of DIR and the directories above it that holds a .git, or
+# "-" when none does -- the repository whose .gitignore files fd applies to a
+# scan from DIR.
+_git_top_r() {
+  local d="${1%/}"
+  while [ -n "$d" ]; do
+    [ -e "$d/.git" ] && { REPLY="$d"; return 0; }
+    case "$d" in */*) d="${d%/*}" ;; *) break ;; esac
+  done
+  REPLY=-
+  [ -e /.git ] && REPLY=/
+  return 0
+}
+
+# FD_NIP: the flag a scan from ROOT takes, (--no-ignore-parent) or none -- see
+# fd_parents_hide.  Free until something has been recorded.
+FD_NIP=()
+fd_nip_r() {
+  FD_NIP=()
+  [ "${#FD_NIP_REPOS[@]}" -gt 0 ] || return 0
+  _git_top_r "$1"
+  [[ ${FD_NIP_REPOS[$REPLY]+x} ]] && FD_NIP=(--no-ignore-parent)
+  return 0
 }
 
 scan_dirs() {
@@ -1620,6 +1660,7 @@ scan_dirs() {
   # which breaks dedup between tiers and finder backends.
   case "$finder" in
     fd|fdfind)
+      fd_nip_r "$root"
       "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} . "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
       ;;
     find)
@@ -1636,23 +1677,39 @@ scan_dirs() {
 # (emit_sorted_tiers sorts and dedups), so it does not matter that one run
 # orders them differently, or repeats a nested root's.  $HOME keeps a run of
 # its own: its ~/Library prune is anchored to it, and fd's --exclude would
-# apply to every root.  In chunks, to stay clear of ARG_MAX.
+# apply to every root.  In chunks, to stay clear of ARG_MAX.  With fd, the
+# roots that go without the ignore files above them (fd_nip_r) get a run of
+# their own.
 scan_roots() {
-  local depth="$1" finder="$2" r i
-  local -a roots=()
+  local depth="$1" finder="$2" r
+  local -a roots=() nroots=()
   shift 2
   for r in "$@"; do
     if [ "$r" = "$HOME" ]; then scan_dirs "$r" "$depth" "$finder"
-    elif [ -d "$r" ]; then roots+=("$r")
+    elif [ -d "$r" ]; then
+      fd_nip_r "$r"
+      if [ "${#FD_NIP[@]}" = 0 ]; then roots+=("$r"); else nroots+=("$r"); fi
     fi
   done
-  [ "${#roots[@]}" -gt 0 ] || return 0
-  for (( i = 0; i < ${#roots[@]}; i += 256 )); do
+  {
+    _scan_chunks "$depth" "$finder" "" ${roots[@]+"${roots[@]}"}
+    _scan_chunks "$depth" "$finder" --no-ignore-parent ${nroots[@]+"${nroots[@]}"}
+  } | sed 's:/\{1,\}$::' || true
+}
+
+# _scan_chunks DEPTH FINDER FD-FLAG ROOT...: scan_roots' finder runs.
+_scan_chunks() {
+  local depth="$1" finder="$2" i
+  local -a nip=()
+  [ -z "$3" ] || nip=("$3")
+  shift 3
+  for (( i = 0; i < $#; i += 256 )); do
     case "$finder" in
-      fd|fdfind) "$finder" --type d --max-depth "$depth" --absolute-path ${FD_NIP[@]+"${FD_NIP[@]}"} . "${roots[@]:i:256}" 2>/dev/null ;;
-      find) find "${roots[@]:i:256}" -maxdepth "$depth" -path '*/.*' -prune -o -type d -print 2>/dev/null ;;
+      fd|fdfind) "$finder" --type d --max-depth "$depth" --absolute-path ${nip[@]+"${nip[@]}"} . "${@:i+1:256}" 2>/dev/null ;;
+      find) find "${@:i+1:256}" -maxdepth "$depth" -path '*/.*' -prune -o -type d -print 2>/dev/null ;;
     esac
-  done | sed 's:/\{1,\}$::' || true
+  done
+  return 0
 }
 
 # Find dirs whose *name* contains the query, case-insensitively, using
@@ -1664,6 +1721,7 @@ match_dirs() {
   _scan_prune "$root"
   case "$finder" in
     fd|fdfind)
+      fd_nip_r "$root"
       "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} -- "$query" "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
       ;;
     find)
