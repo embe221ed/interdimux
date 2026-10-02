@@ -87,7 +87,11 @@ if setup enter demo demo; then
   press A C-b; press A f
   wait_for "screen A | grep -q '❯'" || true
   press A -l other
+  # Not just the query echoed: the cursor on an `other` row, once fzf has
+  # filtered.  Enter on the echo alone could take the row the cursor was on
+  # before the filter ran (it did, now and then, under the bash renderer).
   wait_for "screen A | grep -q '❯ other'" || true
+  wait_for "screen A | grep '▌' | grep -q other" || true
   # a keystroke on B; once the pane has echoed it, tmux has counted it as B's
   # activity (that happens before the key reaches the pane)
   press B -l zq

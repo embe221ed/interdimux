@@ -299,7 +299,7 @@ if opens "kill dialog" "C-b f" '❯'; then
   key C-x
   if wait_for 'shows "Kill session"' 100; then
     I display-popup -C -c "$CL"
-    wait_for '[ "$(dialogs)" = 0 ] && ! popup_up' 30 || true
+    wait_for '[ "$(dialogs)" = 0 ] && ! popup_up' 100 || true
     if popup_up; then
       report "closing the popup under a kill dialog leaves no popup behind" fail
       ERRORS+="    screen: $(cap | grep -v '^ *$' | head -4 | tr '\n' '|')"$'\n'

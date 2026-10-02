@@ -235,7 +235,14 @@ run_rename_tty() { # $1 = cols, $2 = rows, $3 = new name, $4 = session to rename
   # looked like the dialog was broken.  The product code anchors every target
   # for the same reason.
   tmux -L "$SOCK" kill-session -t '=tiny' 2>/dev/null || true
-  tmux -L "$SOCK" new-session -d -s tiny -x "$w" -y "$h" \
+  # The action starts only once the pane IS that size: started with the
+  # session, it could lay its box out for another height under load.
+  tmux -L "$SOCK" new-session -d -s tiny -x "$w" -y "$h" 'sleep 30'
+  for i in $(seq 1 50); do
+    [ "$(tmux -L "$SOCK" display-message -p -t '=tiny:' '#{pane_width}x#{pane_height}' 2>/dev/null)" = "${w}x${h}" ] && break
+    sleep 0.1
+  done
+  tmux -L "$SOCK" respawn-pane -k -t '=tiny:' \
     "env INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 \
          TMUX_PANE='$TMUX_PANE' bash '$SCRIPT' --action rename \"S:$sess\"; sleep 6"
   for i in $(seq 1 60); do
@@ -243,9 +250,12 @@ run_rename_tty() { # $1 = cols, $2 = rows, $3 = new name, $4 = session to rename
     sleep 0.1
   done
   tmux -L "$SOCK" send-keys -t '=tiny:' C-u "$newname" Enter
+  # The error and the bottom border: a capture between the two is a frame
+  # still being drawn.  A border that never comes back runs the wait out and
+  # fails below, as it should.
   for i in $(seq 1 60); do
     out=$(tmux -L "$SOCK" capture-pane -t '=tiny:' -p 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
-    printf '%s' "$out" | grep -q '✗' && break
+    printf '%s' "$out" | grep -q '✗' && printf '%s' "$out" | grep -q '╰' && break
     sleep 0.1
   done
   printf '%s' "$out"

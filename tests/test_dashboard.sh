@@ -51,14 +51,17 @@ echo
 
 # Render prefix+g on a client of the given size and echo the pane contents.
 # TMUX_PANE is deliberately unset: it belongs to whatever server the test runner
-# itself is in, and would not resolve against these private ones.
+# itself is in, and would not resolve against these private ones.  The wait is
+# for the inner client, not the inner server: list-clients exits 0 with no
+# client at all, and a dashboard launched before the client had attached drew
+# nothing, now and then, on a loaded box.
 dash_capture() {
   local w="$1" h="$2" vnum="${3:-}" i
   local out="$SOCK-o-$w-$h${vnum:+-$vnum}" in="$SOCK-i-$w-$h${vnum:+-$vnum}"
   tmux -f /dev/null -L "$out" new-session -d -s drv -x "$w" -y "$h" \
     "tmux -f /dev/null -L '$in' new-session -s host" 2>/dev/null || return 0
   for i in $(seq 1 80); do
-    tmux -L "$in" list-clients >/dev/null 2>&1 && break
+    [ -n "$(tmux -L "$in" list-clients 2>/dev/null)" ] && break
     sleep 0.15
   done
   env -u TMUX_PANE \
@@ -89,7 +92,7 @@ dash_pick() {
   tmux -f /dev/null -L "$out" new-session -d -s drv -x "$w" -y "$h" \
     "tmux -f /dev/null -L '$in' new-session -s host" 2>/dev/null || return 0
   for i in $(seq 1 80); do
-    tmux -L "$in" list-clients >/dev/null 2>&1 && break
+    [ -n "$(tmux -L "$in" list-clients 2>/dev/null)" ] && break
     sleep 0.15
   done
   env -u TMUX_PANE \
@@ -239,7 +242,7 @@ recheck() {
   tmux -f /dev/null -L "$out" new-session -d -s drv -x 100 -y 40 \
     "tmux -f /dev/null -L '$in' new-session -s host" 2>/dev/null || return 1
   for i in $(seq 1 80); do
-    tmux -L "$in" list-clients >/dev/null 2>&1 && break
+    [ -n "$(tmux -L "$in" list-clients 2>/dev/null)" ] && break
     sleep 0.15
   done
   env -u TMUX_PANE \
@@ -316,7 +319,7 @@ doctor_dash() { # $1 = outer client rows -> the one line about the dashboard
   tmux -f /dev/null -L "$out" new-session -d -s drv -x 90 -y "$h" \
     "tmux -f /dev/null -L '$in' new-session -s host" 2>/dev/null || return 0
   for i in $(seq 1 80); do
-    tmux -L "$in" list-clients >/dev/null 2>&1 && break
+    [ -n "$(tmux -L "$in" list-clients 2>/dev/null)" ] && break
     sleep 0.15
   done
   env -u TMUX_PANE \
