@@ -607,7 +607,9 @@ set -ag status-right ' #(bash ~/.tmux/plugins/interdimux/scripts/interdimux.sh -
 
 That is one bash and three short tmux calls every `status-interval` (its
 version, the options and the panes; only the last is as big as your server),
-and fzf is not needed.
+and fzf is not needed. It is not free: about 0.1 s of CPU a run on a server
+of 90 panes, under 1% of a core at tmux's default `status-interval` of 15,
+but a tenth of one at 1.
 
 `--agent-next` switches to the next agent that needs you (`approve` or `input`,
 or the states you give it), with no popup: from anywhere else the first in that
