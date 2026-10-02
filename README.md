@@ -26,7 +26,10 @@ A portal gun for your tmux sessions.
   frames on tmux >= 3.3 and a red frame during kill prompts and kill
   mode on tmux >= 3.6 (only the colour is overridden — your border
   lines and background are kept; with `padded` lines, which have no line
-  to colour, the frame's background turns red instead). Kill mode's prompt
+  to colour, the frame's background turns red instead). That is in the
+  popups interdimux opens: one you open with a `display-popup` of your
+  own keeps its frame, since nothing tells it from a pane, and a recolour
+  outside a popup would open one. Kill mode's prompt
   is red too, on any tmux and any border — with `none` there is no frame
 - Dashboard as a native tmux menu, or a scrolling fzf menu on a client too
   short for it
