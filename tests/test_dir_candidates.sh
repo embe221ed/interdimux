@@ -196,38 +196,98 @@ for mode in default deep 'deep path' scan; do
     ERRORS+="$(printf '%s\n' "$raw" | LC_ALL=C sed -n l | head -8)"$'\n'
   fi
 done
+# The deep searches that list the subtrees of what they matched (scan_roots):
+# a name fragment, and a path typed part of the way, which also scans for the
+# directories it begins -- deeper than the scans that would list the three
+# themselves -- and a fragment of a path, whose scan does list them.  The same
+# three projects, under grp.
+for sd in "caf"$'\xe9' sibling zz; do mkdir -p "$TMPD/scan2/a/b/c/grp/$sd/.git" "$TMPD/scan3/grp/$sd/.git"; done
+for mode in 'deep fragment' 'deep partial path' 'deep path fragment'; do
+  case "$mode" in
+    'deep fragment')      root="$TMPD/scan2" grp="$TMPD/scan2/a/b/c/grp"; set -- --deep grp ;;
+    'deep partial path')  root="$TMPD/scan2" grp="$TMPD/scan2/a/b/c/grp"; set -- --deep "$TMPD/scan2/a/b/c/gr" ;;
+    'deep path fragment') root="$TMPD/scan3" grp="$TMPD/scan3/grp"; set -- --deep rp/ ;;
+  esac
+  raw=$(INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_PROJECT_DIRS="$root" bash "$SCRIPT" --dirs-list "$@" 2>/dev/null \
+          | LC_ALL=C sed 's/\x1b\[[0-9;]*m//g')
+  rows=$(printf '%s\n' "$raw" | LC_ALL=C grep -aF "$grp/" || true)
+  if [ -n "$raw" ] && printf '%s\n' "$raw" | LC_ALL=C awk -F'\t' 'NF != 3 { bad = 1 } END { exit bad }' \
+     && [ "$(printf '%s\n' "$rows" | wc -l)" -eq 3 ] \
+     && ! printf '%s\n' "$rows" | LC_ALL=C grep -qav '◆' \
+     && printf '%s\n' "$rows" | cut -f3 | LC_ALL=C grep -qaxF "$grp/sibling" \
+     && printf '%s\n' "$rows" | cut -f3 | LC_ALL=C grep -qaxF "$grp/zz"; then
+    report "--dirs-list $mode: a Latin-1 project and its siblings, three ◆ rows of 3 fields" pass
+  else
+    report "--dirs-list $mode: a Latin-1 project and its siblings, three ◆ rows of 3 fields" fail
+    ERRORS+="$(printf '%s\n' "$raw" | LC_ALL=C sed -n l | head -8)"$'\n'
+  fi
+done
 set --
+# ...and in the tier of directories that are no project (emit_sorted_tiers
+# sorts each tier and reads it back).
+for sd in "caf"$'\xe9' plain; do mkdir -p "$TMPD/scan4/$sd"; done
+raw=$(INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_PROJECT_DIRS="$TMPD/scan4" bash "$SCRIPT" --dirs-list 2>/dev/null \
+        | LC_ALL=C sed 's/\x1b\[[0-9;]*m//g')
+rows=$(printf '%s\n' "$raw" | LC_ALL=C grep -aF "$TMPD/scan4/" || true)
+if [ -n "$raw" ] && printf '%s\n' "$raw" | LC_ALL=C awk -F'\t' 'NF != 3 { bad = 1 } END { exit bad }' \
+   && [ "$(printf '%s\n' "$rows" | wc -l)" -eq 2 ] \
+   && printf '%s\n' "$rows" | cut -f3 | LC_ALL=C grep -qaxF "$TMPD/scan4/plain"; then
+  report "--dirs-list: a Latin-1 directory and the one after it, two rows of 3 fields" pass
+else
+  report "--dirs-list: a Latin-1 directory and the one after it, two rows of 3 fields" fail
+  ERRORS+="$(printf '%s\n' "$raw" | LC_ALL=C sed -n l | head -8)"$'\n'
+fi
 
-# Those reads run with LC_ALL=C as a prefix, and when the user's LC_ALL names a
-# locale that is not installed, bash 5 warns each time it puts it back after a
-# read -- in the navigator, onto ERR_FILE, the status line and errors.log.  It
-# must stay bash's one warning at startup (the control: that one is there, so
-# the locale really is missing).  ASCII names only, in a data dir and a scan
-# root of their own: what is under test is the reads, not the is_utf8 check a
-# non-ASCII name gets.  Bash 4.x warns per read whatever is done, but its read
-# never needed the prefix.
-if [ "$(bash -c 'echo "${BASH_VERSINFO[0]}"')" -ge 5 ]; then
-  mkdir -p "$TMPD/locdata/interdimux"
-  for sd in one two three four; do mkdir -p "$TMPD/locscan/$sd/.git" "$TMPD/fx/loc-$sd"; done
-  printf '%s\n' "$TMPD/fx/loc-one" "$TMPD/fx/loc-two" "$TMPD/fx/loc-three" "$TMPD/fx/loc-four" \
-    > "$TMPD/locdata/interdimux/recent_dirs"
-  for args in "--list" "--dirs-list" "--dirs-list --scan $TMPD/locscan"; do
-    # shellcheck disable=SC2086  # $args is split on purpose
-    env -u LANG -u LC_CTYPE LC_ALL=xx_XX.UTF-8 XDG_DATA_HOME="$TMPD/locdata" INTERDIMUX_USE_RUST=off \
-      INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_PROJECT_DIRS="$TMPD/locscan" \
-      bash "$SCRIPT" $args > "$TMPD/locale.out" 2> "$TMPD/locale.err" || true
-    warned=$(grep -c 'setlocale' "$TMPD/locale.err" || true)
-    # the premise: the reads happened -- the last entry of what they read is listed
-    case "$args" in --list) last="$TMPD/fx/loc-four" ;; *) last="$TMPD/locscan/four" ;; esac
-    if [ "$warned" = 1 ] && grep -qF "$last" "$TMPD/locale.out"; then
-      report "${args%% $TMPD*} under a missing LC_ALL: bash's one startup warning, none per read" pass
+# Those reads switch to LC_ALL=C (or use mapfile), and when the user's LC_ALL
+# names a locale that is not installed, bash warns each time it puts it back
+# after a read -- in the navigator, onto ERR_FILE, the status line and
+# errors.log.  It must stay bash's one warning at startup, on the stderr the
+# process started with (the control: that one is there, so the locale really is
+# missing), and nothing in ERR_FILE.  On bash 4.3 and 4.4 too, which warn after
+# a redirection on the read itself is undone.  ASCII names only, in a data dir
+# and a scan root of their own: what is under test is the reads, not the
+# is_utf8 check a non-ASCII name gets.  Each deep search lists the subtrees of
+# its matches (scan_roots), so those have a level below them.
+mkdir -p "$TMPD/locdata/interdimux"
+for sd in one two three four; do mkdir -p "$TMPD/locscan/$sd/.git" "$TMPD/locscan/$sd/sub-$sd/inner" "$TMPD/fx/loc-$sd"; done
+printf '%s\n' "$TMPD/fx/loc-one" "$TMPD/fx/loc-two" "$TMPD/fx/loc-three" "$TMPD/fx/loc-four" \
+  > "$TMPD/locdata/interdimux/recent_dirs"
+loc_bashes=(bash)
+if [ -n "${INTERDIMUX_OLD_BASH_DIR:-}" ]; then
+  for v in 4.3 4.4; do
+    if [ -x "$INTERDIMUX_OLD_BASH_DIR/$v/bash" ]; then
+      loc_bashes+=("$INTERDIMUX_OLD_BASH_DIR/$v/bash")
     else
-      report "${args%% $TMPD*} under a missing LC_ALL: bash's one startup warning, none per read (got $warned)" fail
+      report "bash $v is in \$INTERDIMUX_OLD_BASH_DIR (no $INTERDIMUX_OLD_BASH_DIR/$v/bash)" fail
     fi
   done
 else
-  echo "  (skipped the missing-locale warnings: bash 4.x warns per read whatever is done)"
+  echo "  (skipped the missing-locale warnings on bash 4.3 and 4.4: \$INTERDIMUX_OLD_BASH_DIR is not set)"
 fi
+for lb in "${loc_bashes[@]}"; do
+  lv=$("$lb" -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"')
+  for args in "--list" "--dirs-list" "--dirs-list --scan $TMPD/locscan" "--dirs-list --deep sub" \
+              "--dirs-list --deep $TMPD/locscan/fo" "--dirs-list --deep our/sub"; do
+    : > "$TMPD/locale.errfile"
+    # shellcheck disable=SC2086  # $args is split on purpose
+    env -u LANG -u LC_CTYPE LC_ALL=xx_XX.UTF-8 XDG_DATA_HOME="$TMPD/locdata" INTERDIMUX_USE_RUST=off \
+      INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_PROJECT_DIRS="$TMPD/locscan" INTERDIMUX_ERR_FILE="$TMPD/locale.errfile" \
+      "$lb" "$SCRIPT" $args > "$TMPD/locale.out" 2> "$TMPD/locale.err" || true
+    warned=$(grep -c 'setlocale' "$TMPD/locale.err" || true)
+    logged=$(grep -c 'setlocale' "$TMPD/locale.errfile" || true)
+    # the premise: the reads happened -- the last entry of what they read is listed
+    case "$args" in
+      --list) last="$TMPD/fx/loc-four" ;;
+      *--deep*) last="$TMPD/locscan/four/sub-four/inner" ;;
+      *) last="$TMPD/locscan/four" ;;
+    esac
+    if [ "$warned" = 1 ] && [ "$logged" = 0 ] && grep -qF "$last" "$TMPD/locale.out"; then
+      report "bash $lv, ${args//$TMPD/…} under a missing LC_ALL: bash's one startup warning, none per read" pass
+    else
+      report "bash $lv, ${args//$TMPD/…} under a missing LC_ALL: bash's one startup warning, none per read (got $warned, $logged logged)" fail
+    fi
+  done
+done
 
 # A switch rewrites the recent list, keeping the entries that still exist: the
 # one after the Latin-1 directory must survive it.  (Last: it adds a session.)

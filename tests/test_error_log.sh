@@ -121,6 +121,8 @@ STUB
     report "--preview keeps the stderr fzf gave it" fail
     ERRORS+="    saw: $(tr '\n' ' ' <<< "$out")"$'\n'
   fi
+else
+  echo "  (skipped which stderr each mode runs with: needs /proc/<pid>/fd and readlink)"
 fi
 
 # --- end to end: a reload that fails is reported when the navigator exits ------------
@@ -166,6 +168,45 @@ if [ "${fzf_minor:-0}" -ge 53 ]; then
     ERRORS+="    screen: $(screen | grep -v '^ *$' | head -3 | tr '\n' '|')"$'\n'
   fi
   tmux -L "$OUTER" kill-server 2>/dev/null || true
+
+  # ^o under an LC_ALL that names a locale that is not installed, as an ssh
+  # session forwards one.  Every bash warns once as it starts, and the
+  # directory picker's producer started with the navigator's error file as
+  # its stderr: each ^o put the warning on the status line and in errors.log.
+  # Nothing fails here, so nothing may be reported.
+  cp "$SCRIPT_DIR/rust/tests/corpus/basic.dump" "$TMPD/nav.dump"
+  mkdir -p "$TMPD/locproj/alpha" "$TMPD/locproj/beta"
+  rm -f "$LOG"
+  before=$(msgs | grep -c 'interdimux:' || true)
+  tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
+    "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_STATE_HOME='$XDG_STATE_HOME' \
+         XDG_DATA_HOME='$XDG_DATA_HOME' INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=$fzf_minor \
+         INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_USE_ZOXIDE=off INTERDIMUX_DUMP_IN='$TMPD/nav.dump' \
+         INTERDIMUX_PROJECT_DIRS='$TMPD/locproj' LC_ALL=xx_XX.UTF-8 \
+         bash '$SCRIPT' 2>/dev/null; echo NAV-EXITED; sleep 30"
+  if wait_for 'screen | grep -q bravo' 150; then
+    tmux -L "$OUTER" send-keys -t '=drv:' C-o
+    if wait_for 'screen | grep -q "locproj/beta"' 100; then
+      tmux -L "$OUTER" send-keys -t '=drv:' Escape
+      wait_for 'screen | grep -q bravo' 100 || true
+      tmux -L "$OUTER" send-keys -t '=drv:' Escape
+      wait_for 'screen | grep -q NAV-EXITED' 100 || true
+      if [ ! -e "$LOG" ] && [ "$(msgs | grep -c 'interdimux:' || true)" = "$before" ]; then
+        report "^o under a missing LC_ALL reports nothing" pass
+      else
+        report "^o under a missing LC_ALL reports nothing" fail
+        ERRORS+="    log: $( (cat "$LOG" 2>/dev/null || true) | head -3 | tr '\n' '|')"$'\n'
+      fi
+    else
+      report "setup: ^o lists the project dirs under a missing LC_ALL" fail
+      ERRORS+="    screen: $(screen | grep -v '^ *$' | head -3 | tr '\n' '|')"$'\n'
+    fi
+  else
+    report "the navigator draws its first frame under a missing LC_ALL" fail
+  fi
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
+else
+  echo "  (skipped the end-to-end reports: the navigator logs its errors from fzf 0.53 on)"
 fi
 
 # --- the navigator with a stand-in fzf --------------------------------------------------
@@ -300,6 +341,8 @@ if [ "${fzf_minor:-0}" -ge 53 ] && [ -r "/proc/$$/environ" ] && command -v pgrep
     report "the navigator draws its first frame from the dump (2)" fail
   fi
   tmux -L "$OUTER" kill-server 2>/dev/null || true
+else
+  echo "  (skipped a reload's error then fzf's death: needs fzf >= 0.53, /proc/<pid>/environ and pgrep)"
 fi
 
 echo

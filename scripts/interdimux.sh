@@ -1483,24 +1483,29 @@ utf8_ctype_r() {
 # One on a filesystem whose stat can block is offered WITHOUT the existence
 # check (is_remote_path) -- connect_dir reports it if it is gone.
 #
-# Every `read` of a line that can END in a raw path byte runs under LC_ALL=C,
-# as a prefix on the read alone.  Under a UTF-8 locale, bash 5's read takes a
-# line-final lead byte (0xC2-0xF4; a Latin-1 é is 0xE9) for the start of a
-# character and swallows the newline into it, so `caf\xe9` and the line after
-# it came back as ONE line, and the entry after a Latin-1 directory vanished
-# (review BUG-111).  The prefix scopes the C locale to that one read: the loop
-# body still counts characters.  It costs two setlocale(3) calls a line, so it
-# is only where a line can end in a path -- never on a window or pane line.
-# And its stderr goes to /dev/null: when LC_ALL names a locale that is not
-# installed, bash warns each time it puts LC_ALL back after the read, and in
-# the navigator stderr is ERR_FILE -- a line per read, on the status line and
-# in errors.log, where there was only bash's one warning at startup.  (Bash
-# 4.x warns after the redirection is undone, but its read never had the bug.)
+# A line that can END in a raw path byte is never taken by a plain `read`.
+# Under a UTF-8 locale, bash 5's read takes a line-final lead byte (0xC2-0xF4;
+# a Latin-1 é is 0xE9) for the start of a character and swallows the newline
+# into it, so `caf\xe9` and the line after it came back as ONE line, and the
+# entry after a Latin-1 directory vanished (review BUG-111).
+#
+# A finder's output, which can be thousands of lines, is read with mapfile,
+# which splits on the newline BYTE in every bash from 4.3 up, and costs what a
+# plain read did.  The few loops that stop after a handful of lines keep `read`
+# with LC_ALL=C as a prefix, which scopes the C locale to that one read (the
+# loop body still counts characters).  That costs two setlocale(3) calls a
+# line, about 30 us, which over a whole scan made a ctrl-f path query with few
+# matches 15-20% slower.  The prefix's read sits in a group whose stderr is
+# /dev/null: when LC_ALL names a locale that is not installed, bash warns each
+# time it puts LC_ALL back after the read -- on bash 4.x after a redirection on
+# the read itself has been undone -- and in the navigator stderr is ERR_FILE,
+# so each read put a line on the status line and in errors.log, where there was
+# only bash's one warning at startup.
 load_recent_dirs() {
   local d count=0
   local -A _recent_seen=()
   if [ -f "$RECENT_DIRS_FILE" ]; then
-    while LC_ALL=C IFS= read -r d 2>/dev/null; do
+    while { LC_ALL=C IFS= read -r d; } 2>/dev/null; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
       [[ ${_recent_seen[$d]+x} ]] && continue
@@ -1514,7 +1519,7 @@ load_recent_dirs() {
   # Merge frecent dirs from zoxide when available
   if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
     local zcount=0
-    while LC_ALL=C IFS= read -r d 2>/dev/null; do
+    while { LC_ALL=C IFS= read -r d; } 2>/dev/null; do
       is_utf8 "$d" || continue
       is_remote_path "$d" || [ -d "$d" ] || continue
       [[ ${_recent_seen[$d]+x} ]] && continue
@@ -1549,7 +1554,7 @@ record_recent_dir() {
   [ -n "$tmp" ] || return 0
   if ! echo "$dir" > "$tmp" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
   if [ -f "$RECENT_DIRS_FILE" ]; then
-    while LC_ALL=C IFS= read -r d 2>/dev/null; do   # LC_ALL=C: see load_recent_dirs
+    while { LC_ALL=C IFS= read -r d; } 2>/dev/null; do   # LC_ALL=C: see load_recent_dirs
       [ "$d" = "$dir" ] && continue
       is_remote_path "$d" || [ -d "$d" ] || continue   # a stalled mount must not delay the switch
       echo "$d" >> "$tmp"
@@ -2245,17 +2250,20 @@ record_dir_use() {
 }
 
 # Sort and emit arrays of dirs by tier (projects first, then others).
-# LC_ALL=C on each read: see load_recent_dirs.
+# mapfile, not read: see load_recent_dirs.
 emit_sorted_tiers() {
+  local -a _st=()
   if [ "${#_projects[@]}" -gt 0 ]; then
-    while LC_ALL=C IFS= read -r d 2>/dev/null; do
+    mapfile -t _st < <(printf '%s\n' "${_projects[@]}" | sort -u)
+    for d in ${_st[@]+"${_st[@]}"}; do
       emit_dir "$d" project ""
-    done < <(printf '%s\n' "${_projects[@]}" | sort -u)
+    done
   fi
   if [ "${#_others[@]}" -gt 0 ]; then
-    while LC_ALL=C IFS= read -r d 2>/dev/null; do
+    mapfile -t _st < <(printf '%s\n' "${_others[@]}" | sort -u)
+    for d in ${_st[@]+"${_st[@]}"}; do
       emit_dir "$d" dir ""
-    done < <(printf '%s\n' "${_others[@]}" | sort -u)
+    done
   fi
 }
 
@@ -4119,7 +4127,7 @@ IMUX_SECTIONS
     # byte there joined the next session onto it -- which vanished from the
     # list, and could be the one you are in (see load_recent_dirs).
     sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr)
-    while LC_ALL=C IFS= read -r line 2>/dev/null; do
+    while { LC_ALL=C IFS= read -r line; } 2>/dev/null; do
       [ -z "$line" ] && continue
       sn_check="${line%%"$US"*}"
       if [ "$sn_check" = "$current_session" ]; then
@@ -4282,7 +4290,7 @@ IMUX_SECTIONS
   local -A AMARKED=()   # the agents view: panes already marked (agent_mark_r)
 
   # LC_ALL=C on the read: the line ends in #{session_path} (see the MRU pass).
-  while LC_ALL=C IFS="$US" read -r sname sla swins sattach spath 2>/dev/null; do
+  while { LC_ALL=C IFS="$US" read -r sname sla swins sattach spath; } 2>/dev/null; do
     [ -z "$sname" ] && continue
     [ -n "$spath" ] && SESSION_DIRS["$spath"]=1
     marker=" "
@@ -4861,9 +4869,10 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # handed it down -- see mounts_export).
   [ "$_MOUNTS_READ" = 1 ] || _mounts_read
 
-  # Each read of a finder's output is LC_ALL=C (see load_recent_dirs): a Latin-1
-  # directory took the next one into its row, which then spanned two lines.
-  # load_recent_dirs's own output is valid UTF-8, so it is read plainly.
+  # A finder's output is taken with mapfile, never a plain read (see
+  # load_recent_dirs): a Latin-1 directory took the next one into its row,
+  # which then spanned two lines.  load_recent_dirs's own output is valid
+  # UTF-8, so it is read plainly.
   #
   # collect_scan ROOT DEPTH [PREFIX]: collect_dir each directory ROOT's scan
   # finds -- with PREFIX, only those it begins, which also go on _roots for the
@@ -4871,7 +4880,9 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # ignore files above ROOT hid them all (fd_parents_hide).
   collect_scan() {
     local d n=0
-    while LC_ALL=C IFS= read -r d 2>/dev/null; do
+    local -a _cs=()
+    mapfile -t _cs < <(scan_dirs "$1" "$2" "$finder")
+    for d in ${_cs[@]+"${_cs[@]}"}; do
       [ -z "$d" ] || [ "$d" = "$1" ] && continue
       n=1
       if [ $# = 2 ]; then
@@ -4880,8 +4891,21 @@ if [ "${1:-}" = "--dirs-list" ]; then
         collect_dir "$d"
         _roots+=("$d")
       fi
-    done < <(scan_dirs "$1" "$2" "$finder")
+    done
     [ "$n" = 1 ] || ! fd_parents_hide "$1" "$finder" || collect_scan "$@"
+  }
+
+  # collect_dir every directory in the subtrees of _roots, in one finder run
+  # (scan_roots).
+  collect_subtrees() {
+    local sub
+    local -a _cs=()
+    [ "${#_roots[@]}" -gt 0 ] || return 0
+    mapfile -t _cs < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
+    for sub in ${_cs[@]+"${_cs[@]}"}; do
+      [ -z "$sub" ] && continue
+      collect_dir "$sub"
+    done
   }
 
   case "$mode" in
@@ -4952,10 +4976,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
           _roots=()
           collect_scan "$anc" "$stripped" "$qr"
           # every completion's subtree in one finder run (scan_roots)
-          [ "${#_roots[@]}" -gt 0 ] && while LC_ALL=C IFS= read -r sub 2>/dev/null; do
-            [ -z "$sub" ] && continue
-            collect_dir "$sub"
-          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
+          collect_subtrees
         done
 
         if [[ "$query" != */* ]]; then
@@ -4976,10 +4997,7 @@ if [ "${1:-}" = "--dirs-list" ]; then
             done
           done
           # every match's subtree in one finder run (scan_roots)
-          [ "${#_roots[@]}" -gt 0 ] && while LC_ALL=C IFS= read -r sub 2>/dev/null; do
-            [ -z "$sub" ] && continue
-            collect_dir "$sub"
-          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
+          collect_subtrees
         else
           # Multi-component query: match it as a path substring against a
           # scan deep enough for it to appear, capped to keep the scan
@@ -4991,18 +5009,16 @@ if [ "${1:-}" = "--dirs-list" ]; then
           _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
-            while LC_ALL=C IFS= read -r d 2>/dev/null; do
+            mapfile -t _cs < <(scan_dirs "$sp" "$match_depth" "$finder")
+            for d in ${_cs[@]+"${_cs[@]}"}; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               if [[ "${d,,}" == *"${query,,}"* ]]; then
                 collect_dir "$d"
                 _roots+=("$d")
               fi
-            done < <(scan_dirs "$sp" "$match_depth" "$finder")
+            done
           done
-          [ "${#_roots[@]}" -gt 0 ] && while LC_ALL=C IFS= read -r sub 2>/dev/null; do
-            [ -z "$sub" ] && continue
-            collect_dir "$sub"
-          done < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
+          collect_subtrees
         fi
       fi
 
@@ -8181,8 +8197,18 @@ if [ "${1:-}" = "--dirs" ]; then
   #
   # Restoring AFTER the `|| exit 1` is deliberate: the cancel path leaves the
   # process, and the enclosing --dirs block already runs under `set +e`.
+  #
+  # Under the navigator the producer starts with /dev/null for its stderr, as
+  # fzf starts the reloads.  Its bash warns before any of this file runs when
+  # LC_ALL names a locale that is not installed (an ssh session forwards one),
+  # and with this process's stderr, which is ERR_FILE, that put the warning on
+  # the status line and in errors.log on every ^o.  --dirs-list re-attaches
+  # itself to ERR_FILE (see the top of the file), so its own errors still go
+  # there.
+  _dl_err=2
+  [ -z "${INTERDIMUX_ERR_FILE:-}" ] || exec {_dl_err}>/dev/null
   set +o pipefail
-  selected=$(bash "$SCRIPT_PATH" --dirs-list | fzf \
+  selected=$(bash "$SCRIPT_PATH" --dirs-list 2>&"$_dl_err" | fzf \
     "${FZF_THEME[@]}" \
     --no-sort \
     --delimiter=$'\t' \
