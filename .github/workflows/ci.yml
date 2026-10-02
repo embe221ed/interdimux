@@ -75,8 +75,9 @@ jobs:
   tests:
     name: tests (${{ matrix.renderer }} renderer)
     runs-on: ${{ matrix.os }}
-    # The suites drive real tmux servers and wait on real panes.  They take ~5
-    # minutes; a cap keeps a hung one from burning the job's six-hour default.
+    # The suites drive real tmux servers and wait on real panes.  They take ~10
+    # minutes a leg (the shell suites alone 8.5 to 9.5); a cap keeps a hung one
+    # from burning the job's six-hour default.
     timeout-minutes: 30
     # Two renderers ship, so both are tested.  `rust` is the developer's setup:
     # the core built, every suite on it, the parity suites comparing it with the
@@ -95,7 +96,9 @@ jobs:
     # cache built on one image is never restored onto another.  (actions/cache
     # versions an entry by its paths and compression only, not the image, and
     # a bash built against one image's libc is not proof the recipe works on
-    # the next.)  The job's name leaves it out, to keep the two check names.
+    # the next.)  The job's name leaves it out, to keep the two check names --
+    # so a second image needs it added to the name, or the two jobs of each
+    # renderer would share one check name.
     strategy:
       fail-fast: false
       matrix:
@@ -129,9 +132,13 @@ jobs:
           # rule measures 15 there.
           sudo update-alternatives --set awk /usr/bin/gawk
 
+      # Restored here, and saved straight after the build below rather than in
+      # actions/cache's post step, which saves only when the whole job passed:
+      # a red suite threw the fresh builds away, and the next push built them
+      # cold again (~4 minutes).
       - name: Cache tmux ${{ env.TMUX_VERSION }}
         id: tmux-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/tmux-prefix
           key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}
@@ -146,6 +153,13 @@ jobs:
           ./configure --prefix="$HOME/tmux-prefix"
           make -j"$(nproc)"
           make install
+
+      - name: Save tmux ${{ env.TMUX_VERSION }}
+        if: steps.tmux-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/tmux-prefix
+          key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}
 
       - name: Install fzf ${{ env.FZF_VERSION }}
         run: |
@@ -190,12 +204,19 @@ jobs:
       # that relies on signed overflow wrapping.  See docs/CI.md §12.  Each goes
       # under its major.minor, cut from the tarball's name: `${v%.*}` made
       # "5.0" into "5", where the suite, which wants 5.0, would never look.
+      #
+      # make -j can race in 3.2's lib/readline on a small runner (`ar:
+      # xmalloc.o: No such file or directory`, 3 builds in 7 on two CPUs), and a
+      # failure here ends the job before any suite runs: a serial make finishes
+      # what the parallel one left.  The key names the recipe (`r2`): bump it
+      # with any change to the flags or the steps, or a change that only
+      # touches them restores the old binaries and proves nothing.
       - name: Cache bash ${{ env.OLD_BASH_VERSIONS }}
         id: old-bash-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/bash-old
-          key: bash-old-${{ env.OLD_BASH_VERSIONS }}-${{ matrix.os }}
+          key: bash-old-r2-${{ env.OLD_BASH_VERSIONS }}-${{ matrix.os }}
 
       - name: Build bash ${{ env.OLD_BASH_VERSIONS }}
         if: steps.old-bash-cache.outputs.cache-hit != 'true'
@@ -206,7 +227,7 @@ jobs:
             tar -xzf "/tmp/bash-$v.tar.gz" -C /tmp
             cd "/tmp/bash-$v"
             if ! { ./configure --without-bash-malloc CFLAGS="$F" CFLAGS_FOR_BUILD="$F" \
-                   && make -j"$(nproc)"; } > "/tmp/bash-$v.log" 2>&1; then
+                   && { make -j"$(nproc)" || make; }; } > "/tmp/bash-$v.log" 2>&1; then
               tail -40 "/tmp/bash-$v.log"; exit 1
             fi
             d=$(echo "$v" | cut -d. -f1,2)
@@ -214,6 +235,13 @@ jobs:
             cp bash "$HOME/bash-old/$d/bash"
             cd - >/dev/null
           done
+
+      - name: Save bash ${{ env.OLD_BASH_VERSIONS }}
+        if: steps.old-bash-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/bash-old
+          key: bash-old-r2-${{ env.OLD_BASH_VERSIONS }}-${{ matrix.os }}
 
       - name: Point the bash-floor suite at them
         run: echo "INTERDIMUX_OLD_BASH_DIR=$HOME/bash-old" >> "$GITHUB_ENV"

@@ -375,6 +375,21 @@ on 4 cores), and about four for all six (the step as written, run on a
 test" runs each one, so a build that went missing fails that step instead of
 turning the suite back into skips.
 
+Three things about that cache, found in review:
+
+* `make -j` races in 3.2's `lib/readline` on a small runner (`ar:
+  xmalloc.o: No such file or directory`: 3 builds in 7 on two CPUs of a
+  26.04 container, none on four), and the step's failure ended the job
+  before any suite ran.  A failed parallel make is followed by a serial one,
+  which finishes what it left.
+* actions/cache saves in its post step only when the whole job passed, so a
+  red suite threw the fresh builds away.  The workflow restores with
+  `actions/cache/restore` and saves with `actions/cache/save` straight after
+  each build.
+* The key named the versions and the image, not the recipe: a change to the
+  flags alone restored the old binaries and proved nothing until eviction.
+  It carries a recipe tag (`bash-old-r2-…`) to bump with any such change.
+
 That step only knew the workflow's own list, though, and for a while that list
 was 3.2, 4.2, 4.3 and 5.1 while the suite also ran 4.4 and 5.0 — the rest of
 the range that expands a subscript twice — whenever they were there.  They
