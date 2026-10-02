@@ -38,6 +38,8 @@ cleanup() {
   [ -n "$LPID" ] && kill "$LPID" 2>/dev/null || true
   tmux -L "$OUTER" kill-server 2>/dev/null || true
   tmux -L "$SOCK" kill-server 2>/dev/null || true
+  # the socket files too: tmux leaves them behind after kill-server
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK" "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$OUTER"
   rm -rf "$TMPD"
 }
 trap cleanup EXIT

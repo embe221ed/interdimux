@@ -33,7 +33,12 @@ PASS=0
 FAIL=0
 ERRORS=""
 
-cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$TMPD"; }
+# The socket file too: tmux leaves it behind after kill-server.
+cleanup() {
+  tmux -L "$SOCK" kill-server 2>/dev/null || true
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK"
+  rm -rf "$TMPD"
+}
 trap cleanup EXIT
 
 report() {
