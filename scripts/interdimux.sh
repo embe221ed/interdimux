@@ -328,7 +328,22 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # Previously bound keys are NOT preserved -- tmux has no way to ask what a key
   # was bound to and restore it later, so the honest contract is "you named
   # these keys, they are ours now".
-  _bk_jump=$(tmux show-option -gqv @interdimux-jump-keys 2>/dev/null)
+  #
+  # One tmux client reads both opt-in key options (@interdimux-agent-next-key
+  # is below): jump-keys with -v, so its raw value or no line at all, and
+  # agent-next-key by name, so its line can never be taken for jump-keys'.  A
+  # fourth show-option of its own cost every plugin load ~5 ms (+15%).  By name
+  # tmux escapes an odd key ('#' prints as \#), so such a value is read again,
+  # raw.
+  _bk_jump="" _bk_an=""
+  while IFS= read -r _bk_l; do
+    case "$_bk_l" in
+      "@interdimux-agent-next-key "*) _bk_an="${_bk_l#* }" ;;
+      *) _bk_jump="$_bk_l" ;;
+    esac
+  done < <(tmux show-option -gqv @interdimux-jump-keys \; show-option -gq @interdimux-agent-next-key 2>/dev/null)
+  case "$_bk_an" in *[\\\"\']*) _bk_an=$(tmux show-option -gqv @interdimux-agent-next-key 2>/dev/null) ;; esac
+  unset _bk_l
   if [ -n "$_bk_jump" ]; then
     _bk_i=0
     for _bk_k in $_bk_jump; do
@@ -342,7 +357,6 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # to the next agent that needs you (--agent-next), with no popup.  Unset, no
   # key is bound; nor is the navigator's or the dashboard's, which it would take
   # without a word (--doctor says why it is not bound).
-  _bk_an=$(tmux show-option -gqv @interdimux-agent-next-key 2>/dev/null)
   if [ -n "$_bk_an" ] && [ "$_bk_an" != "$_bk_nav" ] && [ "$_bk_an" != "$_bk_dash" ]; then
     tmux bind-key "$_bk_an" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --agent-next" 2>/dev/null
   fi

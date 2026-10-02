@@ -238,6 +238,13 @@ same_cost() { # NAME ARGS... -- run with 3 and with 30 matching directories (@N@
     report "$name: the same cost for $rows3 rows and $rows30 (got $t3 / $f3, then $TOOLS / $FORKS)" fail
   fi
 }
+# --- --bind-keys, once per plugin load --------------------------------------
+# Its tmux clients are the cost: one asks the version, one reads each key
+# option, one binds each key.  The opt-in agent-next key is read in the same
+# client as the jump keys, not in a fourth of its own (~5 ms, +15% of the load).
+run off -- --bind-keys
+check "--bind-keys (no opt-in keys)" "tmux=6" 7
+
 same_cost "--dirs-list" --dirs-list
 same_cost "--dirs-list --deep svc (a name fragment)" --dirs-list --deep svc
 same_cost "--dirs-list --deep /src (a path fragment)" --dirs-list --deep /src

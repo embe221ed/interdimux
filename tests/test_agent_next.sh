@@ -246,6 +246,24 @@ for pair in 'g:dashboard:--dashboard-launch' 'f:navigator:display-popup'; do
   esac
 done
 
+# --- with the jump keys, and a key tmux escapes ---------------------------------
+# --bind-keys reads @interdimux-jump-keys and this key in one tmux client, the
+# second by name; by name tmux prints '#' as \#, so the raw value is read again
+# and '#' is the key bound, next to the jump keys and not instead of them.
+tin set -g @interdimux-jump-keys 'M-1 M-2'
+tin set -g @interdimux-agent-next-key '#'
+bash "$SCRIPT" --bind-keys
+# (list-keys prints the key as \#, and `list-keys -T prefix '#'` finds nothing)
+bound=$(tin list-keys -T prefix 2>/dev/null | awk '$4 == "\\#"' || true)
+case "$bound" in
+  *--agent-next*) report "agent-next-key '#' with jump keys set: prefix+# runs --agent-next" pass ;;
+  *) report "agent-next-key '#' with jump keys set: prefix+# runs --agent-next ($bound)" fail ;;
+esac
+roots=$(tin list-keys -T root 2>/dev/null | grep -c -- '--jump [12]' || true)
+same "...and both jump keys are still bound" "$roots" 2
+tin set -gu @interdimux-jump-keys
+tin set -gu @interdimux-agent-next-key
+
 printf '\nResults: %d passed, %d failed\n\n' "$PASS" "$FAIL"
 [ -n "$ERRORS" ] && printf '%s' "$ERRORS"
 
