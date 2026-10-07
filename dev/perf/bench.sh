@@ -1377,7 +1377,7 @@ paired() { # fileA fileB col
 declare -A R_LINE R_STAGE1
 analyse() { # scenario -> R_LINE[scn]: "scn|A cpu|B cpu|...|n|verdict|wall"
   local scn="$1" fa="$WORK/res/$1.A" fb="$WORK/res/$1.B"
-  if [ ! -s "$fa" ] || [ ! -s "$fb" ]; then R_LINE[$scn]="$scn|-|-|-|-|-|-|-|-|-|-|0|FAILED|-"; return; fi
+  if [ ! -s "$fa" ] || [ ! -s "$fb" ]; then R_LINE[$scn]="$scn|-|-|-|-|-|-|-|-|-|-|-|0|FAILED|-"; return; fi
   local ma qa1 qa3 mb qb1 qb3 wa wb dmed dlo dhi wmed wlo whi n out
   read -r ma qa1 qa3 <<< "$(quart "$fa" 2)"
   read -r mb qb1 qb3 <<< "$(quart "$fb" 2)"
@@ -1406,6 +1406,7 @@ analyse() { # scenario -> R_LINE[scn]: "scn|A cpu|B cpu|...|n|verdict|wall"
       -v wa="$wa" -v wb="$wb" -v dm="$dmed" -v dl="$dlo" -v dh="$dhi" -v wm="$wmed" -v wl="$wlo" -v wh="$whi" \
       -v n="$n" -v out="$out" -v scn="$scn" -v bad="${SCN_BAD[$scn]:-0}" 'BEGIN {
     dp = (ma > 0) ? 100 * dm / ma : 0; nz = (ma > 0) ? 100 * (dh - dl) / 2 / ma : 0
+    up = (ma > 0) ? 100 * dh / ma : 0       # the top of the interval: B may be up to this much slower
     wp = (wa > 0) ? 100 * wm / wa : 0; wz = (wa > 0) ? 100 * (wh - wl) / 2 / wa : 0
     th = (nz > 2) ? nz : 2; wt = (wz > 2) ? wz : 2
     v = "ok"; if (dp > th) v = "REGRESSION"; else if (dp < -th) v = "FASTER"
@@ -1414,8 +1415,8 @@ analyse() { # scenario -> R_LINE[scn]: "scn|A cpu|B cpu|...|n|verdict|wall"
     if (n < 8) { v = "(n<8)"; w = "(n<8)" }
     if (bad) { v = "FAILED"; w = "-" }
     ia = (ma > 0) ? 100 * (qa3 - qa1) / ma : 0; ib = (mb > 0) ? 100 * (qb3 - qb1) / mb : 0
-    printf "%s|%.1f|%.1f|%+.1f|%.1f|%.1f|%.1f|%+.1f|%.1f|%.0f/%.0f|%s|%d|%s|%s\n",
-      scn, ma / 1000, mb / 1000, dp, nz, wa / 1000, wb / 1000, wp, wz, ia, ib, out, n, v, w }')
+    printf "%s|%.1f|%.1f|%+.1f|%.1f|%+.1f|%.1f|%.1f|%+.1f|%.1f|%.0f/%.0f|%s|%d|%s|%s\n",
+      scn, ma / 1000, mb / 1000, dp, nz, up, wa / 1000, wb / 1000, wp, wz, ia, ib, out, n, v, w }')
   R_LINE[$scn]=$line
 }
 flagged() { # $1 = a result line: is anything in it a verdict worth confirming?
@@ -1424,7 +1425,7 @@ flagged() { # $1 = a result line: is anything in it a verdict worth confirming?
 }
 
 print_table() {
-  local hdr="scenario|A cpu|B cpu|dcpu%|noise%|A wall|B wall|dwall%|wnoise%|IQR% A/B|out|n|verdict|wall"
+  local hdr="scenario|A cpu|B cpu|dcpu%|noise%|worst%|A wall|B wall|dwall%|wnoise%|IQR% A/B|out|n|verdict|wall"
   local s
   {
     printf '%s\n' "$hdr"
@@ -1435,7 +1436,7 @@ print_table() {
       for (r = 1; r <= NR; r++) {
         line = ""
         for (i = 1; i <= nf[r]; i++) {
-          if (i == 1 || i >= 13) line = line sprintf("%-" w[i] "s  ", c[r, i])
+          if (i == 1 || i >= 14) line = line sprintf("%-" w[i] "s  ", c[r, i])
           else line = line sprintf("%" w[i] "s  ", c[r, i])
         }
         sub(/ +$/, "", line); print line
@@ -1525,12 +1526,12 @@ ROWS_NOTE=$(strip_ansi "$WORK/hold/A-nav.rows" | awk -F'\t' '
 say "  the navigator lists $ROWS_NOTE; '$TYPED_Q' matches $TYPED_MC"
 
 say "running ${#SCENARIOS[@]} scenario(s): $WARM warm-up pair(s), then up to $N_PAIRS pairs${BUDGET:+ (budget ${BUDGET}s each)}"
-REGRESSED=() SLOWED=() DIFFED=() ERRORED=()
+REGRESSED=() SLOWED=() DIFFED=() ERRORED=() FASTER=()
 progress() { # scenario seconds [label]
-  local _ca _cb _dc _nz _out _n _v _wv
-  IFS='|' read -r _ _ca _cb _dc _nz _ _ _ _ _ _out _n _v _wv <<< "${R_LINE[$1]}"
-  say "$(printf '  %-19s %4ss  cpu %8s -> %8s ms  %6s%% (noise %s%%)  out %-4s  n=%-4s %s / wall %s%s' \
-    "$1" "$2" "$_ca" "$_cb" "$_dc" "$_nz" "$_out" "$_n" "$_v" "$_wv" "${3:-}")"
+  local _ca _cb _dc _nz _up _out _n _v _wv
+  IFS='|' read -r _ _ca _cb _dc _nz _up _ _ _ _ _ _out _n _v _wv <<< "${R_LINE[$1]}"
+  say "$(printf '  %-19s %4ss  cpu %8s -> %8s ms  %6s%% (noise %s%%, worst %s%%)  out %-4s  n=%-4s %s / wall %s%s' \
+    "$1" "$2" "$_ca" "$_cb" "$_dc" "$_nz" "$_up" "$_out" "$_n" "$_v" "$_wv" "${3:-}")"
 }
 T_START=$(date +%s)
 for scn in "${SCENARIOS[@]}"; do
@@ -1550,20 +1551,20 @@ for scn in "${SCENARIOS[@]}"; do
       cat "$WORK/res/stage1.$scn.$side" >> "$WORK/res/$scn.$side"
     done
     analyse "$scn"
-    IFS='|' read -r _ _ _ _d1 _z1 _ _ _w1 _wz1 _ _ _ _v1 _wv1 <<< "${R_STAGE1[$scn]}"
-    IFS='|' read -r _ _ _ _d2 _z2 _ _ _w2 _wz2 _ _ _ _v2 _wv2 <<< "$stage2"
+    IFS='|' read -r _ _ _ _d1 _z1 _ _ _ _w1 _wz1 _ _ _ _v1 _wv1 <<< "${R_STAGE1[$scn]}"
+    IFS='|' read -r _ _ _ _d2 _z2 _ _ _ _w2 _wz2 _ _ _ _v2 _wv2 <<< "$stage2"
     IFS='|' read -r -a _f <<< "${R_LINE[$scn]}"
     # cpu and wall alike, whichever of them set off the re-measuring: the
     # combined verdict, if the second set on its own points the same way
-    case "${_f[12]}" in
-      REGRESSION) [[ "$_d2" == +* ]] && [ "$_d2" != +0.0 ] || _f[12]=ok ;;
-      FASTER)     [[ "$_d2" == -* ]] && [ "$_d2" != -0.0 ] || _f[12]=ok ;;
-    esac
     case "${_f[13]}" in
-      SLOWER) [[ "$_w2" == +* ]] && [ "$_w2" != +0.0 ] || _f[13]=ok ;;
-      FASTER) [[ "$_w2" == -* ]] && [ "$_w2" != -0.0 ] || _f[13]=ok ;;
+      REGRESSION) [[ "$_d2" == +* ]] && [ "$_d2" != +0.0 ] || _f[13]=ok ;;
+      FASTER)     [[ "$_d2" == -* ]] && [ "$_d2" != -0.0 ] || _f[13]=ok ;;
     esac
-    _f[11]="${_f[11]}c"
+    case "${_f[14]}" in
+      SLOWER) [[ "$_w2" == +* ]] && [ "$_w2" != +0.0 ] || _f[14]=ok ;;
+      FASTER) [[ "$_w2" == -* ]] && [ "$_w2" != -0.0 ] || _f[14]=ok ;;
+    esac
+    _f[12]="${_f[12]}c"
     R_LINE[$scn]=$(IFS='|'; printf '%s' "${_f[*]}")
     SCN_NOTE[$scn]+="flagged, so measured again: first set cpu $_d1% (noise $_z1%) $_v1 / wall $_w1% $_wv1; second set cpu $_d2% (noise $_z2%) $_v2 / wall $_w2% $_wv2; the row is both sets together"$'\n'
   fi
@@ -1575,6 +1576,12 @@ for scn in "${SCENARIOS[@]}"; do
   esac
   case "${R_LINE[$scn]}" in *"|SLOWER") SLOWED+=("$scn") ;; esac
   case "${R_LINE[$scn]}" in *"|DIFF|"*) DIFFED+=("$scn") ;; esac
+  # what got faster, cpu or wall, with by how much
+  IFS='|' read -r -a _f <<< "${R_LINE[$scn]}"
+  _fx=()
+  [ "${_f[13]:-}" != FASTER ] || _fx+=("cpu ${_f[3]}%")
+  [ "${_f[14]:-}" != FASTER ] || _fx+=("wall ${_f[8]}%")
+  [ "${#_fx[@]}" = 0 ] || FASTER+=("$scn ($(IFS=,; printf '%s' "${_fx[*]}" | sed 's/,/, /g'))")
 done
 T_END=$(date +%s)
 
@@ -1591,6 +1598,7 @@ printf 'fixture %s: %s sessions / %s windows / %s panes (%s), popup %sx%s; %s s;
   "$FIXTURE" "$(tm list-sessions | wc -l)" "$(tm list-windows -a | wc -l)" "$(tm list-panes -a | wc -l)" \
   "$ROWS_NOTE" "$POPUP_COLS" "$POPUP_ROWS" "$(( T_END - T_START ))" "$LOAD_START" "$LOAD_END" "$CPUS_NOTE"
 echo "cpu = ms of user+sys (process tree + tmux server), wall = ms (first-frame* and keypress: to the first row)"
+echo "worst% = the top of dcpu%'s 99% interval: B may be up to that much slower (an ok rules out no more than that)"
 echo
 print_table
 echo
@@ -1598,8 +1606,11 @@ if [ -n "$HOGS_START$HOGS_END" ]; then
   echo "WARNING: other processes were using more than 50% of a CPU (results are noisier):"
   printf '%s' "$HOGS_START$HOGS_END" | sort -u
 fi
+# Half the CPUs, not all of them: a load of 3 on 4 CPUs already put a
+# preview's absolute cpu up by half (25 -> 38 ms), with no other sign than a
+# wider noise%.  The interleaved pairs keep dcpu% usable; the ms are not.
 awk -v a="$LOAD_START" -v b="$LOAD_END" -v c="$CPUS_ALL" \
-  'BEGIN { if (a > c || b > c) printf "WARNING: load average (%s -> %s) exceeds the %s CPUs: expect wide noise%%\n", a, b, c }'
+  'BEGIN { if (a > c / 2 || b > c / 2) printf "WARNING: load average (%s -> %s) over half the %s CPUs: something else was running.  dcpu%% compares the sides within this run (they are interleaved) and stays usable, if noisier; the absolute ms do not compare with another run'"'"'s.  For a decision, re-run when the machine is quieter\n", a, b, c }'
 # what dev/run.sh saw: dev containers up when this one started, which it did
 # not wait for (a shell, a watch, a `run`), and which no check in here can see
 if [ -n "${IMUX_DEV_OTHERS:-}" ]; then
@@ -1630,15 +1641,20 @@ done
 for scn in "${SCENARIOS[@]}"; do
   [ -n "${SCN_NOTE[$scn]:-}" ] && printf '%s' "${SCN_NOTE[$scn]}" | awk -v s="$scn" 'NF && !seen[$0]++ { print "note " s ": " $0 }'
 done
-# An "ok" only says no effect bigger than the noise: name the scenarios where
-# that noise was large (in % and in ms), so nobody reads them as a clean bill.
-NOISY=()
+# An "ok" says only that the effect was not shown to be above zero; how big
+# a regression it could still be is worst%.  An effect of about noise% is
+# flagged half the time; reliably only at about twice that.  Name the ok
+# rows that leave more than 5% (and a ms) open, so nobody reads them as a
+# clean bill.
+UNRESOLVED=()
 for scn in "${SCENARIOS[@]}"; do
-  IFS='|' read -r _ _ca _ _ _nz _ <<< "${R_LINE[$scn]}"
-  awk -v z="$_nz" -v a="$_ca" 'BEGIN { exit !(z + 0 > 10 && z * a / 100 > 1) }' && NOISY+=("$scn (${_nz}%)")
+  IFS='|' read -r _ _ca _ _ _nz _up _ _ _ _ _ _ _ _v _ <<< "${R_LINE[$scn]}"
+  [ "$_v" = ok ] || continue
+  awk -v u="$_up" -v a="$_ca" 'BEGIN { exit !(u + 0 > 5 && u * a / 100 >= 1) }' && UNRESOLVED+=("$scn (up to ${_up}%)")
 done
-if [ "${#NOISY[@]}" -gt 0 ]; then
-  echo "noisy: ${NOISY[*]} -- an effect smaller than that is invisible here; re-run just these (-s) on a quieter machine"
+if [ "${#UNRESOLVED[@]}" -gt 0 ]; then
+  _line=$(printf '%s, ' "${UNRESOLVED[@]}")
+  echo "unresolved: ${_line%, } -- ok there, but B may be that much slower: detection is reliable only for an effect of about twice noise%.  To keep or reject a change, run just those scenarios with -n 100, or two default runs that agree"
 fi
 for scn in ${DIFFED[@]+"${DIFFED[@]}"}; do
   key=${scn//-/_}
@@ -1656,9 +1672,8 @@ PARTS=() RC=0
 [ "${#REGRESSED[@]}" = 0 ] || PARTS+=("REGRESSION: ${REGRESSED[*]}")
 [ "${#SLOWED[@]}" = 0 ] || PARTS+=("SLOWER: ${SLOWED[*]} (wall time)")
 [ "${#DIFFED[@]}" = 0 ] || PARTS+=("output differs: ${DIFFED[*]}")
-if [ "$RC" = 0 ]; then
-  echo "no CPU regression, no slower wall time, outputs identical"
-else
-  _line=$(printf '%s; ' "${PARTS[@]}"); echo "${_line%; }"
-fi
+if [ "$RC" = 0 ]; then PARTS=("no CPU regression, no slower wall time, outputs identical"); fi
+# (faster is no failure: it changes no exit status)
+if [ "${#FASTER[@]}" -gt 0 ]; then _line=$(printf '%s, ' "${FASTER[@]}"); PARTS+=("FASTER: ${_line%, }"); fi
+_line=$(printf '%s; ' "${PARTS[@]}"); echo "${_line%; }"
 exit "$RC"
