@@ -79,7 +79,10 @@ container (`--rm`):
   everything runs.  So nothing a run does reaches the checkout.  In particular
   it never rebuilds the checkout's `rust/target/release/imux`, which a live
   plugin installed from this checkout runs.  `/work/rust/target` survives
-  between runs, so the core is rebuilt only when `rust/` changes.
+  between runs, so the core is rebuilt only when `rust/` changes:
+  when the copy brings anything new under `rust/`, the core's cargo
+  fingerprints are dropped, which cargo cannot overlook even for a restored
+  file older than its last build.
 * **Nothing else of the host is mounted**: no `/tmp`, no tmux socket, no home,
   no docker socket, and `TMUX` is not passed in.  A bare `tmux` inside can only
   reach servers the container started; your errors.log and recent dirs are out

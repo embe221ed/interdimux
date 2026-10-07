@@ -155,8 +155,11 @@ ci() {
 }
 
 sync_src() {  # the entrypoint's copy again, as dev (who owns /work already)
-  rsync -rlpt --no-D --delete --exclude=/rust/target/ --out-format='%n' /src/ /work/ \
-    | { grep '^rust/' || true; } | while IFS= read -r f; do [ -f "/work/$f" ] && touch "/work/$f"; done
+  local copied
+  copied=$(rsync -rlpt --no-D --delete --exclude=/rust/target/ --out-format='%n' /src/ /work/)
+  if printf '%s\n' "$copied" | grep -q '^rust/.*[^/]$'; then
+    find /work/rust/target -path '*/.fingerprint/imux-*' -prune -exec rm -rf {} + 2>/dev/null || true
+  fi
 }
 
 case "${1:-shell}" in
