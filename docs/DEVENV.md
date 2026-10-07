@@ -48,7 +48,8 @@ label, so this needs neither the builder nor the network), and otherwise
 rebuilds, visibly, only the stages whose pin or recipe changed.  One run at a
 time per checkout: a second one is refused while the first holds the
 checkout's work volume.  Other checkouts -- git worktrees, say -- have volumes
-of their own and run alongside ([Several checkouts at
+of their own, and the timing-sensitive commands (the suites, the benchmarks,
+builds) take turns across all of them ([Several checkouts at
 once](#several-checkouts-at-once)).
 
 ## Measuring a change: perfbench and uxdiff
@@ -139,10 +140,12 @@ sides' captures stay in the work volume until the next `make uxdiff`:
   host's: `/proc/loadavg` is not per container) against the host's CPU count,
   and warns about processes over 50% of a CPU -- but in a container it sees
   only the container's own.
-* **Runs from several checkouts at once queue on one lock file**:
-  `make perfbench LOCK=/tmp/imux-perf.lock`, the same file for every run that
-  must not overlap (uxdiff and the suites too).  See [Several checkouts at
-  once](#several-checkouts-at-once).
+* **Timing-sensitive runs take turns by themselves**, across every checkout
+  ([Several checkouts at once](#several-checkouts-at-once)): a perfbench
+  waits for a suite run from another worktree, saying so, and the other way
+  round.  What they do not wait for -- a `make shell`, a `watch`, a `run`, a
+  run from an older `dev/run.sh` -- each run names when it starts, and
+  perfbench and uxdiff repeat it in their report as a WARNING.
 * **Pin the container to CPUs**: `CPUSET=1-3` on 4 CPUs leaves CPU 0 to the
   host (docker, interrupts, your editor) and stops the scheduler from moving
   the run around.  Both sides run pinned alike.  Never `--cpus`: CFS
@@ -232,12 +235,22 @@ ignored, which no container does by default and which found a real bug once
   one branch never rebuild it for each other.  One whose `dev/` differs
   rebuilds it -- from the cache, in seconds -- and the next run from the
   other rebuilds it back.
-* **`IMUX_LOCK=FILE`** (`make ... LOCK=FILE`) makes runs take turns: the run,
-  and an image build before it, hold an exclusive `flock` on the file
-  throughout, so every run that names the same file waits for the one before
-  it, saying so and naming the run it waits for.  Set it for timing-sensitive
-  runs -- benchmarks, the suites -- from parallel checkouts.  Where there is
-  no `flock(1)` (macOS), the run goes ahead unlocked, and says so.
+* **Timing-sensitive runs take turns**: `test`, `smoke`, `ci`, `ci-sigpipe`,
+  `bench`, `perfbench`, `uxdiff`, `msrv`, `check-macos`, `lint` and `image`,
+  and any image build.  Each first takes an exclusive `flock` on a lock file
+  -- by default `${XDG_RUNTIME_DIR:-/tmp}/interdimux-dev-<uid>.lock`, one per
+  user, `LOCK=FILE` (`IMUX_LOCK`) for another -- and then waits while the
+  container of any other such run is up (they carry the label `imux.turn`),
+  saying which run it waits for and how long it waited.  The containers are
+  what holds when the lock cannot: a run whose `docker` client was killed (a
+  tool's timeout sends SIGKILL) leaves its container running and the lock
+  free, and the next run still waits for that container; so does one that
+  names another lock file, and so does a Mac, which has no `flock(1)`.
+  `shell`, `run`, `watch` and `versions` take no turn unless `LOCK=FILE`
+  names one (then they do, and others wait for them); `LOCK=none` waits for
+  nothing, though a timing-sensitive command is still waited for by others.
+  Two runs that name different lock files and start within the same second
+  can still overlap.
 
 ## What is in the image
 

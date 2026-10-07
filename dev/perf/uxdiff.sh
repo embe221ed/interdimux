@@ -306,6 +306,10 @@ commit_of() {
   printf 'uxdiff: A = %s  (%s)\n' "$WT_A" "$(commit_of "$WT_A")"
   printf 'uxdiff: B = %s  (%s)\n' "$WT_B" "$(commit_of "$WT_B")"
   printf 'uxdiff: out = %s\n' "$OUT"
+  if [ -n "${IMUX_DEV_OTHERS:-}" ]; then
+    printf 'uxdiff: WARNING: other dev containers were up when this run started (screens may settle late):\n'
+    printf '%s\n' "$IMUX_DEV_OTHERS" | tr ';' '\n' | sed '/^ *$/d; s/^ */    /'
+  fi
 } | tee "$OUT/summary.txt"
 
 fx_build || die "the fixture could not be built (see above)"

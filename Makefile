@@ -23,7 +23,8 @@
 #
 #   PLATFORM=linux/arm64       the Apple Silicon image (emulated off one)
 #   CPUSET=2-3                 pin the container to those CPUs
-#   LOCK=/tmp/imux-perf.lock   take turns with every run naming the same file
+#   LOCK=FILE                  the lock timing-sensitive runs take turns on
+#                              (default: one per user); LOCK=none: no turns
 
 # Given on the command line or exported as dev/run.sh's own IMUX_* names.
 PLATFORM ?= $(IMUX_PLATFORM)

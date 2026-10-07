@@ -167,7 +167,9 @@
 #   the load average before and after (the HOST's, also inside a container:
 #   /proc/loadavg is not namespaced) against the host's CPU count, and any
 #   process over 50% of a CPU -- inside a container only the container's own
-#   processes are visible, so that check cannot see the host's.
+#   processes are visible, so that check cannot see the host's.  From
+#   dev/run.sh, the other dev containers that were up when the run started
+#   ($IMUX_DEV_OTHERS) are named in a WARNING too.
 #
 # Sensitivity (A/A runs of one tree against itself)
 #   In the dev image on a 4-CPU VPS, otherwise idle (load ~1), at the default
@@ -1243,6 +1245,12 @@ if [ -n "$HOGS_START$HOGS_END" ]; then
 fi
 awk -v a="$LOAD_START" -v b="$LOAD_END" -v c="$CPUS_ALL" \
   'BEGIN { if (a > c || b > c) printf "WARNING: load average (%s -> %s) exceeds the %s CPUs: expect wide noise%%\n", a, b, c }'
+# what dev/run.sh saw: dev containers up when this one started, which it did
+# not wait for (a shell, a watch, a `run`), and which no check in here can see
+if [ -n "${IMUX_DEV_OTHERS:-}" ]; then
+  echo "WARNING: other dev containers were up when this run started (results may be noisier):"
+  printf '%s\n' "$IMUX_DEV_OTHERS" | tr ';' '\n' | sed '/^ *$/d; s/^ */    /'
+fi
 for scn in "${SCENARIOS[@]}"; do
   [ -n "${SCN_NOTE[$scn]:-}" ] && printf '%s' "${SCN_NOTE[$scn]}" | awk -v s="$scn" 'NF && !seen[$0]++ { print "note " s ": " $0 }'
 done

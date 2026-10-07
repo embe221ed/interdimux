@@ -33,12 +33,24 @@
 #   IMUX_CPUSET    pin the container to these CPUs (docker --cpuset-cpus).
 #                  There is deliberately no --cpus: CFS throttling stalls the
 #                  tmux server mid-format and trips its 100 ms budget.
-#   IMUX_LOCK      a file: the run (and an image build before it) holds an
-#                  exclusive flock(1) on it throughout, so runs that name the
-#                  same file -- from several checkouts at once -- take turns
-#                  instead of overlapping.  For timing-sensitive runs
-#                  (benchmarks, the suites).  Where there is no flock
-#                  (macOS), the run goes ahead unlocked and says so.
+#   IMUX_LOCK      how the run takes turns (below): unset, the default lock
+#                  file ${XDG_RUNTIME_DIR:-/tmp}/interdimux-dev-<uid>.lock for
+#                  the commands that take turns and for any image build; a
+#                  file, that one, and every command takes turns; `none`, no
+#                  lock and no waiting.
+#
+# Taking turns: the suites bound how long a screen may take to settle,
+# perfbench compares CPU times, uxdiff waits for screens, and a build or a
+# cargo run beside any of them skews it.  So test, smoke, ci, ci-sigpipe,
+# bench, perfbench, uxdiff, msrv, check-macos, lint and image -- and every
+# image build -- take an exclusive flock(1) on the lock file, then wait while
+# a container of any other run that takes turns is up (they carry the label
+# imux.turn), from any checkout, and only then start.  The containers are the
+# part that holds when the lock cannot: a run whose docker client was killed
+# (a tool's timeout sends SIGKILL) leaves its container running with the
+# lock released; another lock file; macOS, which has no flock(1).  shell, run,
+# watch and versions do not take turns unless IMUX_LOCK names a file; a run
+# that takes turns names the other interdimux-dev containers still up.
 
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -136,33 +148,82 @@ build() {
   docker build "$plat" --label "imux.src=$sum" -f "$ROOT/dev/Dockerfile" -t "$IMAGE" "$@" "$ROOT"
 }
 
-# IMUX_LOCK: fd 9 holds the lock, and `exec docker run` below inherits it, so it
-# is released when the run ends, however it ends.
-if [ -n "${IMUX_LOCK:-}" ]; then
-  if command -v flock >/dev/null 2>&1; then
-    exec 9>>"$IMUX_LOCK"
-    if ! flock -n 9; then
-      echo "dev/run.sh: waiting for the lock $IMUX_LOCK, held by: $(cat "$IMUX_LOCK.holder" 2>/dev/null || echo '?')" >&2
-      t0=$(date +%s)
-      flock 9 || die "cannot lock $IMUX_LOCK"
-      echo "dev/run.sh: got the lock after $(( $(date +%s) - t0 )) s" >&2
-    fi
-    printf '%s: %s (pid %s, since %s)\n' "$ROOT" "$*" "$$" "$(date '+%Y-%m-%d %H:%M:%S')" > "$IMUX_LOCK.holder" 2>/dev/null || true
-  else
-    echo "dev/run.sh: IMUX_LOCK is set but there is no flock(1) here: running without the lock" >&2
+# Taking turns (the header).  fd 9 holds the lock, and `exec docker run`
+# below inherits it, so it is released when the run ends, however it ends.
+turn=0
+case $1 in
+  test|smoke|ci|ci-sigpipe|bench|perfbench|uxdiff|msrv|check-macos|lint|image) turn=1 ;;
+esac
+lockfile=${IMUX_LOCK:-}
+case $lockfile in
+  none) lockfile="" ;;
+  "") lockfile=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/interdimux-dev-$(id -u).lock ;;
+  *) turn=1 ;;
+esac
+locked=0
+
+describe() {  # container ids -> one line each: id (command, from checkout)
+  [ $# -gt 0 ] || return 0
+  docker inspect -f '    {{printf "%.12s" .ID}} ({{join .Config.Cmd " "}}, from {{range .Mounts}}{{if eq .Destination "/src"}}{{.Source}}{{end}}{{end}})' "$@" 2>/dev/null || true
+}
+
+take_lock() {
+  [ -n "$lockfile" ] && [ "$locked" = 0 ] || return 0
+  locked=1
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "dev/run.sh: no flock(1) here: taking turns only by waiting for other runs' containers" >&2
+    return 0
   fi
+  if ! (: >>"$lockfile") 2>/dev/null; then
+    echo "dev/run.sh: cannot open the lock file $lockfile: taking turns only by waiting for other runs' containers" >&2
+    return 0
+  fi
+  exec 9>>"$lockfile"
+  if ! flock -n 9; then
+    echo "dev/run.sh: waiting for the lock $lockfile, held by: $(cat "$lockfile.holder" 2>/dev/null || echo '?')" >&2
+    t0=$(date +%s)
+    flock 9 || die "cannot lock $lockfile"
+    echo "dev/run.sh: got the lock after $(( $(date +%s) - t0 )) s" >&2
+  fi
+  printf '%s: %s (pid %s, since %s)\n' "$ROOT" "$*" "$$" "$(date '+%Y-%m-%d %H:%M:%S')" > "$lockfile.holder" 2>/dev/null || true
+}
+
+# Wait while another turn's container is up.  (Not with IMUX_LOCK=none.)
+wait_turns() {
+  [ "${IMUX_LOCK:-}" != none ] || return 0
+  t0=""
+  while :; do
+    ids=$(docker ps -q --filter label=imux.turn) || die "docker ps failed"
+    [ -n "$ids" ] || break
+    if [ -z "$t0" ]; then
+      t0=$(date +%s)
+      # shellcheck disable=SC2086  # one id per word
+      printf 'dev/run.sh: waiting for the run(s) taking their turn now (docker stop ID ends one at once):\n%s\n' "$(describe $ids)" >&2
+    fi
+    sleep 2
+  done
+  [ -z "$t0" ] || echo "dev/run.sh: their turn ended after $(( $(date +%s) - t0 )) s" >&2
+}
+
+if [ "$turn" = 1 ]; then
+  take_lock "$@"
+  wait_turns
 fi
 
 [ "$1" = image ] && { build; exit 0; }
 
 have=$(docker image inspect -f '{{ index .Config.Labels "imux.src" }}' "$IMAGE" 2>/dev/null || true)
 if [ "$have" != "$sum" ]; then
+  # a build takes its turn too, even for a run that does not; such a run lets
+  # go of the lock once the image is built
+  if [ "$turn" = 0 ]; then take_lock "$@"; wait_turns; fi
   if [ -n "$have" ]; then
     echo "dev/run.sh: dev/ changed since $IMAGE was built: rebuilding (only the stages that changed)" >&2
   else
     echo "dev/run.sh: building $IMAGE (the first build takes about six minutes on 4 cores)" >&2
   fi
   build
+  if [ "$turn" = 0 ] && [ "$locked" = 1 ]; then exec 9>&-; fi
 fi
 
 # One run at a time per checkout and architecture: every run re-copies the
@@ -214,8 +275,23 @@ case $1 in
 esac
 cpus=${IMUX_CPUSET:+--cpuset-cpus=$IMUX_CPUSET}
 
+# A run that takes turns names the dev containers it does not wait for (a
+# shell, a watch, `run`, an older dev/run.sh's), and tells the harness, which
+# cannot see them from inside, so its report can say so too.
+others=""
+if [ "$turn" = 1 ]; then
+  # shellcheck disable=SC2046  # one id per word
+  others=$(describe $( { docker ps -q --filter label=imux.dev
+                          docker ps --format '{{.ID}} {{.Image}}' | awk '$2 ~ /^interdimux-dev(:|$)/ { print $1 }'
+                        } 2>/dev/null | sort -u))
+  [ -z "$others" ] || printf 'dev/run.sh: NOTE: other dev containers are up, and this run does not wait for them (timings may suffer):\n%s\n' "$others" >&2
+fi
+turnlabel=""
+[ "$turn" = 0 ] || turnlabel=--label=imux.turn=1
+
 # shellcheck disable=SC2086  # each of these is one word or none
 exec docker run --rm $it $term $net $cpus "$plat" --hostname=imux-dev \
-  --env=IMUX_RENDERER \
+  --label=imux.dev=1 $turnlabel --label="imux.cmd=$1" --label="imux.checkout=$ROOT" \
+  --env=IMUX_RENDERER ${others:+"--env=IMUX_DEV_OTHERS=$(printf '%s' "$others" | sed 's/^ *//' | tr '\n' ';')"} \
   -v "$ROOT:/src:ro" -v "$VOLUME:/work" ${gitmnt:+"$gitmnt"} ${gitmnt2:+"$gitmnt2"} \
   "$IMAGE" "$@"
