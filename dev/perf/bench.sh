@@ -9,11 +9,13 @@
 # by the shift of per-pair differences.  Exit status, the first that applies:
 # 1 = the bench itself failed (bad worktree, fixture, or a run that exited
 # unexpectedly), 3 = at least one scenario's CPU REGRESSION, 5 = no CPU
-# regression but at least one scenario's wall time is SLOWER (first-frame's is
-# the time to the first row, the one a user waits for), 4 = neither, but some
-# output differs between A and B (a UX change -- intended or not), 0 = none of
-# these: no CPU regression, no slower wall time, identical outputs.  2 = usage.
-# With -F both, the worse of the two fixtures' (in that order).
+# regression but at least one scenario's wall time is SLOWER (first-frame's and
+# keypress's is the time to the first row, the one a user waits for), 4 =
+# neither, but some output differs between A and B (a UX change -- intended or
+# not), 0 = none of these: no CPU regression, no slower wall time, identical
+# outputs.  2 = usage.  With -F both, the worse of the two fixtures' (in that
+# order).  The last line names all of it, and what got FASTER, which changes
+# no exit status.
 #
 # Options
 #   -n N        measured pairs per scenario (default 30; each pair is one A and
@@ -22,15 +24,20 @@
 #   -s LIST     comma-separated scenarios (default: all default ones, below);
 #               "all" = default + extra.
 #   -F SIZE     the fixture's tmux layout (default both; or IMUX_BENCH_FIXTURE):
-#               large  12 sessions / 40 windows / 90 panes (142 rows), where a
-#                      per-row cost shows
-#               small  1 session / 3 windows / 3 panes (7 rows), the size of
-#                      the VPS user's own server, where the fixed costs --
-#                      parsing the script, exec'ing the core, the tmux
-#                      round-trips -- are nearly all of it
+#               large  12 sessions / 40 windows / 90 panes; the navigator lists
+#                      151 rows (12 sessions, 40 windows, 87 panes, 12
+#                      directories), where a per-row cost shows
+#               small  1 session / 3 windows / 3 panes, the size of the VPS
+#                      user's own server; 19 rows, of which 4 are tmux's (the
+#                      session, its windows: one-pane windows list no pane
+#                      row) and 15 directories (the zoxide db, recent_dirs).
+#                      The fixed costs -- parsing the script, exec'ing the
+#                      core, the tmux round-trips, zoxide -- are nearly all of
+#                      it
 #               both   large with the scenarios asked for, then small with
 #                      those of them whose work depends on the tmux server
-#                      (SIZED below; by default first-frame list preview-S
+#                      (SIZED below; by default keypress first-frame
+#                      first-frame-changed list list-changed preview-S
 #                      preview-W hint footer describe-create, which is also
 #                      -F small's default), each on a fixture of its own, one
 #                      table each
@@ -42,36 +49,58 @@
 #               something else on the machine is diluted rather than decisive
 #   -o FILE     also write the result table as TSV to FILE (first column: the
 #               fixture)
-#   -K          keep the work dir (fixture files, raw samples, outputs) for
-#               inspection.  The tmux servers and holders are always killed.
+#   -K          keep the work dir (fixture files, raw samples, outputs, the
+#               bindings and recorded popup environments) for inspection.  The
+#               tmux servers and holders are always killed.
 #   -q          no progress lines
 #   --allow-stale   accept a rust/target/release/imux older than its sources
 #   --no-confirm    report first-set verdicts without re-measuring flagged ones
 #   --list      list scenarios and exit
-#   --exec CMD  (debugging) build the fixture (-F large unless -F small), run
-#               `bash -c CMD` with BENCH_* variables exported (BENCH_SOCK,
-#               BENCH_FIX, BENCH_POPUP_ENV_A ...), clean up, exit with CMD's
-#               status.  Nothing is measured.
+#   --exec CMD  (debugging) build the fixture (-F large unless -F small),
+#               install the bindings and record the popups, run `bash -c CMD`
+#               with BENCH_* variables exported (BENCH_SOCK, BENCH_FIX,
+#               BENCH_POPUP_ENV_A ...), clean up, exit with CMD's status.
+#               Nothing is measured.
 #
 # Resolution: what a run can see
-#   An "ok" says only that no effect bigger than noise% was there.  In the dev
-#   image on this 4-CPU VPS, A/A: the default budget (30-40 pairs) resolves
-#   about 3-7% on every scenario (hint, a 1.6 ms snippet, 9-14%), so a 5%
-#   change -- 1.3 ms injected into a 25 ms preview -- went unflagged.  To
-#   answer a 5% question, run just those scenarios with -n 100 (that change
-#   was caught, at a noise of 2.6-2.8%, in a minute; a pair of a 30 ms
-#   callback takes about 0.15 s).  -n 10 is a smoke check: noise 8-25%, so it resolves only
-#   effects above about 15%.  A line "noisy:" names the scenarios whose noise
-#   was over 10%.
+#   The verdict is REGRESSION only when the shift is clear of zero (dcpu% >
+#   noise%), so an effect of about noise% is flagged half the time, and
+#   reliably only at about twice that.  An "ok" therefore says no more than
+#   worst%: B may still be up to that much slower.  A line "unresolved:"
+#   names every ok row whose worst% is over 5% (and a ms).  In the dev image
+#   on this 4-CPU VPS, A/A at the default budget (30-90 pairs): noise% about
+#   4-6% on every scenario (keypress 5.5%, hint, a 1.6 ms snippet, 7-8%), so
+#   a 4% change -- a 1.5 ms loop in --footer-for, on the small fixture's
+#   29 ms footer -- passed as ok, worst +9.0%, named unresolved.  To keep or
+#   reject a change, run just the scenarios it touches with -n 100 (that
+#   one: REGRESSION +4.2% at a noise of 2.9%, in half a minute; a pair of a
+#   30 ms callback takes about 0.15 s), or two default runs that agree.  -n
+#   10 is a smoke check: noise 8-25% (keypress up to 30%), so it resolves
+#   only effects of 30% and more.  Compare dcpu% within one run only: the
+#   sides are interleaved, so it survives a busy machine; the absolute ms
+#   (A cpu, B cpu) of two runs do not compare.
 #
 # Scenarios (how each one is invoked mirrors the real caller; see build_scenarios)
-#   first-frame   the navigator opening: `bash interdimux.sh` with a popup's
-#                 environment and a 158x35 pty, a stub fzf on PATH.  WALL is the
-#                 time from exec until the stub fzf receives the FIRST row (what
-#                 fzf needs to paint); CPU is the whole run (all rows, exit).
+#   keypress      prefix+f itself: the side's binding (as its interdimux.tmux
+#                 bound it) re-installed, then the key pressed on the attached
+#                 client (send-keys -K).  The server expands the binding's
+#                 formats and opens the popup, whose navigator runs to the
+#                 stub fzf, which exits as Esc would; the run ends with the
+#                 popup.  WALL: the key to the first row at the stub fzf.
+#                 CPU: the server's own (the key, the formats, the popup, its
+#                 pty), the popup's processes and the client; a note splits
+#                 it three ways, and says when A's and B's bindings differ
+#   first-frame   the navigator opening: `bash interdimux.sh` with the popup's
+#                 environment (recorded from a real popup: see below) and a
+#                 158x35 pty, a stub fzf on PATH.  WALL is the time from exec
+#                 until the stub fzf receives the FIRST row (what fzf needs to
+#                 paint); CPU is the whole run (all rows, exit).
+#   first-frame-changed  the same, with the server changed before every pair
+#                 (see "-changed" below)
 #   list          the fzf reload command (^r, ^/, resize, after every action):
 #                 sh -c "bash interdimux.sh --list", Rust renderer
-#   list-bash     the same with INTERDIMUX_USE_RUST=off (the bash renderer)
+#   list-changed  the same, with the server changed before every pair
+#   list-bash     list with INTERDIMUX_USE_RUST=off (the bash renderer)
 #   preview-S     --preview on a session row (large: ops, 8 windows)
 #   preview-W     --preview on a window row (large: 4 panes; small: the claude
 #                 window)
@@ -82,7 +111,10 @@
 #                 snippet (read from the fzf argv the navigator built), run by
 #                 sh -c with an empty query -- the inline path, no bash re-exec
 #   footer        the same snippet with a query typed: it runs --footer-for
-#   describe-create  the same snippet at zero matches: it runs --describe-create
+#                 (FZF_MATCH_COUNT is fzf's own count: the real fzf --filter
+#                 over the navigator's rows and argv)
+#   describe-create  the same snippet at zero matches (checked with fzf): it
+#                 runs --describe-create
 #   session-name-for  bash interdimux.sh --session-name-for DIR (CLI seam)
 #   dirs-list     the ctrl-o picker's list: --dirs-list, with the environment the
 #                 --dirs picker hands its fzf (mount table exported etc.)
@@ -95,9 +127,21 @@
 #                 runtime callback: the navigator inlines the ladders)
 #   scope-prompt  bash interdimux.sh --scope-prompt (the fallback-path ^] prompt)
 #   parse         bash -n interdimux.sh (pure parse cost of the script)
-#  SIZED (the ones -F both also runs on the small fixture): first-frame
-#   first-frame-bash list list-bash preview-S preview-W hint footer
-#   describe-create
+#   load          bash interdimux.tmux: the plugin loading, as a tmux.conf's
+#                 run-shell runs it at every server start and config reload
+#  SIZED (the ones -F both also runs on the small fixture): keypress
+#   first-frame first-frame-changed first-frame-bash list list-changed
+#   list-bash preview-S preview-W hint footer describe-create
+#  -changed: a plain scenario runs against a server that never changes, so a
+#   cache -- each side has its own, below -- would show only its hit.  These
+#   move the server to the next of three states before every pair (the
+#   current session's shell window renamed, one of its panes retitled;
+#   state 0 is the fixture as built, restored after).  Each side last ran in
+#   the pair before, so each meets a changed server on every run: the miss
+#   and the invalidation, next to the hit.  Both runs of a pair see the same
+#   state, and the outputs are compared per state.  (A toy cache for --list,
+#   validated by a #{S:#{W:#{P:...}}} digest: list FASTER -66.6%,
+#   list-changed REGRESSION +38.1%.)
 #
 # What is measured, per run
 #   cpu   user+sys of the whole process tree (the command, everything it
@@ -111,9 +155,12 @@
 #         shows as 0 or 10 ms in one run and as its true cost only on average:
 #         a job of a few ms is undercounted by the medians below, which the
 #         note "the tmux server's jobs cost ..." (the per-run mean) makes up
-#         for.  Not counted: a job's own orphans (reparented to init), and a
-#         new pane's processes.
-#   wall  fork -> exit of the command (first-frame: -> first row at the stub fzf)
+#         for.  keypress counts its popup the same way (benchrun -P), so its
+#         A cpu / B cpu medians move in 10 ms steps: read its dcpu%.  Not
+#         counted: a job's own orphans (reparented to init), and a new pane's
+#         processes.
+#   wall  fork -> exit of the command (first-frame, keypress: -> first row at
+#         the stub fzf)
 #   Times are in ms.  Runs are interleaved in pairs whose order alternates
 #   (AB BA AB ...), so drift and ordering effects cancel.
 #
@@ -123,6 +170,8 @@
 #                    differences (median of their Walsh averages), % of A's median
 #   noise%           half-width of its 99% confidence interval (exact Wilcoxon
 #                    signed-rank), % of A's median -- the measured noise floor
+#   worst%           the top of that interval: B may be up to this much slower.
+#                    An ok rules out no more than that (Resolution, above)
 #   verdict          REGRESSION when dcpu% > max(2, noise%), FASTER when
 #                    dcpu% < -max(2, noise%), else ok; "(n<8)" = too few pairs
 #                    to say; FAILED = a run exited unexpectedly or no row reached
@@ -153,29 +202,48 @@
 #     and _ZO_DATA_DIR all inside the work dir; 8 git repos on feature branches
 #     (two dirty), ~/work with 10 teams x 10 svc-* projects, a zoxide db of ~50
 #     dirs, a recent_dirs file, @interdimux-project-dirs '~/work:~/src'
+#   * each side has its own XDG_CACHE_HOME, XDG_STATE_HOME, XDG_DATA_HOME and
+#     zoxide db (fix/side-A, fix/side-B: copies of the fixture's, so
+#     recent_dirs and the db too), in its environments; the server's global
+#     environment switches to the side's whenever the side changes, for its
+#     popups and for any job the script starts through tmux.  So neither
+#     side ever reads what the other wrote -- a cache above all.  Shared:
+#     HOME, the config, the repos, XDG_RUNTIME_DIR and TMPDIR (per-pid files)
 #   * fake agents only: a script named `claude` (OSC title "✳ Claude Code",
 #     exec -a claude sleep) with a registry record in ~/.claude/sessions, a
 #     fake codex (perl with codex's argv and its "Action Required" title), and a
 #     plain shell titled "✳ Claude Code".  No real agent CLI is ever started.
 #   * stub `at`/`atq`/`atrm`/`batch` first on PATH (--doctor runs atq), so the
 #     user's at queue is never touched
-#   * INTERDIMUX_NOW is pinned in every environment, so ages cannot make two
-#     renders differ (it is a seam the script honours on every path)
+#   * INTERDIMUX_NOW is pinned in the server's environment, so in every
+#     popup and environment, and ages cannot make two renders differ (it is
+#     a seam the script honours on every path)
 #
 # How callbacks get their environment
-#   For each worktree the bench starts the REAL navigator (twice: Rust and bash
-#   renderer) and the REAL ctrl-o picker (`--dirs`) with a "holding" stub fzf,
-#   which records the argv and environment it was handed and then waits.  The
-#   holders stay alive for the whole run, so the state files their environment
-#   names (preview state, query state, mount table) exist exactly as in a live
-#   popup.  Each callback then runs with that recorded environment plus the
-#   FZF_* variables fzf 0.74 exports to its children (captured from a real fzf:
-#   FZF_COLUMNS=158, FZF_LINES=35, FZF_PREVIEW_* only while the preview is
-#   shown, FZF_QUERY/FZF_MATCH_COUNT/...), through `sh -c` as --with-shell='sh -c'
+#   From a real popup.  Each side's interdimux.tmux runs against the fixture
+#   server, as a tmux.conf's run-shell would, and its prefix+f binding is
+#   saved (list-keys, checked to come back the same through source-file).
+#   Then that key is pressed on the attached client while BASH_ENV, in the
+#   server's environment for that moment, names a recorder: the popup's
+#   shell reads it first, saves the environment it was started with --
+#   tmux's (the server's global environment, TERM, TMUX, COLORTERM,
+#   TERM_PROGRAM*, PWD) plus every -e the binding expanded at the keypress --
+#   and exits, which closes the popup.  first-frame and the CLI scenarios
+#   start from that.  For the callbacks, the bench starts each worktree's
+#   REAL navigator (twice: Rust and bash renderer) and REAL ctrl-o picker
+#   (`--dirs`) from it, with a "holding" stub fzf, which records the argv and
+#   environment it was handed and then waits.  The holders stay alive for the
+#   whole run, so the state files their environment names (preview state,
+#   query state, mount table) exist exactly as in a live popup.  Each callback
+#   then runs with that recorded environment plus the FZF_* variables fzf
+#   0.74 exports to its children (captured from a real fzf: FZF_COLUMNS=158,
+#   FZF_LINES=35, FZF_PREVIEW_* only while the preview is shown,
+#   FZF_QUERY/FZF_MATCH_COUNT/...), through `sh -c` as --with-shell='sh -c'
 #   does.  A worktree whose navigator does not reach fzf fails the bench.
 #
-# Requirements: bash >= 4.4, a C compiler (cc), tmux (the first on PATH, or
-# $IMUX_BENCH_TMUX), fzf (only for its --version string), git, perl, setsid;
+# Requirements: bash >= 4.4, a C compiler (cc), tmux >= 3.4 (send-keys -K
+# and the binding's run-shell -C; the first on PATH, or $IMUX_BENCH_TMUX),
+# fzf (its --version, and --filter for the match counts), git, perl, setsid;
 # fd, fdfind or find (the plugin's own choice, in that order); zoxide
 # ($IMUX_PERF_ZOXIDE, else the first on PATH); Linux (/proc, a child
 # subreaper, signalfd).  The fixture's PATH starts with links to the tmux,
@@ -203,40 +271,52 @@
 #   checkout (dev/cmd.sh perfbench: REF is extracted with git archive and gets
 #   its own Rust core, B is the container's copy of the checkout, /work).  See
 #   docs/DEVENV.md.  Directly: bench.sh BASE MINE, two trees with their cores
-#   built.  A full default run (-F both) takes about 3 minutes in the dev
+#   built.  A full default run (-F both) takes about 4 minutes in the dev
 #   image on a 4-CPU box: give the command a 10-minute timeout, or run it in
 #   the background.  Re-run a single flagged scenario with -s to look closer.
 #   Work dirs go under $IMUX_BENCH_WORKROOT (default: ${TMPDIR:-/tmp}).
 #   IMUX_BENCH_SAME_ENV=1 (debugging the harness) gives B the very environments
-#   A recorded.
+#   A recorded (keypress still presses each side's own binding: its popup's
+#   environment is what that binding makes it).
 #
 # Load
 #   Nothing else heavy may run meanwhile: the verdicts compare CPU time, and a
 #   busy machine widens noise% until nothing is detectable.  The run reports
 #   the load average before and after (the HOST's, also inside a container:
-#   /proc/loadavg is not namespaced) against the host's CPU count, and any
-#   process over 50% of a CPU -- inside a container only the container's own
-#   processes are visible, so that check cannot see the host's.  From
-#   dev/run.sh, the other dev containers that were up when the run started
-#   ($IMUX_DEV_OTHERS) are named in a WARNING too.
+#   /proc/loadavg is not namespaced) against the host's CPU count, and warns
+#   when it was over half of them: a host load of 3 on 4 CPUs put a 25 ms
+#   preview at 38 ms, with no other sign than a wider noise%.  dcpu% stays
+#   usable then; the absolute ms do not compare with another run's.  It also
+#   warns about any process over 50% of a CPU -- inside a container only the
+#   container's own processes are visible, so that check cannot see the
+#   host's.  From dev/run.sh, the other dev containers that were up when the
+#   run started ($IMUX_DEV_OTHERS) are named in a WARNING too.
 #
-# Sensitivity (A/A runs of one tree against itself)
-#   In the dev image on a 4-CPU VPS, at the default budget: noise% 3-6% for
-#   every scenario from the 25 ms callbacks to the 270 ms --doctor and bash
-#   renderer, on both fixtures, at a host load of 1 and of 3.5-4.5 alike; 9-14%
-#   for hint (a 1.6 ms sh); 3% for dirs-deep (0.43 s a run, fdfind walking
-#   ~/work, so 30 pairs fit).  With -n 100 on two previews carrying a 5%
-#   change (flagged, so 200 pairs), 2.4-2.8%, and the change was caught; with
-#   -n 10, 8-25% (hint about 30%).  On the host it was written on (load
-#   0.8-1.9): 4-6%, 2-5% for list-bash, 6-14% for hint, and 15-72% for
-#   dirs-deep (2.5 s a run, so only 8 pairs fit the budget).  An extra
-#   subshell fork in a callback is ~1 ms: about 3-4% of a 25-35 ms preview,
-#   i.e. at the floor; one extra tmux round-trip (+8-10% on --list) or three
-#   forks in a preview are caught.  What the scenarios cost there: on the
-#   large fixture first-frame 95 ms of CPU (90 ms to the first row), list
-#   68 ms, a preview 27-29 ms, footer 32 ms, dirs-list 108 ms (zoxide
-#   included); on the small one first-frame 79 ms (72 ms to the first row),
-#   list 50 ms, a preview 26-29 ms, footer 28 ms.
+# Sensitivity (A/A runs of one tree against itself, and injected changes)
+#   In the dev image on a 4-CPU VPS, at the default budget, host load 0.5-1.4:
+#   noise% 3.8-6.7% on the large fixture (dirs-deep and list-bash 3.8-3.9%,
+#   hint 6.7%), 4.7-8.0% on the small one (hint 8.0%); keypress 5.5% (n=40)
+#   and 5.4% (n=60).  Earlier rounds: 3-6% at a host load of 3.5-4.5 too;
+#   with -n 100 on two previews carrying a 5% change (flagged, so 200
+#   pairs), 2.4-2.8%, and the change was caught; with -n 10, 8-25% (hint
+#   about 30%).  Injected into B, against the same tree: a ~3 ms loop in
+#   --footer-for, +11.3% on the small fixture's footer (noise 3.8%, flagged
+#   at the default budget); a 1.5 ms one, ok at the default budget (worst
+#   +9.0%, unresolved) and REGRESSION +4.2% at -n 100; six copies of a
+#   #{S:#{W:#{P:path,title,command}}} format added to the binding as an -e
+#   variable, keypress REGRESSION +25.3% on the large fixture (the server's
+#   own CPU 18 -> 39 ms a press) and first-frame +7.6% (the 30 KB variable
+#   every exec copies, and a fork the injection made).  An extra subshell
+#   fork in a callback is ~1 ms: about 3-4% of a 25-35 ms preview, i.e. at
+#   the floor; one extra tmux round-trip (+8-10% on --list) or three forks
+#   in a preview are caught.  What the scenarios cost (A/A medians): on the
+#   large fixture keypress 108 ms of CPU (17 ms of it the server's own, 88 ms
+#   to the first row), first-frame 90 ms (76 ms to the first row), list 77
+#   ms, a preview 24-27 ms, footer 27 ms, dirs-list 102 ms (zoxide
+#   included), doctor 253 ms; on the small one keypress 80-88 ms (6 ms the
+#   server's, 71 ms to the first row), first-frame 76 ms (66 ms to the
+#   first row), list 47 ms, a preview 26-29 ms, footer 29 ms.  A full
+#   default run (-F both) took 240 s.
 
 set -uo pipefail
 # never the user's server: no inherited TMUX, and the default socket directory

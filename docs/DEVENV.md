@@ -46,10 +46,12 @@ the six old bashes).  After that a command starts at once while `dev/` and
 `rust/Cargo.*` are as the image was built from (it carries their checksum as a
 label, so this needs neither the builder nor the network), and otherwise
 rebuilds, visibly, only the stages whose pin or recipe changed.  One run at a
-time per checkout: a second one is refused while the first holds the
-checkout's work volume.  Other checkouts -- git worktrees, say -- have volumes
-of their own, and the timing-sensitive commands (the suites, the benchmarks,
-builds) take turns across all of them ([Several checkouts at
+time per checkout, which has one work volume: a second timing-sensitive run
+(the suites, the benchmarks, builds) waits its turn; a `shell`, `run`,
+`watch` or `versions` started while another run uses the checkout's volume
+is refused, and so is any run while one of those is up.  Other checkouts --
+git worktrees, say -- have volumes of their own, and the timing-sensitive
+commands take turns across all of them ([Several checkouts at
 once](#several-checkouts-at-once)).
 
 ## Measuring a change: perfbench and uxdiff
@@ -60,10 +62,11 @@ compare `REF` -- any commit: `main` (the default), `HEAD~1`, a sha -- with
 this checkout as it is, uncommitted edits included:
 
 ```sh
-make perfbench                                   # both fixtures, every default scenario, ~3 min
-make perfbench ARGS='-n 100 -s preview-W,footer' # a 5% question: just those, more pairs, ~1 min
-make perfbench REF=HEAD~1 ARGS='-n 10 -s list,first-frame,footer'   # a smoke check, ~30 s
+make perfbench                                   # both fixtures, every default scenario, ~4 min
+make perfbench ARGS='-n 100 -s preview-W,footer' # to keep or reject a change: what it touches, more pairs, 1-2 min
+make perfbench REF=HEAD~1 ARGS='-n 10 -s keypress,list,footer'   # a smoke check, ~30 s
 make perfbench ARGS='-F small'                   # the small fixture alone
+make perfbench ARGS='-s all'                     # the extras too: load, first-frame-bash, parse ...
 make perfbench ARGS=--list                       # the scenarios
 make uxdiff ARGS=-q                              # the text entry points, ~1 min
 make uxdiff                                      # and every screen, ~6 min
@@ -94,20 +97,52 @@ trees, on Linux (a WARNING says when there is no zoxide).
 ### perfbench: is B slower than A?
 
 Every scenario is a path a keypress waits on, invoked as its real caller
-invokes it -- the navigator opening to its first row, the `--list` reload, a
-preview, the per-keystroke footer, the ctrl-o picker, `--doctor` and more --
-against a fixture that A and B share, with an attached client and a real
-zoxide database.  There are two (`-F`): **large**, 12 sessions, 40 windows
-and 90 panes (142 rows), where a cost per row shows; and **small**, 1
-session, 3 windows, 3 panes -- the size of the server this plugin's user
-actually runs -- where the fixed costs (parsing the script, exec'ing the
-core, the tmux round-trips) are nearly everything, and a saving per row all
-but vanishes under fzf's 20 ms paint floor.  The default, `-F both`, runs the
-scenarios on the large fixture, then those whose work depends on the
-server's size (first-frame, list, preview-S and -W, the footer callbacks)
-on the small one, whose one-pane windows list no pane row for preview-P:
-two tables.  Rank an optimisation by what it does on the small
+invokes it -- prefix+f itself, the navigator opening to its first row, the
+`--list` reload, a preview, the per-keystroke footer, the ctrl-o picker,
+`--doctor` and more -- against a fixture that A and B share, with an
+attached client and a real zoxide database.  There are two (`-F`):
+**large**, 12 sessions, 40 windows and 90 panes, whose navigator lists 151
+rows (12 sessions, 40 windows, 87 panes, 12 directories), where a cost per
+row shows; and **small**, 1 session, 3 windows, 3 panes -- the size of the
+server this plugin's user actually runs -- whose 19 rows are 4 of tmux's
+(the session and its one-pane windows, which list no pane row) and 15
+directories, from the zoxide database and recent_dirs.  There the fixed
+costs (parsing the script, exec'ing the core, the tmux round-trips,
+zoxide) are nearly everything, and a saving per row all but vanishes under
+fzf's 20 ms paint floor.  The default, `-F both`, runs the scenarios on the
+large fixture, then those whose work depends on the server's size
+(keypress, first-frame, list and their `-changed` variants, preview-S and
+-W, the footer callbacks) on the small one, whose windows give preview-P no
+pane row: two tables.  Rank an optimisation by what it does on the small
 one; the large one is what resolves it.
+
+What a popup starts with comes from the real binding.  Each side's
+`interdimux.tmux` runs against the fixture server, as a tmux.conf's
+`run-shell` would, and its prefix+f is pressed on the attached client
+(`send-keys -K`).  The environment that popup's shell starts with -- tmux's,
+and every `-e` the binding expanded at the keypress -- is recorded, and
+first-frame, the holders behind every callback, and the CLI scenarios start
+from it.  So a variable a change adds to the binding reaches B, with what
+it costs every process that inherits it.  And **keypress** measures the
+key itself: the side's binding, the key, the server expanding its formats
+and opening the popup, the navigator running to the stub fzf, to the
+popup's end.  Its wall is the time to the first row; a note splits its cpu
+into the server's own, the popup's processes and the client, and says when
+A's and B's bindings differ.  (Six copies of a `#{S:#{W:#{P:...}}}` format
+added to the binding: keypress +25.3%, the server's own CPU 18 -> 39 ms a
+press.)
+
+Each side has its own `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`
+and zoxide database, copies of the fixture's, and the server's environment
+switches to the side's for its popups and for any job the script starts
+through tmux: neither side ever reads what the other wrote.  A plain
+scenario runs against a server that never changes, so a cache would show
+only its hit.  **first-frame-changed** and **list-changed** change the
+server before every pair (the shell window renamed, a pane retitled,
+through three states), so each side's cache meets a change on every run:
+the miss and the invalidation, next to the hit.  (A toy `--list` cache,
+validated by such a digest: list FASTER -66.6%, list-changed REGRESSION
++38.1%.)
 
 A and B run in pairs whose order alternates, after warm-up pairs.  A run's
 CPU is the user+sys time of its whole process tree, orphans included, plus
@@ -117,39 +152,51 @@ still running when the command ends is waited for (up to 3 s, then killed),
 so work moved into one is counted, not credited as a win.  That last part
 arrives in whole clock ticks (10 ms): right on average, but a job of a few
 ms is undercounted by the medians the verdict uses, so a note gives each
-side's mean job CPU per run whenever there is any.  Not counted: a job's own
-orphans (reparented to init, not the server) and new panes' processes.
+side's mean job CPU per run whenever there is any.  keypress's popup is
+counted the same way, so its A and B medians move in 10 ms steps: read its
+`dcpu%`.  Not counted: a job's own orphans (reparented to init, not the
+server) and new panes' processes.
 
 | column | |
 |---|---|
 | `dcpu%` | B's CPU shift against A: the Hodges-Lehmann estimate over the per-pair differences, in % of A's median |
-| `noise%` | the half-width of that shift's 99% confidence interval: the smallest change this run could have seen |
+| `noise%` | the half-width of that shift's 99% confidence interval |
+| `worst%` | the top of that interval: B may be up to this much slower.  An `ok` rules out no more than that |
 | `verdict` | `REGRESSION` when `dcpu%` > max(2, `noise%`), `FASTER` when it is below minus that, else `ok`; `(n<8)` too few pairs to say; `FAILED` a run exited unexpectedly |
-| `wall` | the same for wall time: `ok`, `SLOWER`, `FASTER`; first-frame's is the time to the first row, the one a user waits for |
+| `wall` | the same for wall time: `ok`, `SLOWER`, `FASTER`; first-frame's and keypress's is the time to the first row, the one a user waits for |
 | `out` | B's output against A's, paths normalised: `same`, `DIFF` (a UX change: the first differing lines are printed), `vol` (A's own varied, so no comparison) |
 | `n` | measured pairs; `c` when a flagged scenario was measured again on fresh pairs: then cpu and wall alike, whichever set off the re-measuring, are judged on both sets together, a flag standing only if the second set on its own points the same way |
 
-Its last line names everything it found, and its exit status is the first
-that applies: 1 when the bench itself failed, 3 on a CPU `REGRESSION`, 5
-when there is none but a wall time is `SLOWER` (`SLOWER: first-frame`: the
-first row came later, CPU or not -- a wait, a lost overlap), 4 when there is
-neither but an output differs, 0 when there is none of these; 2 on a usage
-error.  With `-F both`, the worse of the two fixtures', in that order.
-(`make` exits 2 whenever a command fails, naming its status in `Error N`;
-`sh dev/run.sh perfbench REF ARGS...` exits with the status itself, which
-is what a script should run.)
+Its last line names everything it found, and what got faster (`FASTER:
+list (cpu -66.6%, wall -71.3%)`), and its exit status is the first that
+applies: 1 when the bench itself failed, 3 on a CPU `REGRESSION`, 5 when
+there is none but a wall time is `SLOWER` (`SLOWER: first-frame`: the first
+row came later, CPU or not -- a wait, a lost overlap), 4 when there is
+neither but an output differs, 0 when there is none of these (FASTER
+changes nothing); 2 on a usage error.  With `-F both`, the worse of the two
+fixtures', in that order, and a summary line for each.  (`make` exits 2
+whenever a command fails, naming its status in `Error N`; `sh dev/run.sh
+perfbench REF ARGS...` exits with the status itself, which is what a script
+should run.)
 
-An `ok` only says that no effect larger than `noise%` was there, and that
-floor depends on the pairs measured.  A/A runs on this 4-CPU VPS put it at
-about 3-7% for every scenario at the default budget (30 to 40 pairs), idle
-or at a host load of 4 alike (`hint`, a 1.6 ms snippet, 9-14%): a 5% change
--- 1.3 ms injected into a 25 ms preview -- went unflagged there.  **To
-answer a 5% question, run just those scenarios with `-n 100`**
-(`ARGS='-n 100 -s preview-W,preview-S'` caught that change, at a noise of
-2.6-2.8%, in a minute with the re-measuring; a pair of a 30 ms callback
-takes about 0.15 s).  `-n 10` is a smoke check: noise 8-25%, so
-it resolves only effects above about 15%.  A line `noisy:` names the
-scenarios where it was over 10%.
+**What an `ok` means.**  The verdict is `REGRESSION` only when the shift
+is clear of zero (`dcpu%` > `noise%`), so an effect of about `noise%` is
+flagged half the time, and reliably only at about twice that.  An `ok` says
+no more than `worst%`: B may still be that much slower.  A line
+`unresolved:` names every ok whose `worst%` is over 5% (and a ms).  A/A
+runs on this 4-CPU VPS put `noise%` at about 4-6% for every scenario at the
+default budget (30 to 90 pairs; keypress 5.5%, `hint`, a 1.6 ms snippet,
+7-8%): a 4% change -- a 1.5 ms loop in `--footer-for`, on the small
+fixture's 29 ms footer -- passed a default run as ok, `worst%` +9.0%, named
+unresolved.  **To keep or reject a change, run just the scenarios it
+touches with `-n 100`** (that one: `REGRESSION` +4.2% at a noise of 2.9%,
+in half a minute; a pair of a 30 ms callback takes about 0.15 s), or two
+default runs that agree.  `-n 10` is a smoke check: noise 8-25% (keypress
+up to 30%), so it resolves only effects of 30% and more.  And compare
+`dcpu%` within one run only, never one run's `A cpu` or `B cpu` with
+another's: the sides are interleaved, so `dcpu%` survives a busy machine,
+but the absolute ms do not (a host load of 3 on 4 CPUs put a 25 ms preview
+at 38 ms).
 
 ### uxdiff: does B look different?
 
@@ -182,9 +229,11 @@ sides' captures stay in the work volume until the next `make uxdiff`:
   benchmarks, on the host either -- and only one timing-sensitive run at a
   time: perfbench compares CPU time, and uxdiff's screens wait, bounded, for
   fzf to settle.  perfbench reports the load average before and after (the
-  host's: `/proc/loadavg` is not per container) against the host's CPU count,
-  and warns about processes over 50% of a CPU -- but in a container it sees
-  only the container's own.
+  host's: `/proc/loadavg` is not per container) against the host's CPU
+  count, and warns when it was over half of them: then `dcpu%` is still
+  usable, if noisier, but re-run on a quieter machine before deciding
+  anything.  It also warns about processes over 50% of a CPU -- but in a
+  container it sees only the container's own.
 * **Timing-sensitive runs take turns by themselves**, across every checkout
   ([Several checkouts at once](#several-checkouts-at-once)): a perfbench
   waits for a suite run from another worktree, saying so, and the other way
@@ -269,8 +318,10 @@ ignored, which no container does by default and which found a real bug once
 * **Each checkout has a work volume of its own**,
   `interdimux-dev-work-<arch>-<directory name>-<hash of its path>`, labelled
   with the path.  So runs from several checkouts -- agents in their own git
-  worktrees, say -- go side by side; only a second run from the same checkout
-  is refused.  `make clean` removes the images and this checkout's volumes;
+  worktrees, say -- go side by side.  From the same checkout, a second
+  timing-sensitive run waits its turn, and a run that takes none (`shell`,
+  `run`, `watch`, `versions`) is refused while another one uses the volume,
+  as any run is while one of those is up.  `make clean` removes the images and this checkout's volumes;
   `make clean-volumes` removes the volumes whose checkout is gone, and only
   names those without a label (made by an older `dev/run.sh`, with one volume
   per architecture, which a checkout not yet updated still uses).
