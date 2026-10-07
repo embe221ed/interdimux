@@ -117,9 +117,11 @@ esac
 # one checksum.  The image carries it as a label, so a run whose image is
 # current starts without asking the builder -- or the registry, which a build
 # would ask about the base image even when every layer is cached.
+# (dev/perf/ is not in it: the image does not use the harness, which runs from
+# /work, so editing it rebuilds nothing.)
 src_sum() {
-  (cd "$ROOT" && find dev rust/Cargo.toml rust/Cargo.lock .dockerignore -type f | LC_ALL=C sort |
-     while IFS= read -r f; do printf '%s\n' "$f"; cat "$f"; done) | cksum | tr ' ' -
+  (cd "$ROOT" && find dev rust/Cargo.toml rust/Cargo.lock .dockerignore -path dev/perf -prune -o -type f -print |
+     LC_ALL=C sort | while IFS= read -r f; do printf '%s\n' "$f"; cat "$f"; done) | cksum | tr ' ' -
 }
 sum=$(src_sum)
 

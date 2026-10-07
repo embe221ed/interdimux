@@ -125,10 +125,11 @@ ignored, which no container does by default and which found a real bug once
   names those without a label (made by an older `dev/run.sh`, with one volume
   per architecture, which a checkout not yet updated still uses).
 * **They share the image**, one tag per architecture.  A checkout whose
-  `dev/`, `rust/Cargo.*` and `.dockerignore` match the image's label runs it
-  as it is, so worktrees of one branch never rebuild it for each other.  One
-  whose `dev/` differs rebuilds it -- from the cache, in seconds -- and the
-  next run from the other rebuilds it back.
+  `dev/` (but `dev/perf/`, which the image does not use), `rust/Cargo.*` and
+  `.dockerignore` match the image's label runs it as it is, so worktrees of
+  one branch never rebuild it for each other.  One whose `dev/` differs
+  rebuilds it -- from the cache, in seconds -- and the next run from the
+  other rebuilds it back.
 * **`IMUX_LOCK=FILE`** (`make ... LOCK=FILE`) makes runs take turns: the run,
   and an image build before it, hold an exclusive `flock` on the file
   throughout, so every run that names the same file waits for the one before
@@ -192,6 +193,7 @@ screen may take to settle.  Run those natively, on the Mac itself.
 | `dev/Dockerfile` | the image, one stage per component |
 | `dev/run.sh` | the host side (POSIX sh), what `make` calls |
 | `dev/entrypoint.sh`, `dev/cmd.sh` | inside: the root steps, then the commands |
+| `dev/perf/` | the A/B harness, run from `/work` (not part of the image): `bench.sh` with `benchrun.c` (compiled per run), `uxdiff.sh` with its fixture, text and screen parts and `uxdiff-canon.pl` |
 | `dev/lint-extra.sh` | actionlint, hadolint, lychee |
 | `dev/pin.sh` | records the checksums |
 | `Makefile`, `.dockerignore` | |

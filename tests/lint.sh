@@ -73,11 +73,12 @@ echo "==> the tests"
 "$SC" -S warning -e SC2155,SC2034,SC2164,SC2010,SC2154 \
   tests/*.sh || rc=1
 
-# dev/ -- the dev image's and CI's install recipes, and the host-side
-# dev/run.sh (POSIX sh, for macOS's /bin/sh) -- is held to the plugin's bar,
-# with nothing excluded.  -x follows each installer into dev/install/lib.sh.
+# dev/ -- the dev image's and CI's install recipes, the host-side dev/run.sh
+# (POSIX sh, for macOS's /bin/sh), and the A/B harness in dev/perf/ -- is held
+# to the plugin's bar, with nothing excluded.  -x follows each installer into
+# dev/install/lib.sh, and uxdiff.sh into the parts it sources.
 echo "==> the dev environment"
-"$SC" -S warning -x dev/*.sh dev/install/*.sh || rc=1
+"$SC" -S warning -x dev/*.sh dev/install/*.sh dev/perf/*.sh || rc=1
 
 [ "$rc" = 0 ] && echo "clean"
 exit "$rc"
