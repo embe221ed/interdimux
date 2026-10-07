@@ -175,8 +175,11 @@ ci() {
 # sources built the same way, the same binary -- and kept in the work volume,
 # under rust/target, which the entrypoint's copy leaves alone.  (The volume
 # outlives image rebuilds: after a RUST_VERSION bump, A must not keep a core
-# the old compiler built while B's is the new one's.)  REPLY = the tree.
+# the old compiler built while B's is the new one's.)  Each use touches its
+# entry, and an entry unused for 30 days goes, as does one named in another
+# format than <tree>-<toolchain> (an older cmd.sh's).  REPLY = the tree.
 REF_FLAGS="--release --locked RUSTFLAGS=-Awarnings"
+REF_CACHE=/work/rust/target/perf-ref
 ref_tree() {
   local ref=$1 sha rtree dir cache tc
   git -C /work rev-parse --git-dir >/dev/null 2>&1 || {
@@ -190,7 +193,11 @@ ref_tree() {
   git -C /work archive --format=tar "$sha" | tar -x -C "$dir" || {
     echo "git archive $ref failed" >&2; return 1; }
   tc=$({ rustc -vV; cc --version | head -n 1; printf '%s\n' "$REF_FLAGS"; } 2>&1 | cksum | cut -d' ' -f1)
-  cache=/work/rust/target/perf-ref/$rtree-$tc
+  if [ -d "$REF_CACHE" ]; then
+    find "$REF_CACHE" -mindepth 1 -maxdepth 1 -regextype posix-extended \
+      \( ! -regex '.*/[0-9a-f]{40,64}-[0-9]+' -o -mtime +30 \) -exec rm -rf {} + 2>/dev/null || true
+  fi
+  cache=$REF_CACHE/$rtree-$tc
   if [ ! -x "$cache/imux" ]; then
     say "build the Rust core of $ref (once per rust/ tree and toolchain: kept in the work volume)"
     rm -rf "$cache"
@@ -204,6 +211,7 @@ ref_tree() {
     cp "$cache/target/release/imux" "$cache/imux.new" && mv "$cache/imux.new" "$cache/imux"
     rm -rf "$cache/target"
   fi
+  touch "$cache"
   # copied, so newer than every file the archive restored: the harness insists
   mkdir -p "$dir/rust/target/release"
   cp "$cache/imux" "$dir/rust/target/release/imux"
