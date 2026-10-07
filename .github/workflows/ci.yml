@@ -93,10 +93,39 @@ jobs:
       - name: Load the pinned versions (dev/versions.env)
         run: grep -E '^[A-Z][A-Z0-9_]*=' dev/versions.env >> "$GITHUB_ENV"
 
+      # apt-get can stall.  On the merge of PR #1 this step sat in it for the
+      # job's whole 30 minutes and was cancelled, while the other leg of the
+      # same run passed it in a minute.  The known causes on these runners: a
+      # slow mirror, unattended-upgrades holding dpkg's lock on a fresh boot,
+      # and man-db's trigger, which rebuilds its database after every install
+      # and takes seconds to minutes (curl's CI drops it for that).  So man-db
+      # is told not to, and no call can hang: each is bounded (timeout, and
+      # apt's own network timeouts), waits for the lock rather than failing
+      # on it, never prompts, and is tried three times -- an update that
+      # could not fetch counts as failed (Error-Mode=any), so it is retried
+      # too.  The step has a timeout of its own, so a stall that outlasts all
+      # of that fails here, by name, in minutes.
       - name: Install dependencies
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt_get() {
+            sudo DEBIAN_FRONTEND=noninteractive timeout 240 apt-get \
+              -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+              -o DPkg::Lock::Timeout=180 "$@"
+          }
+          retry() {
+            local i
+            for i in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::$* failed or stalled (attempt $i of 3)"
+              sudo dpkg --configure -a || true
+              sleep 10
+            done
+            return 1
+          }
+          sudo rm -f /var/lib/man-db/auto-update
+          retry apt_get -o APT::Update::Error-Mode=any update
+          retry apt_get install -y \
             fd-find at gawk locales strace zsh \
             build-essential libevent-dev libncurses-dev bison pkg-config
           # strace: tests/test_render_cost.sh counts the bash renderer's
