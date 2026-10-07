@@ -9,15 +9,19 @@
 #   image          build the image now (other commands build it when dev/ or
 #                  rust/Cargo.* changed since it was built)
 #   pin            dev/pin.sh: record checksums after editing dev/versions.env
-#   clean          remove the dev images and work volumes, both architectures
+#   clean          remove the dev images (both architectures) and this
+#                  checkout's work volumes
+#   clean-volumes  remove the work volumes of checkouts that are gone
 #   anything else  dev/cmd.sh COMMAND: test, ci, ci-sigpipe, versions, lint,
 #                  check-macos, msrv, bench, watch, shell, run
 #
 # The container sees the checkout READ-ONLY at /src and works on a copy in a
-# volume of its own (interdimux-dev-work-<arch>), so no run can write into the
-# checkout -- or rebuild the rust/target/release/imux a live plugin runs from
-# it.  It mounts nothing else of the host: no /tmp, no tmux socket, no home,
-# so a bare `tmux` inside can only reach the container's own servers.
+# volume of its own (interdimux-dev-work-<arch>-<dir name>-<hash of the
+# checkout's path>, one per checkout and architecture, so two worktrees never
+# share one), so no run can write into the checkout -- or rebuild the
+# rust/target/release/imux a live plugin runs from it.  It mounts nothing else
+# of the host: no /tmp, no tmux socket, no home, so a bare `tmux` inside can
+# only reach the container's own servers.
 #
 # Environment:
 #   IMUX_PLATFORM  linux/amd64 or linux/arm64; default the docker host's own.
@@ -56,19 +60,51 @@ case $arch in
   *) die "no image for '$arch': IMUX_PLATFORM is linux/amd64 or linux/arm64" ;;
 esac
 IMAGE=interdimux-dev:$arch
-VOLUME=interdimux-dev-work-$arch
+# This checkout's work volume: its directory's name, for `docker volume ls`,
+# and a hash of its path, so two checkouts never share one.  Labelled with the
+# path, which clean-volumes reads.
+ckey=$(printf '%s' "$ROOT" | cksum | cut -d' ' -f1)
+cname=$(printf '%s' "${ROOT##*/}" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_' | cut -c1-40)
+volume_of() { printf 'interdimux-dev-work-%s-%s-%s' "$1" "$cname" "$ckey"; }
+VOLUME=$(volume_of "$arch")
 # Always named, even for the docker host's own arch, so that a
 # DOCKER_DEFAULT_PLATFORM in the environment (common on Apple Silicon) cannot
 # build or run the image under emulation behind a tag that says otherwise.
 plat=--platform=linux/$arch
 
-if [ "$1" = clean ]; then
-  for a in amd64 arm64; do
-    if docker image rm "interdimux-dev:$a" >/dev/null 2>&1; then echo "removed image interdimux-dev:$a"; fi
-    if docker volume rm "interdimux-dev-work-$a" >/dev/null 2>&1; then echo "removed volume interdimux-dev-work-$a"; fi
-  done
-  exit 0
-fi
+work_volumes() {  # every checkout's, and the old per-architecture ones
+  docker volume ls -q --filter name=interdimux-dev-work- | grep '^interdimux-dev-work-' || true
+}
+case $1 in
+  clean)
+    for a in amd64 arm64; do
+      if docker image rm "interdimux-dev:$a" >/dev/null 2>&1; then echo "removed image interdimux-dev:$a"; fi
+      v=$(volume_of "$a")
+      if docker volume rm "$v" >/dev/null 2>&1; then echo "removed volume $v (this checkout's work volume)"; fi
+    done
+    n=$(work_volumes | grep -cvx -e "$(volume_of amd64)" -e "$(volume_of arm64)" || true)
+    [ "$n" = 0 ] || echo "$n work volume(s) of other checkouts are left: dev/run.sh clean-volumes removes those whose checkout is gone"
+    exit 0 ;;
+  clean-volumes)
+    # Stale: the checkout its label names is gone.  One without a label was
+    # made by a dev/run.sh from before volumes were per checkout, which a
+    # checkout not yet updated still uses: named, not removed.  docker refuses
+    # to remove a volume a run is using.
+    for v in $(work_volumes); do
+      co=$(docker volume inspect -f '{{ index .Labels "imux.checkout" }}' "$v" 2>/dev/null || true)
+      [ "$co" != '<no value>' ] || co=""
+      if [ -z "$co" ]; then
+        echo "kept    $v (no checkout recorded: an older dev/run.sh's; docker volume rm $v)"
+      elif [ -f "$co/dev/run.sh" ]; then
+        echo "kept    $v ($co)"
+      elif docker volume rm "$v" >/dev/null 2>&1; then
+        echo "removed $v ($co is gone)"
+      else
+        echo "kept    $v (a run is using it)"
+      fi
+    done
+    exit 0 ;;
+esac
 
 # Everything the image is built from (.dockerignore lets in nothing else), as
 # one checksum.  The image carries it as a label, so a run whose image is
@@ -102,10 +138,14 @@ if [ "$have" != "$sum" ]; then
   build
 fi
 
-# One run at a time per architecture: every run re-copies the checkout into the
-# same volume, and rebuilds rust/target there, under the feet of any other.
+# One run at a time per checkout and architecture: every run re-copies the
+# checkout into its volume, and rebuilds rust/target there, under the feet of
+# any other.  (Other checkouts have volumes of their own.)
 busy=$(docker ps -q --filter "volume=$VOLUME")
 [ -z "$busy" ] || die "another run is using $VOLUME (container $busy): wait for it, or stop it with: docker stop $busy"
+docker volume inspect "$VOLUME" >/dev/null 2>&1 \
+  || docker volume create --label "imux.checkout=$ROOT" "$VOLUME" >/dev/null \
+  || die "cannot create the volume $VOLUME"
 
 # A terminal only where one is used: the suites run without one, as on CI,
 # where `stty size </dev/tty` has nothing to report.  (`watch` is the

@@ -15,7 +15,8 @@
 #   make shell                 a shell in the container
 #   make image                 (re)build the image
 #   make pin                   after editing dev/versions.env: record checksums
-#   make clean                 remove the dev images and volumes (both archs)
+#   make clean                 remove the dev images, and this checkout's volumes
+#   make clean-volumes         remove the volumes of checkouts that are gone
 #
 #   PLATFORM=linux/arm64       the Apple Silicon image (emulated off one)
 #   CPUSET=2-3                 pin the container to those CPUs
@@ -26,7 +27,7 @@ R ?= $(IMUX_RENDERER)
 CPUSET ?= $(IMUX_CPUSET)
 RUN = IMUX_PLATFORM='$(PLATFORM)' IMUX_RENDERER='$(R)' IMUX_CPUSET='$(CPUSET)' sh dev/run.sh
 
-.PHONY: help test smoke ci ci-sigpipe versions lint check-macos msrv bench watch shell image pin clean
+.PHONY: help test smoke ci ci-sigpipe versions lint check-macos msrv bench watch shell image pin clean clean-volumes
 
 help:
 	@sed -n 's/^#   //p' Makefile
@@ -59,3 +60,5 @@ pin:
 	@$(RUN) pin
 clean:
 	@$(RUN) clean
+clean-volumes:
+	@$(RUN) clean-volumes

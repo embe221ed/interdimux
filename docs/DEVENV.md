@@ -36,6 +36,7 @@ make msrv                  # build and test the core on its rust-version (1.74)
 make bench ARGS='HEAD~1'   # tests/bench.sh, this tree against a ref
 make watch T=raw           # re-run those suites whenever a file changes
 make shell                 # a shell inside (tmux there is the container's own)
+make clean-volumes         # drop the work volumes of checkouts that are gone
 ```
 
 The first run builds the image (about six minutes on 4 cores; most of it is
@@ -43,8 +44,10 @@ the six old bashes).  After that a command starts at once while `dev/` and
 `rust/Cargo.*` are as the image was built from (it carries their checksum as a
 label, so this needs neither the builder nor the network), and otherwise
 rebuilds, visibly, only the stages whose pin or recipe changed.  One run at a
-time per architecture: a second one is refused while the first holds the work
-volume.
+time per checkout: a second one is refused while the first holds the
+checkout's work volume.  Other checkouts -- git worktrees, say -- have volumes
+of their own and run alongside ([Several checkouts at
+once](#several-checkouts-at-once)).
 
 ## Moving a version
 
@@ -75,11 +78,11 @@ own lists, which are the authority: `tests/test_old_fzf.sh` and
 container (`--rm`):
 
 * **The checkout is mounted read-only at `/src`** and copied (rsync) into
-  `/work`, a volume per architecture (`interdimux-dev-work-amd64`), where
-  everything runs.  So nothing a run does reaches the checkout.  In particular
-  it never rebuilds the checkout's `rust/target/release/imux`, which a live
-  plugin installed from this checkout runs.  `/work/rust/target` survives
-  between runs, so the core is rebuilt only when `rust/` changes:
+  `/work`, the checkout's own volume ([below](#several-checkouts-at-once)),
+  where everything runs.  So nothing a run does reaches the checkout.  In
+  particular it never rebuilds the checkout's `rust/target/release/imux`,
+  which a live plugin installed from this checkout runs.  `/work/rust/target`
+  survives between runs, so the core is rebuilt only when `rust/` changes:
   when the copy brings anything new under `rust/`, the core's cargo
   fingerprints are dropped, which cargo cannot overlook even for a restored
   file older than its last build.
@@ -107,6 +110,22 @@ container (`--rm`):
 `make ci-sigpipe` exists because GitHub starts every `run:` step with SIGPIPE
 ignored, which no container does by default and which found a real bug once
 ([CI.md §10](CI.md#10-github-runs-run-steps-with-sigpipe-ignored)).
+
+### Several checkouts at once
+
+* **Each checkout has a work volume of its own**,
+  `interdimux-dev-work-<arch>-<directory name>-<hash of its path>`, labelled
+  with the path.  So runs from several checkouts -- agents in their own git
+  worktrees, say -- go side by side; only a second run from the same checkout
+  is refused.  `make clean` removes the images and this checkout's volumes;
+  `make clean-volumes` removes the volumes whose checkout is gone, and only
+  names those without a label (made by an older `dev/run.sh`, with one volume
+  per architecture, which a checkout not yet updated still uses).
+* **They share the image**, one tag per architecture.  A checkout whose
+  `dev/`, `rust/Cargo.*` and `.dockerignore` match the image's label runs it
+  as it is, so worktrees of one branch never rebuild it for each other.  One
+  whose `dev/` differs rebuilds it -- from the cache, in seconds -- and the
+  next run from the other rebuilds it back.
 
 ## What is in the image
 
