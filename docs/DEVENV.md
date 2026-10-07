@@ -251,7 +251,8 @@ ignored, which no container does by default and which found a real bug once
 | Rust | `RUST_VERSION`, and the MSRV | rustup (`RUSTUP_INIT_VERSION`), minimal, with clippy, rustfmt and the two macOS std targets |
 | shellcheck | `SHELLCHECK_VERSION` | release binary |
 | actionlint, hadolint, lychee | `*_VERSION` | release binaries |
-| zsh, dash, gawk (as `awk`), mawk, at, strace, procps, util-linux, perl, python3, fd-find, git, locales (C.UTF-8 and en_US.UTF-8), ncurses terminfo, entr, rsync, jq | noble | apt |
+| zoxide | `ZOXIDE_VERSION` | release binary in `/opt/zoxide/zoxide`, **off the PATH** (`IMUX_PERF_ZOXIDE` names it): only the A/B harness uses it; the suites, as on CI's runner, see no zoxide |
+| zsh, dash, gawk (as `awk`), mawk, at, strace, procps, util-linux, perl, python3, fd-find (as `fdfind`, which the plugin uses when there is no `fd`), git, locales (C.UTF-8 and en_US.UTF-8), ncurses terminfo, entr, rsync, jq | noble | apt |
 
 `make versions` prints all of them, and fails on anything missing or, for
 each pinned one, at another version than its pin.

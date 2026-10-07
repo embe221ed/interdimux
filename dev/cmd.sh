@@ -91,6 +91,10 @@ versions() {
   want_eq hadolint "$(hadolint --version 2>/dev/null | awk '{ print $NF }')" "$(pin HADOLINT_VERSION)"
   check lychee lychee --version
   want_eq lychee "$(lychee --version 2>/dev/null | awk '{ print $2 }')" "$(pin LYCHEE_VERSION)"
+  # the A/B harness's, off the PATH: the suites, as on CI, have none
+  check zoxide "${IMUX_PERF_ZOXIDE:-/opt/zoxide/zoxide}" --version
+  want_eq zoxide "$("${IMUX_PERF_ZOXIDE:-/opt/zoxide/zoxide}" --version 2>/dev/null | awk '{ print $2 }')" "$(pin ZOXIDE_VERSION)"
+  check 'zoxide PATH' sh -c 'if command -v zoxide; then exit 1; fi; echo "none on the PATH, as on CI"'
   check locale locale charmap
   check en_US.UTF-8 sh -c 'locale -a | grep -ix en_US.utf8'
   for v in ps pgrep setsid script perl python3 fdfind git timeout entr rsync; do

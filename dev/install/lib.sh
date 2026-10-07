@@ -112,6 +112,11 @@ artifact() {
       echo "jemalloc-$v.tar.bz2"
       echo "https://github.com/jemalloc/jemalloc/releases/download/$v/jemalloc-$v.tar.bz2"
       echo - ;;
+    zoxide)
+      case $arch in amd64) a=x86_64 ;; arm64) a=aarch64 ;; esac
+      echo "zoxide-$v-$a-unknown-linux-musl.tar.gz"
+      echo "https://github.com/ajeetdsouza/zoxide/releases/download/v$v/zoxide-$v-$a-unknown-linux-musl.tar.gz"
+      echo - ;;
     rustup)
       case $arch in amd64) a=x86_64 ;; arm64) a=aarch64 ;; esac
       echo "rustup-init-$v-$a-unknown-linux-gnu"
