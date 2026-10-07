@@ -16,8 +16,9 @@
 #
 # Old bashes are real binaries: point INTERDIMUX_OLD_BASH_DIR at a directory
 # holding <major.minor>/bash for each of OLD_VERSIONS below -- 3.2, 4.2, 4.3,
-# 4.4, 5.0 and 5.1.  CI builds exactly those; its "Build bash" step in
-# .github/workflows/ci.yml is the recipe, with the flags a modern gcc needs.
+# 4.4, 5.0 and 5.1.  CI and the dev image build exactly those
+# (OLD_BASH_VERSIONS in dev/versions.env) with dev/install/bash-old.sh, the
+# recipe, with the flags a modern gcc needs.
 # With the variable set, a version that is not there FAILS, by name: a skip
 # there is how 4.4 and 5.0 went unrun on every CI run while the totals read
 # green.  Unset (a local run without them), each is reported as skipped where

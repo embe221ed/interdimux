@@ -94,8 +94,12 @@ A portal gun for your tmux sessions.
 - A Rust toolchain (optional, recommended — builds the fast renderer; see
   [The Rust core](#the-rust-core-optional-recommended))
 
-CI builds tmux 3.7b and installs fzf 0.74 rather than using the distro packages,
-for exactly these reasons — see [docs/CI.md](docs/CI.md).
+CI builds tmux from source and installs a release fzf rather than using the
+distro packages, for exactly these reasons — see [docs/CI.md](docs/CI.md). The
+versions it uses, and every other one the tests use, are pinned in
+[`dev/versions.env`](dev/versions.env), and `make test` runs the suites in a
+container with exactly those (Docker on Linux or macOS; see
+[docs/DEVENV.md](docs/DEVENV.md)).
 
 ## Installation
 

@@ -1,0 +1,7 @@
+# The dev image is built from dev/ and rust/Cargo.* alone (dev/Dockerfile);
+# the checkout is mounted at run time instead.  Allow-list, so nothing else --
+# rust/target, a stray socket, .claude/ -- is ever sent to the builder.
+*
+!dev/
+!rust/Cargo.toml
+!rust/Cargo.lock

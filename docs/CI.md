@@ -5,6 +5,11 @@ It failed on every push. This is what was actually wrong, measured in a
 container replicating `ubuntu-latest` (= ubuntu-24.04) rather than reasoned
 about — every number here came from a run.
 
+Since then the versions CI pins live in one file, `dev/versions.env`, and the
+recipes that fetch and build them in `dev/install/`, both shared with the dev
+image (`docs/DEVENV.md`), which is this runner as a container: `make ci` runs
+the tests job's legs there.
+
 Baseline, the workflow exactly as it was: **172 assertions passed, 13 failed,
 and six suites died without producing a result line at all.**
 
@@ -123,7 +128,7 @@ indistinguishable from coverage. Two suites, ~60 assertions, silently absent.
 below their version floors. Installing 0.74 was worth +22 assertions on its own.
 
 **Fix:** install the fzf release tarball, not the distro package.  It is pinned
-(`FZF_VERSION`) at the latest 0.74 patch release, 0.74.4, the one users run,
+(`FZF_VERSION` in `dev/versions.env`) at the latest 0.74 patch release, 0.74.4, the one users run,
 rather than 0.74.0: 0.74.1 to 0.74.4 changed how fzf draws — synchronized
 updates, faster non-ASCII, escape sequences split across reads — and the
 suites read its screen.  The floor the suites pin themselves to
@@ -210,10 +215,13 @@ One invocation needs the union of those lists, and that union is exactly what
 hid the dead variables behind the harnesses' deliberate SC2034s. Split, the
 plugin is linted with SC2034 and SC2155 **on**.
 
-Both invocations live in `tests/lint.sh`, which is all the shellcheck job runs.
-It pins the version too: when the `shellcheck` on PATH is not 0.10.0 (the
-image's apt one is 0.9.0 on 24.04 and 0.11.0 on 26.04), it fetches the 0.10.0
-release into `~/.cache/shellcheck/`, checksummed, and uses that.  So an image
+Both invocations live in `tests/lint.sh`, which is all the shellcheck job runs
+(a third has since joined them, for `dev/`).  It pins the version too
+(`SHELLCHECK_VERSION` in `dev/versions.env`): when the `shellcheck` on PATH is
+not 0.10.0 (the image's apt one is 0.9.0 on 24.04 and 0.11.0 on 26.04),
+`dev/install/shellcheck.sh` fetches the 0.10.0 release into
+`~/.cache/shellcheck/`, checked against `dev/checksums/shellcheck.sha256`, and
+it uses that.  So an image
 bump cannot fail the lint with new SC codes, and the lint a push will get can
 be run before the push — three lint-fix commits in round 2 were made after
 pushing, because the commands lived only in the workflow.
@@ -388,7 +396,9 @@ Three things about that cache, found in review:
   each build.
 * The key named the versions and the image, not the recipe: a change to the
   flags alone restored the old binaries and proved nothing until eviction.
-  It carries a recipe tag (`bash-old-r2-…`) to bump with any such change.
+  It carried a recipe tag (`bash-old-r2-…`) to bump with any such change;
+  now that the recipe is a file, `dev/install/bash-old.sh`, the key hashes it
+  instead, and a change to it builds cold without anyone remembering to.
 
 That step only knew the workflow's own list, though, and for a while that list
 was 3.2, 4.2, 4.3 and 5.1 while the suite also ran 4.4 and 5.0 — the rest of
