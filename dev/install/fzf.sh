@@ -3,7 +3,8 @@
 #   dev/install/fzf.sh BINDIR
 #
 # Installs the pinned fzf release binary (FZF_VERSION) as BINDIR/fzf, for this
-# machine's architecture.  The distro packages lag far behind the 0.74 floor.
+# machine (Linux or macOS, x86_64 or arm64).  The distro packages lag far
+# behind the 0.74 floor.
 
 set -euo pipefail
 # shellcheck source=dev/install/lib.sh
@@ -13,7 +14,7 @@ set -euo pipefail
 bindir=$1
 v=$(pinned FZF_VERSION)
 scratch
-tarball=$(fetch fzf "$v" "$IMUX_SCRATCH" linux "$(host_arch)")
+tarball=$(fetch fzf "$v" "$IMUX_SCRATCH" "$(host_os)" "$(host_arch)")
 mkdir -p "$bindir"
 tar -xzf "$tarball" -C "$bindir" fzf
 "$bindir/fzf" --version

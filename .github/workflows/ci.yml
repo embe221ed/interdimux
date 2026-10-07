@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run it again from the Actions tab, without a push.
+  workflow_dispatch:
 
 # The versions this project builds and tests with -- tmux, fzf, the old fzf
 # and bash releases, shellcheck, Rust -- are pinned in ONE place,
@@ -291,3 +293,110 @@ jobs:
           # already local, and this job does not pull images.
           INTERDIMUX_TEST_DOCKER: "off"
         run: IMUX_SKIP_RUST=1 IMUX_RENDERER=${{ matrix.renderer }} bash tests/run_all.sh
+
+      # tests/smoke.sh, which the macos job below runs on real Macs, here as
+      # well: so a smoke red on a Mac and green here is the Mac's, and one red
+      # in both is the smoke's own.
+      - name: Smoke test
+        if: matrix.renderer == 'rust'
+        env:
+          SMOKE_STRICT: "1"
+        run: bash tests/smoke.sh
+
+  # The plugin on real Macs, which nothing else runs it on: an Apple Silicon
+  # runner and an Intel one (GitHub supports its x86_64 images until August
+  # 2027).  Not the suites, which lean on GNU tools, /proc and strace.  The
+  # Rust tests, natively, which is the only place rust/src/macproc.rs's
+  # libproc backend runs; and tests/smoke.sh, which drives the plugin's main
+  # paths against a private tmux server on the macOS userland: BSD ps, sed,
+  # awk, date, find and at, macOS's /bin/sh, and its /bin/bash 3.2, refused.
+  #
+  # The tmux and fzf are the ones dev/versions.env pins, tmux configured as
+  # Homebrew configures it on a Mac.  dev/install/macos.sh builds them from
+  # source, with bash 5.3 and tmux's libraries, since Homebrew no longer has
+  # Intel builds (it would compile all of it, Go included, for over an hour).
+  macos:
+    name: macOS (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-26-intel]
+    env:
+      # macOS has no C.UTF-8, the workflow's: every bash would warn that it
+      # cannot set it, and count bytes.
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load the pinned versions (dev/versions.env)
+        run: grep -E '^[A-Z][A-Z0-9_]*=' dev/versions.env >> "$GITHUB_ENV"
+
+      # Cached by image, versions and recipe, and saved straight after the
+      # build, as the tests job does: a red smoke does not throw it away.
+      - name: Cache the Mac's tools
+        id: mac-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/imux-prefix
+          key: mac-tools-${{ matrix.os }}-${{ hashFiles('dev/checksums/tmux.sha256', 'dev/checksums/fzf.sha256', 'dev/checksums/bash-macos.sha256', 'dev/checksums/libevent.sha256', 'dev/checksums/utf8proc.sha256', 'dev/checksums/jemalloc.sha256', 'dev/install/macos.sh', 'dev/install/tmux.sh', 'dev/install/fzf.sh', 'dev/install/lib.sh') }}
+
+      # Run by the runner's own /bin/bash 3.2, which is why the installers
+      # are written for it.
+      - name: Build bash ${{ env.MACOS_BASH_VERSION }} and tmux ${{ env.TMUX_VERSION }}, fetch fzf ${{ env.FZF_VERSION }}
+        if: steps.mac-cache.outputs.cache-hit != 'true'
+        run: bash dev/install/macos.sh "$HOME/imux-prefix"
+
+      - name: Save the Mac's tools
+        if: steps.mac-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/imux-prefix
+          key: mac-tools-${{ matrix.os }}-${{ hashFiles('dev/checksums/tmux.sha256', 'dev/checksums/fzf.sha256', 'dev/checksums/bash-macos.sha256', 'dev/checksums/libevent.sha256', 'dev/checksums/utf8proc.sha256', 'dev/checksums/jemalloc.sha256', 'dev/install/macos.sh', 'dev/install/tmux.sh', 'dev/install/fzf.sh', 'dev/install/lib.sh') }}
+
+      # From here on `bash` -- the steps' own shell included -- is 5.3, and so
+      # is the bash the plugin finds on the tmux server's PATH.
+      - name: Put them first on PATH
+        run: echo "$HOME/imux-prefix/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      # What the plugin meets here: the pinned tools first on PATH, and the
+      # BSD userland under them, with no GNU tool in its way.
+      - name: Versions under test
+        run: |
+          sw_vers
+          uname -m
+          bash --version | head -1
+          # shellcheck disable=SC2016  # /bin/bash's own $BASH_VERSION
+          /bin/bash -c 'echo "/bin/bash $BASH_VERSION"'
+          tmux -V
+          fzf --version
+          cargo --version
+          awk --version 2>&1 | head -1
+          for g in sed date find; do
+            if "$g" --version >/dev/null 2>&1; then echo "a GNU $g is on PATH: the smoke would not meet the BSD one"; exit 1; fi
+          done
+          for c in at atq atrm; do command -v "$c" || { echo "no $c"; exit 1; }; done
+
+      - name: Rust tests (natively, the libproc backend included)
+        id: rust-tests
+        run: cargo test --release --locked --manifest-path rust/Cargo.toml
+
+      # The smoke needs the built core, not passing Rust tests: a red Rust
+      # test still lets it run, so one push shows both.  (The job stays red.)
+      - name: Build the Rust core
+        id: core
+        if: success() || steps.rust-tests.outcome == 'failure'
+        run: cargo build --release --locked --manifest-path rust/Cargo.toml
+
+      - name: Smoke test
+        if: steps.core.outcome == 'success' && (success() || steps.rust-tests.outcome == 'failure')
+        env:
+          SMOKE_STRICT: "1"
+        run: bash tests/smoke.sh

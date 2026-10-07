@@ -8,10 +8,12 @@
 # an artifact whose checksum is not recorded, or does not match.
 #
 # Components: tmux fzf fzf-old bash-old shellcheck actionlint hadolint lychee
-# rustup (default: all).  Platforms: linux amd64 and arm64 for everything the
-# image runs (amd64 is this VPS's, CI's and an Intel Mac's Docker; arm64 an
-# Apple Silicon Mac's), plus macOS for shellcheck, which tests/lint.sh fetches
-# on a Mac.
+# rustup bash-macos libevent utf8proc jemalloc (default: all).  Platforms:
+# linux amd64 and arm64 for everything the image runs (amd64 is this VPS's,
+# CI's and an Intel Mac's Docker; arm64 an Apple Silicon Mac's); macOS amd64
+# and arm64 for fzf, which CI's macOS job installs, and for shellcheck, which
+# tests/lint.sh fetches on a Mac.  The macOS job's sources (bash-macos and
+# tmux's three libraries) have one tarball for every platform.
 #
 # A checksum recorded here is trust on first use: it pins what the URL served
 # when this ran.  Where a project publishes its own sha256 (fzf, actionlint,
@@ -24,7 +26,7 @@ set -euo pipefail
 # shellcheck source=dev/install/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/install/lib.sh"
 
-ALL="tmux fzf fzf-old bash-old shellcheck actionlint hadolint lychee rustup"
+ALL="tmux fzf fzf-old bash-old shellcheck actionlint hadolint lychee rustup bash-macos libevent utf8proc jemalloc"
 LINUX="linux:amd64 linux:arm64"
 
 from_file() {
@@ -41,7 +43,7 @@ targets() {
   case $1 in
     tmux)       echo "$(from_file TMUX_VERSION) - -" ;;
     bash-old)   for v in $(items "$(from_file OLD_BASH_VERSIONS)"); do echo "$v - -"; done ;;
-    fzf)        for p in $LINUX; do echo "$(from_file FZF_VERSION) ${p%:*} ${p#*:}"; done ;;
+    fzf)        for p in $LINUX darwin:amd64 darwin:arm64; do echo "$(from_file FZF_VERSION) ${p%:*} ${p#*:}"; done ;;
     fzf-old)    for v in $(items "$(from_file OLD_FZF_VERSIONS)"); do
                   for p in $LINUX; do echo "$v ${p%:*} ${p#*:}"; done; done ;;
     shellcheck) for p in $LINUX darwin:amd64 darwin:arm64; do
@@ -50,6 +52,12 @@ targets() {
     hadolint)   for p in $LINUX; do echo "$(from_file HADOLINT_VERSION) ${p%:*} ${p#*:}"; done ;;
     lychee)     for p in $LINUX; do echo "$(from_file LYCHEE_VERSION) ${p%:*} ${p#*:}"; done ;;
     rustup)     for p in $LINUX; do echo "$(from_file RUSTUP_INIT_VERSION) ${p%:*} ${p#*:}"; done ;;
+    bash-macos) v=$(from_file MACOS_BASH_VERSION)
+                echo "${v%.*} - -"
+                n=1; while [ "$n" -le "${v##*.}" ]; do echo "${v%.*}.$n - -"; n=$((n + 1)); done ;;
+    libevent)   echo "$(from_file LIBEVENT_VERSION) - -" ;;
+    utf8proc)   echo "$(from_file UTF8PROC_VERSION) - -" ;;
+    jemalloc)   echo "$(from_file JEMALLOC_VERSION) - -" ;;
     *) die "no component '$1' (there are: $ALL)" ;;
   esac
 }

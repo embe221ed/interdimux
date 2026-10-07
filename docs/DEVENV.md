@@ -24,8 +24,9 @@ without make.
 make test                  # every suite (the Rust core built first)
 make test T='raw sched'    # the suites whose names match
 make test R=bash           # ... on the bash renderer, as a cargo-less install
+make smoke                 # tests/smoke.sh: the end-to-end check CI runs on Macs
 make ci                    # CI's tests job: both renderer legs, strict
-                           # (the rust leg with check-macos and msrv, as in CI)
+                           # (the rust leg with check-macos, msrv and smoke, as in CI)
 make ci R=rust             # one leg
 make ci-sigpipe            # the same with SIGPIPE ignored, as GitHub runs it
 make versions              # every pinned tool, present and at its pin
@@ -61,7 +62,8 @@ measurement was taken on; they are history, not pins.)
    runs unless its checksum is recorded there: an installer refuses it,
    naming `make pin`.  (Rust's toolchains themselves come through rustup,
    which verifies its own downloads; in CI it is the runner's rustup.)
-3. `make ci`, then commit both files.  CI builds the same versions.
+3. `make ci`, then commit both files.  CI builds the same versions; it can
+   also be re-run from GitHub's Actions tab ("Run workflow"), without a push.
 
 Old releases (`OLD_FZF_VERSIONS`, `OLD_BASH_VERSIONS`) follow the suites'
 own lists, which are the authority: `tests/test_old_fzf.sh` and
@@ -130,16 +132,20 @@ screen may take to settle.  Run those natively, on the Mac itself.
 
 ## What it does not cover
 
-* **macOS's own userland.**  The plugin's macOS paths — the ps-based process
-  backend, BSD `at`/`atq` and `date -j`, `launchctl` for atrun, no `/proc` —
-  run on Linux only through the seams the suites already use
-  (`INTERDIMUX_FORCE_PS`, `INTERDIMUX_REGISTRY_NO_PROC`,
-  `INTERDIMUX_AT_DAEMON`, bash 3.2 from `/opt/bash-old`).  The Rust side is
-  type-checked for both macOS targets (`make check-macos`, and in CI), but not
-  run there.  The suites themselves assume GNU tools, `/proc` and `strace`, so
-  they do not run natively on macOS today.
-* **Homebrew's tmux**, which is built with utf8proc, so its character widths
-  are utf8proc's, not glibc's.
+* **macOS's own userland.**  The plugin's macOS paths -- the ps and libproc
+  process backends, BSD `at`/`atq` and `date -j`, `launchctl` for atrun, no
+  `/proc`, `/private/var` -- run here only through the seams the suites
+  already use (`INTERDIMUX_FORCE_PS`, `INTERDIMUX_REGISTRY_NO_PROC`,
+  `INTERDIMUX_AT_DAEMON`, bash 3.2 from `/opt/bash-old`).  So CI runs them on
+  real Macs instead: the `macos` job, on an Apple Silicon and an Intel runner,
+  runs the Rust tests natively and `tests/smoke.sh`, which drives the plugin
+  end to end on the macOS userland -- the list on every renderer and process
+  backend, previews, the directory picker, scheduling through BSD `at`,
+  `--doctor`, and the navigator in a real popup.  Its tmux is the pinned one,
+  built as Homebrew builds it (utf8proc, jemalloc), with bash 5.3.20:
+  `dev/install/macos.sh`, from the pins in `dev/versions.env`.  The suites
+  themselves assume GNU tools, `/proc` and `strace`, and do not run on a Mac.
+  `make smoke` runs the same smoke here, where it mostly proves the smoke.
 * Real ssh/mosh remotes, network mounts, agent CLIs and a docker daemon for
   `test_title_apps`' container case (`INTERDIMUX_TEST_DOCKER=off`, as on CI).
 * Profiling and debugging tools (perf, gdb, a debug tmux), and other tmux,
@@ -151,7 +157,7 @@ screen may take to settle.  Run those natively, on the Mac itself.
 |---|---|
 | `dev/versions.env` | every pin |
 | `dev/checksums/*.sha256` | the sha256 of every artifact, all platforms (`make pin`) |
-| `dev/install/*.sh` | the recipes, shared with CI; `lib.sh` fetches and verifies |
+| `dev/install/*.sh` | the recipes, shared with CI; `lib.sh` fetches and verifies; `macos.sh` is CI's Mac toolchain |
 | `dev/Dockerfile` | the image, one stage per component |
 | `dev/run.sh` | the host side (POSIX sh), what `make` calls |
 | `dev/entrypoint.sh`, `dev/cmd.sh` | inside: the root steps, then the commands |

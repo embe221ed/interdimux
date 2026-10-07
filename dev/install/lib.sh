@@ -86,6 +86,32 @@ artifact() {
       echo "lychee-$v-$a-unknown-linux-gnu.tar.gz"
       echo "https://github.com/lycheeverse/lychee/releases/download/lychee-v$v/lychee-$a-unknown-linux-gnu.tar.gz"
       echo "https://github.com/lycheeverse/lychee/releases/download/lychee-v$v/lychee-$a-unknown-linux-gnu.tar.gz.sha256" ;;
+    bash-macos)
+      # MACOS_BASH_VERSION 5.3.20 is bash-5.3.tar.gz plus patches bash53-001
+      # to bash53-020: "5.3" names the tarball, "5.3.N" patch N.
+      case $v in
+        *.*.*)
+          local base=${v%.*} n=${v##*.} p
+          p=bash$(printf '%s' "$base" | tr -d .)-$(printf '%03d' "$n")
+          echo "$p"
+          echo "https://mirrors.kernel.org/gnu/bash/bash-$base-patches/$p https://ftp.gnu.org/gnu/bash/bash-$base-patches/$p" ;;
+        *)
+          echo "bash-$v.tar.gz"
+          echo "https://mirrors.kernel.org/gnu/bash/bash-$v.tar.gz https://ftp.gnu.org/gnu/bash/bash-$v.tar.gz" ;;
+      esac
+      echo - ;;
+    libevent)
+      echo "libevent-$v-stable.tar.gz"
+      echo "https://github.com/libevent/libevent/releases/download/release-$v-stable/libevent-$v-stable.tar.gz"
+      echo - ;;
+    utf8proc)
+      echo "utf8proc-$v.tar.gz"
+      echo "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v$v.tar.gz"
+      echo - ;;
+    jemalloc)
+      echo "jemalloc-$v.tar.bz2"
+      echo "https://github.com/jemalloc/jemalloc/releases/download/$v/jemalloc-$v.tar.bz2"
+      echo - ;;
     rustup)
       case $arch in amd64) a=x86_64 ;; arm64) a=aarch64 ;; esac
       echo "rustup-init-$v-$a-unknown-linux-gnu"

@@ -5,9 +5,10 @@
 # in; `make help` lists the same commands.
 #
 #   test [FILTER...]   tests/run_all.sh, the Rust core built first
+#   smoke              tests/smoke.sh, the end-to-end check CI runs on macOS
 #   ci                 what CI's tests job runs, both renderer legs (or the one
 #                      IMUX_RENDERER names), strict: a skip fails.  The rust
-#                      leg includes check-macos and msrv, as in CI.
+#                      leg includes check-macos, msrv and smoke, as in CI.
 #   ci-sigpipe         the same with SIGPIPE ignored, as GitHub runs its steps
 #   versions           every pinned tool, checked present and at its pin
 #   lint               tests/lint.sh, then dev/lint-extra.sh
@@ -130,6 +131,10 @@ ci_leg() {
   say "shell tests, $leg renderer (ci.yml: Shell tests)"
   IMUX_STRICT=1 INTERDIMUX_TEST_DOCKER=off IMUX_SKIP_RUST=1 IMUX_RENDERER=$leg \
     bash tests/run_all.sh || rc=1
+  if [ "$leg" = rust ]; then
+    say "smoke test (ci.yml: Smoke test; the macos job runs it on real Macs)"
+    SMOKE_STRICT=1 bash tests/smoke.sh || rc=1
+  fi
   return "$rc"
 }
 
@@ -150,12 +155,15 @@ ci() {
 }
 
 sync_src() {  # the entrypoint's copy again, as dev (who owns /work already)
-  rsync -rlpt --no-D --delete --exclude=/rust/target/ /src/ /work/
+  rsync -rlpt --no-D --delete --exclude=/rust/target/ --out-format='%n' /src/ /work/ \
+    | { grep '^rust/' || true; } | while IFS= read -r f; do [ -f "/work/$f" ] && touch "/work/$f"; done
 }
 
 case "${1:-shell}" in
   test)
     shift; build_core; exec bash tests/run_all.sh "$@" ;;
+  smoke)
+    build_core; SMOKE_STRICT=1 exec bash tests/smoke.sh ;;
   ci)
     ci ;;
   ci-sigpipe)

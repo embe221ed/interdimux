@@ -450,6 +450,32 @@ and `test_bash_floor.sh` "(no bash from 4.3 to 5.1 to run these on)".  So
 `tests/test_run_all.sh` also reads every suite's source for a note of that
 shape on stdout that does not say "skipped", and fails on one.
 
+## 14. Nothing ran the plugin on a Mac
+
+Every macOS path -- the Rust core's libproc backend (`rust/src/macproc.rs`,
+not even compiled on Linux), the bash renderer's `ps` table, BSD `at` and
+`atq` with `date -j`, the `launchctl` probe for atrun, the Claude registry
+believed on `kill -0` for want of `/proc`, `/private/var` path spellings,
+macOS's `/bin/sh` running every fzf bind and tmux timer -- was written
+against one Mac, and checked since only through seams on Linux.
+
+**Fix:** the `macos` job, on `macos-26` (Apple Silicon) and `macos-26-intel`.
+It runs the Rust tests natively and `tests/smoke.sh`, an end-to-end check
+written to what BSD and GNU userlands share (the suites are not: GNU sed
+escapes, `timeout`, `/proc`, `strace`).  The smoke runs in the Linux rust leg
+too, so a failure on a Mac alone is the Mac's.  Two things it needed:
+
+* **No Homebrew.**  Homebrew 7 dropped Intel Macs: no bottles, so `brew
+  install tmux fzf` compiles everything, Go included, for over an hour.
+  `dev/install/macos.sh` builds the pinned tmux as Homebrew configures it on
+  a Mac (`--enable-utf8proc --enable-jemalloc`, which 3.7c's configure
+  insists on being told on Darwin), its three libraries, and Homebrew's bash
+  (5.3 and its 20 official patches), all checked against
+  `dev/checksums/` -- the same sha256s Homebrew records.  It runs under the
+  runner's `/bin/bash` 3.2.
+* **No C.UTF-8.**  macOS has none, so the workflow's `LC_ALL=C.UTF-8` makes
+  every bash warn and count bytes.  The job sets `en_US.UTF-8`.
+
 ## Why a dev shell and CI disagree
 
 Worth recording, because it is why local runs and CI disagreed for so long, and

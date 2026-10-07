@@ -22,8 +22,12 @@ if [ ! -f /src/scripts/interdimux.sh ]; then
   exit 2
 fi
 # --no-D: a socket or fifo left in the tree (a dead `tmux -S` socket, say) is
-# not copied.
-rsync -a --no-D --delete --chown=dev:dev --exclude=/rust/target/ /src/ /work/
+# not copied.  What it does copy under rust/ is then touched: rsync keeps the
+# source's mtime, and cargo, seeing a restored file OLDER than the build in
+# the volume (an edit undone, a stash, a run that changed /work), would keep
+# the stale binary.
+rsync -a --no-D --delete --chown=dev:dev --exclude=/rust/target/ --out-format='%n' /src/ /work/ \
+  | { grep '^rust/' || true; } | while IFS= read -r f; do [ -f "/work/$f" ] && touch "/work/$f"; done
 mkdir -p /work/rust/target
 chown dev:dev /work/rust/target
 

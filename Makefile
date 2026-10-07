@@ -3,6 +3,7 @@
 # GNU make 3.81 or newer -- macOS's own make is fine.
 #
 #   make test [T='raw sched'] [R=rust|bash]  the suites (those whose names match T)
+#   make smoke                 tests/smoke.sh: what CI runs on real Macs
 #   make ci [R=rust|bash]      CI's tests job: both renderer legs, strict
 #   make ci-sigpipe [R=...]    the same with SIGPIPE ignored, as on GitHub
 #   make versions              every pinned tool, present and at its pin
@@ -25,13 +26,15 @@ R ?= $(IMUX_RENDERER)
 CPUSET ?= $(IMUX_CPUSET)
 RUN = IMUX_PLATFORM='$(PLATFORM)' IMUX_RENDERER='$(R)' IMUX_CPUSET='$(CPUSET)' sh dev/run.sh
 
-.PHONY: help test ci ci-sigpipe versions lint check-macos msrv bench watch shell image pin clean
+.PHONY: help test smoke ci ci-sigpipe versions lint check-macos msrv bench watch shell image pin clean
 
 help:
 	@sed -n 's/^#   //p' Makefile
 
 test:
 	@$(RUN) test $(T)
+smoke:
+	@$(RUN) smoke
 ci:
 	@$(RUN) ci
 ci-sigpipe:
