@@ -4,22 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run it again from the Actions tab, without a push.
+  workflow_dispatch:
 
-# The versions this project targets.  Both floors are load-bearing rather than
-# preferences, and both were measured — see docs/CI.md:
-#
-#   tmux 3.6  the row protocol delimits fields with a raw US byte inside a `-F`
-#             format.  tmux <= 3.5a rewrites that byte as the four characters
-#             `\037`, so every row parses as ONE field, the session name comes
-#             out empty, and `--list` emits nothing at all.  Measured: 3.4 -> 0
-#             rows, 3.5a -> 0 rows, 3.6 -> 3 rows.  ubuntu-24.04 ships 3.4, so
-#             unless tmux is built here the test job is testing an empty picker.
-#   fzf 0.74  the floor the suite pins itself to (INTERDIMUX_FZF_MINOR=74).
-#             ubuntu-24.04's apt fzf is 0.44, which silently turns the picker
-#             suites into skips rather than failures.  Pinned at the latest
-#             0.74 patch release, the one users run: 0.74.1 to 0.74.4 changed
-#             how fzf draws (synchronized updates, faster non-ASCII, escape
-#             sequences split across reads), and the suites read its screen.
+# The versions this project builds and tests with -- tmux, fzf, the old fzf
+# and bash releases, shellcheck, Rust -- are pinned in ONE place,
+# dev/versions.env, which also says why each floor is load-bearing.  The tests
+# job appends that file to $GITHUB_ENV before anything else (tests/lint.sh, all
+# the shellcheck job runs, reads it itself), and the dev image (dev/Dockerfile,
+# docs/DEVENV.md) is built from the same file.  tmux, fzf, the old releases and
+# shellcheck come from dev/install/*.sh, the recipes the dev image runs too,
+# each download checked against dev/checksums/ before it runs (`make pin`
+# records those after a version moves).  Rust is the runner's own rustup,
+# installing RUST_VERSION.
 #
 # Both jobs run on ubuntu-24.04, by name: `ubuntu-latest` moves to 26.04 from
 # 2026-10-19, and every image-specific number in this file is 24.04's.  26.04's
@@ -28,30 +25,11 @@ on:
 # the new image to the tests job's `os` list first: the caches are keyed on
 # it, so that leg builds everything cold and proves the recipes on it.
 #
-# And what runs below them, as real binaries rather than emulated:
-#
-#   bash 4.3  the documented floor; 3.2 (macOS) and 4.2 (RHEL 7) must be
-#             refused in one line.  ubuntu-24.04's own bash is 5.2, and 5.2
-#             hides what behaves differently below it: a `$` in a session name
-#             was re-expanded inside `[[ -v "a[$k]" ]]` on 4.3 to 5.1 while
-#             every suite passed, so all four of those run: 4.4 is RHEL 8's,
-#             5.0 Ubuntu 20.04's, 5.1 Ubuntu 22.04's and RHEL 9's.  Listed as
-#             the GNU tarballs are named, each the newest tarball of its
-#             release (later patches come only as diffs, and 5.0 has no
-#             patch-level tarball at all); each is installed under its
-#             major.minor, where tests/test_bash_floor.sh looks.
-#   fzf       0.40.0, the README's floor and the only release under test on
-#             the `fzf_ge 42` false branch (0.41 is on it too); 0.44.1 and
-#             0.52.1, one per failure tests/test_old_fzf.sh guards.
-#
-# Those two suites' own lists are the authority, not these.  With the
+# The suites' own lists of old releases (tests/test_old_fzf.sh,
+# tests/test_bash_floor.sh) are the authority, not the pins.  With the
 # directories set (below), a version a suite names that is not there FAILS the
-# suite instead of skipping it, so these lists cannot fall behind unnoticed.
+# suite instead of skipping it, so the pins cannot fall behind unnoticed.
 env:
-  TMUX_VERSION: "3.7b"
-  FZF_VERSION: "0.74.4"
-  OLD_BASH_VERSIONS: "3.2.57 4.2.53 4.3.30 4.4.18 5.0 5.1.16"
-  OLD_FZF_VERSIONS: "0.40.0 0.44.1 0.52.1"
   # The tree glyphs are multibyte and the column maths counts CELLS.  Runners do
   # not reliably set a locale, and without a UTF-8 one widths are measured in
   # bytes.
@@ -64,11 +42,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # tests/lint.sh holds both invocations, and why there are two, so the
-      # lint runs on a developer's box exactly as here.  It also pins the
-      # shellcheck: the image's own (0.9.0 here, 0.11.0 on 26.04) is set aside
-      # and the 0.10.0 release fetched, checksummed, so an image bump cannot
-      # bring in SC codes nobody has run.
+      # tests/lint.sh holds every invocation, and why there are several, so the
+      # lint runs on a developer's box and in the dev image exactly as here.
+      # It also pins the shellcheck (SHELLCHECK_VERSION in dev/versions.env):
+      # the image's own (0.9.0 here, 0.11.0 on 26.04) is set aside and the
+      # pinned release fetched, checksummed, so an image bump cannot bring in
+      # SC codes nobody has run.
       - name: Lint the plugin and the tests
         run: bash tests/lint.sh
 
@@ -107,6 +86,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The pins, as environment variables for every step after this one (the
+      # cache keys and step names below, and dev/install/*.sh).  The file is
+      # KEY=value lines with plain values -- dev/run.sh enforces it -- which is
+      # exactly $GITHUB_ENV's format.
+      - name: Load the pinned versions (dev/versions.env)
+        run: grep -E '^[A-Z][A-Z0-9_]*=' dev/versions.env >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -141,31 +127,23 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/tmux-prefix
-          key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}
+          key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}-${{ hashFiles('dev/install/tmux.sh', 'dev/install/lib.sh') }}
 
       - name: Build tmux ${{ env.TMUX_VERSION }}
         if: steps.tmux-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz" \
-            -o /tmp/tmux.tar.gz
-          tar -xzf /tmp/tmux.tar.gz -C /tmp
-          cd "/tmp/tmux-${TMUX_VERSION}"
-          ./configure --prefix="$HOME/tmux-prefix"
-          make -j"$(nproc)"
-          make install
+        run: bash dev/install/tmux.sh "$HOME/tmux-prefix"
 
       - name: Save tmux ${{ env.TMUX_VERSION }}
         if: steps.tmux-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/tmux-prefix
-          key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}
+          key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}-${{ hashFiles('dev/install/tmux.sh', 'dev/install/lib.sh') }}
 
       - name: Install fzf ${{ env.FZF_VERSION }}
-        run: |
-          curl -fsSL "https://github.com/junegunn/fzf/releases/download/v${FZF_VERSION}/fzf-${FZF_VERSION}-linux_amd64.tar.gz" \
-            -o /tmp/fzf.tar.gz
-          sudo tar -xzf /tmp/fzf.tar.gz -C /usr/local/bin
+        # (sudo drops the environment; the installer then reads the pin from
+        # dev/versions.env itself)
+        run: sudo bash dev/install/fzf.sh /usr/local/bin
 
       # Real release binaries for tests/test_old_fzf.sh, which checks that the
       # navigator opens AND draws on fzf older than the pinned one.  Neither
@@ -174,74 +152,42 @@ jobs:
       # draw the whole interface on stderr.  With INTERDIMUX_OLD_FZF_DIR set, a
       # version the suite names that is not here fails it, by name.
       #
-      # fzf's release tags gained their `v` at 0.54.0: 0.53.0 and older are
-      # tagged bare, and releases/download/v0.44.1/… is a 404 -- which, piped
-      # into tar, failed this step as gzip's "unexpected end of file" and took
-      # every suite after it down with it.  Downloaded to a file, a failed
-      # fetch fails as curl, naming the URL.
+      # The fetch picks each release's tag itself: fzf's tags gained their `v`
+      # at 0.54.0, and releases/download/v0.44.1/... is a 404.
       - name: Fetch old fzf releases
         run: |
-          for v in $OLD_FZF_VERSIONS; do
-            case $v in 0.[0-9].*|0.[0-4][0-9].*|0.5[0-3].*) tag=$v ;; *) tag=v$v ;; esac
-            curl -fsSL --retry 3 -o "/tmp/fzf-$v.tar.gz" \
-              "https://github.com/junegunn/fzf/releases/download/$tag/fzf-$v-linux_amd64.tar.gz"
-            mkdir -p "$HOME/fzf-old/$v"
-            tar -xzf "/tmp/fzf-$v.tar.gz" -C "$HOME/fzf-old/$v"
-          done
+          bash dev/install/fzf-old.sh "$HOME/fzf-old"
           echo "INTERDIMUX_OLD_FZF_DIR=$HOME/fzf-old" >> "$GITHUB_ENV"
 
       # Real old bashes for tests/test_bash_floor.sh, which run_all.sh runs with
       # everything else: 3.2 and 4.2 must be refused in one line, and 4.3 to
       # 5.1 must list, search and survive `$` in names.  Built from source --
-      # no apt route installs a second bash -- and cached by version and image,
-      # so a push pays for this only when either changes.  The -std/-Wno flags
-      # are for gcc 14 and later, which reject these K&R-era sources outright
-      # (24.04's gcc 13 only warns), and they go to CFLAGS_FOR_BUILD as well:
-      # 3.2's and 4.2's configure set that to a bare -g, and the helpers it
-      # builds (mkbuiltins, ...) then meet gcc 15's C23 default, where `f()`
-      # means `f(void)`, and fail.  CFLAGS deliberately has no -O2 (configure's
-      # default): with it, 3.2's configure spins in its mktime probe, a loop
-      # that relies on signed overflow wrapping.  See docs/CI.md §12.  Each goes
-      # under its major.minor, cut from the tarball's name: `${v%.*}` made
-      # "5.0" into "5", where the suite, which wants 5.0, would never look.
-      #
-      # make -j can race in 3.2's lib/readline on a small runner (`ar:
-      # xmalloc.o: No such file or directory`, 3 builds in 7 on two CPUs), and a
-      # failure here ends the job before any suite runs: a serial make finishes
-      # what the parallel one left.  The key names the recipe (`r2`): bump it
-      # with any change to the flags or the steps, or a change that only
-      # touches them restores the old binaries and proves nothing.
+      # no apt route installs a second bash -- by dev/install/bash-old.sh,
+      # which says what the build needs and why (gcc 14+ flags,
+      # CFLAGS_FOR_BUILD, no -O2, a serial make after a racing parallel one;
+      # docs/CI.md section 12).  Cached by version, image AND recipe: the key
+      # hashes the checksums file (which names every version) and the
+      # installer, so a change to the flags or the steps builds cold, rather
+      # than restoring old binaries that prove nothing.  Not the version list
+      # itself: it is comma-separated, and actions/cache refuses a key with a
+      # comma in it.
       - name: Cache bash ${{ env.OLD_BASH_VERSIONS }}
         id: old-bash-cache
         uses: actions/cache/restore@v4
         with:
           path: ~/bash-old
-          key: bash-old-r2-${{ env.OLD_BASH_VERSIONS }}-${{ matrix.os }}
+          key: bash-old-${{ matrix.os }}-${{ hashFiles('dev/checksums/bash-old.sha256', 'dev/install/bash-old.sh', 'dev/install/lib.sh') }}
 
       - name: Build bash ${{ env.OLD_BASH_VERSIONS }}
         if: steps.old-bash-cache.outputs.cache-hit != 'true'
-        run: |
-          F="-std=gnu89 -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion -Wno-incompatible-pointer-types"
-          for v in $OLD_BASH_VERSIONS; do
-            curl -fsSL --retry 3 -o "/tmp/bash-$v.tar.gz" "https://ftp.gnu.org/gnu/bash/bash-$v.tar.gz"
-            tar -xzf "/tmp/bash-$v.tar.gz" -C /tmp
-            cd "/tmp/bash-$v"
-            if ! { ./configure --without-bash-malloc CFLAGS="$F" CFLAGS_FOR_BUILD="$F" \
-                   && { make -j"$(nproc)" || make; }; } > "/tmp/bash-$v.log" 2>&1; then
-              tail -40 "/tmp/bash-$v.log"; exit 1
-            fi
-            d=$(echo "$v" | cut -d. -f1,2)
-            mkdir -p "$HOME/bash-old/$d"
-            cp bash "$HOME/bash-old/$d/bash"
-            cd - >/dev/null
-          done
+        run: bash dev/install/bash-old.sh "$HOME/bash-old"
 
       - name: Save bash ${{ env.OLD_BASH_VERSIONS }}
         if: steps.old-bash-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ~/bash-old
-          key: bash-old-r2-${{ env.OLD_BASH_VERSIONS }}-${{ matrix.os }}
+          key: bash-old-${{ matrix.os }}-${{ hashFiles('dev/checksums/bash-old.sha256', 'dev/install/bash-old.sh', 'dev/install/lib.sh') }}
 
       - name: Point the bash-floor suite at them
         run: echo "INTERDIMUX_OLD_BASH_DIR=$HOME/bash-old" >> "$GITHUB_ENV"
@@ -255,19 +201,27 @@ jobs:
         # ("Shell tests" now fails on any skip, under IMUX_STRICT.)
         run: sudo systemctl start atd || sudo service atd start
 
+      # The pinned toolchain rather than whatever stable the runner image
+      # happens to carry, so CI and the dev image build the core with one Rust.
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
       # The old binaries too, so one that went missing fails here, by name,
       # before any suite runs.  (The suites that use them fail on a missing one
       # as well, now that the directories are set: their own lists are what
-      # counts, and this step only knows the lists above.)
+      # counts, and this step only knows dev/versions.env's lists.)
       - name: Versions under test
         run: |
           tmux -V
           fzf --version
           awk --version | head -1
           cargo --version
+          rustc --version
           locale charmap
-          for v in $OLD_FZF_VERSIONS; do "$INTERDIMUX_OLD_FZF_DIR/$v/fzf" --version; done
-          for v in $OLD_BASH_VERSIONS; do
+          for v in ${OLD_FZF_VERSIONS//,/ }; do "$INTERDIMUX_OLD_FZF_DIR/$v/fzf" --version; done
+          for v in ${OLD_BASH_VERSIONS//,/ }; do
             d=$(echo "$v" | cut -d. -f1,2)
             # shellcheck disable=SC2016  # $BASH_VERSION is the old bash's own
             "$INTERDIMUX_OLD_BASH_DIR/$d/bash" -c 'echo "bash $BASH_VERSION"'
@@ -283,6 +237,25 @@ jobs:
       - name: Rust tests
         if: matrix.renderer == 'rust'
         run: cargo test --release --manifest-path rust/Cargo.toml
+
+      # The macOS process backend (rust/src/macproc.rs) is not even compiled
+      # on Linux.  The crate has no build.rs and only std FFI, so the std
+      # targets are enough to type-check it, tests included, for both Macs.
+      - name: The Rust core type-checks for macOS
+        if: matrix.renderer == 'rust'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo check --locked --all-targets --manifest-path rust/Cargo.toml \
+            --target x86_64-apple-darwin --target aarch64-apple-darwin
+
+      # rust/Cargo.toml promises a rust-version: an autobuild with an older
+      # cargo is a user's first build.  Nothing else compiles with it.
+      - name: The Rust core builds and passes on its rust-version
+        if: matrix.renderer == 'rust'
+        run: |
+          msrv=$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' rust/Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          CARGO_TARGET_DIR=rust/target/msrv cargo +"$msrv" test --release --locked --manifest-path rust/Cargo.toml
 
       # run_all.sh, not a bare loop: it runs every suite even after one fails,
       # totals the assertions, and reports a suite that DIED without a Results
@@ -320,3 +293,110 @@ jobs:
           # already local, and this job does not pull images.
           INTERDIMUX_TEST_DOCKER: "off"
         run: IMUX_SKIP_RUST=1 IMUX_RENDERER=${{ matrix.renderer }} bash tests/run_all.sh
+
+      # tests/smoke.sh, which the macos job below runs on real Macs, here as
+      # well: so a smoke red on a Mac and green here is the Mac's, and one red
+      # in both is the smoke's own.
+      - name: Smoke test
+        if: matrix.renderer == 'rust'
+        env:
+          SMOKE_STRICT: "1"
+        run: bash tests/smoke.sh
+
+  # The plugin on real Macs, which nothing else runs it on: an Apple Silicon
+  # runner and an Intel one (GitHub supports its x86_64 images until August
+  # 2027).  Not the suites, which lean on GNU tools, /proc and strace.  The
+  # Rust tests, natively, which is the only place rust/src/macproc.rs's
+  # libproc backend runs; and tests/smoke.sh, which drives the plugin's main
+  # paths against a private tmux server on the macOS userland: BSD ps, sed,
+  # awk, date, find and at, macOS's /bin/sh, and its /bin/bash 3.2, refused.
+  #
+  # The tmux and fzf are the ones dev/versions.env pins, tmux configured as
+  # Homebrew configures it on a Mac.  dev/install/macos.sh builds them from
+  # source, with bash 5.3 and tmux's libraries, since Homebrew no longer has
+  # Intel builds (it would compile all of it, Go included, for over an hour).
+  macos:
+    name: macOS (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-26-intel]
+    env:
+      # macOS has no C.UTF-8, the workflow's: every bash would warn that it
+      # cannot set it, and count bytes.
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load the pinned versions (dev/versions.env)
+        run: grep -E '^[A-Z][A-Z0-9_]*=' dev/versions.env >> "$GITHUB_ENV"
+
+      # Cached by image, versions and recipe, and saved straight after the
+      # build, as the tests job does: a red smoke does not throw it away.
+      - name: Cache the Mac's tools
+        id: mac-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/imux-prefix
+          key: mac-tools-${{ matrix.os }}-${{ hashFiles('dev/checksums/tmux.sha256', 'dev/checksums/fzf.sha256', 'dev/checksums/bash-macos.sha256', 'dev/checksums/libevent.sha256', 'dev/checksums/utf8proc.sha256', 'dev/checksums/jemalloc.sha256', 'dev/install/macos.sh', 'dev/install/tmux.sh', 'dev/install/fzf.sh', 'dev/install/lib.sh') }}
+
+      # Run by the runner's own /bin/bash 3.2, which is why the installers
+      # are written for it.
+      - name: Build bash ${{ env.MACOS_BASH_VERSION }} and tmux ${{ env.TMUX_VERSION }}, fetch fzf ${{ env.FZF_VERSION }}
+        if: steps.mac-cache.outputs.cache-hit != 'true'
+        run: bash dev/install/macos.sh "$HOME/imux-prefix"
+
+      - name: Save the Mac's tools
+        if: steps.mac-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/imux-prefix
+          key: mac-tools-${{ matrix.os }}-${{ hashFiles('dev/checksums/tmux.sha256', 'dev/checksums/fzf.sha256', 'dev/checksums/bash-macos.sha256', 'dev/checksums/libevent.sha256', 'dev/checksums/utf8proc.sha256', 'dev/checksums/jemalloc.sha256', 'dev/install/macos.sh', 'dev/install/tmux.sh', 'dev/install/fzf.sh', 'dev/install/lib.sh') }}
+
+      # From here on `bash` -- the steps' own shell included -- is 5.3, and so
+      # is the bash the plugin finds on the tmux server's PATH.
+      - name: Put them first on PATH
+        run: echo "$HOME/imux-prefix/bin" >> "$GITHUB_PATH"
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      # What the plugin meets here: the pinned tools first on PATH, and the
+      # BSD userland under them, with no GNU tool in its way.
+      - name: Versions under test
+        run: |
+          sw_vers
+          uname -m
+          bash --version | head -1
+          # shellcheck disable=SC2016  # /bin/bash's own $BASH_VERSION
+          /bin/bash -c 'echo "/bin/bash $BASH_VERSION"'
+          tmux -V
+          fzf --version
+          cargo --version
+          awk --version 2>&1 | head -1
+          for g in sed date find; do
+            if "$g" --version >/dev/null 2>&1; then echo "a GNU $g is on PATH: the smoke would not meet the BSD one"; exit 1; fi
+          done
+          for c in at atq atrm; do command -v "$c" || { echo "no $c"; exit 1; }; done
+
+      - name: Rust tests (natively, the libproc backend included)
+        id: rust-tests
+        run: cargo test --release --locked --manifest-path rust/Cargo.toml
+
+      # The smoke needs the built core, not passing Rust tests: a red Rust
+      # test still lets it run, so one push shows both.  (The job stays red.)
+      - name: Build the Rust core
+        id: core
+        if: success() || steps.rust-tests.outcome == 'failure'
+        run: cargo build --release --locked --manifest-path rust/Cargo.toml
+
+      - name: Smoke test
+        if: steps.core.outcome == 'success' && (success() || steps.rust-tests.outcome == 'failure')
+        env:
+          SMOKE_STRICT: "1"
+        run: bash tests/smoke.sh

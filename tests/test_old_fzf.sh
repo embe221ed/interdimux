@@ -29,9 +29,9 @@
 # is a 404).
 #
 # With INTERDIMUX_OLD_FZF_DIR set, a version that is not there FAILS, by name:
-# this list is the one CI must supply (OLD_FZF_VERSIONS in ci.yml), and a skip
-# there would read as a pass in every total.  Unset, a local run without the
-# binaries, each one is reported as skipped.
+# this list is the one CI must supply (OLD_FZF_VERSIONS in dev/versions.env),
+# and a skip there would read as a pass in every total.  Unset, a local run
+# without the binaries, each one is reported as skipped.
 
 set -euo pipefail
 
