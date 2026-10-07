@@ -68,8 +68,16 @@
 #   cpu   user+sys of the whole process tree (the command, everything it
 #         waited for, AND any orphan it left: the runner is a child subreaper)
 #         PLUS the CPU the fixture's tmux server spent meanwhile (format
-#         expansion for list-panes happens in the server).  Work done by
-#         processes the SERVER spawns (run-shell jobs, new panes) is not counted.
+#         expansion for list-panes happens in the server) PLUS what the
+#         server's jobs cost -- run-shell, if-shell, a hook's run-shell, #():
+#         a job still running when the command is done is waited for (up to
+#         3 s, then killed), and its CPU is the growth of the server's
+#         cutime+cstime.  The kernel counts that in clock ticks, so a job
+#         shows as 0 or 10 ms in one run and as its true cost only on average:
+#         a job of a few ms is undercounted by the medians below, which the
+#         note "the tmux server's jobs cost ..." (the per-run mean) makes up
+#         for.  Not counted: a job's own orphans (reparented to init), and a
+#         new pane's processes.
 #   wall  fork -> exit of the command (first-frame: -> first row at the stub fzf)
 #   Times are in ms.  Runs are interleaved in pairs whose order alternates
 #   (AB BA AB ...), so drift and ordering effects cancel.
@@ -941,20 +949,21 @@ norm_paths() {
     }
     s{(?<![\w.-])($re)(?![\w.-])}{$to{$1}}g'
 }
-# One run of one side.  Appends "wall_us cpu_us proc_us srv_us rc orphans killed sum"
-# to $WORK/res/<scn>.<side>.
+# One run of one side.  Appends "wall_us cpu_us proc_us srv_us rc orphans killed
+# sum jobs_us jobs" to $WORK/res/<scn>.<side> (cpu_us = proc_us + srv_us, and
+# srv_us includes jobs_us: what the tmux server's jobs cost).
 run_one() { # scenario side
   local scn="$1" side="$2" key="${1//-/_}_$2"
   # shellcheck disable=SC2178  # namerefs to the scenario's argv and environment arrays
   local -n _c="C_$key" _e="E_$key"
   local out="$WORK/out/$key.out" err="$WORK/out/$key.err" fz="$WORK/out/$key.fzf" res
-  local wall cpu srv rc rt0 orph killed first sum
+  local wall cpu srv rc rt0 orph killed jobs jkilled jobus first sum
   local -a extra=()
   [ "${SCN_KIND[$scn]}" = first ] && { extra=(BENCH_FZF_OUT="$fz"); rm -f "$fz.t" "$fz.rows"; }
   # shellcheck disable=SC2086  # the runner flags are words
   res=$(env -i "${_e[@]}" "${extra[@]}" "$RUNNER" run ${SCN_TTY[$scn]} -s "$SRV_PID" -o "$out" -e "$err" -- "${_c[@]}") \
     || { SCN_NOTE[$scn]+="$side: runner failed"$'\n'; return 1; }
-  read -r wall cpu srv rc rt0 orph killed <<< "$res"
+  read -r wall cpu srv rc rt0 orph killed jobs jkilled jobus <<< "$res"
   if [ "${SCN_KIND[$scn]}" = first ]; then
     if [ -s "$fz.t" ]; then
       read -r first _ _ _ < "$fz.t"
@@ -969,14 +978,16 @@ run_one() { # scenario side
   sum=$(norm_paths < "$out" 2>/dev/null | cksum)
   sum=${sum%% *}
   [ -e "$WORK/out/$key.first" ] || norm_paths < "$out" > "$WORK/out/$key.first" 2>/dev/null
-  printf '%s %s %s %s %s %s %s %s\n' "$wall" $(( cpu + srv )) "$cpu" "$srv" "$rc" "$orph" "$killed" "$sum" \
-    >> "$WORK/res/$scn.$side${3:-}"
+  printf '%s %s %s %s %s %s %s %s %s %s\n' "$wall" $(( cpu + srv )) "$cpu" "$srv" "$rc" "$orph" "$killed" "$sum" \
+    "${jobus:-0}" "${jobs:-0}" >> "$WORK/res/$scn.$side${3:-}"
   case " ${SCN_RC[$scn]} " in
     *" $rc "*) ;;
     *) SCN_NOTE[$scn]+="$side: exit $rc ($(head -c 200 "$err" 2>/dev/null | tr "\n" " "))"$'\n'; SCN_BAD[$scn]=1 ;;
   esac
   [ "$killed" -gt 0 ] && SCN_NOTE[$scn]+="$side: $killed orphan(s) outlived the run and were killed"$'\n'
   [ "$orph" -gt 0 ] && [ "$killed" = 0 ] && SCN_NOTE[$scn]+="$side: left $orph background process(es) (their CPU is counted)"$'\n'
+  [ "${jkilled:-0}" -gt 0 ] && SCN_NOTE[$scn]+="$side: $jkilled job(s) of the tmux server outlived the run by 3 s and were killed"$'\n'
+  [ "${jobs:-0}" -gt 0 ] && [ "${jkilled:-0}" = 0 ] && SCN_NOTE[$scn]+="$side: the tmux server was still running $jobs job(s) for it when it ended (waited for: their CPU is counted)"$'\n'
   return 0
 }
 
@@ -1269,6 +1280,15 @@ if [ -n "${IMUX_DEV_OTHERS:-}" ]; then
   printf '%s\n' "$IMUX_DEV_OTHERS" | tr ';' '\n' | sed '/^ *$/d; s/^ */    /'
 fi
 [ -z "$ZOXIDE_WARN" ] || echo "$ZOXIDE_WARN"
+# What the tmux server's jobs cost, per run on average (the medians above
+# miss a job of a few ms: its CPU arrives in whole 10 ms clock ticks)
+for scn in "${SCENARIOS[@]}"; do
+  _ja=$(awk '{ s += $9; n++ } END { if (n) printf "%.1f", s / n / 1000 }' "$WORK/res/$scn.A" 2>/dev/null)
+  _jb=$(awk '{ s += $9; n++ } END { if (n) printf "%.1f", s / n / 1000 }' "$WORK/res/$scn.B" 2>/dev/null)
+  case "${_ja:-0}${_jb:-0}" in *[1-9]*)
+    SCN_NOTE[$scn]+="the tmux server's jobs cost A ${_ja:-0} ms, B ${_jb:-0} ms a run on average (counted in cpu, in whole clock ticks)"$'\n' ;;
+  esac
+done
 for scn in "${SCENARIOS[@]}"; do
   [ -n "${SCN_NOTE[$scn]:-}" ] && printf '%s' "${SCN_NOTE[$scn]}" | awk -v s="$scn" 'NF && !seen[$0]++ { print "note " s ": " $0 }'
 done

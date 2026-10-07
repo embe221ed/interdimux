@@ -6,20 +6,32 @@
  *   benchrun run [-t COLSxROWS] [-p] [-i IN] [-o OUT] [-e ERR] [-s PID]
  *                [-g GRACE_MS] [-r RESULT] -- CMD ARGS...
  *       Runs CMD once and appends ONE line to RESULT (default stdout):
- *         wall_us cpu_us srv_us status start_rt_us orphans killed
+ *         wall_us cpu_us srv_us status start_rt_us orphans killed jobs
+ *         jobs_killed jobs_us
  *       wall_us  fork -> the command's own exit (CLOCK_MONOTONIC)
  *       cpu_us   user+sys of the whole process tree: the command, every
  *                descendant it waited for, AND every orphan it left behind
  *                (this process is a child subreaper, so a backgrounded or
  *                disowned descendant is reparented here and reaped with its
  *                rusage instead of escaping the measurement)
- *       srv_us   CPU the tmux server (-s PID) spent meanwhile, from
+ *       srv_us   CPU the tmux server (-s PID) spent meanwhile: its own, from
  *                /proc/PID/schedstat (ns resolution) -- the format expansion
- *                a `list-panes -F ...` costs happens there, not in the client
+ *                a `list-panes -F ...` costs happens there, not in the
+ *                client -- PLUS jobs_us
  *       status   the command's wait status, decoded: exit code, or 128+signal
  *       start_rt_us  CLOCK_REALTIME at fork, for the fzf stub's arrival stamp
  *       orphans  descendants still alive when the command exited
  *       killed   of those, how many outlived GRACE_MS and were SIGKILLed
+ *       jobs     the server's jobs (run-shell, if-shell, a hook's run-shell,
+ *                #()) still running when the command and its orphans were
+ *                done: waited for, like the orphans, up to GRACE_MS
+ *       jobs_killed  of those, how many outlived it and were SIGKILLed
+ *       jobs_us  what the server's jobs cost meanwhile: the growth of its
+ *                cutime+cstime (/proc/PID/stat), which a job's CPU joins when
+ *                the server reaps it.  The kernel reports those in clock
+ *                ticks (10 ms), so one run's figure is a multiple of 10 ms,
+ *                right on average over many runs.  A job's own orphans
+ *                (reparented to init, not the server) escape it.
  *     -t gives the command a fresh pty of that size as its CONTROLLING
  *     terminal (a popup has one, and `stty size </dev/tty` reads it); -p also
  *     makes the pty its stdin/stdout/stderr, like a display-popup command, and
@@ -93,6 +105,97 @@ static int64_t schedstat_ns(pid_t pid) {
   }
   closedir(d);
   return total;
+}
+
+/* A /proc/PID/stat line's fields after the command name: FIELD[0] is the
+ * state (field 3 of proc(5)), FIELD[1] the ppid, and so on.  Returns how many
+ * were read (at most MAX), 0 when the process is gone. */
+static int stat_fields(pid_t pid, long long *field, int max, char *state) {
+  char p[64], buf[1024];
+  snprintf(p, sizeof p, "/proc/%d/stat", (int)pid);
+  int fd = open(p, O_RDONLY);
+  if (fd < 0) return 0;
+  ssize_t r = read(fd, buf, sizeof buf - 1);
+  close(fd);
+  if (r <= 0) return 0;
+  buf[r] = 0;
+  char *rp = strrchr(buf, ')');
+  if (!rp || rp[1] != ' ') return 0;
+  char *q = rp + 2;
+  if (state) *state = *q;
+  int n = 0;
+  q = strchr(q, ' ');
+  while (q && n < max) {
+    char *e;
+    long long v = strtoll(q + 1, &e, 10);
+    if (e == q + 1) break;
+    field[n++] = v;
+    q = (*e == ' ') ? e : NULL;
+  }
+  return n;
+}
+
+/* what the server's reaped children cost, in us: cutime + cstime, fields 16
+ * and 17 of proc(5) (in clock ticks); -1 when unreadable */
+static int64_t children_us(pid_t pid) {
+  long long f[16];
+  if (pid <= 0 || stat_fields(pid, f, 16, NULL) < 15) return -1;
+  /* f[0] = ppid (field 4) ... f[12] = cutime (16), f[13] = cstime (17) */
+  long hz = sysconf(_SC_CLK_TCK);
+  return (f[12] + f[13]) * 1000000 / (hz > 0 ? hz : 100);
+}
+
+/* The tmux server's jobs: its children without a controlling terminal.  A
+ * pane's process has its pty, and a popup's too; run-shell, if-shell, #() and
+ * the hooks' run-shell get a socketpair.  Zombies count: their CPU joins the
+ * server's cutime only once it reaps them. */
+static int server_jobs(pid_t srv, pid_t *out, int max) {
+  DIR *d = opendir("/proc");
+  if (!d) return 0;
+  int n = 0;
+  struct dirent *e;
+  while ((e = readdir(d)) && n < max) {
+    if (!isdigit((unsigned char)e->d_name[0])) continue;
+    long long f[5];
+    pid_t pid = (pid_t)atoi(e->d_name);
+    /* f[0] ppid, f[1] pgrp, f[2] session, f[3] tty_nr */
+    if (stat_fields(pid, f, 5, NULL) < 4) continue;
+    if (f[0] == srv && f[3] == 0) out[n++] = pid;
+  }
+  closedir(d);
+  return n;
+}
+
+/* Wait until the server has no job left but those in BASE (NBASE of them),
+ * up to DEADLINE (CLOCK_MONOTONIC us).  With KILL, then SIGKILL what is left
+ * and give the server a second to reap it.  Returns how many it killed;
+ * *seen += every job it waited for. */
+static int settle_jobs(pid_t srv, int64_t deadline, const pid_t *base, int nbase, int kill_left, int *seen) {
+  pid_t known[256];
+  int nknown = 0, killed = 0;
+  for (;;) {
+    pid_t js[256];
+    int nj = server_jobs(srv, js, 256), left = 0;
+    for (int k = 0; k < nj; k++) {
+      int skip = 0;
+      for (int m = 0; m < nbase; m++) if (base[m] == js[k]) skip = 1;
+      if (skip) continue;
+      js[left++] = js[k];
+      for (int m = 0; m < nknown; m++) if (known[m] == js[k]) skip = 1;
+      if (!skip && nknown < 256) known[nknown++] = js[k];
+    }
+    if (left == 0) break;
+    if (now_us(CLOCK_MONOTONIC) >= deadline) {
+      if (!kill_left || killed) break;   /* killed once already: the second is up */
+      for (int k = 0; k < left; k++) { kill(js[k], SIGKILL); killed++; }
+      deadline = now_us(CLOCK_MONOTONIC) + 1000000;
+      continue;
+    }
+    struct timespec ts = { 0, 2000000 };
+    nanosleep(&ts, NULL);
+  }
+  if (seen) *seen += nknown;
+  return killed;
 }
 
 static void write_all(int fd, const char *b, size_t n) {
@@ -200,7 +303,16 @@ static int cmd_run(int argc, char **argv) {
   sigaction(SIGTERM, &sa, NULL);
   sigaction(SIGHUP, &sa, NULL);
 
-  int64_t srv0 = schedstat_ns(srv);
+  /* A job from before this run (a holder's, say) is given a second to end,
+   * so its CPU does not land in this run's figures; one that lives on is
+   * neither waited for nor killed below. */
+  pid_t base[256];
+  int nbase = 0;
+  if (srv > 0) {
+    settle_jobs(srv, now_us(CLOCK_MONOTONIC) + 1000000, NULL, 0, 0, NULL);
+    nbase = server_jobs(srv, base, 256);
+  }
+  int64_t srv0 = schedstat_ns(srv), job0 = children_us(srv);
   int64_t rt0 = now_us(CLOCK_REALTIME);
   int64_t t0 = now_us(CLOCK_MONOTONIC);
   pid_t pid = fork();
@@ -292,15 +404,22 @@ static int cmd_run(int argc, char **argv) {
       if (timeout != 0) { struct timespec ts = { 0, 2000000 }; nanosleep(&ts, NULL); }
     }
   }
-  int64_t srv1 = schedstat_ns(srv);
+  /* the server's jobs the command started and did not wait for (run-shell
+   * -b, a hook's run-shell): the same grace as the orphans */
+  int jobs = 0, jobs_killed = 0;
+  if (srv > 0)
+    jobs_killed = settle_jobs(srv, now_us(CLOCK_MONOTONIC) + (int64_t)grace_ms * 1000, base, nbase, 1, &jobs);
+  int64_t srv1 = schedstat_ns(srv), job1 = children_us(srv);
   int64_t srv_us = (srv0 >= 0 && srv1 >= 0) ? (srv1 - srv0) / 1000 : 0;
+  int64_t jobs_us = (job0 >= 0 && job1 >= job0) ? job1 - job0 : 0;
+  srv_us += jobs_us;
   if (orphans < 0) orphans = 0;
   if (t1 < 0) t1 = now_us(CLOCK_MONOTONIC);
 
   char line[256];
-  int len = snprintf(line, sizeof line, "%lld %lld %lld %d %lld %d %d\n",
+  int len = snprintf(line, sizeof line, "%lld %lld %lld %d %lld %d %d %d %d %lld\n",
                      (long long)(t1 - t0), (long long)cpu, (long long)srv_us, status,
-                     (long long)rt0, orphans, killed);
+                     (long long)rt0, orphans, killed, jobs, jobs_killed, (long long)jobs_us);
   if (result) {
     int rf = open(result, O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (rf < 0) { perror(result); return 2; }
