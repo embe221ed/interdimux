@@ -247,16 +247,18 @@ BENCH_HOME=${BENCH_SELF%/*}
 TMUX_BIN=${IMUX_BENCH_TMUX:-$(command -v tmux 2>/dev/null)}
 BASH_BIN=$(command -v bash 2>/dev/null)
 
-DEFAULT_SCENARIOS=(first-frame list list-bash preview-S preview-W preview-P hint footer
-                   describe-create session-name-for dirs-list dirs-deep dirs-preview doctor)
-EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse)
+DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed list list-changed list-bash
+                   preview-S preview-W preview-P hint footer describe-create session-name-for
+                   dirs-list dirs-deep dirs-preview doctor)
+EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load)
 # the ones whose work depends on the tmux server's size (-F both runs them on
 # the small fixture too), and the small fixture's default set
 # (preview-P is not one: the small fixture's windows have one pane each, and
 # the navigator lists no pane row for those)
-SIZED_SCENARIOS=(first-frame first-frame-bash list list-bash preview-S preview-W hint footer
-                 describe-create)
-SMALL_DEFAULT=(first-frame list preview-S preview-W hint footer describe-create)
+SIZED_SCENARIOS=(keypress first-frame first-frame-changed first-frame-bash list list-changed
+                 list-bash preview-S preview-W hint footer describe-create)
+SMALL_DEFAULT=(keypress first-frame first-frame-changed list list-changed preview-S preview-W
+               hint footer describe-create)
 
 CLIENT_COLS=200 CLIENT_ROWS=50          # the attached client
 POPUP_COLS=158 POPUP_ROWS=35            # 80% x 75% of it, minus the popup border
@@ -342,14 +344,13 @@ fi
 REAL_FZF=$(command -v fzf 2>/dev/null) || REAL_FZF=""
 FZF_VERSION_STR="0.74.3 (bench)"
 [ -n "$REAL_FZF" ] && FZF_VERSION_STR=$("$REAL_FZF" --version 2>/dev/null | head -1)
-FZF_MINOR=74
-if [[ "$FZF_VERSION_STR" =~ ^([0-9]+)\.([0-9]+) ]]; then
-  FZF_MINOR=${BASH_REMATCH[2]}; [ "${BASH_REMATCH[1]}" -gt 0 ] && FZF_MINOR=999
-fi
 TMUX_VNUM=999
 if [[ "$("$TMUX_BIN" -V 2>/dev/null)" =~ ([0-9]+)\.([0-9]+) ]]; then
   TMUX_VNUM=$(( BASH_REMATCH[1] * 100 + BASH_REMATCH[2] ))
 fi
+# the popups come from the real prefix+f binding, pressed with send-keys -K;
+# both, and the binding's run-shell -C, are tmux 3.4's
+[ "$TMUX_VNUM" -ge 304 ] || die "$("$TMUX_BIN" -V) is older than 3.4, whose send-keys -K and run-shell -C the bench drives the real binding with"
 
 # --- scenarios -----------------------------------------------------------------
 SCENARIOS=()
@@ -526,7 +527,29 @@ export_fixture_env() {
     XDG_CACHE_HOME="$FIX/cache" XDG_RUNTIME_DIR="$FIX/run"
     _ZO_DATA_DIR="$FIX/zoxide"
     IMUX_BENCH_ID="$BENCH_ID"
+    # the bench's own, in the server's global environment so that a popup the
+    # real binding opens has them too: ages pinned, the stub fzf's --version,
+    # and the pid the holders watch
+    INTERDIMUX_NOW="$NOW_PIN" BENCH_FZF_VERSION="$FZF_VERSION_STR" BENCH_PID=$$
   )
+}
+
+# What each side has of its own: the directories the script writes, or may
+# one day -- a cache above all -- so neither side ever reads what the other
+# wrote.  Copies of the fixture's, made once it is built (recent_dirs and the
+# zoxide database are in them).  Everything else is shared: HOME, the
+# config, the repos, XDG_RUNTIME_DIR and TMPDIR (whose files are per pid).
+side_env() { # $1 = side, $2 = name of the array to fill with VAR=value
+  local -n _sv="$2"
+  _sv=(XDG_CACHE_HOME="$FIX/side-$1/cache" XDG_STATE_HOME="$FIX/side-$1/state"
+       XDG_DATA_HOME="$FIX/side-$1/data" _ZO_DATA_DIR="$FIX/side-$1/zoxide")
+}
+make_side_dirs() {
+  local s
+  for s in A B; do
+    mkdir -p "$FIX/side-$s" && cp -a "$FIX/cache" "$FIX/state" "$FIX/data" "$FIX/zoxide" "$FIX/side-$s/" \
+      || die "cannot copy the fixture's state for side $s"
+  done
 }
 
 GIT_ENV=(HOME="$H" GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=bench GIT_AUTHOR_EMAIL=bench@example.invalid
@@ -724,17 +747,23 @@ CUR_SESSION=frontend-monorepo
 # Per fixture: the rows the scenarios use (S_SPEC a session, W_SPEC a window,
 # P_SPEC the claude pane -- the small fixture has no pane rows, and its
 # W_SPEC is the claude window), the claude pane (CLAUDE_T: it gets the
-# registry record), the pane with a @pane_status, and the typed query's match
-# count.
+# registry record), the pane with a @pane_status, the query the footer
+# scenario types (its match count is fzf's own, from the navigator's rows:
+# typed_counts), and what the *-changed scenarios change before each pair:
+# the current session's shell window (CHG_WIN), renamed, and one of its
+# panes (CHG_PANE), retitled.
 if [ "$FIXTURE" = small ]; then
   LAYOUT=("${LAYOUT_SMALL[@]}")
   S_SPEC="S:frontend-monorepo" W_SPEC="W:frontend-monorepo:1" P_SPEC=""
-  CLAUDE_T='=frontend-monorepo:=1.0' STATUS_T='=frontend-monorepo:=2.0' TYPED_Q=mono TYPED_MC=7
+  CLAUDE_T='=frontend-monorepo:=1.0' STATUS_T='=frontend-monorepo:=2.0' TYPED_Q=mono
+  CHG_WIN='=frontend-monorepo:=2' CHG_PANE='=frontend-monorepo:=2.0'
 else
   LAYOUT=("${LAYOUT_LARGE[@]}")
   S_SPEC="S:ops" W_SPEC="W:api-gateway-production-eu-west-1:1" P_SPEC="P:agents:0:0"
-  CLAUDE_T='=agents:=0.0' STATUS_T='=ops:=3.1' TYPED_Q=api TYPED_MC=15
+  CLAUDE_T='=agents:=0.0' STATUS_T='=ops:=3.1' TYPED_Q=api
+  CHG_WIN='=frontend-monorepo:=4' CHG_PANE='=frontend-monorepo:=4.1'
 fi
+TYPED_MC="" ZERO_MC=0
 EXPECT_CMDS=()
 EXPECT_TITLES=0
 
@@ -847,28 +876,86 @@ claude_record() {
 # =====================================================================================
 # Environments
 # =====================================================================================
-# The popup's: the server's global environment, TERM, TMUX, and the -e list the
-# prefix+f binding passes -- every OPT_MAP option (unset ones expand to ""),
-# OPTS_PRIMED, the pane and client, the versions and the title.  The OPT_MAP is
-# read from each worktree's own script, as its --bind-keys would.
-popup_env() { # $1 = worktree, $2 = name of the array to fill, $3... = extra VAR=value
-  local wt="$1"; local -n _pe="$2"; shift 2
-  local -a opts=() vals=() srv=()
-  mapfile -d '' -t opts < <(bash -c 'eval "$(sed -n "/^OPT_MAP=(/,/^)/p" "$1")" || exit 1
-    for m in "${OPT_MAP[@]}"; do printf "%s\0" "$m"; done' _ "$wt/scripts/interdimux.sh")
-  [ "${#opts[@]}" -gt 0 ] || die "$wt: cannot read OPT_MAP from the script"
-  local fmt="" m
-  for m in "${opts[@]}"; do fmt+="#{@interdimux-${m%%:*}}"$'\x1f'; done
-  IFS=$'\x1f' read -r -a vals <<< "$(tm display-message -p -t "$CUR_PANE" "$fmt")"
-  # TERM and TMUX are the popup's own (below), not the server's
-  mapfile -t srv < <(tm show-environment -g | grep -v -e '^-' -e '^TERM=' -e '^TMUX=' -e '^TMUX_PANE=')
-  _pe=("${srv[@]}" TERM="$(tm show -gv default-terminal)" TMUX="$SOCK_PATH,99999,0")
-  local i=0
-  for m in "${opts[@]}"; do _pe+=("INTERDIMUX_${m#*:}=${vals[i]:-}"); i=$((i + 1)); done
-  _pe+=(INTERDIMUX_OPTS_PRIMED=1 TMUX_PANE="$CUR_PANE" INTERDIMUX_CLIENT="$CLIENT_NAME"
-        INTERDIMUX_TMUX_VNUM="$TMUX_VNUM" INTERDIMUX_FZF_MINOR="$FZF_MINOR"
-        "INTERDIMUX_TITLE= interdimux · $CUR_SESSION "
-        INTERDIMUX_NOW="$NOW_PIN" BENCH_FZF_VERSION="$FZF_VERSION_STR" BENCH_PID=$$ "$@")
+# The server's global environment gets the side's own directories (side_env)
+# before each of its runs: a popup the real binding opens, and a job the
+# script starts through tmux (run-shell -b), take theirs from there.  Only
+# when the side changes, so mostly every other run, outside the measurement.
+CUR_SIDE=""
+use_side() { # $1 = side
+  [ "$1" = "$CUR_SIDE" ] && return 0
+  local -a sv=() args=(); local v
+  side_env "$1" sv
+  for v in "${sv[@]}"; do
+    [ "${#args[@]}" = 0 ] || args+=(\;)
+    args+=(set-environment -g "${v%%=*}" "${v#*=}")
+  done
+  tm "${args[@]}" || die "cannot set the fixture server's environment for side $1"
+  CUR_SIDE=$1
+}
+
+# Each side's key bindings, as the plugin installs them: its interdimux.tmux
+# (the file a tmux.conf runs) against the fixture server, from the server's
+# environment, as `run-shell interdimux.tmux` would run it.  The prefix+key
+# binding it leaves is saved as list-keys prints it, which source-file reads
+# back as the same binding (checked here): the keypress scenario re-installs
+# the side's own before each of its runs.  (`list-keys -T prefix KEY` prints
+# nothing on tmux 3.7c: the key's line is picked from the whole table.)
+NAV_KEY="" PREFIX_KEY=""
+key_line() {
+  tm list-keys -T prefix 2>/dev/null | awk -v k="$NAV_KEY" '
+    { for (i = 2; i <= 3; i++) if ($i == "-T" && $(i + 1) == "prefix" && $(i + 2) == k) { print; next } }'
+}
+install_binding() { # $1 = side, $2 = worktree
+  local side=$1 wt=$2 conf="$WORK/bind-$1.conf"
+  local -a sv=() entry=()
+  side_env "$side" sv
+  if [ -f "$wt/interdimux.tmux" ]; then entry=("$wt/interdimux.tmux")
+  else entry=("$wt/scripts/interdimux.sh" --bind-keys); fi
+  ( cd "$H" && exec env -i "${SRV_ENV[@]}" "${sv[@]}" TMUX="$SOCK_PATH,$SRV_PID,0" \
+      setsid -w timeout 60 bash "${entry[@]}" ) </dev/null > "$WORK/bind-$side.log" 2>&1 \
+    || die "$wt: ${entry[*]##*/} failed against the fixture server: $(tail -5 "$WORK/bind-$side.log")"
+  if [ -z "$NAV_KEY" ]; then
+    NAV_KEY=$(tm show-option -gqv @interdimux-key); NAV_KEY=${NAV_KEY:-f}
+    PREFIX_KEY=$(tm show-option -gv prefix)
+  fi
+  key_line > "$conf"
+  [ "$(wc -l < "$conf")" = 1 ] || die "$wt: ${entry[*]##*/} left $(wc -l < "$conf") prefix $NAV_KEY bindings, not one"
+  tm unbind-key -T prefix "$NAV_KEY" \; source-file "$conf" || die "$conf: source-file refused it"
+  key_line | cmp -s - "$conf" \
+    || die "$wt: its prefix $NAV_KEY binding does not survive list-keys | source-file (see $conf)"
+}
+
+# The popup's environment, the one first-frame, the holders and the CLI
+# scenarios start the script with: recorded from a real popup.  The side's
+# binding is pressed on the attached client (send-keys -K: as if typed there)
+# while BASH_ENV, in the server's global environment for that moment, names a
+# recorder: the popup's shell (default-shell -c "exec bash ...") reads it
+# first, saves the environment it was started with -- tmux's: the server's
+# global one, TERM, TMUX, COLORTERM, TERM_PROGRAM*, PWD, and everything the
+# binding's -e flags expanded at the keypress -- and exits 0, which closes the
+# popup.  So whatever a change to the binding passes, or stops passing, the
+# scenarios get exactly that.
+record_popup_env() { # $1 = side, $2 = name of the array to fill, $3... = extra VAR=value
+  local side=$1 out="$WORK/hold/$1-popup.env" rec="$WORK/bin/record-$1.sh" i rpid=""
+  local -n _pe="$2"; shift 2
+  printf '%s\n' "cat /proc/\$\$/environ > '$out.tmp' && mv '$out.tmp' '$out'" "echo \$\$ > '$out.pid'" 'exit 0' > "$rec"
+  rm -f "$out" "$out.pid"
+  use_side "$side"
+  tm display-popup -C -c "$CLIENT_NAME" \; source-file "$WORK/bind-$side.conf" \
+    \; set-environment -g BASH_ENV "$rec" || die "cannot arm the popup recorder"
+  tm send-keys -K -c "$CLIENT_NAME" "$PREFIX_KEY" "$NAV_KEY" || die "send-keys -K failed (tmux >= 3.4 has it)"
+  for i in $(seq 1 500); do [ -e "$out" ] && break; sleep 0.02; done
+  tm set-environment -gu BASH_ENV
+  [ -e "$out" ] || die "side $side: prefix $NAV_KEY opened no popup that ran a shell within 10 s (the binding: $WORK/bind-$side.conf)"
+  read -r rpid < "$out.pid" 2>/dev/null
+  for i in $(seq 1 250); do [ -n "$rpid" ] && kill -0 "$rpid" 2>/dev/null || break; sleep 0.02; done
+  tm display-popup -C -c "$CLIENT_NAME"
+  local -a recd=(); local v
+  mapfile -d '' -t recd < "$out"
+  _pe=()
+  for v in "${recd[@]}"; do case "$v" in BASH_ENV=*) ;; *) _pe+=("$v") ;; esac; done
+  case " ${_pe[*]} " in *" TMUX="*) ;; *) die "side $side: the recorded popup environment has no TMUX" ;; esac
+  _pe+=("$@")
 }
 
 # What fzf 0.74 exports to a child, as recorded from the real navigator under
@@ -956,7 +1043,7 @@ expand_ph() { # $1 = template, $2 = {-1} value, $3 = {q} value -> REPLY
 # E_<scn>_<side> (environment), and per scenario T_<scn> (runner flags) and
 # K_<scn> (kind: cmd | first).
 # =====================================================================================
-declare -A SCN_TTY SCN_KIND SCN_RC SCN_NOTE SCN_BAD
+declare -A SCN_TTY SCN_KIND SCN_RC SCN_NOTE SCN_BAD SCN_PRE SCN_PAIR SCN_POST
 define() { # scenario side envarray-name argv...
   local key="${1//-/_}_$2" en="$3"; shift 3
   declare -g -a "C_$key=()" "E_$key=()"
@@ -968,6 +1055,60 @@ find_row() { # $1 = rows file, $2 = spec -> REPLY = the row's visible text (ANSI
   REPLY=$(strip_ansi "$1" | awk -F'\t' -v s="$2" '$NF == s { print; exit }')
   [ -n "$REPLY" ]
 }
+
+# FZF_MATCH_COUNT for the footer's query and for the zero-match one: fzf's own
+# count, the real fzf filtering the navigator's rows with the navigator's argv
+# (its --delimiter, --nth, --scheme ...) -- but --print-query, with which
+# --filter prints the query too.  With no real fzf, a plain case-insensitive
+# substring count, which a note names.
+NEW_Q=svc-07c
+fzf_count() { # query -> REPLY; fails when fzf does
+  local -a raw=() argv=(); local a rc=0
+  [ -n "$REAL_FZF" ] || return 1
+  mapfile -d '' -t raw < "$WORK/hold/A-nav.args"
+  for a in "${raw[@]}"; do [ "$a" = --print-query ] || argv+=("$a"); done
+  env -i PATH=/usr/bin:/bin HOME="$H" LANG=C.UTF-8 "$REAL_FZF" "${argv[@]}" --filter="$1" \
+    < "$WORK/hold/A-nav.rows" > "$WORK/hold/count.out" 2>/dev/null || rc=$?
+  [ "$rc" -le 1 ] || return 1                     # 1: nothing matched
+  REPLY=$(wc -l < "$WORK/hold/count.out")
+}
+typed_counts() {
+  if fzf_count "$TYPED_Q" && TYPED_MC=$REPLY && fzf_count "$NEW_Q"; then ZERO_MC=$REPLY
+  else
+    TYPED_MC=$(strip_ansi "$WORK/hold/A-nav.rows" | cut -f1-3 | grep -ci -- "$TYPED_Q")
+    ZERO_MC=$(strip_ansi "$WORK/hold/A-nav.rows" | cut -f1-3 | grep -ci -- "$NEW_Q")
+    SCN_NOTE[footer]+="no real fzf to count what '$TYPED_Q' matches: FZF_MATCH_COUNT=$TYPED_MC is a substring count"$'\n'
+  fi
+  [ "$ZERO_MC" = 0 ] || SCN_NOTE[describe-create]+="'$NEW_Q' matches $ZERO_MC row(s): this is no zero-match run"$'\n'
+}
+
+# The keypress scenario's: before each run, any popup left closed, the
+# side's own binding, and the stub fzf's mode and output file for the popup
+# (the server's global environment is where the popup's comes from); after
+# the scenario, those two unset again.
+pre_keypress() { # side fzf-out
+  tm display-popup -C -c "$CLIENT_NAME" \; source-file "$WORK/bind-$1.conf" \
+    \; set-environment -g BENCH_FZF_MODE first \; set-environment -g BENCH_FZF_OUT "$2" \
+    || die "cannot set up the keypress for side $1"
+}
+post_keypress() { tm set-environment -gu BENCH_FZF_MODE \; set-environment -gu BENCH_FZF_OUT; }
+
+# The *-changed scenarios': before each pair, the fixture server goes to the
+# next of three states -- 0 is the fixture as built; 1 and 2 rename CHG_WIN
+# and retitle CHG_PANE -- so every pair finds the server changed since the
+# pair before, which is when each side ran last: a cache of either side, in
+# its own directories (side_env), meets a change on every run, the miss and
+# the invalidation a plain scenario never shows.  Both sides of a pair see
+# the same state, so their outputs still compare (per state).  Then a
+# round-trip, so the redraw the change causes is over before the pair
+# starts.  After the scenario: state 0 again.
+CHG_NAME=() CHG_TITLE=()
+change_server() { # state
+  tm rename-window -t "$CHG_WIN" "${CHG_NAME[$1]}" \; select-pane -t "$CHG_PANE" -T "${CHG_TITLE[$1]}" \
+    || die "cannot change the fixture server ($CHG_WIN, $CHG_PANE)"
+  tm display-message -p '' > /dev/null
+}
+restore_server() { change_server 0; }
 
 # shellcheck disable=SC2034  # the arrays named "e" here are read through define's nameref
 build_scenarios() {
@@ -983,7 +1124,7 @@ build_scenarios() {
   find_row "$rows" "$W_SPEC" || die "no row $W_SPEC in the list"; ROW_W=$REPLY
   if [ -n "$P_SPEC" ]; then find_row "$rows" "$P_SPEC" || die "no row $P_SPEC in the list"; ROW_P=$REPLY; fi
   find_row "$rows" "W:$CUR_SESSION:0" || die "no row W:$CUR_SESSION:0"; ROW_F=$REPLY
-  local DIR_PV="$H/src/api-gateway" DEEP_Q=svc NEW_Q=svc-07c
+  local DIR_PV="$H/src/api-gateway" DEEP_Q=svc
   grep -qF "$DIR_PV" "$drows" || die "the ctrl-o picker does not list $DIR_PV"
   local ROW_D
   ROW_D=$(strip_ansi "$drows" | awk -F'\t' -v s="$DIR_PV" '$NF == s { print; exit }')
@@ -994,8 +1135,9 @@ build_scenarios() {
   fzf_env fz_pv_W  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_W" 1
   fzf_env fz_pv_P  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_P" 1
   fzf_env fz_focus nav down bg-cancel "" "$ntot" "$ntot" "$ROW_W" 0
+  typed_counts
   fzf_env fz_typed nav i bg-cancel "$TYPED_Q" "$TYPED_MC" "$ntot" "$ROW_F" 0
-  fzf_env fz_zero  nav q bg-cancel "$NEW_Q" 0 "$ntot" "$ROW_F" 0 0
+  fzf_env fz_zero  nav q bg-cancel "$NEW_Q" "$ZERO_MC" "$ntot" "$ROW_F" 0 0
   # the ctrl-o picker: its preview is always shown
   fzf_env fz_dreload dirs ctrl-r async "" "$nd" "$nd" "$ROW_D" 1
   fzf_env fz_ddeep   dirs ctrl-f async "$DEEP_Q" "$nd" "$nd" "$ROW_D" 1
@@ -1016,10 +1158,22 @@ build_scenarios() {
 
     e=("${pop[@]}" BENCH_FZF_MODE=first)
     define first-frame "$side" e bash "$wt/scripts/interdimux.sh"
+    define first-frame-changed "$side" e bash "$wt/scripts/interdimux.sh"
     e=("${popb[@]}" BENCH_FZF_MODE=first)
     define first-frame-bash "$side" e bash "$wt/scripts/interdimux.sh"
+    # the key itself, on the attached client: the side's binding (pre_keypress)
+    # expands its formats in the server and opens the popup, whose
+    # environment is whatever the binding gives it
+    e=("${SRV_ENV[@]}")
+    define keypress "$side" e "$TMUX_BIN" -L "$SOCK" send-keys -K -c "$CLIENT_NAME" "$PREFIX_KEY" "$NAV_KEY"
+    # the plugin loading, as a tmux.conf's run-shell runs it
+    local -a sv=(); side_env "$side" sv
+    e=("${SRV_ENV[@]}" "${sv[@]}" TMUX="$SOCK_PATH,$SRV_PID,0")
+    if [ -f "$wt/interdimux.tmux" ]; then define load "$side" e bash "$wt/interdimux.tmux"
+    else define load "$side" e bash "$wt/scripts/interdimux.sh" --bind-keys; fi
 
     e=("${nav[@]}" "${fz_reload[@]}");  define list "$side" e sh -c "bash $sq --list"
+    define list-changed "$side" e sh -c "bash $sq --list"
     e=("${navb[@]}" "${fz_reload[@]}"); define list-bash "$side" e sh -c "bash $sq --list"
     e=("${nav[@]}" "${fz_pv_S[@]}"); define preview-S "$side" e sh -c "bash $sq --preview '$S_SPEC'"
     e=("${nav[@]}" "${fz_pv_W[@]}"); define preview-W "$side" e sh -c "bash $sq --preview '$W_SPEC'"
@@ -1053,8 +1207,13 @@ build_scenarios() {
   for s in "${DEFAULT_SCENARIOS[@]}" "${EXTRA_SCENARIOS[@]}"; do
     SCN_TTY[$s]="-t ${POPUP_COLS}x${POPUP_ROWS}"; SCN_KIND[$s]=cmd; SCN_RC[$s]=0
   done
-  SCN_TTY[first-frame]+=" -p"; SCN_KIND[first-frame]=first
-  SCN_TTY[first-frame-bash]+=" -p"; SCN_KIND[first-frame-bash]=first
+  for s in first-frame first-frame-changed first-frame-bash; do SCN_TTY[$s]+=" -p"; SCN_KIND[$s]=first; done
+  # a tmux client command: no terminal, and every process the server starts
+  # meanwhile -- the popup -- waited for and counted (benchrun -P)
+  SCN_TTY[keypress]="-P"; SCN_KIND[keypress]=key
+  SCN_PRE[keypress]=pre_keypress; SCN_POST[keypress]=post_keypress
+  SCN_TTY[load]=""
+  for s in first-frame-changed list-changed; do SCN_PAIR[$s]=change_server; SCN_POST[$s]=restore_server; done
   SCN_RC[doctor]="0 1"
 }
 
@@ -1066,29 +1225,34 @@ build_scenarios() {
 # /work in the dev image, and the fixture has a ~/work of its own: a plain
 # substitution would rewrite $H/work/team-01 too.
 norm_paths() {
-  NP_A=$WT_A NP_B=$WT_B NP_W=$WORK perl -pe '
+  NP_A=$WT_A NP_B=$WT_B NP_W=$WORK NP_SA=$FIX/side-A NP_SB=$FIX/side-B perl -pe '
     BEGIN {
-      %to = ($ENV{NP_W} => "<WORK>", $ENV{NP_A} => "<WT>", $ENV{NP_B} => "<WT>");
+      %to = ($ENV{NP_W} => "<WORK>", $ENV{NP_A} => "<WT>", $ENV{NP_B} => "<WT>",
+             $ENV{NP_SA} => "<SIDE>", $ENV{NP_SB} => "<SIDE>");
       $re = join "|", map { quotemeta } sort { length($b) <=> length($a) } grep { length } keys %to;
     }
     s{(?<![\w.-])($re)(?![\w.-])}{$to{$1}}g'
 }
 # One run of one side.  Appends "wall_us cpu_us proc_us srv_us rc orphans killed
-# sum jobs_us jobs" to $WORK/res/<scn>.<side> (cpu_us = proc_us + srv_us, and
-# srv_us includes jobs_us: what the tmux server's jobs cost).
-run_one() { # scenario side
-  local scn="$1" side="$2" key="${1//-/_}_$2"
+# sum jobs_us jobs state" to $WORK/res/<scn>.<side> (cpu_us = proc_us + srv_us,
+# and srv_us includes jobs_us: what the tmux server's jobs cost; state: the
+# fixture server's, for the *-changed scenarios, else 0).
+run_one() { # scenario side [suffix] [state]
+  local scn="$1" side="$2" key="${1//-/_}_$2" kind=${SCN_KIND[$1]}
   # shellcheck disable=SC2178  # namerefs to the scenario's argv and environment arrays
   local -n _c="C_$key" _e="E_$key"
   local out="$WORK/out/$key.out" err="$WORK/out/$key.err" fz="$WORK/out/$key.fzf" res
   local wall cpu srv rc rt0 orph killed jobs jkilled jobus first sum
   local -a extra=()
-  [ "${SCN_KIND[$scn]}" = first ] && { extra=(BENCH_FZF_OUT="$fz"); rm -f "$fz.t" "$fz.rows"; }
+  case $kind in first|key) rm -f "$fz.t" "$fz.rows" ;; esac
+  [ "$kind" = first ] && extra=(BENCH_FZF_OUT="$fz")
+  use_side "$side"
+  [ -z "${SCN_PRE[$scn]:-}" ] || "${SCN_PRE[$scn]}" "$side" "$fz"
   # shellcheck disable=SC2086  # the runner flags are words
   res=$(env -i "${_e[@]}" "${extra[@]}" "$RUNNER" run ${SCN_TTY[$scn]} -s "$SRV_PID" -o "$out" -e "$err" -- "${_c[@]}") \
     || { SCN_NOTE[$scn]+="$side: runner failed"$'\n'; return 1; }
   read -r wall cpu srv rc rt0 orph killed jobs jkilled jobus <<< "$res"
-  if [ "${SCN_KIND[$scn]}" = first ]; then
+  if [ "$kind" = first ] || [ "$kind" = key ]; then
     if [ -s "$fz.t" ]; then
       read -r first _ _ _ < "$fz.t"
       if [ "$first" -gt 0 ]; then wall=$(( first - rt0 )); else wall=-1; fi
@@ -1102,25 +1266,36 @@ run_one() { # scenario side
   sum=$(norm_paths < "$out" 2>/dev/null | cksum)
   sum=${sum%% *}
   [ -e "$WORK/out/$key.first" ] || norm_paths < "$out" > "$WORK/out/$key.first" 2>/dev/null
-  printf '%s %s %s %s %s %s %s %s %s %s\n' "$wall" $(( cpu + srv )) "$cpu" "$srv" "$rc" "$orph" "$killed" "$sum" \
-    "${jobus:-0}" "${jobs:-0}" >> "$WORK/res/$scn.$side${3:-}"
+  printf '%s %s %s %s %s %s %s %s %s %s %s\n' "$wall" $(( cpu + srv )) "$cpu" "$srv" "$rc" "$orph" "$killed" "$sum" \
+    "${jobus:-0}" "${jobs:-0}" "${4:-0}" >> "$WORK/res/$scn.$side${3:-}"
   case " ${SCN_RC[$scn]} " in
     *" $rc "*) ;;
     *) SCN_NOTE[$scn]+="$side: exit $rc ($(head -c 200 "$err" 2>/dev/null | tr "\n" " "))"$'\n'; SCN_BAD[$scn]=1 ;;
   esac
   [ "$killed" -gt 0 ] && SCN_NOTE[$scn]+="$side: $killed orphan(s) outlived the run and were killed"$'\n'
   [ "$orph" -gt 0 ] && [ "$killed" = 0 ] && SCN_NOTE[$scn]+="$side: left $orph background process(es) (their CPU is counted)"$'\n'
-  [ "${jkilled:-0}" -gt 0 ] && SCN_NOTE[$scn]+="$side: $jkilled job(s) of the tmux server outlived the run by 3 s and were killed"$'\n'
-  [ "${jobs:-0}" -gt 0 ] && [ "${jkilled:-0}" = 0 ] && SCN_NOTE[$scn]+="$side: the tmux server was still running $jobs job(s) for it when it ended (waited for: their CPU is counted)"$'\n'
+  [ "${jkilled:-0}" -gt 0 ] && SCN_NOTE[$scn]+="$side: $jkilled job(s) of the tmux server (or its popup) outlived the run by 3 s and were killed"$'\n'
+  # (a keypress always leaves its popup to wait for: that is what it measures)
+  [ "${jobs:-0}" -gt 0 ] && [ "${jkilled:-0}" = 0 ] && [ "$kind" != key ] \
+    && SCN_NOTE[$scn]+="$side: the tmux server was still running $jobs job(s) for it when it ended (waited for: their CPU is counted)"$'\n'
   return 0
 }
 
+# One pair, its order alternating with the index (AB BA AB ...).  A scenario
+# that changes the server (SCN_PAIR) moves it to its next state first, the
+# same for both runs of the pair; three states, so that the state and the
+# order are not in step.
+PAIR_N=0
+run_pair() { # scenario index [suffix]
+  local state=0
+  if [ -n "${SCN_PAIR[$1]:-}" ]; then state=$(( PAIR_N % 3 )); "${SCN_PAIR[$1]}" "$state"; fi
+  PAIR_N=$((PAIR_N + 1))
+  if (( $2 % 2 == 0 )); then run_one "$1" A "${3:-}" "$state"; run_one "$1" B "${3:-}" "$state"
+  else run_one "$1" B "${3:-}" "$state"; run_one "$1" A "${3:-}" "$state"; fi
+}
 run_pairs() { # scenario count -- interleaved, the order alternating per pair
   local i
-  for (( i = 0; i < $2; i++ )); do
-    if (( i % 2 == 0 )); then run_one "$1" A; run_one "$1" B
-    else run_one "$1" B; run_one "$1" A; fi
-  done
+  for (( i = 0; i < $2; i++ )); do run_pair "$1" "$i"; done
 }
 # Warm-up pairs, then N pairs (fewer when one pair is too slow for the budget,
 # never fewer than 8).  Then, within the budget: while the measured noise is
@@ -1132,10 +1307,7 @@ run_scenario() { # scenario -> also leaves R_LINE[scenario] analysed
   rm -f "$WORK/res/$scn".*
   t0=$(date +%s%N)
   local i
-  for (( i = 0; i < WARM; i++ )); do
-    if (( i % 2 == 0 )); then run_one "$scn" A .warm; run_one "$scn" B .warm
-    else run_one "$scn" B .warm; run_one "$scn" A .warm; fi
-  done
+  for (( i = 0; i < WARM; i++ )); do run_pair "$scn" "$i" .warm; done
   t1=$(date +%s%N)
   pairs=$N_PAIRS
   if [ -n "$BUDGET" ] && [ "$WARM" -gt 0 ]; then
@@ -1214,13 +1386,21 @@ analyse() { # scenario -> R_LINE[scn]: "scn|A cpu|B cpu|...|n|verdict|wall"
   read -r dmed dlo dhi <<< "$(paired "$fa" "$fb" 2)"
   read -r wmed wlo whi <<< "$(paired "$fa" "$fb" 1)"
   n=$(wc -l < "$fa")
-  # outputs: A's own must be stable to compare with B's
-  local sa sb
-  sa=$(cat "$fa" "$WORK/res/$scn.A.warm" 2>/dev/null | awk '{ print $8 }' | sort -u)
-  sb=$(cat "$fb" "$WORK/res/$scn.B.warm" 2>/dev/null | awk '{ print $8 }' | sort -u)
-  if [ "$(printf '%s\n' "$sa" | wc -l)" -gt 1 ]; then out=vol
-  elif [ "$sa" = "$sb" ]; then out=same
-  else out=DIFF; fi
+  # outputs, per state of the server (one but for the *-changed scenarios):
+  # A's own must be stable to compare with B's -- vol when it is not -- and
+  # B's the same as A's -- DIFF when it is not
+  out=$( { cat "$fa" "$WORK/res/$scn.A.warm" 2>/dev/null | awk '{ print "A", $11 + 0, $8 }'
+           cat "$fb" "$WORK/res/$scn.B.warm" 2>/dev/null | awk '{ print "B", $11 + 0, $8 }'; } | awk '
+    { k = $1 SUBSEP $2; if (!((k, $3) in seen)) { seen[k, $3] = 1; cnt[k]++; val[k] = $3 }; st[$2] = 1 }
+    END {
+      vol = 0; diff = 0
+      for (s in st) {
+        a = "A" SUBSEP s; b = "B" SUBSEP s
+        if (cnt[a] != 1) vol = 1
+        else if (cnt[b] != 1 || val[a] != val[b]) diff = 1
+      }
+      print vol ? "vol" : diff ? "DIFF" : "same"
+    }')
   local line
   line=$(awk -v ma="$ma" -v mb="$mb" -v qa1="$qa1" -v qa3="$qa3" -v qb1="$qb1" -v qb3="$qb3" \
       -v wa="$wa" -v wb="$wb" -v dm="$dmed" -v dl="$dlo" -v dh="$dhi" -v wm="$wmed" -v wl="$wlo" -v wh="$whi" \
@@ -1289,13 +1469,25 @@ claude_record
 # A popup starts in the pressing pane's directory, and every callback inherits it
 cd "$H/src/$CUR_SESSION" || die "no fixture dir for $CUR_SESSION"
 say "  $(tm list-sessions | wc -l) sessions, $(tm list-windows -a | wc -l) windows, $(tm list-panes -a | wc -l) panes; zoxide $ZOX_N dirs; client $CLIENT_NAME"
+make_side_dirs
+CHG_NAME=("$(tm display-message -p -t "$CHG_WIN" '#{window_name}')" shell-ci shell-dev)
+CHG_TITLE=("$(tm display-message -p -t "$CHG_PANE" '#{pane_title}')" "make ci" "cargo watch")
 
+# Each side's bindings, and the popup environment its prefix+f gives
+say "installing each side's key bindings (its interdimux.tmux) and recording the popup its prefix+f opens ..."
 for side in A B; do
   if [ "$side" = A ]; then wt=$WT_A; else wt=$WT_B; fi
+  install_binding "$side" "$wt"
   declare -a "POPUP_$side=()" "POPUPB_$side=()"
-  popup_env "$wt" "POPUP_$side"
-  popup_env "$wt" "POPUPB_$side" INTERDIMUX_USE_RUST=off
+  record_popup_env "$side" "POPUP_$side"
+  declare -n _pb="POPUPB_$side" _pp="POPUP_$side"
+  _pb=("${_pp[@]}" INTERDIMUX_USE_RUST=off)
+  unset -n _pb _pp
 done
+# The two bindings, paths aside: a difference is what keypress measures
+if ! cmp -s <(norm_paths < "$WORK/bind-A.conf") <(norm_paths < "$WORK/bind-B.conf"); then
+  SCN_NOTE[keypress]+="the prefix $NAV_KEY binding differs between A and B (uxdiff's text/bind-keys-* shows how); this scenario measures it"$'\n'
+fi
 
 if [ -n "$EXEC_CMD" ]; then
   printf '%s\0' "${POPUP_A[@]}" > "$WORK/popup-A.env"
@@ -1310,6 +1502,7 @@ fi
 say "starting the holders (each worktree's real navigator and ctrl-o picker, stub fzf) ..."
 for side in A B; do
   if [ "$side" = A ]; then wt=$WT_A; else wt=$WT_B; fi
+  use_side "$side"
   start_holder "$side-nav" "POPUP_$side" bash "$wt/scripts/interdimux.sh"
   start_holder "$side-navbash" "POPUPB_$side" bash "$wt/scripts/interdimux.sh"
   # ctrl-o: fzf's execute child, with the navigator's environment and fzf's
@@ -1325,13 +1518,18 @@ for side in A B; do
   unset -n _de
 done
 build_scenarios
+# What the navigator lists here: its rows by kind (the last field's prefix)
+ROWS_NOTE=$(strip_ansi "$WORK/hold/A-nav.rows" | awk -F'\t' '
+  { k = substr($NF, 1, 2); c[k]++ }
+  END { printf "%d rows: %d session(s), %d window(s), %d pane(s), %d director%s", NR, c["S:"], c["W:"], c["P:"], c["D:"], (c["D:"] == 1 ? "y" : "ies") }')
+say "  the navigator lists $ROWS_NOTE; '$TYPED_Q' matches $TYPED_MC"
 
 say "running ${#SCENARIOS[@]} scenario(s): $WARM warm-up pair(s), then up to $N_PAIRS pairs${BUDGET:+ (budget ${BUDGET}s each)}"
 REGRESSED=() SLOWED=() DIFFED=() ERRORED=()
 progress() { # scenario seconds [label]
   local _ca _cb _dc _nz _out _n _v _wv
   IFS='|' read -r _ _ca _cb _dc _nz _ _ _ _ _ _out _n _v _wv <<< "${R_LINE[$1]}"
-  say "$(printf '  %-17s %4ss  cpu %8s -> %8s ms  %6s%% (noise %s%%)  out %-4s  n=%-3s %s / wall %s%s' \
+  say "$(printf '  %-19s %4ss  cpu %8s -> %8s ms  %6s%% (noise %s%%)  out %-4s  n=%-4s %s / wall %s%s' \
     "$1" "$2" "$_ca" "$_cb" "$_dc" "$_nz" "$_out" "$_n" "$_v" "$_wv" "${3:-}")"
 }
 T_START=$(date +%s)
@@ -1369,6 +1567,7 @@ for scn in "${SCENARIOS[@]}"; do
     R_LINE[$scn]=$(IFS='|'; printf '%s' "${_f[*]}")
     SCN_NOTE[$scn]+="flagged, so measured again: first set cpu $_d1% (noise $_z1%) $_v1 / wall $_w1% $_wv1; second set cpu $_d2% (noise $_z2%) $_v2 / wall $_w2% $_wv2; the row is both sets together"$'\n'
   fi
+  [ -z "${SCN_POST[$scn]:-}" ] || "${SCN_POST[$scn]}"
   progress "$scn" $(( $(date +%s) - ts ))
   case "${R_LINE[$scn]}" in
     *"|REGRESSION|"*) REGRESSED+=("$scn") ;;
@@ -1388,10 +1587,10 @@ printf 'interdimux A/B  A=%s  B=%s\n' "$WT_A" "$WT_B"
 CPUS_ALL=$(nproc --all 2>/dev/null || echo 1) CPUS_RUN=$(nproc 2>/dev/null || echo 1)
 CPUS_NOTE="$CPUS_ALL CPUs"
 [ "$CPUS_RUN" = "$CPUS_ALL" ] || CPUS_NOTE+=" ($CPUS_RUN for this run)"
-printf 'fixture %s: %s sessions / %s windows / %s panes, popup %sx%s; %s s; load1 %s -> %s on %s\n' \
+printf 'fixture %s: %s sessions / %s windows / %s panes (%s), popup %sx%s; %s s; load1 %s -> %s on %s\n' \
   "$FIXTURE" "$(tm list-sessions | wc -l)" "$(tm list-windows -a | wc -l)" "$(tm list-panes -a | wc -l)" \
-  "$POPUP_COLS" "$POPUP_ROWS" "$(( T_END - T_START ))" "$LOAD_START" "$LOAD_END" "$CPUS_NOTE"
-echo "cpu = ms of user+sys (process tree + tmux server), wall = ms (first-frame*: to the first row)"
+  "$ROWS_NOTE" "$POPUP_COLS" "$POPUP_ROWS" "$(( T_END - T_START ))" "$LOAD_START" "$LOAD_END" "$CPUS_NOTE"
+echo "cpu = ms of user+sys (process tree + tmux server), wall = ms (first-frame* and keypress: to the first row)"
 echo
 print_table
 echo
@@ -1413,6 +1612,17 @@ fi
 for scn in "${SCENARIOS[@]}"; do
   _ja=$(awk '{ s += $9; n++ } END { if (n) printf "%.1f", s / n / 1000 }' "$WORK/res/$scn.A" 2>/dev/null)
   _jb=$(awk '{ s += $9; n++ } END { if (n) printf "%.1f", s / n / 1000 }' "$WORK/res/$scn.B" 2>/dev/null)
+  if [ "${SCN_KIND[$scn]:-}" = key ]; then
+    # where a keypress's cpu went: the server's own (the key, the binding's
+    # formats, the popup and its pty -- ns-exact), the popup's processes
+    # (whole clock ticks), and the tmux client that sent the key
+    _sa=$(awk '{ s += $4 - $9; n++ } END { if (n) printf "%.1f", s / n / 1000 }' "$WORK/res/$scn.A" 2>/dev/null)
+    _sb=$(awk '{ s += $4 - $9; n++ } END { if (n) printf "%.1f", s / n / 1000 }' "$WORK/res/$scn.B" 2>/dev/null)
+    _ka=$(awk '{ s += $3; n++ } END { if (n) printf "%.1f", s / n / 1000 }' "$WORK/res/$scn.A" 2>/dev/null)
+    _kb=$(awk '{ s += $3; n++ } END { if (n) printf "%.1f", s / n / 1000 }' "$WORK/res/$scn.B" 2>/dev/null)
+    SCN_NOTE[$scn]+="a run on average: the tmux server itself A ${_sa:-?} ms, B ${_sb:-?} ms; the popup's processes A ${_ja:-?} ms, B ${_jb:-?} ms (whole clock ticks, so the A cpu / B cpu medians move in 10 ms steps: read dcpu%); the client sending the key A ${_ka:-?} ms, B ${_kb:-?} ms"$'\n'
+    continue
+  fi
   case "${_ja:-0}${_jb:-0}" in *[1-9]*)
     SCN_NOTE[$scn]+="the tmux server's jobs cost A ${_ja:-0} ms, B ${_jb:-0} ms a run on average (counted in cpu, in whole clock ticks)"$'\n' ;;
   esac
