@@ -174,12 +174,12 @@
 #   budget: noise% 3.7-6% for every scenario from the 25 ms callbacks to the
 #   260 ms --doctor and bash renderer, 9% for hint (a 1.6 ms sh), 5% for
 #   dirs-deep (0.44 s a run there -- no zoxide or fd in the image -- so 30
-#   pairs fit); with -n 10, 9-14%.  On the host it was written on (load
-#   0.8-1.9): 4-6%, 2-5% for list-bash, 6-14% for hint, and 15-72% for
-#   dirs-deep (2.5 s a run, so only 8 pairs fit the budget).  An extra subshell
-#   fork in a callback is ~1 ms: about 3-4% of a 25-35 ms preview, i.e. at the
-#   floor; one extra tmux round-trip (+8-10% on --list) or three forks in a
-#   preview are caught.
+#   pairs fit); with -n 10, 8-14%, once 25%.  On the host it was written on
+#   (load 0.8-1.9): 4-6%, 2-5% for list-bash, 6-14% for hint, and 15-72% for
+#   dirs-deep (2.5 s a run, so only 8 pairs fit the budget).  An extra
+#   subshell fork in a callback is ~1 ms: about 3-4% of a 25-35 ms preview,
+#   i.e. at the floor; one extra tmux round-trip (+8-10% on --list) or three
+#   forks in a preview are caught.
 
 set -uo pipefail
 # never the user's server: no inherited TMUX, and the default socket directory

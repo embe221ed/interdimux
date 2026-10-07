@@ -60,7 +60,7 @@ this checkout as it is, uncommitted edits included:
 
 ```sh
 make perfbench                                   # every default scenario, ~2 min
-make perfbench REF=HEAD~1 ARGS='-n 10 -s list,first-frame,footer'   # ~30 s
+make perfbench REF=HEAD~1 ARGS='-n 10 -s list,first-frame,footer'   # ~15 s
 make perfbench ARGS=--list                       # the scenarios
 make uxdiff ARGS=-q                              # the text entry points, ~1 min
 make uxdiff                                      # and every screen, ~6 min
@@ -97,10 +97,13 @@ tree, orphans included, plus what the tmux server spent meanwhile.
 
 It exits 0 when there is no CPU regression and every output is the same, 3 on
 a `REGRESSION`, 4 when there is none but an output differs, 1 when the bench
-itself failed and 2 on a usage error.  An `ok` only says that no effect
-larger than `noise%` was there: A/A runs on this 4-CPU VPS, otherwise idle,
-put it at 3.7-6% for every scenario at the default budget (30 to 40 pairs),
-9% for `hint` (a 1.6 ms snippet), and at 9-14% with `-n 10`.  A line `noisy:`
+itself failed and 2 on a usage error.  (`make` exits 2 whenever a command
+fails, naming its status in `Error N`; `sh dev/run.sh perfbench REF ARGS...`
+exits with the status itself, which is what a script should run.)  An `ok`
+only says that no effect larger than `noise%` was there: A/A runs on this
+4-CPU VPS, otherwise idle, put it at 3.7-6% for every scenario at the
+default budget (30 to 40 pairs), 9% for `hint` (a 1.6 ms snippet), and at
+8-14% with `-n 10`, once 25% (`footer`).  A line `noisy:`
 names the scenarios where it was over 10%; re-run those with more pairs
 (`ARGS='-n 40 -s footer'`).
 
@@ -117,7 +120,8 @@ modes, Health, Jobs, Agents -- captured with `capture-pane -e` and reduced to
 each cell's visible style.
 
 One line per scenario, `IDENTICAL` or `DIFF`; it exits 0 when all are
-identical, 1 when anything differs or was skipped, 2 on a setup error.  A
+identical, 1 when anything differs or was skipped, 2 on a setup error (`sh
+dev/run.sh uxdiff REF ARGS...` for the status itself, as above).  A
 screen that differs is run again (`-r N`, default 2) before it counts: a
 retry that matches is `IDENTICAL` (flagged "retried"), one that reproduces
 both sides byte for byte is a `DIFF` at once.  `-q` runs the text scenarios
