@@ -11,6 +11,9 @@
 #   make check-macos           type-check the Rust core for both macOS targets
 #   make msrv                  build and test the Rust core on its rust-version
 #   make bench [ARGS='-n 10 HEAD~1']   tests/bench.sh
+#   make perfbench [REF=main] [ARGS='-n 10 -s list,footer']
+#                              dev/perf/bench.sh: is this checkout slower than REF?
+#   make uxdiff [REF=main] [ARGS=-q]   dev/perf/uxdiff.sh: does it look different?
 #   make watch [T=...]         re-run suites whenever a file changes
 #   make shell                 a shell in the container
 #   make image                 (re)build the image
@@ -27,9 +30,10 @@ PLATFORM ?= $(IMUX_PLATFORM)
 R ?= $(IMUX_RENDERER)
 CPUSET ?= $(IMUX_CPUSET)
 LOCK ?= $(IMUX_LOCK)
+REF ?= main
 RUN = IMUX_PLATFORM='$(PLATFORM)' IMUX_RENDERER='$(R)' IMUX_CPUSET='$(CPUSET)' IMUX_LOCK='$(LOCK)' sh dev/run.sh
 
-.PHONY: help test smoke ci ci-sigpipe versions lint check-macos msrv bench watch shell image pin clean clean-volumes
+.PHONY: help test smoke ci ci-sigpipe versions lint check-macos msrv bench perfbench uxdiff watch shell image pin clean clean-volumes
 
 help:
 	@sed -n 's/^#   //p' Makefile
@@ -52,6 +56,10 @@ msrv:
 	@$(RUN) msrv
 bench:
 	@$(RUN) bench $(ARGS)
+perfbench:
+	@$(RUN) perfbench '$(REF)' $(ARGS)
+uxdiff:
+	@$(RUN) uxdiff '$(REF)' $(ARGS)
 watch:
 	@$(RUN) watch $(T)
 shell:

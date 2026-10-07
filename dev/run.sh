@@ -13,7 +13,8 @@
 #                  checkout's work volumes
 #   clean-volumes  remove the work volumes of checkouts that are gone
 #   anything else  dev/cmd.sh COMMAND: test, ci, ci-sigpipe, versions, lint,
-#                  check-macos, msrv, bench, watch, shell, run
+#                  check-macos, msrv, bench, perfbench, uxdiff, watch, shell,
+#                  run
 #
 # The container sees the checkout READ-ONLY at /src and works on a copy in a
 # volume of its own (interdimux-dev-work-<arch>-<dir name>-<hash of the
