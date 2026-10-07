@@ -71,11 +71,15 @@ make uxdiff ARGS='-f screen/80x24/'              # the scenarios a regex matches
 Inside (`dev/cmd.sh perfbench|uxdiff REF ARGS...`), `REF` is extracted from
 the checkout's git with `git archive` into a temporary tree and given a Rust
 core of its own -- a core built from other sources cannot serve its script --
-built offline once per `rust/` tree and kept in the work volume
+built offline once per `rust/` tree and toolchain (`rustc -vV`, the linker,
+the flags: the volume outlives image rebuilds, and after a `RUST_VERSION`
+bump A must not keep the old compiler's core) and kept in the work volume
 (`/work/rust/target/perf-ref/`).  This checkout's core is built as for `make
-test`.  Then `dev/perf/bench.sh ARGS <REF's tree> /work` runs (or
-`uxdiff.sh`).  Both scripts document every scenario and option in their
-headers, and run as well outside the image on any two built trees, on Linux.
+test`; B's header says "with uncommitted changes" when `git status` lists
+anything, untracked files included.  Then `dev/perf/bench.sh ARGS <REF's
+tree> /work` runs (or `uxdiff.sh`).  Both scripts document every scenario
+and option in their headers, and run as well outside the image on any two
+built trees, on Linux.
 
 ### perfbench: is B slower than A?
 

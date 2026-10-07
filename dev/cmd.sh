@@ -170,11 +170,15 @@ ci() {
 # A tree of REF (any commit /work's git knows: main, HEAD~1, a sha), extracted
 # with git archive, with a Rust core of its own -- one built from other sources
 # cannot serve its script (the stdin protocol is versioned).  That core is
-# built offline once per rust/ tree (git's tree id: the same sources, the same
-# binary) and kept in the work volume, under rust/target, which the entrypoint's
-# copy leaves alone.  REPLY = the tree.
+# built offline once per rust/ tree and toolchain -- git's tree id, and a hash
+# of `rustc -vV`, the linker driver's version and the build's flags: the same
+# sources built the same way, the same binary -- and kept in the work volume,
+# under rust/target, which the entrypoint's copy leaves alone.  (The volume
+# outlives image rebuilds: after a RUST_VERSION bump, A must not keep a core
+# the old compiler built while B's is the new one's.)  REPLY = the tree.
+REF_FLAGS="--release --locked RUSTFLAGS=-Awarnings"
 ref_tree() {
-  local ref=$1 sha rtree dir cache
+  local ref=$1 sha rtree dir cache tc
   git -C /work rev-parse --git-dir >/dev/null 2>&1 || {
     echo "git cannot read this checkout's repository from /work (for a worktree, dev/run.sh mounts its git dir)" >&2
     return 2; }
@@ -185,13 +189,15 @@ ref_tree() {
   dir=$(mktemp -d "${TMPDIR:-/tmp}/imux-ref.XXXXXX")
   git -C /work archive --format=tar "$sha" | tar -x -C "$dir" || {
     echo "git archive $ref failed" >&2; return 1; }
-  cache=/work/rust/target/perf-ref/$rtree
+  tc=$({ rustc -vV; cc --version | head -n 1; printf '%s\n' "$REF_FLAGS"; } 2>&1 | cksum | cut -d' ' -f1)
+  cache=/work/rust/target/perf-ref/$rtree-$tc
   if [ ! -x "$cache/imux" ]; then
-    say "build the Rust core of $ref (once per rust/ tree: kept in the work volume)"
+    say "build the Rust core of $ref (once per rust/ tree and toolchain: kept in the work volume)"
     rm -rf "$cache"
     mkdir -p "$cache"
     # (-Awarnings: REF's warnings are not this checkout's business; lint
     # levels change no code)
+    # (REF_FLAGS above names these flags, for the cache's key: change both)
     CARGO_TARGET_DIR=$cache/target RUSTFLAGS=-Awarnings cargo build --release --locked --quiet \
         --manifest-path "$dir/rust/Cargo.toml" || {
       echo "$ref's Rust core does not build here (offline, from the crates the image fetched)" >&2; return 1; }
@@ -232,7 +238,8 @@ perf_ab() {  # perfbench|uxdiff REF [ARGS...]
   ref_tree "$ref" || return
   a=$REPLY
   b="$(git -C /work rev-parse --abbrev-ref HEAD 2>/dev/null) $(git -C /work rev-parse --short HEAD 2>/dev/null)"
-  git -C /work diff --quiet HEAD -- 2>/dev/null || b+=", with uncommitted changes"
+  # untracked files too: a new module or helper is a change as much as an edit
+  [ -z "$(git -C /work status --porcelain 2>/dev/null)" ] || b+=", with uncommitted changes"
   printf 'A = %s: %s, in %s\n' "$ref" "$(git -C /work log -1 --format='%h %s' "$ref" -- | cut -c1-72)" "$a"
   printf 'B = this checkout (%s), in /work\n' "$b"
   if [ "$mode" = perfbench ]; then
