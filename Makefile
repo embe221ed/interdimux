@@ -14,6 +14,8 @@
 #   make perfbench [REF=main] [ARGS='-n 10 -s list,footer']
 #                              dev/perf/bench.sh: is this checkout slower than REF?
 #   make uxdiff [REF=main] [ARGS=-q]   dev/perf/uxdiff.sh: does it look different?
+#                              (ARGS is shell words: a regex with | in it is
+#                              quoted inside, ARGS="-f 'text/|kill'")
 #   make watch [T=...]         re-run suites whenever a file changes
 #   make shell                 a shell in the container
 #   make image                 (re)build the image

@@ -53,6 +53,17 @@
 #               BENCH_FIX, BENCH_POPUP_ENV_A ...), clean up, exit with CMD's
 #               status.  Nothing is measured.
 #
+# Resolution: what a run can see
+#   An "ok" says only that no effect bigger than noise% was there.  In the dev
+#   image on this 4-CPU VPS, A/A: the default budget (30-40 pairs) resolves
+#   about 3-7% on every scenario (hint, a 1.6 ms snippet, 9-14%), so a 5%
+#   change -- 1.3 ms injected into a 25 ms preview -- went unflagged.  To
+#   answer a 5% question, run just those scenarios with -n 100 (that change
+#   was caught, at a noise of 2.6-2.8%, in a minute; a pair of a 30 ms
+#   callback takes about 0.15 s).  -n 10 is a smoke check: noise 8-25%, so it resolves only
+#   effects above about 15%.  A line "noisy:" names the scenarios whose noise
+#   was over 10%.
+#
 # Scenarios (how each one is invoked mirrors the real caller; see build_scenarios)
 #   first-frame   the navigator opening: `bash interdimux.sh` with a popup's
 #                 environment and a 158x35 pty, a stub fzf on PATH.  WALL is the
@@ -210,16 +221,22 @@
 #   ($IMUX_DEV_OTHERS) are named in a WARNING too.
 #
 # Sensitivity (A/A runs of one tree against itself)
-#   In the dev image on a 4-CPU VPS, otherwise idle (load ~1), at the default
-#   budget: noise% 3.7-6% for every scenario from the 25 ms callbacks to the
-#   260 ms --doctor and bash renderer, 9% for hint (a 1.6 ms sh), 5% for
-#   dirs-deep (0.44 s a run there -- no zoxide or fd in the image -- so 30
-#   pairs fit); with -n 10, 8-14%, once 25%.  On the host it was written on
-#   (load 0.8-1.9): 4-6%, 2-5% for list-bash, 6-14% for hint, and 15-72% for
+#   In the dev image on a 4-CPU VPS, at the default budget: noise% 3-6% for
+#   every scenario from the 25 ms callbacks to the 270 ms --doctor and bash
+#   renderer, on both fixtures, at a host load of 1 and of 3.5-4.5 alike; 9-14%
+#   for hint (a 1.6 ms sh); 3% for dirs-deep (0.43 s a run, fdfind walking
+#   ~/work, so 30 pairs fit).  With -n 100 on two previews carrying a 5%
+#   change (flagged, so 200 pairs), 2.4-2.8%, and the change was caught; with
+#   -n 10, 8-25% (hint about 30%).  On the host it was written on (load
+#   0.8-1.9): 4-6%, 2-5% for list-bash, 6-14% for hint, and 15-72% for
 #   dirs-deep (2.5 s a run, so only 8 pairs fit the budget).  An extra
 #   subshell fork in a callback is ~1 ms: about 3-4% of a 25-35 ms preview,
 #   i.e. at the floor; one extra tmux round-trip (+8-10% on --list) or three
-#   forks in a preview are caught.
+#   forks in a preview are caught.  What the scenarios cost there: on the
+#   large fixture first-frame 95 ms of CPU (90 ms to the first row), list
+#   68 ms, a preview 27-29 ms, footer 32 ms, dirs-list 108 ms (zoxide
+#   included); on the small one first-frame 79 ms (72 ms to the first row),
+#   list 50 ms, a preview 26-29 ms, footer 28 ms.
 
 set -uo pipefail
 # never the user's server: no inherited TMUX, and the default socket directory

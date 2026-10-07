@@ -60,13 +60,21 @@ compare `REF` -- any commit: `main` (the default), `HEAD~1`, a sha -- with
 this checkout as it is, uncommitted edits included:
 
 ```sh
-make perfbench                                   # every default scenario, ~2 min
-make perfbench REF=HEAD~1 ARGS='-n 10 -s list,first-frame,footer'   # ~15 s
+make perfbench                                   # both fixtures, every default scenario, ~3 min
+make perfbench ARGS='-n 100 -s preview-W,footer' # a 5% question: just those, more pairs, ~1 min
+make perfbench REF=HEAD~1 ARGS='-n 10 -s list,first-frame,footer'   # a smoke check, ~30 s
+make perfbench ARGS='-F small'                   # the small fixture alone
 make perfbench ARGS=--list                       # the scenarios
 make uxdiff ARGS=-q                              # the text entry points, ~1 min
 make uxdiff                                      # and every screen, ~6 min
 make uxdiff ARGS='-f screen/80x24/'              # the scenarios a regex matches
+make uxdiff ARGS="-f 'text/dirs|kill-dialog'"    # a regex with | in it: quoted inside ARGS
 ```
+
+`ARGS` is pasted into a shell command line, so it is shell words: a `|` or
+a space that belongs to one argument is quoted inside it, as above (`make
+uxdiff ARGS='-f text/|kill'` would pipe the run into a command named
+`kill`).  Or skip make: `sh dev/run.sh uxdiff main -f 'text/dirs|kill'`.
 
 Inside (`dev/cmd.sh perfbench|uxdiff REF ARGS...`), `REF` is extracted from
 the checkout's git with `git archive` into a temporary tree and given a Rust
@@ -88,31 +96,60 @@ trees, on Linux (a WARNING says when there is no zoxide).
 Every scenario is a path a keypress waits on, invoked as its real caller
 invokes it -- the navigator opening to its first row, the `--list` reload, a
 preview, the per-keystroke footer, the ctrl-o picker, `--doctor` and more --
-against one fixture (12 sessions, 40 windows, 90 panes, an attached client)
-that A and B share.  A and B run in pairs whose order alternates, after
-warm-up pairs, and each run's CPU is the user+sys time of its whole process
-tree, orphans included, plus what the tmux server spent meanwhile.
+against a fixture that A and B share, with an attached client and a real
+zoxide database.  There are two (`-F`): **large**, 12 sessions, 40 windows
+and 90 panes (142 rows), where a cost per row shows; and **small**, 1
+session, 3 windows, 3 panes -- the size of the server this plugin's user
+actually runs -- where the fixed costs (parsing the script, exec'ing the
+core, the tmux round-trips) are nearly everything, and a saving per row all
+but vanishes under fzf's 20 ms paint floor.  The default, `-F both`, runs the
+scenarios on the large fixture, then those whose work depends on the
+server's size (first-frame, list, preview-S and -W, the footer callbacks)
+on the small one, whose one-pane windows list no pane row for preview-P:
+two tables.  Rank an optimisation by what it does on the small
+one; the large one is what resolves it.
+
+A and B run in pairs whose order alternates, after warm-up pairs.  A run's
+CPU is the user+sys time of its whole process tree, orphans included, plus
+what the tmux server spent meanwhile, plus what the server's jobs cost:
+`run-shell` (`-b` too), `if-shell`, a hook's `run-shell`, `#()` -- a job
+still running when the command ends is waited for (up to 3 s, then killed),
+so work moved into one is counted, not credited as a win.  That last part
+arrives in whole clock ticks (10 ms): right on average, but a job of a few
+ms is undercounted by the medians the verdict uses, so a note gives each
+side's mean job CPU per run whenever there is any.  Not counted: a job's own
+orphans (reparented to init, not the server) and new panes' processes.
 
 | column | |
 |---|---|
 | `dcpu%` | B's CPU shift against A: the Hodges-Lehmann estimate over the per-pair differences, in % of A's median |
 | `noise%` | the half-width of that shift's 99% confidence interval: the smallest change this run could have seen |
 | `verdict` | `REGRESSION` when `dcpu%` > max(2, `noise%`), `FASTER` when it is below minus that, else `ok`; `(n<8)` too few pairs to say; `FAILED` a run exited unexpectedly |
-| `wall` | the same for wall time: `ok`, `SLOWER`, `FASTER` |
+| `wall` | the same for wall time: `ok`, `SLOWER`, `FASTER`; first-frame's is the time to the first row, the one a user waits for |
 | `out` | B's output against A's, paths normalised: `same`, `DIFF` (a UX change: the first differing lines are printed), `vol` (A's own varied, so no comparison) |
-| `n` | measured pairs; `c` when a flagged scenario was measured again on fresh pairs, the flag standing only if both sets agree |
+| `n` | measured pairs; `c` when a flagged scenario was measured again on fresh pairs: then cpu and wall alike, whichever set off the re-measuring, are judged on both sets together, a flag standing only if the second set on its own points the same way |
 
-It exits 0 when there is no CPU regression and every output is the same, 3 on
-a `REGRESSION`, 4 when there is none but an output differs, 1 when the bench
-itself failed and 2 on a usage error.  (`make` exits 2 whenever a command
-fails, naming its status in `Error N`; `sh dev/run.sh perfbench REF ARGS...`
-exits with the status itself, which is what a script should run.)  An `ok`
-only says that no effect larger than `noise%` was there: A/A runs on this
-4-CPU VPS, otherwise idle, put it at 3.7-6% for every scenario at the
-default budget (30 to 40 pairs), 9% for `hint` (a 1.6 ms snippet), and at
-8-14% with `-n 10`, once 25% (`footer`).  A line `noisy:`
-names the scenarios where it was over 10%; re-run those with more pairs
-(`ARGS='-n 40 -s footer'`).
+Its last line names everything it found, and its exit status is the first
+that applies: 1 when the bench itself failed, 3 on a CPU `REGRESSION`, 5
+when there is none but a wall time is `SLOWER` (`SLOWER: first-frame`: the
+first row came later, CPU or not -- a wait, a lost overlap), 4 when there is
+neither but an output differs, 0 when there is none of these; 2 on a usage
+error.  With `-F both`, the worse of the two fixtures', in that order.
+(`make` exits 2 whenever a command fails, naming its status in `Error N`;
+`sh dev/run.sh perfbench REF ARGS...` exits with the status itself, which
+is what a script should run.)
+
+An `ok` only says that no effect larger than `noise%` was there, and that
+floor depends on the pairs measured.  A/A runs on this 4-CPU VPS put it at
+about 3-7% for every scenario at the default budget (30 to 40 pairs), idle
+or at a host load of 4 alike (`hint`, a 1.6 ms snippet, 9-14%): a 5% change
+-- 1.3 ms injected into a 25 ms preview -- went unflagged there.  **To
+answer a 5% question, run just those scenarios with `-n 100`**
+(`ARGS='-n 100 -s preview-W,preview-S'` caught that change, at a noise of
+2.6-2.8%, in a minute with the re-measuring; a pair of a 30 ms callback
+takes about 0.15 s).  `-n 10` is a smoke check: noise 8-25%, so
+it resolves only effects above about 15%.  A line `noisy:` names the
+scenarios where it was over 10%.
 
 ### uxdiff: does B look different?
 
