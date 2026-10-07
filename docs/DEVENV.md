@@ -129,6 +129,12 @@ ignored, which no container does by default and which found a real bug once
   as it is, so worktrees of one branch never rebuild it for each other.  One
   whose `dev/` differs rebuilds it -- from the cache, in seconds -- and the
   next run from the other rebuilds it back.
+* **`IMUX_LOCK=FILE`** (`make ... LOCK=FILE`) makes runs take turns: the run,
+  and an image build before it, hold an exclusive `flock` on the file
+  throughout, so every run that names the same file waits for the one before
+  it, saying so and naming the run it waits for.  Set it for timing-sensitive
+  runs -- benchmarks, the suites -- from parallel checkouts.  Where there is
+  no `flock(1)` (macOS), the run goes ahead unlocked, and says so.
 
 ## What is in the image
 

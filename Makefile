@@ -20,12 +20,14 @@
 #
 #   PLATFORM=linux/arm64       the Apple Silicon image (emulated off one)
 #   CPUSET=2-3                 pin the container to those CPUs
+#   LOCK=/tmp/imux-perf.lock   take turns with every run naming the same file
 
 # Given on the command line or exported as dev/run.sh's own IMUX_* names.
 PLATFORM ?= $(IMUX_PLATFORM)
 R ?= $(IMUX_RENDERER)
 CPUSET ?= $(IMUX_CPUSET)
-RUN = IMUX_PLATFORM='$(PLATFORM)' IMUX_RENDERER='$(R)' IMUX_CPUSET='$(CPUSET)' sh dev/run.sh
+LOCK ?= $(IMUX_LOCK)
+RUN = IMUX_PLATFORM='$(PLATFORM)' IMUX_RENDERER='$(R)' IMUX_CPUSET='$(CPUSET)' IMUX_LOCK='$(LOCK)' sh dev/run.sh
 
 .PHONY: help test smoke ci ci-sigpipe versions lint check-macos msrv bench watch shell image pin clean clean-volumes
 

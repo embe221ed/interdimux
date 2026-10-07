@@ -32,6 +32,12 @@
 #   IMUX_CPUSET    pin the container to these CPUs (docker --cpuset-cpus).
 #                  There is deliberately no --cpus: CFS throttling stalls the
 #                  tmux server mid-format and trips its 100 ms budget.
+#   IMUX_LOCK      a file: the run (and an image build before it) holds an
+#                  exclusive flock(1) on it throughout, so runs that name the
+#                  same file -- from several checkouts at once -- take turns
+#                  instead of overlapping.  For timing-sensitive runs
+#                  (benchmarks, the suites).  Where there is no flock
+#                  (macOS), the run goes ahead unlocked and says so.
 
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -126,6 +132,23 @@ build() {
   done < "$VERSIONS"
   docker build "$plat" --label "imux.src=$sum" -f "$ROOT/dev/Dockerfile" -t "$IMAGE" "$@" "$ROOT"
 }
+
+# IMUX_LOCK: fd 9 holds the lock, and `exec docker run` below inherits it, so it
+# is released when the run ends, however it ends.
+if [ -n "${IMUX_LOCK:-}" ]; then
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$IMUX_LOCK"
+    if ! flock -n 9; then
+      echo "dev/run.sh: waiting for the lock $IMUX_LOCK, held by: $(cat "$IMUX_LOCK.holder" 2>/dev/null || echo '?')" >&2
+      t0=$(date +%s)
+      flock 9 || die "cannot lock $IMUX_LOCK"
+      echo "dev/run.sh: got the lock after $(( $(date +%s) - t0 )) s" >&2
+    fi
+    printf '%s: %s (pid %s, since %s)\n' "$ROOT" "$*" "$$" "$(date '+%Y-%m-%d %H:%M:%S')" > "$IMUX_LOCK.holder" 2>/dev/null || true
+  else
+    echo "dev/run.sh: IMUX_LOCK is set but there is no flock(1) here: running without the lock" >&2
+  fi
+fi
 
 [ "$1" = image ] && { build; exit 0; }
 
