@@ -6,11 +6,13 @@
 #
 # Proves (or disproves) that worktree B is not slower than worktree A.  Both are
 # run against ONE fixture built once per invocation, interleaved, and compared
-# by the shift of per-pair differences.  Exit status: 0 = no CPU regression and
-# identical outputs, 3 = at least one scenario REGRESSION, 4 = no regression but
-# some output differs between A and B (a UX change -- intended or not), 1 = the
-# bench itself failed (bad worktree, fixture, or a run that exited unexpectedly),
-# 2 = usage.
+# by the shift of per-pair differences.  Exit status, the first that applies:
+# 1 = the bench itself failed (bad worktree, fixture, or a run that exited
+# unexpectedly), 3 = at least one scenario's CPU REGRESSION, 5 = no CPU
+# regression but at least one scenario's wall time is SLOWER (first-frame's is
+# the time to the first row, the one a user waits for), 4 = neither, but some
+# output differs between A and B (a UX change -- intended or not), 0 = none of
+# these: no CPU regression, no slower wall time, identical outputs.  2 = usage.
 #
 # Options
 #   -n N        measured pairs per scenario (default 30; each pair is one A and
@@ -93,11 +95,12 @@
 #                    to say; FAILED = a run exited unexpectedly or no row reached
 #                    fzf (see the notes).  A flagged scenario (cpu or wall) is
 #                    measured AGAIN on a fresh set of pairs; the row then shows
-#                    both sets together (n marked "c"), and the flag stands only
-#                    if that combined result still exceeds the threshold AND the
-#                    second set on its own points the same way.  One noisy
-#                    stretch on a shared machine can push a single set past its
-#                    interval; it rarely does that to two.
+#                    both sets together (n marked "c"), and EACH metric's flag,
+#                    cpu and wall alike (whichever set off the re-measuring),
+#                    stands only if that combined result exceeds the threshold
+#                    AND the second set on its own points the same way.  One
+#                    noisy stretch on a shared machine can push a single set
+#                    past its interval; it rarely does that to two.
 #   A wall / B wall, dwall%, wall   the same for wall time (wall: ok/SLOWER/FASTER)
 #   IQR%             interquartile range of each side's cpu, % of its median
 #   out              B's output vs A's, worktree paths normalised: same / DIFF /
@@ -1202,7 +1205,7 @@ done
 build_scenarios
 
 say "running ${#SCENARIOS[@]} scenario(s): $WARM warm-up pair(s), then up to $N_PAIRS pairs${BUDGET:+ (budget ${BUDGET}s each)}"
-REGRESSED=() DIFFED=() ERRORED=()
+REGRESSED=() SLOWED=() DIFFED=() ERRORED=()
 progress() { # scenario seconds [label]
   local _ca _cb _dc _nz _out _n _v _wv
   IFS='|' read -r _ _ca _cb _dc _nz _ _ _ _ _ _out _n _v _wv <<< "${R_LINE[$1]}"
@@ -1230,13 +1233,15 @@ for scn in "${SCENARIOS[@]}"; do
     IFS='|' read -r _ _ _ _d1 _z1 _ _ _w1 _wz1 _ _ _ _v1 _wv1 <<< "${R_STAGE1[$scn]}"
     IFS='|' read -r _ _ _ _d2 _z2 _ _ _w2 _wz2 _ _ _ _v2 _wv2 <<< "$stage2"
     IFS='|' read -r -a _f <<< "${R_LINE[$scn]}"
+    # cpu and wall alike, whichever of them set off the re-measuring: the
+    # combined verdict, if the second set on its own points the same way
     case "${_f[12]}" in
-      REGRESSION) [ "$_v1" = REGRESSION ] && [[ "$_d2" == +* ]] && [ "$_d2" != +0.0 ] || _f[12]=ok ;;
-      FASTER)     [ "$_v1" = FASTER ] && [[ "$_d2" == -* ]] || _f[12]=ok ;;
+      REGRESSION) [[ "$_d2" == +* ]] && [ "$_d2" != +0.0 ] || _f[12]=ok ;;
+      FASTER)     [[ "$_d2" == -* ]] && [ "$_d2" != -0.0 ] || _f[12]=ok ;;
     esac
     case "${_f[13]}" in
-      SLOWER) [ "$_wv1" = SLOWER ] && [[ "$_w2" == +* ]] && [ "$_w2" != +0.0 ] || _f[13]=ok ;;
-      FASTER) [ "$_wv1" = FASTER ] && [[ "$_w2" == -* ]] || _f[13]=ok ;;
+      SLOWER) [[ "$_w2" == +* ]] && [ "$_w2" != +0.0 ] || _f[13]=ok ;;
+      FASTER) [[ "$_w2" == -* ]] && [ "$_w2" != -0.0 ] || _f[13]=ok ;;
     esac
     _f[11]="${_f[11]}c"
     R_LINE[$scn]=$(IFS='|'; printf '%s' "${_f[*]}")
@@ -1247,6 +1252,7 @@ for scn in "${SCENARIOS[@]}"; do
     *"|REGRESSION|"*) REGRESSED+=("$scn") ;;
     *"|FAILED|"*) ERRORED+=("$scn") ;;
   esac
+  case "${R_LINE[$scn]}" in *"|SLOWER") SLOWED+=("$scn") ;; esac
   case "${R_LINE[$scn]}" in *"|DIFF|"*) DIFFED+=("$scn") ;; esac
 done
 T_END=$(date +%s)
@@ -1307,14 +1313,20 @@ for scn in ${DIFFED[@]+"${DIFFED[@]}"}; do
   echo "output DIFF in $scn (A vs B, first lines that differ):"
   diff <(strip_ansi "$WORK/out/${key}_A.first") <(strip_ansi "$WORK/out/${key}_B.first") | head -8 | sed 's/^/    /'
 done
-if [ "${#ERRORED[@]}" -gt 0 ]; then
-  echo "FAILED: ${ERRORED[*]} (see the notes)"; exit 1
+# One line for everything found; the exit status is the first that applies:
+# failed 1, CPU regression 3, slower wall time 5, output differs 4.
+PARTS=() RC=0
+[ "${#DIFFED[@]}" = 0 ] || RC=4
+[ "${#SLOWED[@]}" = 0 ] || RC=5
+[ "${#REGRESSED[@]}" = 0 ] || RC=3
+[ "${#ERRORED[@]}" = 0 ] || RC=1
+[ "${#ERRORED[@]}" = 0 ] || PARTS+=("FAILED: ${ERRORED[*]} (see the notes)")
+[ "${#REGRESSED[@]}" = 0 ] || PARTS+=("REGRESSION: ${REGRESSED[*]}")
+[ "${#SLOWED[@]}" = 0 ] || PARTS+=("SLOWER: ${SLOWED[*]} (wall time)")
+[ "${#DIFFED[@]}" = 0 ] || PARTS+=("output differs: ${DIFFED[*]}")
+if [ "$RC" = 0 ]; then
+  echo "no CPU regression, no slower wall time, outputs identical"
+else
+  _line=$(printf '%s; ' "${PARTS[@]}"); echo "${_line%; }"
 fi
-if [ "${#REGRESSED[@]}" -gt 0 ]; then
-  echo "REGRESSION: ${REGRESSED[*]}"; exit 3
-fi
-if [ "${#DIFFED[@]}" -gt 0 ]; then
-  echo "no CPU regression, but output differs: ${DIFFED[*]}"; exit 4
-fi
-echo "no CPU regression, outputs identical"
-exit 0
+exit "$RC"
