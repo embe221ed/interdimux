@@ -44,10 +44,15 @@
 # printed).  See docs/DEVENV.md.
 #
 # Requirements: bash >= 5.0, tmux (the first on PATH, or $UXDIFF_TMUX), fzf,
-# perl, git, setsid, timeout, pgrep/pkill; Linux (/proc).  fd and zoxide are
-# used when present.  The fixture's PATH starts with links to the tmux, fzf and
-# bash this shell found, so the servers, the popups and the plugin all run
-# those.  Nothing here reads the caller's terminal: it runs without one.
+# perl, git, setsid, timeout, pgrep/pkill; Linux (/proc); zoxide
+# ($IMUX_PERF_ZOXIDE, else the first on PATH).  fd is used when present, and
+# fdfind or find otherwise, as the plugin chooses.  The fixture's PATH starts
+# with links to the tmux, fzf, bash and zoxide this shell found, so the
+# servers, the popups and the plugin all run those.  Without a zoxide no
+# zoxide row is ever drawn, so a change to them could not show: the run says
+# so in a WARNING (in summary.txt too), and with IMUX_PERF_STRICT=1
+# (dev/cmd.sh sets it; the dev image has one, off the PATH) refuses to start.
+# Nothing here reads the caller's terminal: it runs without one.
 #
 #   -q        quick: text scenarios only (no popups)
 #   -r N      re-run a screen scenario that differs up to N times (default 2);
@@ -114,6 +119,12 @@ command -v perl >/dev/null 2>&1 || die "perl is needed (fixture processes, norma
 for _t in git setsid timeout pgrep pkill; do
   command -v "$_t" >/dev/null 2>&1 || die "$_t is needed"
 done
+_zo=${IMUX_PERF_ZOXIDE:-$(command -v zoxide 2>/dev/null)}
+ZOXIDE_WARN=""
+if [ -z "$_zo" ] || [ ! -x "$_zo" ]; then
+  [ "${IMUX_PERF_STRICT:-0}" != 1 ] || die "no zoxide (${IMUX_PERF_ZOXIDE:-none on PATH}), and IMUX_PERF_STRICT=1 wants one: set IMUX_PERF_ZOXIDE"
+  ZOXIDE_WARN="uxdiff: WARNING: no zoxide (${IMUX_PERF_ZOXIDE:-none on PATH}; IMUX_PERF_ZOXIDE names one): no scenario drew a zoxide row"
+fi
 
 mkdir -p "$SCRATCH_ROOT" || die "cannot create $SCRATCH_ROOT"
 if [ $# -eq 3 ]; then
@@ -306,6 +317,7 @@ commit_of() {
   printf 'uxdiff: A = %s  (%s)\n' "$WT_A" "$(commit_of "$WT_A")"
   printf 'uxdiff: B = %s  (%s)\n' "$WT_B" "$(commit_of "$WT_B")"
   printf 'uxdiff: out = %s\n' "$OUT"
+  [ -z "$ZOXIDE_WARN" ] || printf '%s\n' "$ZOXIDE_WARN"
   if [ -n "${IMUX_DEV_OTHERS:-}" ]; then
     printf 'uxdiff: WARNING: other dev containers were up when this run started (screens may settle late):\n'
     printf '%s\n' "$IMUX_DEV_OTHERS" | tr ';' '\n' | sed '/^ *$/d; s/^ */    /'
@@ -338,6 +350,7 @@ ELAPSED=$(perl -e 'printf "%.1f", $ARGV[0] - $ARGV[1]' "$EPOCHREALTIME" "$TSTART
   [ "${N_TIMEOUTS:-0}" -gt 0 ] && printf ', %d screen settle timeouts' "$N_TIMEOUTS"
   printf ' -- %ss%s\n' "$ELAPSED" "$([ "$QUICK" = 1 ] && echo ' (quick: text only)')"
   [ "$N_DIFF" -gt 0 ] && printf 'uxdiff: diffs under %s\n' "$OUT/diff"
+  [ -z "$ZOXIDE_WARN" ] || printf '%s\n' "$ZOXIDE_WARN"
 } | tee -a "$OUT/summary.txt"
 
 if [ "$N_DIFF" = 0 ] && [ "$N_SKIP" = 0 ]; then exit 0; fi

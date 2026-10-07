@@ -242,11 +242,12 @@ perf_ab() {  # perfbench|uxdiff REF [ARGS...]
   [ -z "$(git -C /work status --porcelain 2>/dev/null)" ] || b+=", with uncommitted changes"
   printf 'A = %s: %s, in %s\n' "$ref" "$(git -C /work log -1 --format='%h %s' "$ref" -- | cut -c1-72)" "$a"
   printf 'B = this checkout (%s), in /work\n' "$b"
+  # the image has everything the harness can use: a missing zoxide is a fault
   if [ "$mode" = perfbench ]; then
-    bash dev/perf/bench.sh "$@" "$a" /work || rc=$?
+    IMUX_PERF_STRICT=1 bash dev/perf/bench.sh "$@" "$a" /work || rc=$?
   else
     rm -rf "$out"; mkdir -p "${out%/*}"
-    bash dev/perf/uxdiff.sh "$@" "$a" /work "$out" || rc=$?
+    IMUX_PERF_STRICT=1 bash dev/perf/uxdiff.sh "$@" "$a" /work "$out" || rc=$?
     [ "$rc" != 1 ] || show_diffs "$out"
   fi
   rm -rf "$a"

@@ -77,9 +77,11 @@ bump A must not keep the old compiler's core) and kept in the work volume
 (`/work/rust/target/perf-ref/`).  This checkout's core is built as for `make
 test`; B's header says "with uncommitted changes" when `git status` lists
 anything, untracked files included.  Then `dev/perf/bench.sh ARGS <REF's
-tree> /work` runs (or `uxdiff.sh`).  Both scripts document every scenario
-and option in their headers, and run as well outside the image on any two
-built trees, on Linux.
+tree> /work` runs (or `uxdiff.sh`), with `IMUX_PERF_STRICT=1`: the image
+has everything they use, so a missing zoxide fails them instead of quietly
+measuring a picker without it.  Both scripts document every scenario and
+option in their headers, and run as well outside the image on any two built
+trees, on Linux (a WARNING says when there is no zoxide).
 
 ### perfbench: is B slower than A?
 
@@ -115,7 +117,9 @@ names the scenarios where it was over 10%; re-run those with more pairs
 ### uxdiff: does B look different?
 
 It renders one deterministic fixture through A and through B and compares
-what a user would see, byte for byte, colours included.  The text scenarios
+what a user would see, byte for byte, colours included.  The fixture has a
+zoxide database, so the directory picker's zoxide rows are drawn (and
+compared) too.  The text scenarios
 run the script's entry points: `--list` on both renderers at five widths, the
 preview of every row, the fzf callbacks, the directory picker, `--doctor`,
 the effect of `--bind-keys`, and more.  The screen scenarios drive real fzf

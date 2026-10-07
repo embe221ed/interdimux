@@ -131,12 +131,17 @@
 #
 # Requirements: bash >= 4.4, a C compiler (cc), tmux (the first on PATH, or
 # $IMUX_BENCH_TMUX), fzf (only for its --version string), git, perl, setsid;
-# fd or find; zoxide is used when present; Linux (/proc, a child subreaper,
-# signalfd).  The dev image has all of it (dev/Dockerfile; there is no zoxide
-# and no `fd` in it, so the fixture has no zoxide db and the plugin walks with
-# find).  The fixture's PATH starts with links to the tmux and bash this shell
-# found, so the server, the panes and the plugin all run those two.  Both
-# worktrees need rust/target/release/imux built and newer than rust/src
+# fd, fdfind or find (the plugin's own choice, in that order); zoxide
+# ($IMUX_PERF_ZOXIDE, else the first on PATH); Linux (/proc, a child
+# subreaper, signalfd).  The fixture's PATH starts with links to the tmux,
+# bash and zoxide this shell found, so the server, the panes and the plugin
+# all run those.  Without a zoxide the picker has no zoxide rows and costs
+# nothing for it: the run says so in a WARNING, and with IMUX_PERF_STRICT=1
+# (dev/cmd.sh sets it) refuses to start.  The dev image has all of it: zoxide
+# at /opt/zoxide/zoxide, off the PATH (the suites, as on CI, have none), and
+# fd as Debian's fdfind, which the plugin walks with.  The VPS host has
+# zoxide and fd: its dirs-* numbers are not comparable with the image's.
+# Both worktrees need rust/target/release/imux built and newer than rust/src
 # (--allow-stale skips the age check).
 #
 # Safety: never touches the user's tmux server (every tmux call is
@@ -257,6 +262,18 @@ command -v setsid >/dev/null 2>&1 || die "setsid (util-linux) is needed for the 
 command -v cc >/dev/null 2>&1 || die "a C compiler (cc) is needed for the runner"
 command -v git >/dev/null 2>&1 || die "git is needed for the fixture"
 command -v perl >/dev/null 2>&1 || die "perl is needed for the fixture"
+# zoxide: the ctrl-o picker's frecent rows and their cost.  Without one the
+# dirs-* scenarios measure a picker that a zoxide user never sees.
+ZOXIDE_BIN=${IMUX_PERF_ZOXIDE:-$(command -v zoxide 2>/dev/null)}
+ZOXIDE_WARN=""
+if [ -n "$ZOXIDE_BIN" ] && [ -x "$ZOXIDE_BIN" ]; then
+  ZOXIDE_BIN=$(readlink -f "$ZOXIDE_BIN")
+else
+  ZOXIDE_WARN="WARNING: no zoxide (${IMUX_PERF_ZOXIDE:-none on PATH}; IMUX_PERF_ZOXIDE names one): the dirs-* and describe-create scenarios ran without zoxide's rows and its exec"
+  ZOXIDE_BIN=""
+  [ "${IMUX_PERF_STRICT:-0}" != 1 ] || die "no zoxide (${IMUX_PERF_ZOXIDE:-none on PATH}), and IMUX_PERF_STRICT=1 wants one: set IMUX_PERF_ZOXIDE"
+  say "bench: $ZOXIDE_WARN"
+fi
 REAL_FZF=$(command -v fzf 2>/dev/null) || REAL_FZF=""
 FZF_VERSION_STR="0.74.3 (bench)"
 [ -n "$REAL_FZF" ] && FZF_VERSION_STR=$("$REAL_FZF" --version 2>/dev/null | head -1)
@@ -454,12 +471,12 @@ build_dirs() {
     done
   done
   mkdir -p "$H/work/sandbox" "$H/work/archive/2025" "$H/Downloads" "$H/.claude/sessions"
-  # tools the panes and the script look up: fd and zoxide live outside /usr/bin here
-  local tool p
-  for tool in fd zoxide; do
-    p=$(command -v "$tool" 2>/dev/null) || continue
-    case "$p" in /usr/bin/*|/bin/*|/usr/local/bin/*) ;; *) ln -s "$p" "$FIX/bin/$tool" ;; esac
-  done
+  # tools the panes and the script look up, where the fixture's PATH would
+  # not find them: fd (in ~/.cargo/bin, say) and zoxide (the dev image's is
+  # off the PATH: $IMUX_PERF_ZOXIDE)
+  local p
+  p=$(command -v fd 2>/dev/null) && case "$p" in /usr/bin/*|/bin/*|/usr/local/bin/*) ;; *) ln -s "$p" "$FIX/bin/fd" ;; esac
+  [ -n "$ZOXIDE_BIN" ] && ln -s "$ZOXIDE_BIN" "$FIX/bin/zoxide"
   # recent dirs: most recent first, two that no longer exist
   {
     printf '%s\n' "$H/src/frontend-monorepo" "$H/src/api-gateway" "$H/work/team-03/svc-03c" \
@@ -467,7 +484,7 @@ build_dirs() {
       "$H/src/blog" "$H/src/dotfiles" "$H/work/sandbox" "$H/old/removed" "$H/src/notes-vault"
   } > "$FIX/data/interdimux/recent_dirs"
   # zoxide: ~50 dirs, some visited more often than others
-  if [ -x "$FIX/bin/zoxide" ] || command -v zoxide >/dev/null 2>&1; then
+  if [ -x "$FIX/bin/zoxide" ]; then
     local z=() n
     for d in "$H"/src/*; do z+=("$d" "$d" "$d"); done
     n=0
@@ -1251,6 +1268,7 @@ if [ -n "${IMUX_DEV_OTHERS:-}" ]; then
   echo "WARNING: other dev containers were up when this run started (results may be noisier):"
   printf '%s\n' "$IMUX_DEV_OTHERS" | tr ';' '\n' | sed '/^ *$/d; s/^ */    /'
 fi
+[ -z "$ZOXIDE_WARN" ] || echo "$ZOXIDE_WARN"
 for scn in "${SCENARIOS[@]}"; do
   [ -n "${SCN_NOTE[$scn]:-}" ] && printf '%s' "${SCN_NOTE[$scn]}" | awk -v s="$scn" 'NF && !seen[$0]++ { print "note " s ": " $0 }'
 done

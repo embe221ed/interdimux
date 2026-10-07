@@ -24,7 +24,11 @@ FXENV=()
 
 fx_env_init() {
   local fzfp fdp zop bashp
-  fzfp=$(command -v fzf) fdp=$(command -v fd 2>/dev/null || true) zop=$(command -v zoxide 2>/dev/null || true)
+  fzfp=$(command -v fzf) fdp=$(command -v fd 2>/dev/null || true)
+  # the dev image's zoxide is off the PATH (IMUX_PERF_ZOXIDE); uxdiff.sh has
+  # warned, or refused, when there is none
+  zop=${IMUX_PERF_ZOXIDE:-$(command -v zoxide 2>/dev/null || true)}
+  [ -x "$zop" ] || zop=""
   bashp=$(command -v bash)
   mkdir -p "$RUN/toolbin" "$RUN/fakebin" "$RUN/agents/approve" "$RUN/agents/busy" \
            "$RUN/tmp" "$RUN/xdg-runtime" "$FH"
