@@ -3,7 +3,7 @@
  *
  * One multi-call binary, compiled by bench.sh into its work dir:
  *
- *   benchrun run [-t COLSxROWS] [-p] [-i IN] [-o OUT] [-e ERR] [-s PID]
+ *   benchrun run [-t COLSxROWS] [-p] [-i IN] [-o OUT] [-e ERR] [-s PID [-P]]
  *                [-g GRACE_MS] [-r RESULT] -- CMD ARGS...
  *       Runs CMD once and appends ONE line to RESULT (default stdout):
  *         wall_us cpu_us srv_us status start_rt_us orphans killed jobs
@@ -24,7 +24,11 @@
  *       killed   of those, how many outlived GRACE_MS and were SIGKILLed
  *       jobs     the server's jobs (run-shell, if-shell, a hook's run-shell,
  *                #()) still running when the command and its orphans were
- *                done: waited for, like the orphans, up to GRACE_MS
+ *                done: waited for, like the orphans, up to GRACE_MS.  With
+ *                -P, every process the server started meanwhile counts as
+ *                one, a popup's too (it has a pty, so it is no job
+ *                otherwise): a key whose binding opens a popup is measured
+ *                to the popup's end
  *       jobs_killed  of those, how many outlived it and were SIGKILLed
  *       jobs_us  what the server's jobs cost meanwhile: the growth of its
  *                cutime+cstime (/proc/PID/stat), which a job's CPU joins when
@@ -32,6 +36,11 @@
  *                ticks (10 ms), so one run's figure is a multiple of 10 ms,
  *                right on average over many runs.  A job's own orphans
  *                (reparented to init, not the server) escape it.
+ *     -P is for a command that presses a key: the processes the server
+ *     already had (its panes) are left out, and every one it starts is
+ *     waited for and its CPU counted -- in whole clock ticks, as jobs_us.
+ *     At least one is waited for (up to GRACE_MS): the binding runs after
+ *     the client that sent the key is gone, so its popup may come later.
  *     -t gives the command a fresh pty of that size as its CONTROLLING
  *     terminal (a popup has one, and `stty size </dev/tty` reads it); -p also
  *     makes the pty its stdin/stdout/stderr, like a display-popup command, and
@@ -147,9 +156,10 @@ static int64_t children_us(pid_t pid) {
 
 /* The tmux server's jobs: its children without a controlling terminal.  A
  * pane's process has its pty, and a popup's too; run-shell, if-shell, #() and
- * the hooks' run-shell get a socketpair.  Zombies count: their CPU joins the
- * server's cutime only once it reaps them. */
-static int server_jobs(pid_t srv, pid_t *out, int max) {
+ * the hooks' run-shell get a socketpair.  With ALL, every child: popups and
+ * panes too.  Zombies count: their CPU joins the server's cutime only once it
+ * reaps them. */
+static int server_jobs(pid_t srv, pid_t *out, int max, int all) {
   DIR *d = opendir("/proc");
   if (!d) return 0;
   int n = 0;
@@ -160,7 +170,7 @@ static int server_jobs(pid_t srv, pid_t *out, int max) {
     pid_t pid = (pid_t)atoi(e->d_name);
     /* f[0] ppid, f[1] pgrp, f[2] session, f[3] tty_nr */
     if (stat_fields(pid, f, 5, NULL) < 4) continue;
-    if (f[0] == srv && f[3] == 0) out[n++] = pid;
+    if (f[0] == srv && (all || f[3] == 0)) out[n++] = pid;
   }
   closedir(d);
   return n;
@@ -169,23 +179,28 @@ static int server_jobs(pid_t srv, pid_t *out, int max) {
 /* Wait until the server has no job left but those in BASE (NBASE of them),
  * up to DEADLINE (CLOCK_MONOTONIC us).  With KILL, then SIGKILL what is left
  * and give the server a second to reap it.  Returns how many it killed;
- * *seen += every job it waited for. */
-static int settle_jobs(pid_t srv, int64_t deadline, const pid_t *base, int nbase, int kill_left, int *seen) {
-  pid_t known[256];
+ * *seen += every job it waited for.  ALL: every child counts (server_jobs).
+ * NEED: one is waited for to appear too (until DEADLINE) before it is waited
+ * for to end -- a key's binding runs only once the client that sent the key
+ * has gone, so the popup it opens may not be there yet. */
+#define MAXJOBS 1024
+static int settle_jobs(pid_t srv, int64_t deadline, const pid_t *base, int nbase, int kill_left, int *seen,
+                       int all, int need) {
+  pid_t known[MAXJOBS];
   int nknown = 0, killed = 0;
   for (;;) {
-    pid_t js[256];
-    int nj = server_jobs(srv, js, 256), left = 0;
+    pid_t js[MAXJOBS];
+    int nj = server_jobs(srv, js, MAXJOBS, all), left = 0;
     for (int k = 0; k < nj; k++) {
       int skip = 0;
       for (int m = 0; m < nbase; m++) if (base[m] == js[k]) skip = 1;
       if (skip) continue;
       js[left++] = js[k];
       for (int m = 0; m < nknown; m++) if (known[m] == js[k]) skip = 1;
-      if (!skip && nknown < 256) known[nknown++] = js[k];
+      if (!skip && nknown < MAXJOBS) known[nknown++] = js[k];
     }
-    if (left == 0) break;
-    if (now_us(CLOCK_MONOTONIC) >= deadline) {
+    if (left == 0 && (!need || nknown > 0 || now_us(CLOCK_MONOTONIC) >= deadline)) break;
+    if (left > 0 && now_us(CLOCK_MONOTONIC) >= deadline) {
       if (!kill_left || killed) break;   /* killed once already: the second is up */
       for (int k = 0; k < left; k++) { kill(js[k], SIGKILL); killed++; }
       deadline = now_us(CLOCK_MONOTONIC) + 1000000;
@@ -252,14 +267,15 @@ static int our_children(pid_t *out, int max) {
 
 static int cmd_run(int argc, char **argv) {
   const char *tty = NULL, *in = NULL, *out = NULL, *err = NULL, *result = NULL;
-  int popup = 0, grace_ms = 3000;
+  int popup = 0, grace_ms = 3000, allkids = 0;
   pid_t srv = 0;
   int i = 0;
   for (; i < argc; i++) {
     if (!strcmp(argv[i], "--")) { i++; break; }
-    if (i + 1 >= argc && strcmp(argv[i], "-p")) { fprintf(stderr, "benchrun: %s needs a value\n", argv[i]); return 2; }
+    if (i + 1 >= argc && strcmp(argv[i], "-p") && strcmp(argv[i], "-P")) { fprintf(stderr, "benchrun: %s needs a value\n", argv[i]); return 2; }
     if (!strcmp(argv[i], "-t")) tty = argv[++i];
     else if (!strcmp(argv[i], "-p")) popup = 1;
+    else if (!strcmp(argv[i], "-P")) allkids = 1;
     else if (!strcmp(argv[i], "-i")) in = argv[++i];
     else if (!strcmp(argv[i], "-o")) out = argv[++i];
     else if (!strcmp(argv[i], "-e")) err = argv[++i];
@@ -305,12 +321,12 @@ static int cmd_run(int argc, char **argv) {
 
   /* A job from before this run (a holder's, say) is given a second to end,
    * so its CPU does not land in this run's figures; one that lives on is
-   * neither waited for nor killed below. */
-  pid_t base[256];
+   * neither waited for nor killed below.  With -P, neither are the panes. */
+  pid_t base[MAXJOBS];
   int nbase = 0;
   if (srv > 0) {
-    settle_jobs(srv, now_us(CLOCK_MONOTONIC) + 1000000, NULL, 0, 0, NULL);
-    nbase = server_jobs(srv, base, 256);
+    settle_jobs(srv, now_us(CLOCK_MONOTONIC) + 1000000, NULL, 0, 0, NULL, 0, 0);
+    nbase = server_jobs(srv, base, MAXJOBS, allkids);
   }
   int64_t srv0 = schedstat_ns(srv), job0 = children_us(srv);
   int64_t rt0 = now_us(CLOCK_REALTIME);
@@ -405,10 +421,11 @@ static int cmd_run(int argc, char **argv) {
     }
   }
   /* the server's jobs the command started and did not wait for (run-shell
-   * -b, a hook's run-shell): the same grace as the orphans */
+   * -b, a hook's run-shell; with -P, a popup): the same grace as the orphans */
   int jobs = 0, jobs_killed = 0;
   if (srv > 0)
-    jobs_killed = settle_jobs(srv, now_us(CLOCK_MONOTONIC) + (int64_t)grace_ms * 1000, base, nbase, 1, &jobs);
+    jobs_killed = settle_jobs(srv, now_us(CLOCK_MONOTONIC) + (int64_t)grace_ms * 1000, base, nbase, 1, &jobs,
+                              allkids, allkids);
   int64_t srv1 = schedstat_ns(srv), job1 = children_us(srv);
   int64_t srv_us = (srv0 >= 0 && srv1 >= 0) ? (srv1 - srv0) / 1000 : 0;
   int64_t jobs_us = (job0 >= 0 && job1 >= job0) ? job1 - job0 : 0;
