@@ -2,7 +2,7 @@
 #
 # bench.sh -- performance A/B harness for interdimux
 #
-#   bench.sh [-n N] [-s scenario,scenario,...] [options] <worktreeA> <worktreeB>
+#   bench.sh [-n N] [-s scenario,scenario,...] [-F large|small|both] [options] <worktreeA> <worktreeB>
 #
 # Proves (or disproves) that worktree B is not slower than worktree A.  Both are
 # run against ONE fixture built once per invocation, interleaved, and compared
@@ -13,6 +13,7 @@
 # the time to the first row, the one a user waits for), 4 = neither, but some
 # output differs between A and B (a UX change -- intended or not), 0 = none of
 # these: no CPU regression, no slower wall time, identical outputs.  2 = usage.
+# With -F both, the worse of the two fixtures' (in that order).
 #
 # Options
 #   -n N        measured pairs per scenario (default 30; each pair is one A and
@@ -20,22 +21,37 @@
 #               also given.
 #   -s LIST     comma-separated scenarios (default: all default ones, below);
 #               "all" = default + extra.
+#   -F SIZE     the fixture's tmux layout (default both; or IMUX_BENCH_FIXTURE):
+#               large  12 sessions / 40 windows / 90 panes (142 rows), where a
+#                      per-row cost shows
+#               small  1 session / 3 windows / 3 panes (7 rows), the size of
+#                      the VPS user's own server, where the fixed costs --
+#                      parsing the script, exec'ing the core, the tmux
+#                      round-trips -- are nearly all of it
+#               both   large with the scenarios asked for, then small with
+#                      those of them whose work depends on the tmux server
+#                      (SIZED below; by default first-frame list preview-S
+#                      preview-W hint footer describe-create, which is also
+#                      -F small's default), each on a fixture of its own, one
+#                      table each
 #   -w W        warm-up pairs per scenario, discarded (default 2)
 #   -b SECS     per-scenario time budget (default 25 when -n is not given):
 #               slow scenarios run fewer pairs, never fewer than 8; and while a
 #               scenario's noise is above 6%, it gets 10 more pairs at a time
 #               (up to 3N) until the budget is spent, so a load burst from
 #               something else on the machine is diluted rather than decisive
-#   -o FILE     also write the result table as TSV to FILE
+#   -o FILE     also write the result table as TSV to FILE (first column: the
+#               fixture)
 #   -K          keep the work dir (fixture files, raw samples, outputs) for
 #               inspection.  The tmux servers and holders are always killed.
 #   -q          no progress lines
 #   --allow-stale   accept a rust/target/release/imux older than its sources
 #   --no-confirm    report first-set verdicts without re-measuring flagged ones
 #   --list      list scenarios and exit
-#   --exec CMD  (debugging) build the fixture, run `bash -c CMD` with BENCH_*
-#               variables exported (BENCH_SOCK, BENCH_FIX, BENCH_POPUP_ENV_A ...),
-#               clean up, exit with CMD's status.  Nothing is measured.
+#   --exec CMD  (debugging) build the fixture (-F large unless -F small), run
+#               `bash -c CMD` with BENCH_* variables exported (BENCH_SOCK,
+#               BENCH_FIX, BENCH_POPUP_ENV_A ...), clean up, exit with CMD's
+#               status.  Nothing is measured.
 #
 # Scenarios (how each one is invoked mirrors the real caller; see build_scenarios)
 #   first-frame   the navigator opening: `bash interdimux.sh` with a popup's
@@ -45,9 +61,12 @@
 #   list          the fzf reload command (^r, ^/, resize, after every action):
 #                 sh -c "bash interdimux.sh --list", Rust renderer
 #   list-bash     the same with INTERDIMUX_USE_RUST=off (the bash renderer)
-#   preview-S     --preview on a session row (ops, 8 windows)
-#   preview-W     --preview on a window row (4 panes)
-#   preview-P     --preview on a pane row (the fake claude agent pane)
+#   preview-S     --preview on a session row (large: ops, 8 windows)
+#   preview-W     --preview on a window row (large: 4 panes; small: the claude
+#                 window)
+#   preview-P     --preview on a pane row (the fake claude agent pane; large
+#                 only: a one-pane window, as all the small fixture's are,
+#                 lists no pane row)
 #   hint          the per-cursor-move footer: the navigator's own `focus` bind
 #                 snippet (read from the fzf argv the navigator built), run by
 #                 sh -c with an empty query -- the inline path, no bash re-exec
@@ -65,6 +84,9 @@
 #                 runtime callback: the navigator inlines the ladders)
 #   scope-prompt  bash interdimux.sh --scope-prompt (the fallback-path ^] prompt)
 #   parse         bash -n interdimux.sh (pure parse cost of the script)
+#  SIZED (the ones -F both also runs on the small fixture): first-frame
+#   first-frame-bash list list-bash preview-S preview-W hint footer
+#   describe-create
 #
 # What is measured, per run
 #   cpu   user+sys of the whole process tree (the command, everything it
@@ -111,10 +133,11 @@
 #
 # The fixture (shared by A and B, rebuilt every invocation, removed after)
 #   * private tmux server `-L imux-bench-$$ -f /dev/null`, default-command
-#     'bash --norc --noprofile -i', 12 sessions / 40 windows / 90 panes (short and
-#     long session names, editors, servers, ssh, logs -- perl processes with a
-#     chosen argv -- and idle bash prompts), plus one attached client (a second
-#     server, imux-bench-$$-outer, hosts it at 200x50, so the popup is 158x35)
+#     'bash --norc --noprofile -i', the -F layout (large: short and long
+#     session names, editors, servers, ssh, logs -- perl processes with a
+#     chosen argv -- and idle bash prompts; small: an editor, a claude pane
+#     and a shell), plus one attached client (a second server,
+#     imux-bench-$$-outer, hosts it at 200x50, so the popup is 158x35)
 #   * HOME, XDG_{CONFIG,DATA,STATE,CACHE}_HOME, XDG_RUNTIME_DIR (0700), TMPDIR
 #     and _ZO_DATA_DIR all inside the work dir; 8 git repos on feature branches
 #     (two dirty), ~/work with 10 teams x 10 svc-* projects, a zoxide db of ~50
@@ -169,11 +192,10 @@
 #   checkout (dev/cmd.sh perfbench: REF is extracted with git archive and gets
 #   its own Rust core, B is the container's copy of the checkout, /work).  See
 #   docs/DEVENV.md.  Directly: bench.sh BASE MINE, two trees with their cores
-#   built.  A full default run takes ~2 minutes in the dev image on a 4-CPU
-#   box (setup ~11 s; 2.5-3 minutes on the host it was written on): give the
-#   command a 10-minute timeout, or run it in the background.
-#   Re-run a single flagged scenario with -s to look closer.  Work dirs go
-#   under $IMUX_BENCH_WORKROOT (default: ${TMPDIR:-/tmp}).
+#   built.  A full default run (-F both) takes about 3 minutes in the dev
+#   image on a 4-CPU box: give the command a 10-minute timeout, or run it in
+#   the background.  Re-run a single flagged scenario with -s to look closer.
+#   Work dirs go under $IMUX_BENCH_WORKROOT (default: ${TMPDIR:-/tmp}).
 #   IMUX_BENCH_SAME_ENV=1 (debugging the harness) gives B the very environments
 #   A recorded.
 #
@@ -211,6 +233,13 @@ BASH_BIN=$(command -v bash 2>/dev/null)
 DEFAULT_SCENARIOS=(first-frame list list-bash preview-S preview-W preview-P hint footer
                    describe-create session-name-for dirs-list dirs-deep dirs-preview doctor)
 EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse)
+# the ones whose work depends on the tmux server's size (-F both runs them on
+# the small fixture too), and the small fixture's default set
+# (preview-P is not one: the small fixture's windows have one pane each, and
+# the navigator lists no pane row for those)
+SIZED_SCENARIOS=(first-frame first-frame-bash list list-bash preview-S preview-W hint footer
+                 describe-create)
+SMALL_DEFAULT=(first-frame list preview-S preview-W hint footer describe-create)
 
 CLIENT_COLS=200 CLIENT_ROWS=50          # the attached client
 POPUP_COLS=158 POPUP_ROWS=35            # 80% x 75% of it, minus the popup border
@@ -218,26 +247,29 @@ PV_NAV_COLS=76 PV_NAV_LEFT=81           # --preview-window right,50%,border-left
 PV_DIRS_COLS=60 PV_DIRS_LEFT=97         # --preview-window right,40%,border-left
 
 N_PAIRS=30 N_SET=0 WARM=2 BUDGET="" OUT_TSV="" KEEP=0 QUIET=0 ALLOW_STALE=0 EXEC_CMD="" CONFIRM=1
-SCN_ARG=""
+SCN_ARG="" FIXTURE=${IMUX_BENCH_FIXTURE:-both}
+PASS=()   # the options a -F both run hands to each of its two runs
 
-usage() { sed -n '3,4p' "$BENCH_SELF" | sed 's/^# \{0,1\}//'; echo "see the header of $BENCH_SELF"; }
+usage() { sed -n '3,5p' "$BENCH_SELF" | sed 's/^# \{0,1\}//'; echo "see the header of $BENCH_SELF"; }
 die() { printf 'bench: %s\n' "$*" >&2; exit 1; }
 say() { [ "$QUIET" = 1 ] || printf '%s\n' "$*" >&2; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -n) N_PAIRS=${2:?}; N_SET=1; shift 2 ;;
+    -n) N_PAIRS=${2:?}; N_SET=1; PASS+=(-n "$2"); shift 2 ;;
     -s) SCN_ARG=${2:?}; shift 2 ;;
-    -w) WARM=${2:?}; shift 2 ;;
-    -b) BUDGET=${2:?}; shift 2 ;;
+    -F) FIXTURE=${2:?}; shift 2 ;;
+    -w) WARM=${2:?}; PASS+=(-w "$2"); shift 2 ;;
+    -b) BUDGET=${2:?}; PASS+=(-b "$2"); shift 2 ;;
     -o) OUT_TSV=${2:?}; shift 2 ;;
-    -K) KEEP=1; shift ;;
-    -q) QUIET=1; shift ;;
-    --allow-stale) ALLOW_STALE=1; shift ;;
-    --no-confirm) CONFIRM=0; shift ;;
+    -K) KEEP=1; PASS+=(-K); shift ;;
+    -q) QUIET=1; PASS+=(-q); shift ;;
+    --allow-stale) ALLOW_STALE=1; PASS+=(--allow-stale); shift ;;
+    --no-confirm) CONFIRM=0; PASS+=(--no-confirm); shift ;;
     --exec) EXEC_CMD=${2:?}; shift 2 ;;
     --list)
-      printf 'default: %s\nextra:   %s\n' "${DEFAULT_SCENARIOS[*]}" "${EXTRA_SCENARIOS[*]}"; exit 0 ;;
+      printf 'default: %s\nextra:   %s\nsized:   %s (-F both: on the small fixture too)\nsmall:   %s (-F small, -F both: its default set)\n' \
+        "${DEFAULT_SCENARIOS[*]}" "${EXTRA_SCENARIOS[*]}" "${SIZED_SCENARIOS[*]}" "${SMALL_DEFAULT[*]}"; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     -*) usage >&2; exit 2 ;;
@@ -245,6 +277,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ $# -eq 2 ] || { usage >&2; exit 2; }
+case $FIXTURE in
+  large|small|both) ;;
+  *) printf 'bench: -F wants large, small or both, not %s\n' "$FIXTURE" >&2; exit 2 ;;
+esac
+[ -z "$EXEC_CMD" ] || [ "$FIXTURE" != both ] || FIXTURE=large
 [[ "$N_PAIRS" =~ ^[1-9][0-9]*$ ]] || die "-n wants a positive integer"
 [[ "$WARM" =~ ^[0-9]+$ ]] || die "-w wants a non-negative integer"
 if [ -z "$BUDGET" ] && [ "$N_SET" = 0 ]; then BUDGET=25; fi
@@ -283,7 +320,7 @@ else
   ZOXIDE_WARN="WARNING: no zoxide (${IMUX_PERF_ZOXIDE:-none on PATH}; IMUX_PERF_ZOXIDE names one): the dirs-* and describe-create scenarios ran without zoxide's rows and its exec"
   ZOXIDE_BIN=""
   [ "${IMUX_PERF_STRICT:-0}" != 1 ] || die "no zoxide (${IMUX_PERF_ZOXIDE:-none on PATH}), and IMUX_PERF_STRICT=1 wants one: set IMUX_PERF_ZOXIDE"
-  say "bench: $ZOXIDE_WARN"
+  [ "$FIXTURE" = both ] || say "bench: $ZOXIDE_WARN"
 fi
 REAL_FZF=$(command -v fzf 2>/dev/null) || REAL_FZF=""
 FZF_VERSION_STR="0.74.3 (bench)"
@@ -299,7 +336,8 @@ fi
 
 # --- scenarios -----------------------------------------------------------------
 SCENARIOS=()
-if [ -z "$SCN_ARG" ]; then SCENARIOS=("${DEFAULT_SCENARIOS[@]}")
+if [ -z "$SCN_ARG" ] && [ "$FIXTURE" = small ]; then SCENARIOS=("${SMALL_DEFAULT[@]}")
+elif [ -z "$SCN_ARG" ]; then SCENARIOS=("${DEFAULT_SCENARIOS[@]}")
 else
   IFS=, read -r -a _req <<< "$SCN_ARG"
   for s in "${_req[@]}"; do
@@ -312,6 +350,50 @@ else
   done
 fi
 [ "${#SCENARIOS[@]}" -gt 0 ] || die "no scenarios"
+if [ "$FIXTURE" = small ]; then
+  case " ${SCENARIOS[*]} " in
+    *" preview-P "*) die "preview-P needs a pane row, and the small fixture has none (one pane per window)" ;;
+  esac
+fi
+
+# --- -F both: the large fixture, then the small one, each a run of its own -----
+if [ "$FIXTURE" = both ]; then
+  SMALL=()
+  if [ -z "$SCN_ARG" ]; then SMALL=("${SMALL_DEFAULT[@]}")
+  else
+    for s in "${SCENARIOS[@]}"; do
+      case " ${SIZED_SCENARIOS[*]} " in *" $s "*) SMALL+=("$s") ;; esac
+    done
+  fi
+  BOTH_TMP=$(mktemp -d "${TMPDIR:-/tmp}/imux-bench-both.XXXXXX") || die "mktemp failed"
+  trap 'rm -rf "$BOTH_TMP"' EXIT
+  trap 'exit 130' INT TERM HUP
+  # the exit status that wins: failed, regression, slower, diff, ok
+  rank() { case $1 in 0) echo 1 ;; 4) echo 2 ;; 5) echo 3 ;; 3) echo 4 ;; 1) echo 5 ;; *) echo 6 ;; esac; }
+  RC=0 SUMMARY=()
+  for size in large small; do
+    if [ "$size" = large ]; then list=("${SCENARIOS[@]}"); else list=("${SMALL[@]}"); fi
+    if [ "${#list[@]}" = 0 ]; then
+      SUMMARY+=("small: not run (none of the scenarios asked for depends on the tmux server's size)")
+      continue
+    fi
+    printf '=== the %s fixture: %s ===\n' "$size" "${list[*]}"
+    rc=0
+    bash "$BENCH_SELF" ${PASS[@]+"${PASS[@]}"} -F "$size" -s "$(IFS=,; printf '%s' "${list[*]}")" \
+      ${OUT_TSV:+-o "$BOTH_TMP/$size.tsv"} -- "$WT_A" "$WT_B" | tee "$BOTH_TMP/$size.out"
+    rc=${PIPESTATUS[0]}
+    SUMMARY+=("$size: $(grep -v '^ *$' "$BOTH_TMP/$size.out" | tail -n 1) (exit $rc)")
+    [ "$(rank "$rc")" -le "$(rank "$RC")" ] || RC=$rc
+    [ "$rc" = 130 ] && break
+    echo
+  done
+  if [ -n "$OUT_TSV" ]; then
+    { cat "$BOTH_TMP/large.tsv" 2>/dev/null; tail -n +2 "$BOTH_TMP/small.tsv" 2>/dev/null; } > "$OUT_TSV"
+  fi
+  echo "=== both fixtures (exit $RC) ==="
+  printf '%s\n' "${SUMMARY[@]}"
+  exit "$RC"
+fi
 
 # --- work dir, cleanup -------------------------------------------------------------
 BENCH_ID="imux-bench-$$"
@@ -602,7 +684,7 @@ kind_cmd() {
 }
 
 # session|dir|window;window...   window = name[@dir]=kind,kind,...
-LAYOUT=(
+LAYOUT_LARGE=(
   "api-gateway-production-eu-west-1|src/api-gateway|editor=ed,shl;server=srv,tail,sh,sh;tests=shl,sh;git=shl,sh"
   "frontend-monorepo|src/frontend-monorepo|editor=ed,shl,sh,sh;dev=srv,shl,sh;storybook=srv;tests=shl,sh;shell=shl,sh"
   "dotfiles|src/dotfiles|main=ed,shl,sh;sync=shl,sh"
@@ -616,7 +698,26 @@ LAYOUT=(
   "a|.|main=sh,sh"
   "ops|work|w0=shl,sh,sh,sh;w1=sh,shl,sh;w2=top;w3=ssh,sh;w4=sh,sh;w5@work/sandbox=shl,sh;w6=tail,sh;w7=sh,sh,sh"
 )
+# The VPS user's own server, as measured: one session, three windows of one
+# pane each -- an editor, an agent, a shell.
+LAYOUT_SMALL=(
+  "frontend-monorepo|src/frontend-monorepo|editor=ed;claude=claude;shell=shl"
+)
 CUR_SESSION=frontend-monorepo
+# Per fixture: the rows the scenarios use (S_SPEC a session, W_SPEC a window,
+# P_SPEC the claude pane -- the small fixture has no pane rows, and its
+# W_SPEC is the claude window), the claude pane (CLAUDE_T: it gets the
+# registry record), the pane with a @pane_status, and the typed query's match
+# count.
+if [ "$FIXTURE" = small ]; then
+  LAYOUT=("${LAYOUT_SMALL[@]}")
+  S_SPEC="S:frontend-monorepo" W_SPEC="W:frontend-monorepo:1" P_SPEC=""
+  CLAUDE_T='=frontend-monorepo:=1.0' STATUS_T='=frontend-monorepo:=2.0' TYPED_Q=mono TYPED_MC=7
+else
+  LAYOUT=("${LAYOUT_LARGE[@]}")
+  S_SPEC="S:ops" W_SPEC="W:api-gateway-production-eu-west-1:1" P_SPEC="P:agents:0:0"
+  CLAUDE_T='=agents:=0.0' STATUS_T='=ops:=3.1' TYPED_Q=api TYPED_MC=15
+fi
 EXPECT_CMDS=()
 EXPECT_TITLES=0
 
@@ -665,7 +766,7 @@ start_server() {
     tm "${args[@]}" display-message -p '' >/dev/null || die "the fixture session $sess did not start"
   done
   tm kill-session -t =__boot
-  tm set -p -t '=ops:=3.1' @pane_status running >/dev/null || die "cannot set a pane option"
+  tm set -p -t "$STATUS_T" @pane_status running >/dev/null || die "cannot set a pane option"
   tm set -g @interdimux-bench "$BENCH_ID"
 }
 
@@ -717,11 +818,13 @@ attach_client() {
 
 claude_record() {
   local pid pane st
-  pid=$(tm display-message -p -t '=agents:=0.0' '#{pane_pid}')
-  pane=$(tm display-message -p -t '=agents:=0.0' '#{pane_id}')
+  pid=$(tm display-message -p -t "$CLAUDE_T" '#{pane_pid}')
+  pane=$(tm display-message -p -t "$CLAUDE_T" '#{pane_id}')
   read -r -a st < "/proc/$pid/stat"
-  printf '{"pid":%s,"sessionId":"bench","cwd":"%s","startedAt":1,"procStart":"%s","version":"2.1.281","kind":"interactive","entrypoint":"cli","tmux":"agents:@1.%s","name":"n","status":"waiting","waitingFor":"permission prompt","statusUpdatedAt":%s}' \
-    "$pid" "$H/src/api-gateway" "${st[21]}" "$pane" "$(( (NOW_PIN - 300) * 1000 ))" > "$H/.claude/sessions/$pid.json"
+  printf '{"pid":%s,"sessionId":"bench","cwd":"%s","startedAt":1,"procStart":"%s","version":"2.1.281","kind":"interactive","entrypoint":"cli","tmux":"%s:@1.%s","name":"n","status":"waiting","waitingFor":"permission prompt","statusUpdatedAt":%s}' \
+    "$pid" "$(tm display-message -p -t "$CLAUDE_T" '#{pane_current_path}')" "${st[21]}" \
+    "$(tm display-message -p -t "$CLAUDE_T" '#{session_name}')" "$pane" \
+    "$(( (NOW_PIN - 300) * 1000 ))" > "$H/.claude/sessions/$pid.json"
 }
 
 # =====================================================================================
@@ -853,16 +956,17 @@ find_row() { # $1 = rows file, $2 = spec -> REPLY = the row's visible text (ANSI
 build_scenarios() {
   local side wt sq
   local rows="$WORK/hold/A-nav.rows" drows="$WORK/hold/A-dirs.rows"
-  local ntot nd
+  local ntot nd nsw
   ntot=$(wc -l < "$rows"); nd=$(wc -l < "$drows")
-  [ "$ntot" -gt 100 ] || die "the navigator listed only $ntot rows"
-  local S_SPEC="S:ops" W_SPEC="W:api-gateway-production-eu-west-1:1" P_SPEC="P:agents:0:0"
-  local ROW_S ROW_W ROW_P ROW_F
+  # a row for each session and each window, at the least
+  nsw=$(( $(tm list-sessions | wc -l) + $(tm list-windows -a | wc -l) ))
+  [ "$ntot" -ge "$nsw" ] || die "the navigator listed only $ntot rows for $nsw sessions and windows"
+  local ROW_S ROW_W ROW_P="" ROW_F
   find_row "$rows" "$S_SPEC" || die "no row $S_SPEC in the list"; ROW_S=$REPLY
   find_row "$rows" "$W_SPEC" || die "no row $W_SPEC in the list"; ROW_W=$REPLY
-  find_row "$rows" "$P_SPEC" || die "no row $P_SPEC in the list"; ROW_P=$REPLY
+  if [ -n "$P_SPEC" ]; then find_row "$rows" "$P_SPEC" || die "no row $P_SPEC in the list"; ROW_P=$REPLY; fi
   find_row "$rows" "W:$CUR_SESSION:0" || die "no row W:$CUR_SESSION:0"; ROW_F=$REPLY
-  local DIR_PV="$H/src/api-gateway" DEEP_Q=svc TYPED_Q=api NEW_Q=svc-07c
+  local DIR_PV="$H/src/api-gateway" DEEP_Q=svc NEW_Q=svc-07c
   grep -qF "$DIR_PV" "$drows" || die "the ctrl-o picker does not list $DIR_PV"
   local ROW_D
   ROW_D=$(strip_ansi "$drows" | awk -F'\t' -v s="$DIR_PV" '$NF == s { print; exit }')
@@ -873,7 +977,7 @@ build_scenarios() {
   fzf_env fz_pv_W  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_W" 1
   fzf_env fz_pv_P  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_P" 1
   fzf_env fz_focus nav down bg-cancel "" "$ntot" "$ntot" "$ROW_W" 0
-  fzf_env fz_typed nav i bg-cancel "$TYPED_Q" 15 "$ntot" "$ROW_F" 0
+  fzf_env fz_typed nav i bg-cancel "$TYPED_Q" "$TYPED_MC" "$ntot" "$ROW_F" 0
   fzf_env fz_zero  nav q bg-cancel "$NEW_Q" 0 "$ntot" "$ROW_F" 0 0
   # the ctrl-o picker: its preview is always shown
   fzf_env fz_dreload dirs ctrl-r async "" "$nd" "$nd" "$ROW_D" 1
@@ -902,7 +1006,7 @@ build_scenarios() {
     e=("${navb[@]}" "${fz_reload[@]}"); define list-bash "$side" e sh -c "bash $sq --list"
     e=("${nav[@]}" "${fz_pv_S[@]}"); define preview-S "$side" e sh -c "bash $sq --preview '$S_SPEC'"
     e=("${nav[@]}" "${fz_pv_W[@]}"); define preview-W "$side" e sh -c "bash $sq --preview '$W_SPEC'"
-    e=("${nav[@]}" "${fz_pv_P[@]}"); define preview-P "$side" e sh -c "bash $sq --preview '$P_SPEC'"
+    [ -z "$P_SPEC" ] || { e=("${nav[@]}" "${fz_pv_P[@]}"); define preview-P "$side" e sh -c "bash $sq --preview '$P_SPEC'"; }
 
     if focus_snippet "$side-nav"; then
       local snip=$REPLY
@@ -1146,7 +1250,8 @@ print_table() {
       }
     }'
   if [ -n "$OUT_TSV" ]; then
-    { printf '%s\n' "$hdr"; for s in "${SCENARIOS[@]}"; do printf '%s\n' "${R_LINE[$s]}"; done; } | tr '|' '\t' > "$OUT_TSV"
+    { printf 'fixture|%s\n' "$hdr"; for s in "${SCENARIOS[@]}"; do printf '%s|%s\n' "$FIXTURE" "${R_LINE[$s]}"; done; } \
+      | tr '|' '\t' > "$OUT_TSV"
   fi
 }
 
@@ -1266,8 +1371,8 @@ printf 'interdimux A/B  A=%s  B=%s\n' "$WT_A" "$WT_B"
 CPUS_ALL=$(nproc --all 2>/dev/null || echo 1) CPUS_RUN=$(nproc 2>/dev/null || echo 1)
 CPUS_NOTE="$CPUS_ALL CPUs"
 [ "$CPUS_RUN" = "$CPUS_ALL" ] || CPUS_NOTE+=" ($CPUS_RUN for this run)"
-printf 'fixture: %s sessions / %s windows / %s panes, popup %sx%s; %s s; load1 %s -> %s on %s\n' \
-  "$(tm list-sessions | wc -l)" "$(tm list-windows -a | wc -l)" "$(tm list-panes -a | wc -l)" \
+printf 'fixture %s: %s sessions / %s windows / %s panes, popup %sx%s; %s s; load1 %s -> %s on %s\n' \
+  "$FIXTURE" "$(tm list-sessions | wc -l)" "$(tm list-windows -a | wc -l)" "$(tm list-panes -a | wc -l)" \
   "$POPUP_COLS" "$POPUP_ROWS" "$(( T_END - T_START ))" "$LOAD_START" "$LOAD_END" "$CPUS_NOTE"
 echo "cpu = ms of user+sys (process tree + tmux server), wall = ms (first-frame*: to the first row)"
 echo
