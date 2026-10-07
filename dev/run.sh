@@ -20,8 +20,9 @@
 # checkout's path>, one per checkout and architecture, so two worktrees never
 # share one), so no run can write into the checkout -- or rebuild the
 # rust/target/release/imux a live plugin runs from it.  It mounts nothing else
-# of the host: no /tmp, no tmux socket, no home, so a bare `tmux` inside can
-# only reach the container's own servers.
+# of the host -- no /tmp, no tmux socket, no home, so a bare `tmux` inside can
+# only reach the container's own servers -- except, for a git worktree, its
+# repository's git dir, read-only (below).
 #
 # Environment:
 #   IMUX_PLATFORM  linux/amd64 or linux/arm64; default the docker host's own.
@@ -147,6 +148,34 @@ docker volume inspect "$VOLUME" >/dev/null 2>&1 \
   || docker volume create --label "imux.checkout=$ROOT" "$VOLUME" >/dev/null \
   || die "cannot create the volume $VOLUME"
 
+# A git worktree's .git is a file that names its git dir, inside the main
+# repository's .git (the common dir), outside this checkout.  Mounted
+# read-only at the same path, git works inside -- on /work, whose .git is the
+# same file.  (A plain checkout's .git is a directory, copied into /work with
+# the rest.)
+gitmnt="" gitmnt2=""
+if [ -f "$ROOT/.git" ]; then
+  gd=$(sed -n 's/^gitdir: //p' "$ROOT/.git")
+  case $gd in
+    /*)
+      common=$gd
+      if [ -f "$gd/commondir" ]; then
+        c=$(cat "$gd/commondir")
+        case $c in /*) common=$c ;; *) common=$gd/$c ;; esac
+      fi
+      common=$(CDPATH='' cd -- "$common" 2>/dev/null && pwd) || common=""
+      case $common$gd in
+        *:*|*,*) echo "dev/run.sh: a ':' or ',' in $gd: its git dir is not mounted, git does not work inside" >&2 ;;
+        *)
+          if [ -n "$common" ]; then
+            gitmnt="--volume=$common:$common:ro"
+            case $gd/ in "$common"/*) ;; *) gitmnt2="--volume=$gd:$gd:ro" ;; esac
+          fi ;;
+      esac ;;
+    *) echo "dev/run.sh: this worktree's .git names its git dir by a relative path: it is not mounted, git does not work inside" >&2 ;;
+  esac
+fi
+
 # A terminal only where one is used: the suites run without one, as on CI,
 # where `stty size </dev/tty` has nothing to report.  (`watch` is the
 # exception: entr needs one, so suites there can see its size.)
@@ -162,5 +191,5 @@ cpus=${IMUX_CPUSET:+--cpuset-cpus=$IMUX_CPUSET}
 # shellcheck disable=SC2086  # each of these is one word or none
 exec docker run --rm $it $term $net $cpus "$plat" --hostname=imux-dev \
   --env=IMUX_RENDERER \
-  -v "$ROOT:/src:ro" -v "$VOLUME:/work" \
+  -v "$ROOT:/src:ro" -v "$VOLUME:/work" ${gitmnt:+"$gitmnt"} ${gitmnt2:+"$gitmnt2"} \
   "$IMAGE" "$@"

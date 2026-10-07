@@ -127,6 +127,11 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo CARGO_NET_OFFLINE=true \
     PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# A git worktree's repository is mounted read-only at its host path
+# (dev/run.sh), owned by the host's uid, which `dev` is not: git would refuse
+# it as "dubious ownership".  Every repository here is the user's own.
+RUN git config --system --add safe.directory '*'
+
 COPY dev/entrypoint.sh dev/cmd.sh /usr/local/lib/imux-dev/
 WORKDIR /work
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/lib/imux-dev/entrypoint.sh"]

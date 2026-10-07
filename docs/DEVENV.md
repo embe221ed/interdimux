@@ -89,7 +89,10 @@ container (`--rm`):
 * **Nothing else of the host is mounted**: no `/tmp`, no tmux socket, no home,
   no docker socket, and `TMUX` is not passed in.  A bare `tmux` inside can only
   reach servers the container started; your errors.log and recent dirs are out
-  of reach.
+  of reach.  The one exception is a git worktree's repository: its `.git` is a
+  file naming a git dir in the main checkout's `.git`, which is mounted
+  read-only at its own path, so git works inside.  A plain checkout's `.git`
+  is copied with the rest.
 * **Not as root.**  The entrypoint starts `atd` (no systemd in a container),
   then drops to the user `dev`.  As root, `test_doctor` and
   `test_doctor_agents` fail and `test_cli_guards` skips.
