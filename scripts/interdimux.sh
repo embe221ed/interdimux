@@ -1607,15 +1607,12 @@ record_recent_dir() {
   return 0
 }
 
-resolve_finder() {
-  if command -v fd >/dev/null 2>&1; then
-    echo "fd"
-  elif command -v fdfind >/dev/null 2>&1; then
-    echo "fdfind"
-  elif command -v find >/dev/null 2>&1; then
-    echo "find"
-  else
-    echo ""
+# The directory finder, in REPLY: fd, fdfind, find, or "" for none.
+resolve_finder_r() {
+  if command -v fd >/dev/null 2>&1; then REPLY="fd"
+  elif command -v fdfind >/dev/null 2>&1; then REPLY="fdfind"
+  elif command -v find >/dev/null 2>&1; then REPLY="find"
+  else REPLY=""
   fi
 }
 
@@ -1706,26 +1703,37 @@ fd_nip_r() {
   return 0
 }
 
+# The scans fill SCAN_FOUND, every trailing slash stripped as sed did: fd emits
+# "dir/" while find emits "dir", which breaks dedup between tiers and finders.
+# Both sides quoted (bash 4 joins an unquoted [*] with a space, not IFS: a loop
+# forever), and the `-`s for 4.3 and 4.4, where ("/") strips to NO element.
+SCAN_FOUND=()
+scan_strip() {
+  local -a _ss=()
+  [ "${#SCAN_FOUND[@]}" -gt 0 ] || return 0
+  while _ss=("${SCAN_FOUND[@]%/}"); [[ "${_ss[*]-}" != "${SCAN_FOUND[*]}" ]]; do SCAN_FOUND=("${_ss[@]-}"); done
+}
+
 scan_dirs() {
   local root="$1" depth="$2" finder="$3"
-  [ -d "$root" ] || return
+  SCAN_FOUND=()
+  [ -d "$root" ] || return 0
   _scan_prune "$root"
-  # Trailing slashes stripped: fd emits "dir/" while find emits "dir",
-  # which breaks dedup between tiers and finder backends.
   case "$finder" in
     fd|fdfind)
       fd_nip_r "$root"
-      "$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} . "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
+      mapfile -t SCAN_FOUND < <("$finder" --type d --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} . "$root" 2>/dev/null)
       ;;
     find)
-      find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -print 2>/dev/null | sed 's:/\{1,\}$::' || true
+      mapfile -t SCAN_FOUND < <(find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -print 2>/dev/null)
       ;;
   esac
+  scan_strip
 }
 
 # scan_dirs over many roots: scan_roots DEPTH FINDER ROOT...  ONE finder run
-# (and one sed) for all of them, where a loop over scan_dirs paid a fork of
-# each per root -- a deep search whose query matched 300 directories took ~7 s,
+# for all of them, where a loop over scan_dirs paid a fork of each per root --
+# a deep search whose query matched 300 directories took ~7 s,
 # against 0.06 s for the one run (review PERF-08).  fd and find both apply the
 # depth to each root, and the callers only ever gather a SET of directories
 # (emit_sorted_tiers sorts and dedups), so it does not matter that one run
@@ -1736,19 +1744,21 @@ scan_dirs() {
 # their own.
 scan_roots() {
   local depth="$1" finder="$2" r
-  local -a roots=() nroots=()
+  local -a roots=() nroots=() home=()
   shift 2
   for r in "$@"; do
-    if [ "$r" = "$HOME" ]; then scan_dirs "$r" "$depth" "$finder"
+    if [ "$r" = "$HOME" ]; then scan_dirs "$r" "$depth" "$finder"; home+=(${SCAN_FOUND[@]+"${SCAN_FOUND[@]}"})
     elif [ -d "$r" ]; then
       fd_nip_r "$r"
       if [ "${#FD_NIP[@]}" = 0 ]; then roots+=("$r"); else nroots+=("$r"); fi
     fi
   done
-  {
+  SCAN_FOUND=()
+  [ "${#roots[@]}" = 0 ] && [ "${#nroots[@]}" = 0 ] || mapfile -t SCAN_FOUND < <(
     _scan_chunks "$depth" "$finder" "" ${roots[@]+"${roots[@]}"}
-    _scan_chunks "$depth" "$finder" --no-ignore-parent ${nroots[@]+"${nroots[@]}"}
-  } | sed 's:/\{1,\}$::' || true
+    _scan_chunks "$depth" "$finder" --no-ignore-parent ${nroots[@]+"${nroots[@]}"})
+  scan_strip
+  SCAN_FOUND=(${home[@]+"${home[@]}"} ${SCAN_FOUND[@]+"${SCAN_FOUND[@]}"})
 }
 
 # _scan_chunks DEPTH FINDER FD-FLAG ROOT...: scan_roots' finder runs.
@@ -1768,20 +1778,23 @@ _scan_chunks() {
 
 # Find dirs whose *name* contains the query, case-insensitively, using
 # the finder's native matching — much deeper reach than scanning
-# everything and filtering in bash.
+# everything and filtering in bash.  Sorted, once stripped.
 match_dirs() {
   local root="$1" query="$2" depth="$3" finder="$4"
-  [ -d "$root" ] || return
+  SCAN_FOUND=()
+  [ -d "$root" ] || return 0
   _scan_prune "$root"
   case "$finder" in
     fd|fdfind)
       fd_nip_r "$root"
-      "$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} -- "$query" "$root" 2>/dev/null | sed 's:/\{1,\}$::' || true
+      mapfile -t SCAN_FOUND < <("$finder" --type d --fixed-strings -i --max-depth "$depth" --absolute-path ${FD_EXCL[@]+"${FD_EXCL[@]}"} ${FD_NIP[@]+"${FD_NIP[@]}"} -- "$query" "$root" 2>/dev/null)
       ;;
     find)
-      find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -iname "*$query*" -print 2>/dev/null | sed 's:/\{1,\}$::' || true
+      mapfile -t SCAN_FOUND < <(find "$root" -maxdepth "$depth" \( -path '*/.*' -o -path "$FIND_PRUNE" \) -prune -o -type d -iname "*$query*" -print 2>/dev/null)
       ;;
   esac
+  scan_strip
+  [ "${#SCAN_FOUND[@]}" = 0 ] || mapfile -t SCAN_FOUND < <(sort < <(printf '%s\n' "${SCAN_FOUND[@]}"))
 }
 
 # The search roots come from get_opt like every other option: at the pane's own
@@ -1789,22 +1802,34 @@ match_dirs() {
 # primed child, so a ctrl-o reload asks tmux nothing.  A prefix+f binding baked
 # before project-dirs was forwarded primes the popup without the variable at
 # all, until tmux next loads the plugin; that one run still asks.
+#
+# Into search_paths, as mapfile read their echo back: an option word (-n, -e
+# ...) is no root or an empty one, and a newline (in $HOME) makes two.
 resolve_search_paths() {
-  local project_dirs="$PROJECT_DIRS"
+  local project_dirs="$PROJECT_DIRS" v
+  local -a _paths=()
+  search_paths=()
   if [ -z "${INTERDIMUX_PROJECT_DIRS+set}" ] && [ "${INTERDIMUX_OPTS_PRIMED:-}" = 1 ]; then
     project_dirs=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#{@interdimux-project-dirs}' 2>/dev/null || true)
   fi
   if [ -n "${project_dirs:-}" ]; then
     IFS=':' read -ra _paths <<< "$project_dirs"
-    for p in "${_paths[@]}"; do
-      # Safe tilde expansion without eval
-      echo "${p/#\~/$HOME}"
-    done
+    # Safe tilde expansion without eval
+    [ "${#_paths[@]}" = 0 ] || _paths=("${_paths[@]/#\~/$HOME}")
   else
-    for d in "$HOME/projects" "$HOME/code" "$HOME/src" "$HOME/repos" "$HOME/work" "$HOME/dev"; do
-      [ -d "$d" ] && echo "$d"
+    for v in "$HOME/projects" "$HOME/code" "$HOME/src" "$HOME/repos" "$HOME/work" "$HOME/dev"; do
+      [ -d "$v" ] && _paths+=("$v")
     done
   fi
+  for v in ${_paths[@]+"${_paths[@]}"}; do
+    case "$v" in
+      *$'\n'*) mapfile -t -O "${#search_paths[@]}" search_paths <<< "$v" ;;
+      -|-*[!neE]*) search_paths+=("$v") ;;
+      -*) [[ $v == *n* ]] || search_paths+=("") ;;
+      *) search_paths+=("$v") ;;
+    esac
+  done
+  return 0
 }
 
 # Shared helper for --dirs-list deep/scan modes: classify a dir as project or other
@@ -1869,7 +1894,7 @@ load_session_table() {
   local id name spath cwd i=0 nl=$'\n' j l out _noglob=0
   local -a _sl=() _sf=()
   SESS_ID=() SESS_NAME=() SESS_SPATH=() SESS_CWD=() SESS_AT=() SESS_BYNAME=()
-  out=$(tmux list-sessions -F "#{session_id}${US}#{session_name}${US}#{?#{m/r:[${US}${nl}],#{session_path}},,#{session_path}}${US}#{?#{m/r:[${US}${nl}],#{pane_current_path}},,#{pane_current_path}}" 2>/dev/null)
+  out=$(exec tmux list-sessions -F "#{session_id}${US}#{session_name}${US}#{?#{m/r:[${US}${nl}],#{session_path}},,#{session_path}}${US}#{?#{m/r:[${US}${nl}],#{pane_current_path}},,#{pane_current_path}}" 2>/dev/null)
   case $- in *f*) _noglob=1 ;; esac
   set -f
   local IFS=$'\n'
@@ -2362,17 +2387,17 @@ record_dir_use() {
 }
 
 # Sort and emit arrays of dirs by tier (projects first, then others).
-# mapfile, not read: see load_recent_dirs.
+# mapfile, not read: see load_recent_dirs.  Two forks, where printf | sort took three.
 emit_sorted_tiers() {
   local -a _st=()
   if [ "${#_projects[@]}" -gt 0 ]; then
-    mapfile -t _st < <(printf '%s\n' "${_projects[@]}" | sort -u)
+    mapfile -t _st < <(sort -u < <(printf '%s\n' "${_projects[@]}"))
     for d in ${_st[@]+"${_st[@]}"}; do
       emit_dir "$d" project ""
     done
   fi
   if [ "${#_others[@]}" -gt 0 ]; then
-    mapfile -t _st < <(printf '%s\n' "${_others[@]}" | sort -u)
+    mapfile -t _st < <(sort -u < <(printf '%s\n' "${_others[@]}"))
     for d in ${_st[@]+"${_st[@]}"}; do
       emit_dir "$d" dir ""
     done
@@ -3976,10 +4001,10 @@ if [ "${1:-}" = "--dirs-list" ]; then
     esac
   done
 
-  finder=$(resolve_finder)
+  resolve_finder_r; finder="$REPLY"
   [ -z "$finder" ] && { echo "interdimux: no directory finder available" >&2; exit 1; }
 
-  mapfile -t search_paths < <(resolve_search_paths)
+  resolve_search_paths
   [ ${#search_paths[@]} -eq 0 ] && search_paths=("$HOME")
 
   declare -A seen=()
@@ -4083,9 +4108,8 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # ignore files above ROOT hid them all (fd_parents_hide).
   collect_scan() {
     local d n=0
-    local -a _found=()
-    mapfile -t _found < <(scan_dirs "$1" "$2" "$finder")
-    for d in ${_found[@]+"${_found[@]}"}; do
+    scan_dirs "$1" "$2" "$finder"
+    for d in ${SCAN_FOUND[@]+"${SCAN_FOUND[@]}"}; do
       [ -z "$d" ] || [ "$d" = "$1" ] && continue
       n=1
       if [ $# = 2 ]; then
@@ -4102,10 +4126,9 @@ if [ "${1:-}" = "--dirs-list" ]; then
   # (scan_roots).
   collect_subtrees() {
     local sub
-    local -a _found=()
     [ "${#_roots[@]}" -gt 0 ] || return 0
-    mapfile -t _found < <(scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}")
-    for sub in ${_found[@]+"${_found[@]}"}; do
+    scan_roots "$SCAN_DEPTH" "$finder" "${_roots[@]}"
+    for sub in ${SCAN_FOUND[@]+"${SCAN_FOUND[@]}"}; do
       [ -z "$sub" ] && continue
       collect_dir "$sub"
     done
@@ -4190,9 +4213,9 @@ if [ "${1:-}" = "--dirs-list" ]; then
           _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
-            mapfile -t _matches < <(match_dirs "$sp" "$query" $((SCAN_DEPTH * 2)) "$finder" | sort)
+            match_dirs "$sp" "$query" $((SCAN_DEPTH * 2)) "$finder"
             _scanned_root=""
-            for d in ${_matches[@]+"${_matches[@]}"}; do
+            for d in ${SCAN_FOUND[@]+"${SCAN_FOUND[@]}"}; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               collect_dir "$d"
               # A match inside an already-scanned match is covered
@@ -4214,8 +4237,8 @@ if [ "${1:-}" = "--dirs-list" ]; then
           _roots=()
           for sp in "${search_paths[@]}"; do
             [ -d "$sp" ] || continue
-            mapfile -t _scanned < <(scan_dirs "$sp" "$match_depth" "$finder")
-            for d in ${_scanned[@]+"${_scanned[@]}"}; do
+            scan_dirs "$sp" "$match_depth" "$finder"
+            for d in ${SCAN_FOUND[@]+"${SCAN_FOUND[@]}"}; do
               [ -z "$d" ] || [ "$d" = "$sp" ] && continue
               if [[ "${d,,}" == *"${query,,}"* ]]; then
                 collect_dir "$d"
