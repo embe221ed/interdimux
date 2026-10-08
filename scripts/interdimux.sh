@@ -9640,7 +9640,11 @@ if [ "${1:-}" = "--doctor" ]; then
     # atd on Linux and atrun (launchd) on macOS; at_daemon_state knows the
     # difference and reads each without root, and says so honestly when it cannot
     # tell (BSD's cron-atrun, or a host without pgrep) rather than crying wolf.
-    _npend=$(atq -q "$SCHED_QUEUE" 2>/dev/null | grep -c . || true)
+    # (its non-empty lines, as `| grep -c .` counted them, without the grep)
+    _npend=0
+    while IFS= read -r _pl; do
+      [ -z "$_pl" ] || _npend=$((_npend + 1))
+    done <<< "$(atq -q "$SCHED_QUEUE" 2>/dev/null)"
     case "${_npend:-0}" in
       0) ;;
       1) _note "1 command is scheduled — see it under Jobs on the dashboard" ;;
@@ -9749,21 +9753,30 @@ if [ "${1:-}" = "--doctor" ]; then
   # Read the table once and match the key column ourselves: `list-keys -T prefix
   # <key>` prints nothing on tmux 3.7b, so filtering with it silently reports
   # every binding as missing.
-  # Here-strings, not `printf … | grep -q`: grep -q exits at its first match,
-  # and a printf still writing the rest of the table then dies of SIGPIPE —
-  # which pipefail (on for this whole file) turns into "no match".  Under load,
-  # or with a big enough table, the report said no bindings were installed.
+  # A pattern test and a here-string, not `printf … | grep -q`: grep -q exits
+  # at its first match, and a printf still writing the rest of the table then
+  # dies of SIGPIPE — which pipefail (on for this whole file) turns into "no
+  # match".  Under load, or with a big enough table, the report said no
+  # bindings were installed.
   _keytable=$(tmux list-keys -T prefix 2>/dev/null)
-  if grep -q interdimux <<< "$_keytable"; then
+  if [[ "$_keytable" == *interdimux* ]]; then
+    # Both keys in one pass over the table, not an awk each: a line per key,
+    # "1 <the fzf minor --bind-keys baked into it, if any>" (only prefix+f's
+    # carries one) when it is bound, else "0".
+    _bres=$(awk -v k1="${_k%%:*}" -v k2="${_dk%%:*}" '
+      function hit(i) {
+        f[i] = 1
+        if (match($0, /INTERDIMUX_FZF_MINOR=[0-9]+/)) m[i] = substr($0, RSTART + 21, RLENGTH - 21)
+      }
+      $2=="-T" && $3=="prefix" && /interdimux/ { if ($4==k1) hit(1); if ($4==k2) hit(2) }
+      END { for (i = 1; i <= 2; i++) print (f[i] ? "1 " m[i] : "0") }' <<< "$_keytable")
+    _bi=0
     for _pair in "$_k:navigator" "$_dk:dashboard"; do
       _key="${_pair%%:*}"; _what="${_pair#*:}"
-      # ...and the fzf minor --bind-keys baked into it, if any (only prefix+f's
-      # carries one).
-      if _bfz=$(awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k && /interdimux/ {
-                                    f = 1
-                                    if (match($0, /INTERDIMUX_FZF_MINOR=[0-9]+/))
-                                      m = substr($0, RSTART + 21, RLENGTH - 21) }
-                                  END { if (f) print m; exit !f }' <<< "$_keytable"); then
+      _bi=$((_bi + 1))
+      if [ "$_bi" = 1 ]; then _bl="${_bres%%$'\n'*}"; else _bl="${_bres#*$'\n'}"; fi
+      if [ "${_bl%% *}" = 1 ]; then
+        _bfz="${_bl#1 }"
         _ok "prefix+$_key opens the $_what"
         # That number is fzf's version as it was when the plugin last loaded,
         # and every fzf feature the picker uses is gated on it.  Nothing
