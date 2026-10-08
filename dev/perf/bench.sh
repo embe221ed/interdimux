@@ -37,7 +37,7 @@
 #               both   large with the scenarios asked for, then small with
 #                      those of them whose work depends on the tmux server
 #                      (SIZED below; by default keypress first-frame
-#                      first-frame-changed list list-changed preview-S
+#                      first-frame-changed paint list list-changed preview-S
 #                      preview-W hint footer describe-create, which is also
 #                      -F small's default), each on a fixture of its own, one
 #                      table each
@@ -95,8 +95,25 @@
 #                 158x35 pty, a stub fzf on PATH.  WALL is the time from exec
 #                 until the stub fzf receives the FIRST row (what fzf needs to
 #                 paint); CPU is the whole run (all rows, exit).
+#                 A note gives D, when that row reached the stub relative to
+#                 its exec: what decides a real fzf's first paint (see paint)
 #   first-frame-changed  the same, with the server changed before every pair
 #                 (see "-changed" below)
+#   paint         the navigator opening with the REAL fzf, to its first paint:
+#                 `bash interdimux.sh` as first-frame runs it, but with the
+#                 fzf this shell found first on PATH, in a 158x35 pty that
+#                 answers fzf's terminal queries as tmux 3.7c does (benchrun
+#                 -T).  WALL is the time from exec until fzf first draws a
+#                 row (a session row's ▸) -- what the user sees, which the
+#                 stub cannot show: fzf 0.74 paints in steps, about 20, 40
+#                 and 65 ms after its first byte, and only rows that reach it
+#                 within ~18 ms of its exec make the first one.  So rows that
+#                 the stub sees 3 ms sooner can be painted 20 ms later, or
+#                 earlier.  CPU is the whole run: Esc once the screen has been
+#                 quiet for 40 ms, and the exit.  A note gives the share of
+#                 opens painted on fzf's first step (within 30 ms of its
+#                 first byte) on each side.  Its output is not compared
+#                 (fzf's frames vary with timing): uxdiff compares the screens
 #   list          the fzf reload command (^r, ^/, resize, after every action):
 #                 sh -c "bash interdimux.sh --list", Rust renderer
 #   list-changed  the same, with the server changed before every pair
@@ -130,7 +147,7 @@
 #   load          bash interdimux.tmux: the plugin loading, as a tmux.conf's
 #                 run-shell runs it at every server start and config reload
 #  SIZED (the ones -F both also runs on the small fixture): keypress
-#   first-frame first-frame-changed first-frame-bash list list-changed
+#   first-frame first-frame-changed paint first-frame-bash list list-changed
 #   list-bash preview-S preview-W hint footer describe-create
 #  -changed: a plain scenario runs against a server that never changes, so a
 #   cache -- each side has its own, below -- would show only its hit.  These
@@ -160,7 +177,7 @@
 #         counted: a job's own orphans (reparented to init), and a new pane's
 #         processes.
 #   wall  fork -> exit of the command (first-frame, keypress: -> first row at
-#         the stub fzf)
+#         the stub fzf; paint: -> the first row the real fzf drew)
 #   Times are in ms.  Runs are interleaved in pairs whose order alternates
 #   (AB BA AB ...), so drift and ordering effects cancel.
 #
@@ -243,7 +260,8 @@
 #
 # Requirements: bash >= 4.4, a C compiler (cc), tmux >= 3.4 (send-keys -K
 # and the binding's run-shell -C; the first on PATH, or $IMUX_BENCH_TMUX),
-# fzf (its --version, and --filter for the match counts), git, perl, setsid;
+# fzf (its --version, --filter for the match counts, and paint: without one
+# that scenario is left out, with a WARNING), git, perl, setsid;
 # fd, fdfind or find (the plugin's own choice, in that order); zoxide
 # ($IMUX_PERF_ZOXIDE, else the first on PATH); Linux (/proc, a child
 # subreaper, signalfd).  The fixture's PATH starts with links to the tmux,
@@ -271,9 +289,11 @@
 #   checkout (dev/cmd.sh perfbench: REF is extracted with git archive and gets
 #   its own Rust core, B is the container's copy of the checkout, /work).  See
 #   docs/DEVENV.md.  Directly: bench.sh BASE MINE, two trees with their cores
-#   built.  A full default run (-F both) takes about 4 minutes in the dev
-#   image on a 4-CPU box: give the command a 10-minute timeout, or run it in
-#   the background.  Re-run a single flagged scenario with -s to look closer.
+#   built.  A full default run (-F both) takes about 8 minutes in the dev
+#   image on a 4-CPU box, the flagged scenarios' second measurement included
+#   (paint, the real fzf's, is ~25-60 s of each fixture's): give the command
+#   a 15-minute timeout, or run it in the background.  Re-run a single
+#   flagged scenario with -s to look closer.
 #   Work dirs go under $IMUX_BENCH_WORKROOT (default: ${TMPDIR:-/tmp}).
 #   IMUX_BENCH_SAME_ENV=1 (debugging the harness) gives B the very environments
 #   A recorded (keypress still presses each side's own binding: its popup's
@@ -327,7 +347,7 @@ BENCH_HOME=${BENCH_SELF%/*}
 TMUX_BIN=${IMUX_BENCH_TMUX:-$(command -v tmux 2>/dev/null)}
 BASH_BIN=$(command -v bash 2>/dev/null)
 
-DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed list list-changed list-bash
+DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed paint list list-changed list-bash
                    preview-S preview-W preview-P hint footer describe-create session-name-for
                    dirs-list dirs-deep dirs-preview doctor)
 EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load)
@@ -335,9 +355,9 @@ EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load)
 # the small fixture too), and the small fixture's default set
 # (preview-P is not one: the small fixture's windows have one pane each, and
 # the navigator lists no pane row for those)
-SIZED_SCENARIOS=(keypress first-frame first-frame-changed first-frame-bash list list-changed
+SIZED_SCENARIOS=(keypress first-frame first-frame-changed paint first-frame-bash list list-changed
                  list-bash preview-S preview-W hint footer describe-create)
-SMALL_DEFAULT=(keypress first-frame first-frame-changed list list-changed preview-S preview-W
+SMALL_DEFAULT=(keypress first-frame first-frame-changed paint list list-changed preview-S preview-W
                hint footer describe-create)
 
 CLIENT_COLS=200 CLIENT_ROWS=50          # the attached client
@@ -447,6 +467,18 @@ else
     esac
   done
 fi
+# paint needs a real fzf to paint
+FZF_WARN=""
+case " ${SCENARIOS[*]} " in
+  *" paint "*)
+    if [ -z "$REAL_FZF" ]; then
+      [ "${IMUX_PERF_STRICT:-0}" != 1 ] || die "no fzf on PATH for paint, and IMUX_PERF_STRICT=1 wants every scenario"
+      FZF_WARN="WARNING: no fzf on PATH: paint, the real fzf's first paint, was not measured"
+      _keep=(); for s in "${SCENARIOS[@]}"; do [ "$s" = paint ] || _keep+=("$s"); done
+      SCENARIOS=(${_keep[@]+"${_keep[@]}"})
+      [ "$FIXTURE" = both ] || say "bench: $FZF_WARN"
+    fi ;;
+esac
 [ "${#SCENARIOS[@]}" -gt 0 ] || die "no scenarios"
 if [ "$FIXTURE" = small ]; then
   case " ${SCENARIOS[*]} " in
@@ -571,6 +603,8 @@ WATCHDOG=$!
 mkdir -p "$WORK/bin" "$WORK/stub" "$WORK/tools" "$WORK/hold" "$WORK/out" "$WORK/res"
 cc -O2 -o "$RUNNER" "$BENCH_HOME/benchrun.c" 2> "$WORK/cc.log" || { cat "$WORK/cc.log" >&2; die "cannot compile benchrun.c"; }
 ln -s "$RUNNER" "$WORK/stub/fzf"
+# paint's fzf: the real one, found before the stub
+if [ -n "$REAL_FZF" ]; then mkdir -p "$WORK/realfzf" && ln -s "$REAL_FZF" "$WORK/realfzf/fzf"; fi
 # the tmux and bash this shell found, first on the fixture's PATH
 ln -s "$TMUX_BIN" "$WORK/tools/tmux"
 ln -s "$BASH_BIN" "$WORK/tools/bash"
@@ -1239,6 +1273,10 @@ build_scenarios() {
     e=("${pop[@]}" BENCH_FZF_MODE=first)
     define first-frame "$side" e bash "$wt/scripts/interdimux.sh"
     define first-frame-changed "$side" e bash "$wt/scripts/interdimux.sh"
+    # the same popup, with the real fzf first on its PATH
+    local v; e=()
+    for v in "${pop[@]}"; do case "$v" in PATH=*) e+=("PATH=$WORK/realfzf:${v#PATH=}") ;; *) e+=("$v") ;; esac; done
+    define paint "$side" e bash "$wt/scripts/interdimux.sh"
     e=("${popb[@]}" BENCH_FZF_MODE=first)
     define first-frame-bash "$side" e bash "$wt/scripts/interdimux.sh"
     # the key itself, on the attached client: the side's binding (pre_keypress)
@@ -1288,6 +1326,8 @@ build_scenarios() {
     SCN_TTY[$s]="-t ${POPUP_COLS}x${POPUP_ROWS}"; SCN_KIND[$s]=cmd; SCN_RC[$s]=0
   done
   for s in first-frame first-frame-changed first-frame-bash; do SCN_TTY[$s]+=" -p"; SCN_KIND[$s]=first; done
+  # the real fzf, on a terminal that answers it, to the first ▸ it draws
+  SCN_TTY[paint]+=" -p -T ▸"; SCN_KIND[paint]=paint
   # a tmux client command: no terminal, and every process the server starts
   # meanwhile -- the popup -- waited for and counted (benchrun -P)
   SCN_TTY[keypress]="-P"; SCN_KIND[keypress]=key
@@ -1314,15 +1354,17 @@ norm_paths() {
     s{(?<![\w.-])($re)(?![\w.-])}{$to{$1}}g'
 }
 # One run of one side.  Appends "wall_us cpu_us proc_us srv_us rc orphans killed
-# sum jobs_us jobs state" to $WORK/res/<scn>.<side> (cpu_us = proc_us + srv_us,
-# and srv_us includes jobs_us: what the tmux server's jobs cost; state: the
-# fixture server's, for the *-changed scenarios, else 0).
+# sum jobs_us jobs state gap_us" to $WORK/res/<scn>.<side> (cpu_us = proc_us +
+# srv_us, and srv_us includes jobs_us: what the tmux server's jobs cost;
+# state: the fixture server's, for the *-changed scenarios, else 0; gap_us:
+# first-frame* and keypress, the first row's arrival after the stub fzf's
+# exec; paint, the paint after the real fzf's first byte; else -1).
 run_one() { # scenario side [suffix] [state]
   local scn="$1" side="$2" key="${1//-/_}_$2" kind=${SCN_KIND[$1]}
   # shellcheck disable=SC2178  # namerefs to the scenario's argv and environment arrays
   local -n _c="C_$key" _e="E_$key"
   local out="$WORK/out/$key.out" err="$WORK/out/$key.err" fz="$WORK/out/$key.fzf" res
-  local wall cpu srv rc rt0 orph killed jobs jkilled jobus first sum
+  local wall cpu srv rc rt0 orph killed jobs jkilled jobus first fstart sum gap=-1 pfb pnd
   local -a extra=()
   case $kind in first|key) rm -f "$fz.t" "$fz.rows" ;; esac
   [ "$kind" = first ] && extra=(BENCH_FZF_OUT="$fz")
@@ -1331,23 +1373,29 @@ run_one() { # scenario side [suffix] [state]
   # shellcheck disable=SC2086  # the runner flags are words
   res=$(env -i "${_e[@]}" "${extra[@]}" "$RUNNER" run ${SCN_TTY[$scn]} -s "$SRV_PID" -o "$out" -e "$err" -- "${_c[@]}") \
     || { SCN_NOTE[$scn]+="$side: runner failed"$'\n'; return 1; }
-  read -r wall cpu srv rc rt0 orph killed jobs jkilled jobus <<< "$res"
+  read -r wall cpu srv rc rt0 orph killed jobs jkilled jobus pfb pnd _ <<< "$res"
   if [ "$kind" = first ] || [ "$kind" = key ]; then
     if [ -s "$fz.t" ]; then
-      read -r first _ _ _ < "$fz.t"
+      read -r first _ _ _ fstart < "$fz.t"
       if [ "$first" -gt 0 ]; then wall=$(( first - rt0 )); else wall=-1; fi
+      [ "$first" -gt 0 ] && [ "${fstart:-0}" -gt 0 ] && gap=$(( first - fstart ))
       out="$fz.rows"
     else
       wall=-1
     fi
     [ "$wall" -ge 0 ] || { SCN_NOTE[$scn]+="$side: no row ever reached fzf"$'\n'; SCN_BAD[$scn]=1; }
+  elif [ "$kind" = paint ]; then
+    wall=${pnd:--1}
+    [ "$wall" -ge 0 ] && [ "${pfb:--1}" -ge 0 ] && gap=$(( wall - pfb ))
+    [ "$wall" -ge 0 ] || { SCN_NOTE[$scn]+="$side: fzf drew no row within 5 s"$'\n'; SCN_BAD[$scn]=1; }
+    out=/dev/null
   fi
   # the output, worktree paths normalised, as one checksum
   sum=$(norm_paths < "$out" 2>/dev/null | cksum)
   sum=${sum%% *}
   [ -e "$WORK/out/$key.first" ] || norm_paths < "$out" > "$WORK/out/$key.first" 2>/dev/null
-  printf '%s %s %s %s %s %s %s %s %s %s %s\n' "$wall" $(( cpu + srv )) "$cpu" "$srv" "$rc" "$orph" "$killed" "$sum" \
-    "${jobus:-0}" "${jobs:-0}" "${4:-0}" >> "$WORK/res/$scn.$side${3:-}"
+  printf '%s %s %s %s %s %s %s %s %s %s %s %s\n' "$wall" $(( cpu + srv )) "$cpu" "$srv" "$rc" "$orph" "$killed" "$sum" \
+    "${jobus:-0}" "${jobs:-0}" "${4:-0}" "$gap" >> "$WORK/res/$scn.$side${3:-}"
   case " ${SCN_RC[$scn]} " in
     *" $rc "*) ;;
     *) SCN_NOTE[$scn]+="$side: exit $rc ($(head -c 200 "$err" 2>/dev/null | tr "\n" " "))"$'\n'; SCN_BAD[$scn]=1 ;;
@@ -1481,6 +1529,8 @@ analyse() { # scenario -> R_LINE[scn]: "scn|A cpu|B cpu|...|n|verdict|wall"
       }
       print vol ? "vol" : diff ? "DIFF" : "same"
     }')
+  # (paint's screens vary with timing: uxdiff is what compares them)
+  [ "${SCN_KIND[$scn]:-}" != paint ] || out=-
   local line
   line=$(awk -v ma="$ma" -v mb="$mb" -v qa1="$qa1" -v qa3="$qa3" -v qb1="$qb1" -v qb3="$qb3" \
       -v wa="$wa" -v wb="$wb" -v dm="$dmed" -v dl="$dlo" -v dh="$dhi" -v wm="$wmed" -v wl="$wlo" -v wh="$whi" \
@@ -1677,7 +1727,7 @@ CPUS_NOTE="$CPUS_ALL CPUs"
 printf 'fixture %s: %s sessions / %s windows / %s panes (%s), popup %sx%s; %s s; load1 %s -> %s on %s\n' \
   "$FIXTURE" "$(tm list-sessions | wc -l)" "$(tm list-windows -a | wc -l)" "$(tm list-panes -a | wc -l)" \
   "$ROWS_NOTE" "$POPUP_COLS" "$POPUP_ROWS" "$(( T_END - T_START ))" "$LOAD_START" "$LOAD_END" "$CPUS_NOTE"
-echo "cpu = ms of user+sys (process tree + tmux server), wall = ms (first-frame* and keypress: to the first row)"
+echo "cpu = ms of user+sys (process tree + tmux server), wall = ms (first-frame* and keypress: to the first row; paint: to the first row the real fzf drew)"
 echo "worst% = the top of dcpu%'s 99% interval: B may be up to that much slower (an ok rules out no more than that)"
 echo
 print_table
@@ -1698,6 +1748,29 @@ if [ -n "${IMUX_DEV_OTHERS:-}" ]; then
   printf '%s\n' "$IMUX_DEV_OTHERS" | tr ';' '\n' | sed '/^ *$/d; s/^ */    /'
 fi
 [ -z "$ZOXIDE_WARN" ] || echo "$ZOXIDE_WARN"
+[ -z "$FZF_WARN" ] || echo "$FZF_WARN"
+# When the rows reach fzf decides when a real one paints them: fzf 0.74 paints
+# in steps, ~20, ~40 and ~65 ms after its first byte, and makes the first
+# step only with rows that arrive within ~18 ms of its exec.  So a change that
+# moves fzf's exec earlier but not the rows can paint LATER while the stub
+# reports it faster.  paint measures it; the stub's D says why.
+gap_note() { # scenario side -> REPLY: "median ms, share% under the threshold"
+  local lim=18000; [ "${SCN_KIND[$1]}" = paint ] && lim=30000
+  REPLY=$(awk '$12 >= 0 { print $12 }' "$WORK/res/$1.$2" 2>/dev/null | sort -n | awk -v l="$lim" '
+    { g[NR] = $1; if ($1 <= l) k++ }
+    END { if (!NR) exit; m = (NR % 2) ? g[(NR + 1) / 2] : (g[NR / 2] + g[NR / 2 + 1]) / 2
+          printf "%.1f ms, %d/%d (%.0f%%)", m / 1000, k, NR, 100 * k / NR }')
+}
+for scn in "${SCENARIOS[@]}"; do
+  case "${SCN_KIND[$scn]:-}" in
+    first|key)
+      gap_note "$scn" A; _ga=$REPLY; gap_note "$scn" B; _gb=$REPLY
+      [ -z "$_ga$_gb" ] || SCN_NOTE[$scn]+="D, the first row's arrival after the stub fzf's exec, median, and the runs within 18 ms (where a real fzf 0.74 paints on its first step): A ${_ga:-?}, B ${_gb:-?}"$'\n' ;;
+    paint)
+      gap_note "$scn" A; _ga=$REPLY; gap_note "$scn" B; _gb=$REPLY
+      [ -z "$_ga$_gb" ] || SCN_NOTE[$scn]+="the first paint after fzf's first byte, median, and the runs on fzf's first step (within 30 ms): A ${_ga:-?}, B ${_gb:-?}"$'\n' ;;
+  esac
+done
 # What the tmux server's jobs cost, per run on average (the medians above
 # miss a job of a few ms: its CPU arrives in whole 10 ms clock ticks)
 for scn in "${SCENARIOS[@]}"; do

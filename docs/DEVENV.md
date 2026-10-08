@@ -62,7 +62,7 @@ compare `REF` -- any commit: `main` (the default), `HEAD~1`, a sha -- with
 this checkout as it is, uncommitted edits included:
 
 ```sh
-make perfbench                                   # both fixtures, every default scenario, ~4 min
+make perfbench                                   # both fixtures, every default scenario, ~8 min
 make perfbench ARGS='-n 100 -s preview-W,footer' # to keep or reject a change: what it touches, more pairs, 1-2 min
 make perfbench REF=HEAD~1 ARGS='-n 10 -s keypress,list,footer'   # a smoke check, ~30 s
 make perfbench ARGS='-F small'                   # the small fixture alone
@@ -111,7 +111,7 @@ costs (parsing the script, exec'ing the core, the tmux round-trips,
 zoxide) are nearly everything, and a saving per row all but vanishes under
 fzf's 20 ms paint floor.  The default, `-F both`, runs the scenarios on the
 large fixture, then those whose work depends on the server's size
-(keypress, first-frame, list and their `-changed` variants, preview-S and
+(keypress, first-frame, paint, list and the `-changed` variants, preview-S and
 -W, the footer callbacks) on the small one, whose windows give preview-P no
 pane row: two tables.  Rank an optimisation by what it does on the small
 one; the large one is what resolves it.
@@ -131,6 +131,24 @@ into the server's own, the popup's processes and the client, and says when
 A's and B's bindings differ.  (Six copies of a `#{S:#{W:#{P:...}}}` format
 added to the binding: keypress +25.3%, the server's own CPU 18 -> 39 ms a
 press.)
+
+**paint** is the navigator with the real fzf, timed to the first row fzf
+draws: what the user sees.  Every other scenario stops at a stub fzf, which
+sees the first row arrive but cannot say when a real one paints it, and fzf
+0.74 paints in steps -- about 20, 40 and 65 ms after its first byte, the
+first only for rows that reach it within ~18 ms of its exec.  (fzf alone,
+the rows piped in late: 0-15 ms, painted 18-21 ms after its first byte;
+18-30 ms, 39-42; 40-50 ms, 64-67.)  So a change that brings fzf's exec
+forward but not the rows can paint 20 ms LATER while first-frame calls it
+faster, and one that moves the rows from 19 to 17 ms after fzf's exec
+paints 20 ms sooner while first-frame barely moves.  paint runs the
+navigator in a 158x35 pty that answers fzf's terminal queries as tmux 3.7c
+does (`benchrun run -T`; unanswered, fzf waits half a second before it draws
+anything), its wall is the time to the first `▸` fzf draws, and a note gives
+each side's share of opens painted on fzf's first step.  first-frame and
+keypress note D, the first row's arrival after the stub's exec, and the
+share within 18 ms: why paint moved.  Judge a change to the navigator's
+start by paint, on both fixtures.
 
 Each side has its own `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`
 and zoxide database, copies of the fixture's, and the server's environment

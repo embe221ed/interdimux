@@ -45,6 +45,17 @@
  *     terminal (a popup has one, and `stty size </dev/tty` reads it); -p also
  *     makes the pty its stdin/stdout/stderr, like a display-popup command, and
  *     drains it into OUT.  The command runs in a new session either way.
+ *     -T NEEDLE (with -t and -p) is the terminal a REAL fzf needs, and a
+ *     watch for its first paint: it answers what fzf asks the terminal
+ *     (DECRQM, DA1, DA2, the cursor position) as tmux 3.7c does in a pane
+ *     and in a popup -- unanswered, fzf 0.74 waits ~500 ms for the replies
+ *     before it draws anything -- stamps the first byte the command writes
+ *     and the moment NEEDLE (a string only the rows carry) is first written,
+ *     and once the screen has been quiet for 40 ms after that, presses Esc.
+ *     No NEEDLE within 5 s: Esc all the same; still running 5 s after the
+ *     Esc: the session is SIGKILLed.  The result line then has four more
+ *     fields, `firstbyte_us needle_us esc_us queries` (from the fork; -1 for
+ *     what never happened).
  *
  *   benchrun hogs MS PCT [EXCLUDE_SID...]
  *       Samples every process twice, MS apart, and prints "pid pct comm" for
@@ -54,8 +65,11 @@
  *       --version anywhere in argv: prints $BENCH_FZF_VERSION, exits 0.
  *       BENCH_FZF_MODE=first: stamps CLOCK_REALTIME when the FIRST complete
  *         line arrives on stdin, drains the rest, writes
- *         "$BENCH_FZF_OUT.t" = "first_us last_us bytes lines" and the rows to
- *         "$BENCH_FZF_OUT.rows", exits 130 (what Esc makes fzf return).
+ *         "$BENCH_FZF_OUT.t" = "first_us last_us bytes lines start_us" and
+ *         the rows to "$BENCH_FZF_OUT.rows", exits 130 (what Esc makes fzf
+ *         return).  start_us is CLOCK_REALTIME as the stub starts, i.e. at
+ *         fzf's exec: first_us - start_us is how long fzf would have waited
+ *         for its rows, which decides when a real one paints them.
  *       BENCH_FZF_MODE=hold: writes its argv (NUL-separated) to .args, its
  *         environment to .env, drains stdin to .rows, then .ready, and waits
  *         until "$BENCH_FZF_OUT.release" exists (or $BENCH_PID is gone), then
@@ -221,6 +235,67 @@ static void write_all(int fd, const char *b, size_t n) {
   }
 }
 
+/* ------------------------------------------------------------- terminal -- */
+
+/* run -T: the terminal side of a real fzf.  Its output is parsed as it
+ * streams, so a query split across two reads is still answered, and so is
+ * the needle found. */
+struct term {
+  int state;                 /* 0 text, 1 after ESC, 2 inside a CSI */
+  char par[64];              /* the CSI's parameter and intermediate bytes */
+  size_t np;
+  int queries;
+  const char *needle;
+  size_t nlen;
+  char tail[256];            /* the last nlen-1 bytes, for a needle split across reads */
+  size_t ntail;
+  int found;
+};
+
+/* The replies tmux 3.7c gives (checked in a pane and in a popup): every mode
+ * DECRQM asks about "reset", DA1 a VT100 with advanced video, DA2 tmux's own
+ * ('T' = 84), the cursor at the top left. */
+static void term_reply(int master, struct term *t, char final) {
+  char r[96];
+  int n = 0;
+  t->par[t->np] = 0;
+  if (final == 'p' && t->np >= 2 && t->par[0] == '?' && t->par[t->np - 1] == '$')
+    n = snprintf(r, sizeof r, "\033[?%.*s;2$y", (int)(t->np - 2), t->par + 1);
+  else if (final == 'c' && t->par[0] == '>')
+    n = snprintf(r, sizeof r, "\033[>84;0;0c");
+  else if (final == 'c' && (t->np == 0 || !strcmp(t->par, "0")))
+    n = snprintf(r, sizeof r, "\033[?1;2c");
+  else if (final == 'n' && !strcmp(t->par, "6"))
+    n = snprintf(r, sizeof r, "\033[1;1R");
+  if (n > 0) { write_all(master, r, (size_t)n); t->queries++; }
+}
+
+static void term_feed(int master, struct term *t, const char *b, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)b[i];
+    if (t->state == 0) { if (c == 0x1b) t->state = 1; }
+    else if (t->state == 1) { if (c == '[') { t->state = 2; t->np = 0; } else t->state = (c == 0x1b); }
+    else if (c >= 0x20 && c <= 0x3f) { if (t->np < sizeof t->par - 1) t->par[t->np++] = (char)c; }
+    else { if (c >= 0x40 && c <= 0x7e) term_reply(master, t, (char)c); t->state = (c == 0x1b); }
+  }
+  if (t->found || t->nlen == 0) return;
+  if (memmem(b, n, t->needle, t->nlen)) { t->found = 1; return; }
+  size_t keep = t->nlen - 1, k = n < keep ? n : keep;
+  if (t->ntail) {
+    char j[512];
+    memcpy(j, t->tail, t->ntail);
+    memcpy(j + t->ntail, b, k);
+    if (memmem(j, t->ntail + k, t->needle, t->nlen)) { t->found = 1; return; }
+  }
+  if (n >= keep) { memcpy(t->tail, b + n - keep, keep); t->ntail = keep; }
+  else {
+    size_t drop = t->ntail + n > keep ? t->ntail + n - keep : 0;
+    memmove(t->tail, t->tail + drop, t->ntail - drop);
+    memcpy(t->tail + t->ntail - drop, b, n);
+    t->ntail = t->ntail - drop + n;
+  }
+}
+
 /* ------------------------------------------------------------------ run -- */
 
 static volatile pid_t g_child = 0;
@@ -266,7 +341,7 @@ static int our_children(pid_t *out, int max) {
 }
 
 static int cmd_run(int argc, char **argv) {
-  const char *tty = NULL, *in = NULL, *out = NULL, *err = NULL, *result = NULL;
+  const char *tty = NULL, *in = NULL, *out = NULL, *err = NULL, *result = NULL, *needle = NULL;
   int popup = 0, grace_ms = 3000, allkids = 0;
   pid_t srv = 0;
   int i = 0;
@@ -282,9 +357,13 @@ static int cmd_run(int argc, char **argv) {
     else if (!strcmp(argv[i], "-s")) srv = (pid_t)atoi(argv[++i]);
     else if (!strcmp(argv[i], "-g")) grace_ms = atoi(argv[++i]);
     else if (!strcmp(argv[i], "-r")) result = argv[++i];
+    else if (!strcmp(argv[i], "-T")) needle = argv[++i];
     else { fprintf(stderr, "benchrun: unknown option %s\n", argv[i]); return 2; }
   }
   if (i >= argc) { fprintf(stderr, "benchrun run: no command\n"); return 2; }
+  if (needle && (!tty || !popup || !*needle || strlen(needle) > 255)) {
+    fprintf(stderr, "benchrun: -T wants -t and -p, and a needle of 1-255 bytes\n"); return 2;
+  }
   char **cmd = argv + i;
 
   int master = -1;
@@ -363,6 +442,13 @@ static int cmd_run(int argc, char **argv) {
   int status = 0, done = 0, orphans = -1, killed = 0;
   int64_t deadline = 0;
   char buf[65536];
+  /* -T: the first byte, the needle, the last output, the Esc (CLOCK_MONOTONIC) */
+  struct term term = { 0 };
+  term.needle = needle;
+  term.nlen = needle ? strlen(needle) : 0;
+  int64_t t_fb = -1, t_needle = -1, t_last = -1, t_esc = -1;
+  int term_killed = 0;
+  const int64_t settle_us = 40000, wait_us = 5000000;
   for (;;) {
     struct pollfd pf[2];
     int n = 0;
@@ -373,16 +459,41 @@ static int cmd_run(int argc, char **argv) {
     if (done) {
       int64_t left = (deadline - now_us(CLOCK_MONOTONIC)) / 1000;
       timeout = left > 0 ? (int)left : 0;
+    } else if (needle) {
+      /* the next thing -T does: the Esc (quiet since the needle, or none
+       * within wait_us), or the kill (wait_us after the Esc) */
+      int64_t at = t_esc >= 0 ? t_esc + wait_us : t_needle >= 0 ? t_last + settle_us : t0 + wait_us;
+      int64_t left = (at - now_us(CLOCK_MONOTONIC) + 999) / 1000;
+      timeout = term_killed ? -1 : left > 0 ? (int)left : 0;
     }
     int pr = poll(pf, n, timeout);
     if (pr < 0 && errno != EINTR) break;
     if (mi >= 0 && (pf[mi].revents & (POLLIN | POLLHUP | POLLERR))) {
       ssize_t r = read(master, buf, sizeof buf);
-      if (r > 0) { if (outfd >= 0) write_all(outfd, buf, (size_t)r); }
+      if (r > 0) {
+        if (outfd >= 0) write_all(outfd, buf, (size_t)r);
+        if (needle) {
+          int64_t t = now_us(CLOCK_MONOTONIC);
+          if (t_fb < 0) t_fb = t;
+          t_last = t;
+          term_feed(master, &term, buf, (size_t)r);
+          if (term.found && t_needle < 0) t_needle = t;
+        }
+      }
       else if (r <= 0 && (pf[mi].revents & (POLLHUP | POLLERR)) && !(pf[mi].revents & POLLIN)) {
         /* no slave open right now: stop polling it until something reopens it */
         if (done) { close(master); master = -1; }
         else { struct timespec ts = { 0, 1000000 }; nanosleep(&ts, NULL); }
+      }
+    }
+    if (needle && !done && master >= 0) {
+      int64_t t = now_us(CLOCK_MONOTONIC);
+      if (t_esc < 0 && ((t_needle >= 0 && t - t_last >= settle_us) || (t_needle < 0 && t - t0 >= wait_us))) {
+        write_all(master, "\033", 1);
+        t_esc = t;
+      } else if (t_esc >= 0 && t - t_esc >= wait_us && !term_killed) {
+        kill(-pid, SIGKILL);
+        term_killed = 1;
       }
     }
     struct signalfd_siginfo si;
@@ -433,10 +544,15 @@ static int cmd_run(int argc, char **argv) {
   if (orphans < 0) orphans = 0;
   if (t1 < 0) t1 = now_us(CLOCK_MONOTONIC);
 
-  char line[256];
-  int len = snprintf(line, sizeof line, "%lld %lld %lld %d %lld %d %d %d %d %lld\n",
+  char line[320];
+  int len = snprintf(line, sizeof line, "%lld %lld %lld %d %lld %d %d %d %d %lld",
                      (long long)(t1 - t0), (long long)cpu, (long long)srv_us, status,
                      (long long)rt0, orphans, killed, jobs, jobs_killed, (long long)jobs_us);
+  if (needle)
+    len += snprintf(line + len, sizeof line - (size_t)len, " %lld %lld %lld %d",
+                    (long long)(t_fb >= 0 ? t_fb - t0 : -1), (long long)(t_needle >= 0 ? t_needle - t0 : -1),
+                    (long long)(t_esc >= 0 ? t_esc - t0 : -1), term.queries);
+  len += snprintf(line + len, sizeof line - (size_t)len, "\n");
   if (result) {
     int rf = open(result, O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (rf < 0) { perror(result); return 2; }
@@ -527,6 +643,7 @@ static void save(const char *base, const char *ext, const char *data, size_t n) 
 }
 
 static int stub_fzf(int argc, char **argv) {
+  int64_t start = now_us(CLOCK_REALTIME);
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--version")) {
       const char *v = getenv("BENCH_FZF_VERSION");
@@ -583,7 +700,8 @@ static int stub_fzf(int argc, char **argv) {
   if (strcmp(mode, "drain")) {
     save(out, ".rows", rows, len);
     char t[128];
-    int tl = snprintf(t, sizeof t, "%lld %lld %zu %zu\n", (long long)first, (long long)last, len, lines);
+    int tl = snprintf(t, sizeof t, "%lld %lld %zu %zu %lld\n", (long long)first, (long long)last, len, lines,
+                      (long long)start);
     save(out, ".t", t, (size_t)tl);
   }
   free(rows);
