@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# This file's directory, as `cd "$(dirname FILE)" && pwd` says it, without
+# that line's two subshells and its dirname (~2 ms of every plugin load).  The
+# cd is undone, so what runs from here runs where this was started: the
+# script globs the jump keys, and a run-shell job gets its tmux client's
+# directory.  bash 3.2 too, macOS's /bin/bash.
+case "${BASH_SOURCE[0]}" in
+  */*) CURRENT_DIR="${BASH_SOURCE[0]%/*}" ;;
+  *)   CURRENT_DIR=. ;;
+esac
+if cd "${CURRENT_DIR:-/}" >/dev/null; then CURRENT_DIR="$PWD"; cd "$OLDPWD" || :
+else CURRENT_DIR=""
+fi
 SCRIPT="$CURRENT_DIR/scripts/interdimux.sh"
 RUST_DIR="$CURRENT_DIR/rust"
 IMUX="$RUST_DIR/target/release/imux"
