@@ -216,7 +216,7 @@ pub fn is_remote(path: &str) -> bool {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "/proc/self/mountinfo".to_string());
             let home = std::env::var("HOME").unwrap_or_default();
-            let (t, lossless) = match std::fs::read(&src) {
+            let (t, lossless) = match crate::proc::read_all(&src) {
                 Ok(b) => {
                     let text = String::from_utf8_lossy(&b);
                     let lossless = matches!(text, std::borrow::Cow::Borrowed(_));
