@@ -10845,6 +10845,7 @@ ACTION_CMD="bash '$SCRIPT_PATH' --action"
 # the old dialog; an Enter switched nothing.
 trap : INT
 
+_hints_built=""   # the hint ladders, built on the loop's first pass (see there)
 while true; do
   : > "$RESUME_FILE"
   # Re-seed each iteration: the loop restarts fzf using the STATIC $SHOW_PREVIEW
@@ -11022,13 +11023,22 @@ while true; do
       # tiers ("W:line|W:line|…|0:"), so the focus bind can choose both the row
       # type and the tier inline instead of re-exec'ing this script on every
       # cursor move.
+      #
+      # Built on the first pass only.  They depend on nothing a pass changes --
+      # the palette's accent and fzf's version -- and a pass after the first is
+      # ctrl-o and then Esc, which spent ~5 ms rebuilding the same five strings
+      # before the navigator could come back.  The tier is still picked on
+      # every pass.
       hint_cols; _hint_w="$REPLY"
-      for _t in S W P D X; do
-        hint_set "$_t"
-        hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
-        printf -v "INTERDIMUX_HINTS_$_t" '%s' "$REPLY"
-        export "INTERDIMUX_HINTS_$_t"
-      done
+      if [ -z "$_hints_built" ]; then
+        for _t in S W P D X; do
+          hint_set "$_t"
+          hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+          printf -v "INTERDIMUX_HINTS_$_t" '%s' "$REPLY"
+          export "INTERDIMUX_HINTS_$_t"
+        done
+        _hints_built=1
+      fi
       # The launch-time bar, fitted here rather than by the snippet: fzf has to
       # be told the string before it can draw a first frame.
       hint_pick "$_hint_w" "$INTERDIMUX_HINTS_X"; _hint_x="$REPLY"
