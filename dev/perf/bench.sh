@@ -129,9 +129,26 @@
 #   parse         bash -n interdimux.sh (pure parse cost of the script)
 #   load          bash interdimux.tmux: the plugin loading, as a tmux.conf's
 #                 run-shell runs it at every server start and config reload
+#   dashboard     prefix+g: the bash its binding's run-shell job starts (argv
+#                 and environment recorded from the real key, as a popup's
+#                 are; the job's /bin/sh, dash, execs it), to the native menu
+#                 it opens, which a watcher outside the measurement closes.
+#                 WALL: to the menu's tmux client; the output is what the
+#                 menu draws (each item's command left out: none is drawn)
+#   launch        a dashboard item: the run-shell job of the side's own
+#                 Switch entry (taken from its menu), the launcher, to the
+#                 popup it opens, whose shell exits at once (BASH_ENV).
+#                 WALL: to the popup's shell; the output is its environment
+#   jobs          the Jobs picker (--jobs, in the popup's environment and a
+#                 158x35 pty) with three queued jobs (a stub atq and at -c),
+#                 to its rows at the stub fzf.  WALL: to the first row
+#   sched-list    bash interdimux.sh --sched-list, nothing queued
+#   doctor-opts   doctor with the VPS user's colours set: fifteen
+#                 @interdimux-color-* '#rrggbb', which show-options prints
+#                 quoted (set before the scenario, unset after)
 #  SIZED (the ones -F both also runs on the small fixture): keypress
 #   first-frame first-frame-changed first-frame-bash list list-changed
-#   list-bash preview-S preview-W hint footer describe-create
+#   list-bash preview-S preview-W hint footer describe-create dashboard
 #  -changed: a plain scenario runs against a server that never changes, so a
 #   cache -- each side has its own, below -- would show only its hit.  These
 #   move the server to the next of three states before every pair (the
@@ -330,13 +347,14 @@ BASH_BIN=$(command -v bash 2>/dev/null)
 DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed list list-changed list-bash
                    preview-S preview-W preview-P hint footer describe-create session-name-for
                    dirs-list dirs-deep dirs-preview doctor)
-EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load)
+EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load dashboard launch jobs sched-list
+                 doctor-opts)
 # the ones whose work depends on the tmux server's size (-F both runs them on
 # the small fixture too), and the small fixture's default set
 # (preview-P is not one: the small fixture's windows have one pane each, and
 # the navigator lists no pane row for those)
 SIZED_SCENARIOS=(keypress first-frame first-frame-changed first-frame-bash list list-changed
-                 list-bash preview-S preview-W hint footer describe-create)
+                 list-bash preview-S preview-W hint footer describe-create dashboard)
 SMALL_DEFAULT=(keypress first-frame first-frame-changed list list-changed preview-S preview-W
                hint footer describe-create)
 
@@ -578,6 +596,40 @@ for c in at atq atrm batch; do
   printf '#!/bin/sh\nprintf "%%s %%s\\n" "%s" "$*" >> "%s/stub/at.log"\nexit 0\n' "$c" "$WORK" > "$WORK/stub/$c"
   chmod +x "$WORK/stub/$c"
 done
+# The jobs scenario's queue, first on its PATH: three jobs of the plugin's
+# queue, as GNU atq prints them (-o, a sortable stamp) and as BSD's does, and
+# each one's `at -c` with the plugin's header lines.  Read-only: nothing here
+# can queue or remove a job.
+mkdir -p "$WORK/jobs"
+cat > "$WORK/jobs/atq" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *-o*) printf '11\t2026-10-08 18:00 i bench\n12\t2026-10-08 19:30 i bench\n13\t2026-10-09 08:15 i bench\n' ;;
+  *)    printf '11\tThu Oct  8 18:00:00 2026 i bench\n12\tThu Oct  8 19:30:00 2026 i bench\n13\tFri Oct  9 08:15:00 2026 i bench\n' ;;
+esac
+EOF
+cat > "$WORK/jobs/at" <<'EOF'
+#!/bin/sh
+[ "$1" = -c ] || exit 0
+printf '#!/bin/sh\n# atrun uid=1000 gid=1000\nHOME=/x; export HOME\ncd /x || exit 1\n# imux:v1 \n# imux-pane: %%1\n# imux-target: frontend-monorepo:=1.0\n# imux-desc: make test-%s\ntmux send-keys -t %%1 -l make\n' "$2"
+EOF
+chmod +x "$WORK/jobs/atq" "$WORK/jobs/at"
+# What the launch scenario's popup runs first (BASH_ENV): it stamps the moment
+# the popup's shell started and saves the environment the launcher gave it
+# (BENCH_* aside, which differ by side), then exits 0, which closes the
+# popup.  Builtins only: the popup's processes are counted in clock ticks.
+cat > "$WORK/bin/popup-stamp.sh" <<'EOF'
+o=${BENCH_FZF_OUT:-}
+if [ -n "$o" ]; then
+  t=${EPOCHREALTIME//[!0-9]/}; [ -n "$t" ] || t=$(date +%s%6N)
+  mapfile -d '' -t e < "/proc/$$/environ"
+  for v in "${e[@]}"; do case $v in BASH_ENV=*|BENCH_*) ;; *) printf '%s\n' "$v" ;; esac; done > "$o.rows"
+  printf '%s 0 0 0\n' "$t" > "$o.t"
+fi
+exit 0
+EOF
+# a pipe nothing writes to, for 1 ms sleeps with `read -t`
+mkfifo "$WORK/tick" || die "mkfifo failed"
 
 # --- load ---------------------------------------------------------------------------
 load1() { local a _; read -r a _ < /proc/loadavg; printf '%s' "$a"; }
@@ -980,7 +1032,7 @@ use_side() { # $1 = side
 # back as the same binding (checked here): the keypress scenario re-installs
 # the side's own before each of its runs.  (`list-keys -T prefix KEY` prints
 # nothing on tmux 3.7c: the key's line is picked from the whole table.)
-NAV_KEY="" PREFIX_KEY=""
+NAV_KEY="" PREFIX_KEY="" DASH_KEY=""
 key_line() {
   tm list-keys -T prefix 2>/dev/null | awk -v k="$NAV_KEY" '
     { for (i = 2; i <= 3; i++) if ($i == "-T" && $(i + 1) == "prefix" && $(i + 2) == k) { print; next } }'
@@ -996,6 +1048,7 @@ install_binding() { # $1 = side, $2 = worktree
     || die "$wt: ${entry[*]##*/} failed against the fixture server: $(tail -5 "$WORK/bind-$side.log")"
   if [ -z "$NAV_KEY" ]; then
     NAV_KEY=$(tm show-option -gqv @interdimux-key); NAV_KEY=${NAV_KEY:-f}
+    DASH_KEY=$(tm show-option -gqv @interdimux-dashboard-key); DASH_KEY=${DASH_KEY:-g}
     PREFIX_KEY=$(tm show-option -gv prefix)
   fi
   key_line > "$conf"
@@ -1036,6 +1089,132 @@ record_popup_env() { # $1 = side, $2 = name of the array to fill, $3... = extra 
   for v in "${recd[@]}"; do case "$v" in BASH_ENV=*) ;; *) _pe+=("$v") ;; esac; done
   case " ${_pe[*]} " in *" TMUX="*) ;; *) die "side $side: the recorded popup environment has no TMUX" ;; esac
   _pe+=("$@")
+}
+
+# The argv and environment of the bash that a tmux command list ($2...) has
+# the server start, recorded as the popup's environment is: BASH_ENV, in the
+# server's global environment for that moment, names a recorder, which that
+# bash reads first; it saves both (NUL-separated) and exits 0, so nothing it
+# was to run runs.  Into $WORK/hold/$1.argv and $WORK/hold/$1.env.
+record_bash() { # $1 = name, $2... = tmux command list
+  local name=$1 out="$WORK/hold/$1" rec="$WORK/bin/record-$1.sh" i; shift
+  printf '%s\n' "cat /proc/\$\$/cmdline > '$out.argv' && cat /proc/\$\$/environ > '$out.env.tmp' && mv '$out.env.tmp' '$out.env'" 'exit 0' > "$rec"
+  rm -f "$out.argv" "$out.env"
+  tm set-environment -g BASH_ENV "$rec" \; "$@" || die "$name: cannot run: $*"
+  for i in $(seq 1 500); do [ -e "$out.env" ] && break; sleep 0.02; done
+  tm set-environment -gu BASH_ENV
+  [ -e "$out.env" ] || die "$name: no bash started within 10 s ($*)"
+}
+recorded() { # $1 = name, $2 = array to fill with its environment (BASH_ENV aside), $3 = with its argv
+  local -n _re="$2" _ra="$3"; local -a vars=(); local v
+  mapfile -d '' -t vars < "$WORK/hold/$1.env"
+  _re=()
+  for v in "${vars[@]}"; do case "$v" in BASH_ENV=*) ;; *) _re+=("$v") ;; esac; done
+  mapfile -d '' -t _ra < "$WORK/hold/$1.argv"
+}
+
+# prefix+g's menu.  display-menu waits until its menu closes, so a run of the
+# dashboard needs someone to close it: this watcher, outside the measurement.
+# It walks this shell's process tree (/proc/PID/task/PID/children) until the
+# menu's tmux client turns up, stamps that moment (the menu on screen, near
+# enough) and saves its argv, and closes the menu -- display-popup -C closes
+# any overlay, and is a no-op before there is one -- until that client is
+# gone.  It gives up when the run ends without a menu.
+menu_watch() { # $1 = output prefix: .t (the stamp), .argv, .rows (what the menu draws)
+  local me=$BASHPID p k a0 a1 i q n t menu="" ran=0
+  local -a todo kids mv
+  exec 9<> "$WORK/tick"
+  for (( i = 0; i < 20000; i++ )); do
+    todo=("$$") q=0 n=0
+    while [ "$q" -lt "${#todo[@]}" ] && [ -z "$menu" ]; do
+      p=${todo[q]}; q=$((q + 1)); kids=()
+      { read -r -a kids || :; } 2>/dev/null < "/proc/$p/task/$p/children"
+      for k in ${kids[@]+"${kids[@]}"}; do
+        [ "$k" = "$me" ] && continue
+        n=$((n + 1)); todo+=("$k"); a0="" a1=""
+        { IFS= read -r -d '' a0; IFS= read -r -d '' a1; } 2>/dev/null < "/proc/$k/cmdline"
+        [ "$a1" = display-menu ] && { menu=$k; break; }
+      done
+    done
+    [ -n "$menu" ] && break
+    if [ "$n" -gt 0 ]; then ran=1; elif [ "$ran" = 1 ]; then return 0; fi
+    read -t 0.001 -u 9 _
+  done
+  [ -n "$menu" ] || return 0
+  t=${EPOCHREALTIME//[!0-9]/}; [ -n "$t" ] || t=$(date +%s%6N)
+  mapfile -d '' -t mv < "/proc/$menu/cmdline"
+  printf '%s\0' "${mv[@]}" > "$1.argv"
+  for a0 in "${mv[@]:1}"; do
+    case "$a0" in 'run-shell '*) a0='<command>' ;; esac
+    printf '%s\n' "$a0"
+  done > "$1.rows"
+  printf '%s 0 0 0\n' "$t" > "$1.t"
+  for (( i = 0; i < 5000; i++ )); do
+    [ -e "/proc/$menu" ] || return 0
+    (( i % 5 )) || "$TMUX_BIN" -L "$SOCK" display-popup -C -c "$CLIENT_NAME" 2>/dev/null
+    read -t 0.001 -u 9 _
+  done
+  kill "$menu" 2>/dev/null
+}
+MENU_WATCHER=""
+pre_dashboard() { # side fzf-out
+  [ -z "$MENU_WATCHER" ] || wait "$MENU_WATCHER"
+  menu_watch "$2" &
+  MENU_WATCHER=$!
+}
+post_dashboard() { [ -z "$MENU_WATCHER" ] || wait "$MENU_WATCHER"; MENU_WATCHER=""; }
+
+# The Switch entry of a side's own menu, as display-menu was handed it (one
+# run of its dashboard, the watcher saving the argv): the shell command its
+# `run-shell -b "..."` runs.  An item whose command needs tmux's escapes or
+# formats undone (an install path with a quote, a '$', a '#') is refused.
+menu_item() { # $1 = side -> REPLY
+  local -a de=() da=() mv=(); local i c=""
+  recorded "$1-dash" de da
+  use_side "$1"
+  pre_dashboard "$1" "$WORK/hold/$1-menu"
+  env -i "${de[@]}" "${da[@]}" </dev/null >/dev/null 2>&1
+  post_dashboard
+  [ -s "$WORK/hold/$1-menu.argv" ] || die "side $1: prefix $DASH_KEY's dashboard opened no menu"
+  mapfile -d '' -t mv < "$WORK/hold/$1-menu.argv"
+  for (( i = 0; i + 2 < ${#mv[@]}; i++ )); do
+    [ "${mv[i]}" = Switch ] && { c=${mv[i + 2]}; break; }
+  done
+  case "$c" in 'run-shell -b "'*'"') c=${c#'run-shell -b "'}; c=${c%'"'} ;; *) die "side $1: no Switch item in its menu" ;; esac
+  case "$c" in *[\\\"\$#]*) die "side $1: the Switch item's command has escapes or formats the bench does not undo: $c" ;; esac
+  REPLY=$c
+}
+# launch: the item's popup runs popup-stamp.sh first, and the run is stamped
+# when it does
+pre_launch() { # side fzf-out
+  tm display-popup -C -c "$CLIENT_NAME" \; set-environment -g BASH_ENV "$WORK/bin/popup-stamp.sh" \
+    \; set-environment -g BENCH_FZF_OUT "$2" || die "cannot set up the launch for side $1"
+}
+post_launch() { tm set-environment -gu BASH_ENV \; set-environment -gu BENCH_FZF_OUT; }
+# doctor-opts: the VPS user's own colours (their ~/.tmux.conf), for the
+# scenario only
+USER_COLOURS=(accent '#e78a4e' path '#d8a657' git '#d3869b' ssh '#7daea3' editor '#a9b665'
+              success '#a9b665' danger '#ea6962' tree '#6b665f' separator '#504945' query '#ddc7a1'
+              match-current '#e78a4e' current-bg '#32302f' header '#8d877d' border '#504945'
+              menu-sel-fg '#282828')
+COLOURS_SET=0
+pre_doctor_opts() {
+  [ "$COLOURS_SET" = 1 ] && return 0
+  local -a args=(); local i
+  for (( i = 0; i < ${#USER_COLOURS[@]}; i += 2 )); do
+    [ "${#args[@]}" = 0 ] || args+=(\;)
+    args+=(set -g "@interdimux-color-${USER_COLOURS[i]}" "${USER_COLOURS[i + 1]}")
+  done
+  tm "${args[@]}" || die "cannot set the user's colours"
+  COLOURS_SET=1
+}
+post_doctor_opts() {
+  local -a args=(); local i
+  for (( i = 0; i < ${#USER_COLOURS[@]}; i += 2 )); do
+    [ "${#args[@]}" = 0 ] || args+=(\;)
+    args+=(set -gu "@interdimux-color-${USER_COLOURS[i]}")
+  done
+  tm "${args[@]}"; COLOURS_SET=0
 }
 
 # What fzf 0.74 exports to a child, as recorded from the real navigator under
@@ -1192,7 +1371,7 @@ restore_server() { change_server 0; }
 
 # shellcheck disable=SC2034  # the arrays named "e" here are read through define's nameref
 build_scenarios() {
-  local side wt sq
+  local side wt sq v
   local rows="$WORK/hold/A-nav.rows" drows="$WORK/hold/A-dirs.rows"
   local ntot nd nsw
   ntot=$(wc -l < "$rows"); nd=$(wc -l < "$drows")
@@ -1282,6 +1461,20 @@ build_scenarios() {
     e=("${dirs[@]}" "${fz_ddeep[@]}");   define dirs-deep "$side" e sh -c "bash $sq --dirs-list --deep '$DEEP_Q'"
     e=("${dirs[@]}" "${fz_dpv[@]}");     define dirs-preview "$side" e sh -c "bash $sq --dirs-preview '$DIR_PV'"
     e=("${pop[@]}"); define doctor "$side" e bash "$wt/scripts/interdimux.sh" --doctor
+    define doctor-opts "$side" e bash "$wt/scripts/interdimux.sh" --doctor
+    e=("${pop[@]}"); define sched-list "$side" e bash "$wt/scripts/interdimux.sh" --sched-list
+    e=()
+    for v in "${pop[@]}"; do case "$v" in PATH=*) e+=("PATH=$WORK/jobs:${v#PATH=}") ;; *) e+=("$v") ;; esac; done
+    e+=(BENCH_FZF_MODE=first)
+    define jobs "$side" e bash "$wt/scripts/interdimux.sh" --jobs
+    if [ "$NEED_DASH" = 1 ]; then
+      local -a da=()
+      recorded "$side-dash" e da
+      define dashboard "$side" e "${da[@]}"
+      menu_item "$side"
+      recorded "$side-job" e da
+      define launch "$side" e sh -c "$REPLY"
+    fi
   done
   local s
   for s in "${DEFAULT_SCENARIOS[@]}" "${EXTRA_SCENARIOS[@]}"; do
@@ -1293,6 +1486,11 @@ build_scenarios() {
   SCN_TTY[keypress]="-P"; SCN_KIND[keypress]=key
   SCN_PRE[keypress]=pre_keypress; SCN_POST[keypress]=post_keypress
   SCN_TTY[load]=""
+  # a run-shell job's: no terminal
+  SCN_TTY[dashboard]="" SCN_KIND[dashboard]=menu SCN_PRE[dashboard]=pre_dashboard SCN_POST[dashboard]=post_dashboard
+  SCN_TTY[launch]="" SCN_KIND[launch]=popup SCN_PRE[launch]=pre_launch SCN_POST[launch]=post_launch
+  SCN_TTY[jobs]+=" -p"; SCN_KIND[jobs]=first
+  SCN_PRE[doctor-opts]=pre_doctor_opts SCN_POST[doctor-opts]=post_doctor_opts SCN_RC[doctor-opts]="0 1"
   for s in first-frame-changed list-changed; do SCN_PAIR[$s]=change_server; SCN_POST[$s]=restore_server; done
   SCN_RC[doctor]="0 1"
 }
@@ -1324,7 +1522,7 @@ run_one() { # scenario side [suffix] [state]
   local out="$WORK/out/$key.out" err="$WORK/out/$key.err" fz="$WORK/out/$key.fzf" res
   local wall cpu srv rc rt0 orph killed jobs jkilled jobus first sum
   local -a extra=()
-  case $kind in first|key) rm -f "$fz.t" "$fz.rows" ;; esac
+  case $kind in first|key|menu|popup) rm -f "$fz.t" "$fz.rows" "$fz.argv" ;; esac
   [ "$kind" = first ] && extra=(BENCH_FZF_OUT="$fz")
   use_side "$side"
   [ -z "${SCN_PRE[$scn]:-}" ] || "${SCN_PRE[$scn]}" "$side" "$fz"
@@ -1332,7 +1530,7 @@ run_one() { # scenario side [suffix] [state]
   res=$(env -i "${_e[@]}" "${extra[@]}" "$RUNNER" run ${SCN_TTY[$scn]} -s "$SRV_PID" -o "$out" -e "$err" -- "${_c[@]}") \
     || { SCN_NOTE[$scn]+="$side: runner failed"$'\n'; return 1; }
   read -r wall cpu srv rc rt0 orph killed jobs jkilled jobus <<< "$res"
-  if [ "$kind" = first ] || [ "$kind" = key ]; then
+  if [ "$kind" != cmd ]; then
     if [ -s "$fz.t" ]; then
       read -r first _ _ _ < "$fz.t"
       if [ "$first" -gt 0 ]; then wall=$(( first - rt0 )); else wall=-1; fi
@@ -1340,7 +1538,14 @@ run_one() { # scenario side [suffix] [state]
     else
       wall=-1
     fi
-    [ "$wall" -ge 0 ] || { SCN_NOTE[$scn]+="$side: no row ever reached fzf"$'\n'; SCN_BAD[$scn]=1; }
+    if [ "$wall" -lt 0 ]; then
+      case $kind in
+        menu)  SCN_NOTE[$scn]+="$side: no menu ever opened"$'\n' ;;
+        popup) SCN_NOTE[$scn]+="$side: no popup ever ran its shell"$'\n' ;;
+        *)     SCN_NOTE[$scn]+="$side: no row ever reached fzf"$'\n' ;;
+      esac
+      SCN_BAD[$scn]=1
+    fi
   fi
   # the output, worktree paths normalised, as one checksum
   sum=$(norm_paths < "$out" 2>/dev/null | cksum)
@@ -1555,12 +1760,22 @@ CHG_NAME=("$(tm display-message -p -t "$CHG_WIN" '#{window_name}')" shell-ci she
 CHG_TITLE=("$(tm display-message -p -t "$CHG_PANE" '#{pane_title}')" "make ci" "cargo watch")
 
 # Each side's bindings, and the popup environment its prefix+f gives
+NEED_DASH=0
+case " ${SCENARIOS[*]} " in *" dashboard "*|*" launch "*) NEED_DASH=1 ;; esac
 say "installing each side's key bindings (its interdimux.tmux) and recording the popup its prefix+f opens ..."
 for side in A B; do
   if [ "$side" = A ]; then wt=$WT_A; else wt=$WT_B; fi
   install_binding "$side" "$wt"
   declare -a "POPUP_$side=()" "POPUPB_$side=()"
   record_popup_env "$side" "POPUP_$side"
+  # what the side's prefix+g starts, and what a run-shell job in the
+  # pressing pane gets (a menu item's command runs as one)
+  if [ "$NEED_DASH" = 1 ]; then
+    record_bash "$side-dash" send-keys -K -c "$CLIENT_NAME" "$PREFIX_KEY" "$DASH_KEY"
+    # (a script, not -c: bash -c on a socket for stdin, which a job has,
+    # takes itself for an rsh command and reads ~/.bashrc, not BASH_ENV)
+    record_bash "$side-job" run-shell -b -t "$CUR_PANE" 'exec bash /dev/null'
+  fi
   declare -n _pb="POPUPB_$side" _pp="POPUP_$side"
   _pb=("${_pp[@]}" INTERDIMUX_USE_RUST=off)
   unset -n _pb _pp
