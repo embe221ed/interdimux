@@ -38,9 +38,9 @@
 #                      those of them whose work depends on the tmux server
 #                      (SIZED below; by default keypress first-frame
 #                      first-frame-changed list list-changed preview-S
-#                      preview-W hint footer describe-create, which is also
-#                      -F small's default), each on a fixture of its own, one
-#                      table each
+#                      preview-W preview-D hint footer describe-create, which
+#                      is also -F small's default), each on a fixture of its
+#                      own, one table each
 #   -w W        warm-up pairs per scenario, discarded (default 2)
 #   -b SECS     per-scenario time budget (default 25 when -n is not given):
 #               slow scenarios run fewer pairs, never fewer than 8; and while a
@@ -107,6 +107,11 @@
 #   preview-P     --preview on a pane row (the fake claude agent pane; large
 #                 only: a one-pane window, as all the small fixture's are,
 #                 lists no pane row)
+#   preview-D     --preview on a directory row, the navigator's first that is
+#                 a git repo, else its first (small: src/api-gateway, a repo
+#                 with changes and a README; large: a plain directory, since
+#                 every repo there has a session, and a directory with one is
+#                 listed as the session)
 #   hint          the per-cursor-move footer: the navigator's own `focus` bind
 #                 snippet (read from the fzf argv the navigator built), run by
 #                 sh -c with an empty query -- the inline path, no bash re-exec
@@ -120,6 +125,11 @@
 #                 --dirs picker hands its fzf (mount table exported etc.)
 #   dirs-deep     ctrl-f deep search: --dirs-list --deep svc (~100 dirs match)
 #   dirs-preview  --dirs-preview on a git repo with changes and a README
+#   dirs-open     ctrl-o itself: the navigator's execute child, sh -c "bash
+#                 interdimux.sh --dirs", with the navigator's environment, a
+#                 158x35 pty and the stub fzf, which exits as Esc would (so
+#                 --dirs exits 1, its cancel).  WALL: exec to the first row at
+#                 the stub fzf; CPU: the whole run (the picker's whole list)
 #   doctor        bash interdimux.sh --doctor
 #  extra (only with -s, or -s all):
 #   first-frame-bash  first-frame with INTERDIMUX_USE_RUST=off
@@ -328,17 +338,18 @@ TMUX_BIN=${IMUX_BENCH_TMUX:-$(command -v tmux 2>/dev/null)}
 BASH_BIN=$(command -v bash 2>/dev/null)
 
 DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed list list-changed list-bash
-                   preview-S preview-W preview-P hint footer describe-create session-name-for
-                   dirs-list dirs-deep dirs-preview doctor)
+                   preview-S preview-W preview-P preview-D hint footer describe-create
+                   session-name-for dirs-list dirs-deep dirs-preview dirs-open doctor)
 EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load)
 # the ones whose work depends on the tmux server's size (-F both runs them on
 # the small fixture too), and the small fixture's default set
 # (preview-P is not one: the small fixture's windows have one pane each, and
-# the navigator lists no pane row for those)
+# the navigator lists no pane row for those.  preview-D is, for the row: only
+# the small fixture lists a repo as a directory row)
 SIZED_SCENARIOS=(keypress first-frame first-frame-changed first-frame-bash list list-changed
-                 list-bash preview-S preview-W hint footer describe-create)
+                 list-bash preview-S preview-W preview-D hint footer describe-create)
 SMALL_DEFAULT=(keypress first-frame first-frame-changed list list-changed preview-S preview-W
-               hint footer describe-create)
+               preview-D hint footer describe-create)
 
 CLIENT_COLS=200 CLIENT_ROWS=50          # the attached client
 POPUP_COLS=158 POPUP_ROWS=35            # 80% x 75% of it, minus the popup border
@@ -1199,21 +1210,28 @@ build_scenarios() {
   # a row for each session and each window, at the least
   nsw=$(( $(tm list-sessions | wc -l) + $(tm list-windows -a | wc -l) ))
   [ "$ntot" -ge "$nsw" ] || die "the navigator listed only $ntot rows for $nsw sessions and windows"
-  local ROW_S ROW_W ROW_P="" ROW_F
+  local ROW_S ROW_W ROW_P="" ROW_F ROW_DN D_SPEC
   find_row "$rows" "$S_SPEC" || die "no row $S_SPEC in the list"; ROW_S=$REPLY
   find_row "$rows" "$W_SPEC" || die "no row $W_SPEC in the list"; ROW_W=$REPLY
   if [ -n "$P_SPEC" ]; then find_row "$rows" "$P_SPEC" || die "no row $P_SPEC in the list"; ROW_P=$REPLY; fi
   find_row "$rows" "W:$CUR_SESSION:0" || die "no row W:$CUR_SESSION:0"; ROW_F=$REPLY
+  # the navigator's first directory row that is a git repo, else its first
+  D_SPEC=$(strip_ansi "$rows" | awk -F'\t' '$NF ~ /^D:/ { print $NF }' \
+    | while IFS= read -r d; do [ -d "${d#D:}/.git" ] && { printf '%s\n' "$d"; break; }; done)
+  [ -n "$D_SPEC" ] || D_SPEC=$(strip_ansi "$rows" | awk -F'\t' '$NF ~ /^D:/ { print $NF; exit }')
+  [ -n "$D_SPEC" ] || die "the navigator lists no directory row"
+  find_row "$rows" "$D_SPEC" || die "no row $D_SPEC in the list"; ROW_DN=$REPLY
   local DIR_PV="$H/src/api-gateway" DEEP_Q=svc
   grep -qF "$DIR_PV" "$drows" || die "the ctrl-o picker does not list $DIR_PV"
   local ROW_D
   ROW_D=$(strip_ansi "$drows" | awk -F'\t' -v s="$DIR_PV" '$NF == s { print; exit }')
-  local -a fz_reload fz_pv_S fz_pv_W fz_pv_P fz_focus fz_typed fz_zero fz_dreload fz_ddeep fz_dpv
+  local -a fz_reload fz_pv_S fz_pv_W fz_pv_P fz_pv_D fz_focus fz_typed fz_zero fz_dreload fz_ddeep fz_dpv
   # the navigator: preview hidden (the default) except for the preview itself
   fzf_env fz_reload nav ctrl-r async "" "$ntot" "$ntot" "$ROW_F" 0
   fzf_env fz_pv_S  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_S" 1
   fzf_env fz_pv_W  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_W" 1
   fzf_env fz_pv_P  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_P" 1
+  fzf_env fz_pv_D  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_DN" 1
   fzf_env fz_focus nav down bg-cancel "" "$ntot" "$ntot" "$ROW_W" 0
   typed_counts
   fzf_env fz_typed nav i bg-cancel "$TYPED_Q" "$TYPED_MC" "$ntot" "$ROW_F" 0
@@ -1258,6 +1276,7 @@ build_scenarios() {
     e=("${nav[@]}" "${fz_pv_S[@]}"); define preview-S "$side" e sh -c "bash $sq --preview '$S_SPEC'"
     e=("${nav[@]}" "${fz_pv_W[@]}"); define preview-W "$side" e sh -c "bash $sq --preview '$W_SPEC'"
     [ -z "$P_SPEC" ] || { e=("${nav[@]}" "${fz_pv_P[@]}"); define preview-P "$side" e sh -c "bash $sq --preview '$P_SPEC'"; }
+    e=("${nav[@]}" "${fz_pv_D[@]}"); define preview-D "$side" e sh -c "bash $sq --preview '$D_SPEC'"
 
     if focus_snippet "$side-nav"; then
       local snip=$REPLY
@@ -1281,13 +1300,18 @@ build_scenarios() {
     e=("${dirs[@]}" "${fz_dreload[@]}"); define dirs-list "$side" e sh -c "bash $sq --dirs-list"
     e=("${dirs[@]}" "${fz_ddeep[@]}");   define dirs-deep "$side" e sh -c "bash $sq --dirs-list --deep '$DEEP_Q'"
     e=("${dirs[@]}" "${fz_dpv[@]}");     define dirs-preview "$side" e sh -c "bash $sq --dirs-preview '$DIR_PV'"
+    # ctrl-o: the environment the --dirs holder started with (start_holder)
+    local -n _dop="DIRSENV_$es"
+    e=("${_dop[@]}" BENCH_FZF_MODE=first); define dirs-open "$side" e sh -c "bash $sq --dirs"
+    unset -n _dop
     e=("${pop[@]}"); define doctor "$side" e bash "$wt/scripts/interdimux.sh" --doctor
   done
   local s
   for s in "${DEFAULT_SCENARIOS[@]}" "${EXTRA_SCENARIOS[@]}"; do
     SCN_TTY[$s]="-t ${POPUP_COLS}x${POPUP_ROWS}"; SCN_KIND[$s]=cmd; SCN_RC[$s]=0
   done
-  for s in first-frame first-frame-changed first-frame-bash; do SCN_TTY[$s]+=" -p"; SCN_KIND[$s]=first; done
+  for s in first-frame first-frame-changed first-frame-bash dirs-open; do SCN_TTY[$s]+=" -p"; SCN_KIND[$s]=first; done
+  SCN_RC[dirs-open]=1   # the stub's Esc: --dirs's cancel
   # a tmux client command: no terminal, and every process the server starts
   # meanwhile -- the popup -- waited for and counted (benchrun -P)
   SCN_TTY[keypress]="-P"; SCN_KIND[keypress]=key

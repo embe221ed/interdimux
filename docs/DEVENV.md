@@ -98,9 +98,10 @@ trees, on Linux (a WARNING says when there is no zoxide).
 
 Every scenario is a path a keypress waits on, invoked as its real caller
 invokes it -- prefix+f itself, the navigator opening to its first row, the
-`--list` reload, a preview, the per-keystroke footer, the ctrl-o picker,
-`--doctor` and more -- against a fixture that A and B share, with an
-attached client and a real zoxide database.  There are two (`-F`):
+`--list` reload, a preview, the per-keystroke footer, ctrl-o to the
+picker's first row, its list and preview, `--doctor` and more -- against a
+fixture that A and B share, with an attached client and a real zoxide
+database.  There are two (`-F`):
 **large**, 12 sessions, 40 windows and 90 panes, whose navigator lists 151
 rows (12 sessions, 40 windows, 87 panes, 12 directories), where a cost per
 row shows; and **small**, 1 session, 3 windows, 3 panes -- the size of the
@@ -111,10 +112,12 @@ costs (parsing the script, exec'ing the core, the tmux round-trips,
 zoxide) are nearly everything, and a saving per row all but vanishes under
 fzf's 20 ms paint floor.  The default, `-F both`, runs the scenarios on the
 large fixture, then those whose work depends on the server's size
-(keypress, first-frame, list and their `-changed` variants, preview-S and
--W, the footer callbacks) on the small one, whose windows give preview-P no
-pane row: two tables.  Rank an optimisation by what it does on the small
-one; the large one is what resolves it.
+(keypress, first-frame, list and their `-changed` variants, preview-S, -W
+and -D, the footer callbacks) on the small one, whose windows give
+preview-P no pane row and whose directory rows include a repo (preview-D's
+row; every repo of the large one has a session): two tables.  Rank an
+optimisation by what it does on the small one; the large one is what
+resolves it.
 
 What a popup starts with comes from the real binding.  Each side's
 `interdimux.tmux` runs against the fixture server, as a tmux.conf's
