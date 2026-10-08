@@ -311,7 +311,7 @@ fi
 
 # --- what --doctor says about which dashboard you are about to get ------------
 # The doctor suite cannot reach these arms: it attaches no client, so
-# client_dim reads 0 and the report can only say it could not tell.  Here there
+# client_dims reads 0 and the report can only say it could not tell.  Here there
 # are clients of known height.
 doctor_dash() { # $1 = outer client rows -> the one line about the dashboard
   local h="$1" i

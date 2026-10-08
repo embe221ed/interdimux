@@ -3402,22 +3402,12 @@ term_cols() {
   printf '%s' "$REPLY"
 }
 
-# The pressing client's width or height in cells, or 0 when it cannot be read.
-# Sets REPLY.
+# The pressing client's height and width in cells, in one round-trip:
+# REPLY="<height> <width>", each 0 when they cannot be read.
 #
 # Targeted first, so the answer is the pressing client's when several are
 # attached; untargeted second, because a TMUX_PANE inherited from a DIFFERENT
 # server does not resolve here and would otherwise read as "unknown".
-client_dim() {
-  local fmt="$1" v
-  v=$(tmux display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} "$fmt" 2>/dev/null)
-  case "$v" in ''|*[!0-9]*) v=$(tmux display-message -p "$fmt" 2>/dev/null) ;; esac
-  case "$v" in ''|*[!0-9]*) v=0 ;; esac
-  REPLY="$v"
-}
-
-# Both, in one round-trip: REPLY="<height> <width>", each 0 when unknown.  The
-# same targeted-then-untargeted lookup as client_dim.
 client_dims() {
   local fmt='#{client_height} #{client_width}' v
   v=$(tmux display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} "$fmt" 2>/dev/null)
@@ -9203,10 +9193,6 @@ if [ "${1:-}" = "--doctor" ]; then
   # avoid, and it does so on exactly the narrow popup a floor was meant to help.
   [ "$_doc_w" -lt 1 ] && _doc_w=1
 
-  # Read once here: the scheduling note below wants it, and the key-bindings
-  # section further down re-reads it in its own idiom.
-  _dk_early=$(tmux show-option -gqv @interdimux-dashboard-key 2>/dev/null); _dk_early="${_dk_early:-g}"
-
   _sec environment
 
   # The environment the popups actually run in.  prefix+f's display-popup and
@@ -9809,8 +9795,7 @@ if [ "${1:-}" = "--doctor" ]; then
   # larger than the client.  Both are guarded now, so this is not a failure — but
   # it is worth saying which one the user is about to get, because they look
   # different and "prefix+g looks wrong" is otherwise unexplainable.
-  client_dim '#{client_height}'; _dh="$REPLY"
-  client_dim '#{client_width}';  _dwid="$REPLY"
+  client_dims; _dh="${REPLY% *}" _dwid="${REPLY#* }"
   if [ "$_dh" = 0 ]; then
     _note "no client attached here, so the dashboard's size could not be checked"
   elif ! tmux_ge 304; then
