@@ -124,6 +124,8 @@
 #   dirs-list     the ctrl-o picker's list: --dirs-list, with the environment the
 #                 --dirs picker hands its fzf (mount table exported etc.)
 #   dirs-deep     ctrl-f deep search: --dirs-list --deep svc (~100 dirs match)
+#   dirs-hints    ctrl-f's header, which fzf waits for (transform-header):
+#                 --dirs-hints deep svc
 #   dirs-preview  --dirs-preview on a git repo with changes and a README
 #   dirs-open     ctrl-o itself: the navigator's execute child, sh -c "bash
 #                 interdimux.sh --dirs", with the navigator's environment, a
@@ -139,6 +141,10 @@
 #   parse         bash -n interdimux.sh (pure parse cost of the script)
 #   load          bash interdimux.tmux: the plugin loading, as a tmux.conf's
 #                 run-shell runs it at every server start and config reload
+#   dirs-deep-home  dirs-deep with $HOME as the one search root, as for a user
+#                 who sets no @interdimux-project-dirs and has none of ~/projects,
+#                 ~/code, ~/src, ~/repos, ~/work, ~/dev (INTERDIMUX_PROJECT_DIRS=~
+#                 here, whose ~/src and ~/work would be the roots otherwise)
 #  SIZED (the ones -F both also runs on the small fixture): keypress
 #   first-frame first-frame-changed first-frame-bash list list-changed
 #   list-bash preview-S preview-W hint footer describe-create
@@ -339,8 +345,8 @@ BASH_BIN=$(command -v bash 2>/dev/null)
 
 DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed list list-changed list-bash
                    preview-S preview-W preview-P preview-D hint footer describe-create
-                   session-name-for dirs-list dirs-deep dirs-preview dirs-open doctor)
-EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load)
+                   session-name-for dirs-list dirs-deep dirs-hints dirs-preview dirs-open doctor)
+EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load dirs-deep-home)
 # the ones whose work depends on the tmux server's size (-F both runs them on
 # the small fixture too), and the small fixture's default set
 # (preview-P is not one: the small fixture's windows have one pane each, and
@@ -1299,6 +1305,8 @@ build_scenarios() {
 
     e=("${dirs[@]}" "${fz_dreload[@]}"); define dirs-list "$side" e sh -c "bash $sq --dirs-list"
     e=("${dirs[@]}" "${fz_ddeep[@]}");   define dirs-deep "$side" e sh -c "bash $sq --dirs-list --deep '$DEEP_Q'"
+    define dirs-hints "$side" e sh -c "bash $sq --dirs-hints deep '$DEEP_Q'"
+    e+=("INTERDIMUX_PROJECT_DIRS=~");    define dirs-deep-home "$side" e sh -c "bash $sq --dirs-list --deep '$DEEP_Q'"
     e=("${dirs[@]}" "${fz_dpv[@]}");     define dirs-preview "$side" e sh -c "bash $sq --dirs-preview '$DIR_PV'"
     # ctrl-o: the environment the --dirs holder started with (start_holder)
     local -n _dop="DIRSENV_$es"
