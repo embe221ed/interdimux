@@ -4897,7 +4897,9 @@ sched_job_body() {
 sched_rows() {
   local rows id when ln pane target desc seen
   if rows=$(atq -q "$SCHED_QUEUE" -o '%Y-%m-%d %H:%M' 2>/dev/null); then
-    rows=$(printf '%s\n' "$rows" | sort -k2)
+    # (no row or one needs no sort, nor its fork and exec: what --sched-list
+    # costs most often, and the Jobs picker with one job)
+    case "$rows" in *$'\n'*) rows=$(printf '%s\n' "$rows" | sort -k2) ;; esac
   else
     rows=$(atq -q "$SCHED_QUEUE" 2>/dev/null | while IFS=$'\t' read -r id when; do
       [ -n "$id" ] || continue
