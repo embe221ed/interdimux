@@ -124,6 +124,11 @@ PANE="$(tmux -L "$SOCK" list-panes -t '=alpha:0' -F '#{pane_id}')"
 for n in 3 30; do
   for i in $(seq 1 "$n"); do mkdir -p "$TMPD/proj$n/svc-$i/src"; done
 done
+# ...and a repo with a README and uncommitted files, for the directory
+# previews: every git call they make runs
+mkdir -p "$TMPD/repo"
+printf '# repo\n\nWhat it is.\n' > "$TMPD/repo/README.md"
+git -C "$TMPD/repo" init -q && echo wip > "$TMPD/repo/TODO.txt"
 
 # run RENDERER [VAR=value ...] -- ARGS: the script with ARGS, as the popup
 # (no ARGS) or fzf would start it.  Sets TOOLS ("name=count ..." by name) and
@@ -219,6 +224,14 @@ run on -- --describe-create newproj
 check "--describe-create" "head=1 tmux=1 zoxide=1" 4
 run on FZF_NTH=1 -- --scope-prompt
 check "--scope-prompt" "" 1
+# A directory row's preview is the directory's (--dirs-preview), drawn by the
+# same process: no second bash (review MAINT-13).  As the ctrl-o picker's, on
+# every cursor move there: the two git calls, each under `timeout`, and the
+# listing's head; the changes counted by head, wc and tr.
+run on -- --preview "D:$TMPD/repo"
+check "--preview of a directory row" "basename=1 git=2 head=2 ls=1 timeout=2 tr=1 wc=1" 9
+run on -- --dirs-preview "$TMPD/repo"
+check "--dirs-preview" "basename=1 git=2 head=2 ls=1 timeout=2 tr=1 wc=1" 9
 
 # --- the ctrl-o picker: nothing per row, nothing per match -------------------
 # A row used to fork the whole script for its padding (review PERF-07), and a

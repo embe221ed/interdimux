@@ -3742,11 +3742,15 @@ if [ "${1:-}" = "--preview" ]; then
   spec="${spec%%	*}"
   parse_spec "$spec"
 
-  # Directory rows preview the directory itself, not a tmux target.
+  # Directory rows preview the directory itself, not a tmux target: in this
+  # process, by the --dirs-preview block below.  (An `exec bash` of it parsed
+  # the script and ran its setup again on every cursor move over such a row,
+  # a quarter of what the preview cost -- review MAINT-13.)
   if [ "$SPEC_TYPE" = "D" ]; then
-    exec bash "$SCRIPT_PATH" --dirs-preview "$SPEC_DIR"
+    set -- --dirs-preview "$SPEC_DIR"
   fi
-
+fi
+if [ "${1:-}" = "--preview" ]; then
   spec_target_r; target="$REPLY"
 
   # ONE tmux client per preview (review PERF-06): each costs ~5 ms of connect
@@ -3868,7 +3872,8 @@ if [ "${1:-}" = "--preview" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Directory preview (called by fzf --preview for dir picker)
+# Directory preview (called by fzf --preview for dir picker, and reached
+# from --preview above for a directory row)
 # ---------------------------------------------------------------------------
 
 if [ "${1:-}" = "--dirs-preview" ]; then
