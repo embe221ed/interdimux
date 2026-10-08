@@ -9817,7 +9817,10 @@ if [ "${1:-}" = "--doctor" ]; then
   # (`autobuild` is read by interdimux.tmux, at plugin load.)
   _known=("${OPT_NAMES[@]}" key dashboard-key jump-keys agent-next-key autobuild)
 
-  _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
+  # One pattern test, not a loop over the fifty names for every option set (a
+  # statement each).  A name here never holds a blank.
+  _known_s=" ${_known[*]} "
+  _is_known() { [[ "$_known_s" == *" $1 "* ]]; }
 
   # Longest-common-prefix suggestion.  Crude on purpose: the realistic typo is a
   # dropped or doubled character, not an anagram.
@@ -9835,37 +9838,41 @@ if [ "${1:-}" = "--doctor" ]; then
   }
 
   # A value's domain, by option name.  Empty always means "unset, use default".
-  _check_value() { # $1 = name, $2 = value -> prints a complaint, or nothing
+  # The complaint goes to _why (_cv: printf's formatting), not to stdout: a
+  # $(_check_value) was a fork for every option set, sixteen for the VPS
+  # user's.  fzf-opts alone is still judged in one, and prints (see the loop).
+  _cv() { local m; printf -v m "$@"; _why+="$m"; }
+  _check_value() { # $1 = name, $2 = value -> _why gets a complaint, or nothing
     local n="$1" v="$2" _d
     [ -n "$v" ] || return 0
     case "$n" in
       show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw|session-rule|scope-highlight|autobuild)
-        case "$v" in on|off) ;; *) printf "expected 'on' or 'off'" ;; esac ;;
+        case "$v" in on|off) ;; *) _cv "expected 'on' or 'off'" ;; esac ;;
       order)
-        case "$v" in mru|index) ;; *) printf "expected 'mru' or 'index'" ;; esac ;;
+        case "$v" in mru|index) ;; *) _cv "expected 'mru' or 'index'" ;; esac ;;
       # The agent options, in the terms the script replaces a bad value in
       # (right after the get_opt calls): the default, which for agent-args is
       # off and for agent-state on -- so a `yes` does the opposite of what it
       # says for one of them.
       agent-args)
-        case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays off" ;; esac ;;
+        case "$v" in on|off) ;; *) _cv "expected 'on' or 'off', so it stays off" ;; esac ;;
       agent-state)
-        case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays on" ;; esac ;;
+        case "$v" in on|off) ;; *) _cv "expected 'on' or 'off', so it stays on" ;; esac ;;
       agent-separator)
         case "$v" in
           off) ;;
-          *[[:cntrl:]]*) printf "holds a control character, so the default, ∣, applies" ;;
-          *) [ "${#v}" -le 3 ] || printf 'at most 3 characters, so the default, ∣, applies' ;;
+          *[[:cntrl:]]*) _cv "holds a control character, so the default, ∣, applies" ;;
+          *) [ "${#v}" -le 3 ] || _cv 'at most 3 characters, so the default, ∣, applies' ;;
         esac ;;
       show-title)
-        case "$v" in known|all|off) ;; *) printf "expected 'known', 'all' or 'off', so it stays known" ;; esac ;;
+        case "$v" in known|all|off) ;; *) _cv "expected 'known', 'all' or 'off', so it stays known" ;; esac ;;
       title-max)
         # Decimal whatever the leading zeros, then clamped to 8..200.
         case "$v" in
-          *[!0-9]*) printf 'expected a whole number from 8 to 200, so the default, 40, applies' ;;
+          *[!0-9]*) _cv 'expected a whole number from 8 to 200, so the default, 40, applies' ;;
           *) _d="${v#"${v%%[!0]*}"}"; _d="${_d:-0}"
-             if [ "${#_d}" -gt 3 ] || [ "$_d" -gt 200 ]; then printf 'the most is 200, so 200 applies'
-             elif [ "$_d" -lt 8 ]; then printf 'the least is 8, so 8 applies'
+             if [ "${#_d}" -gt 3 ] || [ "$_d" -gt 200 ]; then _cv 'the most is 200, so 200 applies'
+             elif [ "$_d" -lt 8 ]; then _cv 'the least is 8, so 8 applies'
              fi ;;
         esac ;;
       agents)
@@ -9878,18 +9885,18 @@ if [ "${1:-}" = "--doctor" ]; then
             case "$_w" in *[!A-Za-z0-9._-]*) _skip+="${_skip:+, }'$_w'" ;; esac
           done
           set +f
-          [ -z "$_skip" ] || printf 'skipped: %s (a name is letters, digits, dots, underscores and hyphens)' "$_skip"
+          [ -z "$_skip" ] || _cv 'skipped: %s (a name is letters, digits, dots, underscores and hyphens)' "$_skip"
         fi ;;
       recent-limit|dirs-limit|scan-depth)
-        case "$v" in ''|*[!0-9]*) printf 'expected a whole number' ;; esac
+        case "$v" in ''|*[!0-9]*) _cv 'expected a whole number' ;; esac
         # Decimal, whatever the leading zeros, as the script reads it; and the
         # length first, as there: `[ -gt ]` on a 20-digit number is an error.
         [ "$n" = scan-depth ] && case "$v" in ''|*[!0-9]*) ;; *)
           _d="${v#"${v%%[!0]*}"}"; _d="${_d:-0}"
-          { [ "${#_d}" -gt 2 ] || [ "$_d" -gt 10 ]; } && printf 'deeper than 10 will not finish inside a popup' ;; esac ;;
+          { [ "${#_d}" -gt 2 ] || [ "$_d" -gt 10 ]; } && _cv 'deeper than 10 will not finish inside a popup' ;; esac ;;
       popup-width|popup-height)
-        case "$v" in *%) case "${v%\%}" in ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
-                     ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
+        case "$v" in *%) case "${v%\%}" in ''|*[!0-9]*) _cv 'expected NN or NN%%' ;; esac ;;
+                     ''|*[!0-9]*) _cv 'expected NN or NN%%' ;; esac ;;
       color-*)
         # Exactly: '#' and six hex digits, 0-255, -1, or default.  The length
         # alone let '#zzzzzz' through.  [[:xdigit:]] rather than a range: under
@@ -9897,13 +9904,13 @@ if [ "${1:-}" = "--doctor" ]; then
         case "$v" in
           default|-1) ;;
           '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) ;;
-          '#'*) printf 'a hex colour must be #rrggbb' ;;
-          ''|*[!0-9]*) printf 'expected #rrggbb, a 0-255 index, or default' ;;
+          '#'*) _cv 'a hex colour must be #rrggbb' ;;
+          ''|*[!0-9]*) _cv 'expected #rrggbb, a 0-255 index, or default' ;;
           # Length first: `[ "$v" -le 255 ]` on a 26-digit number is not false,
           # it is "integer expression expected" ON STDERR — which used to land
           # above the report's own title.
-          ????*) printf 'a colour index must be 0-255' ;;
-          *) [ "$v" -le 255 ] || printf 'a colour index must be 0-255' ;;
+          ????*) _cv 'a colour index must be 0-255' ;;
+          *) [ "$v" -le 255 ] || _cv 'a colour index must be 0-255' ;;
         esac ;;
       key|dashboard-key|agent-next-key)
         # Any key tmux can bind, not one character: --bind-keys hands the value to
@@ -9924,15 +9931,15 @@ if [ "${1:-}" = "--doctor" ]; then
         local _ke
         if [ "$n" = agent-next-key ]; then
           case "$v" in
-            "$_k")  printf 'prefix+%s opens the navigator, so it is not bound to --agent-next' "$v"; return 0 ;;
-            "$_dk") printf 'prefix+%s opens the dashboard, so it is not bound to --agent-next' "$v"; return 0 ;;
+            "$_k")  _cv 'prefix+%s opens the navigator, so it is not bound to --agent-next' "$v"; return 0 ;;
+            "$_dk") _cv 'prefix+%s opens the dashboard, so it is not bound to --agent-next' "$v"; return 0 ;;
           esac
         fi
         case "$v" in
-          ';') printf "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
+          ';') _cv "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
           *)   _ke=$(tmux list-keys -T prefix "$v" 2>&1 >/dev/null) \
                  || case "$_ke" in
-                      'invalid key'*) printf 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
+                      'invalid key'*) _cv 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
                     esac ;;
         esac ;;
       fzf-opts)
@@ -9974,7 +9981,7 @@ if [ "${1:-}" = "--doctor" ]; then
         fi ;;
       jump-keys)
         # space-separated tmux key specs; the count is what maps to #1, #2, …
-        case "$v" in *[!A-Za-z0-9\ ^\-]*) printf 'expected space-separated tmux keys, e.g. "M-1 M-2 M-3"' ;; esac ;;
+        case "$v" in *[!A-Za-z0-9\ ^\-]*) _cv 'expected space-separated tmux keys, e.g. "M-1 M-2 M-3"' ;; esac ;;
     esac
   }
 
@@ -10050,7 +10057,13 @@ if [ "${1:-}" = "--doctor" ]; then
         && _note "the helper's path comes from \$INTERDIMUX_BIN only — for the popups: tmux set-environment -g INTERDIMUX_BIN <path>"
       continue
     fi
-    _why=$(_check_value "$_name" "$_raw")
+    # fzf-opts in a $(…) still, its check as it was: the eval runs what the
+    # value holds, and what that prints or defines must land where it did, in
+    # the complaint or nowhere.
+    _why=""
+    if [ "$_name" = fzf-opts ]; then _why=$(_check_value "$_name" "$_raw")
+    else _check_value "$_name" "$_raw"
+    fi
     if [ -n "$_why" ]; then
       _bad "@interdimux-$_name = '$_val' — $_why"
     else
