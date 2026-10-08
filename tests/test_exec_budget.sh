@@ -239,11 +239,16 @@ same_cost() { # NAME ARGS... -- run with 3 and with 30 matching directories (@N@
   fi
 }
 # --- --bind-keys, once per plugin load --------------------------------------
-# Its tmux clients are the cost: one asks the version, one reads each key
-# option, one binds each key.  The opt-in agent-next key is read in the same
-# client as the jump keys, not in a fourth of its own (~5 ms, +15% of the load).
+# Its tmux clients are the cost: one asks the version, one reads the four key
+# options, one binds every key, the opt-in ones too (six before: a `tmux -V`,
+# three reads, two binds).  More only for a value tmux prints escaped, which
+# is read again raw, or a key it refuses: then each key is bound on its own.
 run off -- --bind-keys
-check "--bind-keys (no opt-in keys)" "tmux=6" 7
+check "--bind-keys (no opt-in keys)" "tmux=3" 5
+tmux -L "$SOCK" set -g @interdimux-jump-keys 'M-1 M-2' \; set -g @interdimux-agent-next-key a
+run off -- --bind-keys
+check "--bind-keys (two jump keys, an agent-next key)" "tmux=3" 5
+tmux -L "$SOCK" set -gu @interdimux-jump-keys \; set -gu @interdimux-agent-next-key
 
 same_cost "--dirs-list" --dirs-list
 same_cost "--dirs-list --deep svc (a name fragment)" --dirs-list --deep svc

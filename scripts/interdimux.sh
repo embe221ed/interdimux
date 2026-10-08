@@ -283,8 +283,37 @@ if [ "${1:-}" = "--bind-keys" ]; then
   [[ "$_bk_vstr" =~ ([0-9]+)\.([0-9]+) ]] && \
     _bk_tvnum=$(( BASH_REMATCH[1] * 100 + BASH_REMATCH[2] ))
 
-  _bk_nav=$(tmux show-option -gqv @interdimux-key 2>/dev/null);           _bk_nav="${_bk_nav:-f}"
-  _bk_dash=$(tmux show-option -gqv @interdimux-dashboard-key 2>/dev/null); _bk_dash="${_bk_dash:-g}"
+  # The four key options in one tmux client (one each cost every plugin load
+  # ~5 ms), by name so that each line says whose it is.  tmux prints a value
+  # as its parser would need it: as it is, quoted ('M-"', "M-1 M-2") or
+  # escaped ('#' as \#).  The quotes come off; an escaped value is read
+  # again, raw, as all were (the jump keys' raw read kept its last line).
+  _bk_nav="" _bk_dash="" _bk_jump="" _bk_an=""
+  while IFS= read -r _bk_l; do
+    case "$_bk_l" in
+      "@interdimux-key "*)            _bk_nav="${_bk_l#* }" ;;
+      "@interdimux-dashboard-key "*)  _bk_dash="${_bk_l#* }" ;;
+      "@interdimux-jump-keys "*)      _bk_jump="${_bk_l#* }" ;;
+      "@interdimux-agent-next-key "*) _bk_an="${_bk_l#* }" ;;
+    esac
+  done < <(tmux show-option -gq @interdimux-key \; show-option -gq @interdimux-dashboard-key \; \
+             show-option -gq @interdimux-jump-keys \; show-option -gq @interdimux-agent-next-key 2>/dev/null)
+  unset _bk_l
+  _bk_raw() { # $1 = option, $2 = its value as printed by name -> REPLY = the value
+    case "$2" in
+      *\\*) REPLY=$(tmux show-option -gqv "@interdimux-$1" 2>/dev/null) ;;
+      \"*\"|\'*\') REPLY="${2:1:${#2}-2}" ;;
+      *) REPLY="$2" ;;
+    esac
+  }
+  _bk_raw key "$_bk_nav";            _bk_nav="${REPLY:-f}"
+  _bk_raw dashboard-key "$_bk_dash"; _bk_dash="${REPLY:-g}"
+  _bk_raw agent-next-key "$_bk_an";  _bk_an="$REPLY"
+  case "$_bk_jump" in
+    *\\*) _bk_jump=$(tmux show-option -gqv @interdimux-jump-keys 2>/dev/null; echo .)
+          _bk_jump="${_bk_jump%.}"; _bk_jump="${_bk_jump%$'\n'}"; _bk_jump="${_bk_jump##*$'\n'}" ;;
+    *) _bk_raw jump-keys "$_bk_jump"; _bk_jump="$REPLY" ;;
+  esac
 
   # TMUX_PANE=#{pane_id} on every run-shell binding, not just the popup one.
   #
@@ -313,7 +342,7 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_who="TMUX_PANE=#{pane_id} INTERDIMUX_CLIENT=#{q:client_name}"
 
   # The dashboard is not the hot path — it keeps the simple launcher.
-  tmux bind-key "$_bk_dash" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --dashboard-launch"
+  _bk_dashcmd="$_bk_who bash '$SQ_SCRIPT_FMT' --dashboard-launch"
 
   # Opt-in numbered jumps (@interdimux-jump-keys 'M-1 M-2 M-3').  Space-separated
   # keys, in order: the first jumps to session #1 in the picker's own ordering,
@@ -329,41 +358,46 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # was bound to and restore it later, so the honest contract is "you named
   # these keys, they are ours now".
   #
-  # One tmux client reads both opt-in key options (@interdimux-agent-next-key
-  # is below): jump-keys with -v, so its raw value or no line at all, and
-  # agent-next-key by name, so its line can never be taken for jump-keys'.  A
-  # fourth show-option of its own cost every plugin load ~5 ms (+15%).  By name
-  # tmux escapes an odd key ('#' prints as \#), so such a value is read again,
-  # raw.
-  _bk_jump="" _bk_an=""
-  while IFS= read -r _bk_l; do
-    case "$_bk_l" in
-      "@interdimux-agent-next-key "*) _bk_an="${_bk_l#* }" ;;
-      *) _bk_jump="$_bk_l" ;;
-    esac
-  done < <(tmux show-option -gqv @interdimux-jump-keys \; show-option -gq @interdimux-agent-next-key 2>/dev/null)
-  case "$_bk_an" in *[\\\"\']*) _bk_an=$(tmux show-option -gqv @interdimux-agent-next-key 2>/dev/null) ;; esac
-  unset _bk_l
-  if [ -n "$_bk_jump" ]; then
-    _bk_i=0
-    for _bk_k in $_bk_jump; do
-      _bk_i=$(( _bk_i + 1 ))
-      tmux bind-key -n "$_bk_k" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --jump $_bk_i" 2>/dev/null
-    done
-    unset _bk_i _bk_k
-  fi
-
   # Opt-in too (@interdimux-agent-next-key 'a'): a prefix key that goes straight
   # to the next agent that needs you (--agent-next), with no popup.  Unset, no
   # key is bound; nor is the navigator's or the dashboard's, which it would take
   # without a word (--doctor says why it is not bound).
+  _bk_ancmd=""
   if [ -n "$_bk_an" ] && [ "$_bk_an" != "$_bk_nav" ] && [ "$_bk_an" != "$_bk_dash" ]; then
-    tmux bind-key "$_bk_an" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --agent-next" 2>/dev/null
+    _bk_ancmd="$_bk_who bash '$SQ_SCRIPT_FMT' --agent-next"
   fi
+
+  # Every key in one tmux client, in the order they were bound one by one, so
+  # a key two of them spell differently (^G, C-g) is still the later one's.
+  # A refused key ends a command list, and an argument ending in ';' splits
+  # it (what follows would run twice): then each is bound on its own, as all
+  # were, with the same errors.
+  _bk_bind() {
+    local -a all=(bind-key "$_bk_dash" run-shell -b "$_bk_dashcmd")
+    local k i=0
+    for k in $_bk_jump; do
+      i=$(( i + 1 ))
+      all+=(\; bind-key -n "$k" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --jump $i")
+    done
+    [ -z "$_bk_ancmd" ] || all+=(\; bind-key "$_bk_an" run-shell -b "$_bk_ancmd")
+    all+=(\; bind-key "$_bk_nav" "$@")
+    case "$_bk_dash $_bk_jump $_bk_an $_bk_nav " in
+      *\;[[:space:]]*) ;;
+      *) tmux "${all[@]}" 2>/dev/null && return 0 ;;
+    esac
+    tmux bind-key "$_bk_dash" run-shell -b "$_bk_dashcmd"
+    i=0
+    for k in $_bk_jump; do
+      i=$(( i + 1 ))
+      tmux bind-key -n "$k" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --jump $i" 2>/dev/null
+    done
+    [ -z "$_bk_ancmd" ] || tmux bind-key "$_bk_an" run-shell -b "$_bk_ancmd" 2>/dev/null
+    tmux bind-key "$_bk_nav" "$@"
+  }
 
   # run-shell -C needs tmux >= 3.4; below it, keep the original binding.
   if [ "$_bk_tvnum" -lt 304 ]; then
-    tmux bind-key "$_bk_nav" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --launch switch"
+    _bk_bind run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --launch switch"
     exit 0
   fi
 
@@ -438,7 +472,7 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # it, and a Ctrl-C in a dialog, or as the popup opens, killed that sh too, so
   # a navigator that had carried on (see its main loop) still left the popup
   # held as a failure.  Exec'd, the navigator is what the popup runs.
-  tmux bind-key "$_bk_nav" run-shell -bC \
+  _bk_bind run-shell -bC \
     "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title_fmt\"$_bk_env $_bk_close \"exec bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
