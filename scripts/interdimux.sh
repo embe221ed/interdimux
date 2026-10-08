@@ -8484,10 +8484,13 @@ fi
 # would call a function that does not exist yet.
 
 # Rows for the picker: "<display>\t<pane>\t<id>", the last field being what
-# {-1} hands to the cancel binding.
-if [ "${1:-}" = "--jobs-list" ]; then
-  set +e
-  command -v atq >/dev/null 2>&1 || exit 0
+# {-1} hands to the cancel binding.  A function, so that the picker opening
+# lists them in its own process: `$(bash interdimux.sh --jobs-list)` started
+# a second bash, which parsed most of this file again (~20 ms).  fzf's
+# reloads still run --jobs-list.
+jobs_list_rows() {
+  local _id _when _tgt _pane _desc _c1 _c2 _p1 _p2
+  command -v atq >/dev/null 2>&1 || return 0
   while IFS="$US" read -r _id _when _tgt _pane _desc; do
     [ -n "$_id" ] || continue
     # Pad the FITTED text, not the raw text: %-20s counts escape bytes as
@@ -8501,6 +8504,10 @@ if [ "${1:-}" = "--jobs-list" ]; then
       "$DIM" "$_c2" "$_p2" "$RST" \
       "$_desc" "$_pane" "$_id"
   done < <(sched_rows)
+}
+if [ "${1:-}" = "--jobs-list" ]; then
+  set +e
+  jobs_list_rows
   exit 0
 fi
 
@@ -8550,7 +8557,7 @@ if [ "${1:-}" = "--jobs" ]; then
   _jl="bash '$SQ_SCRIPT' --jobs-list"
   # Read once, not twice: --jobs-list costs an `at -c` per job, and the
   # emptiness check and the picker want the same rows.
-  _jrows=$(bash "$SCRIPT_PATH" --jobs-list)
+  _jrows=$(jobs_list_rows)
   if [ -z "$_jrows" ]; then
     info_flash "$BOLD_AMBER" "Scheduled jobs" "Nothing is scheduled." \
       "Schedule one from the dashboard."
