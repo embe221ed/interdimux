@@ -37,10 +37,10 @@
 #               both   large with the scenarios asked for, then small with
 #                      those of them whose work depends on the tmux server
 #                      (SIZED below; by default keypress first-frame
-#                      first-frame-changed list list-changed preview-S
-#                      preview-W hint footer describe-create, which is also
-#                      -F small's default), each on a fixture of its own, one
-#                      table each
+#                      first-frame-changed accept-W list list-changed
+#                      preview-S preview-W hint footer describe-create, which
+#                      is also -F small's default), each on a fixture of its
+#                      own, one table each
 #   -w W        warm-up pairs per scenario, discarded (default 2)
 #   -b SECS     per-scenario time budget (default 25 when -n is not given):
 #               slow scenarios run fewer pairs, never fewer than 8; and while a
@@ -97,6 +97,13 @@
 #                 paint); CPU is the whole run (all rows, exit).
 #   first-frame-changed  the same, with the server changed before every pair
 #                 (see "-changed" below)
+#   accept-W      Enter on a window row: the navigator as in first-frame, its
+#                 stub fzf accepting the current session's window 0 once the
+#                 list is in (so the switch-client moves nothing but the
+#                 session's last-attached time).  CPU is the whole run, the
+#                 list included; WALL is from the accept to the navigator's
+#                 exit (which closes a real popup): what Enter waits for.  OUT
+#                 is what it drew on its terminal (the rows are first-frame's)
 #   list          the fzf reload command (^r, ^/, resize, after every action):
 #                 sh -c "bash interdimux.sh --list", Rust renderer
 #   list-changed  the same, with the server changed before every pair
@@ -115,6 +122,20 @@
 #                 over the navigator's rows and argv)
 #   describe-create  the same snippet at zero matches (checked with fzf): it
 #                 runs --describe-create
+#   action-kill-cancel  ctrl-x on a window row, the kill dialog answered 'n':
+#                 the bind's sh -c "bash interdimux.sh --action kill SPEC",
+#                 with the navigator's environment and fzf's for an execute.
+#                 The answer comes through the dialogs' test seam
+#                 (INTERDIMUX_TTY_IN, a file holding 'n'; INTERDIMUX_TTY_OUT
+#                 the run's output, so what the dialog drew is compared), so
+#                 no key is waited for; the frame repaints are real: a popup
+#                 of prefix+f's size and title is held open on the attached
+#                 client for the scenario, as the navigator's own is (on a
+#                 client with none, the repaint would OPEN a shell popup)
+#   action-zoom   ctrl-z on a window row (execute-silent): --action zoom, which
+#                 says "only panes can be zoomed" on the status line, the
+#                 popup held open as above -- what ^z does on the small
+#                 fixture's every row, and the fixed cost of every action key
 #   session-name-for  bash interdimux.sh --session-name-for DIR (CLI seam)
 #   dirs-list     the ctrl-o picker's list: --dirs-list, with the environment the
 #                 --dirs picker hands its fzf (mount table exported etc.)
@@ -130,8 +151,8 @@
 #   load          bash interdimux.tmux: the plugin loading, as a tmux.conf's
 #                 run-shell runs it at every server start and config reload
 #  SIZED (the ones -F both also runs on the small fixture): keypress
-#   first-frame first-frame-changed first-frame-bash list list-changed
-#   list-bash preview-S preview-W hint footer describe-create
+#   first-frame first-frame-changed first-frame-bash accept-W list
+#   list-changed list-bash preview-S preview-W hint footer describe-create
 #  -changed: a plain scenario runs against a server that never changes, so a
 #   cache -- each side has its own, below -- would show only its hit.  These
 #   move the server to the next of three states before every pair (the
@@ -327,18 +348,18 @@ BENCH_HOME=${BENCH_SELF%/*}
 TMUX_BIN=${IMUX_BENCH_TMUX:-$(command -v tmux 2>/dev/null)}
 BASH_BIN=$(command -v bash 2>/dev/null)
 
-DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed list list-changed list-bash
-                   preview-S preview-W preview-P hint footer describe-create session-name-for
-                   dirs-list dirs-deep dirs-preview doctor)
+DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed accept-W list list-changed list-bash
+                   preview-S preview-W preview-P hint footer describe-create action-kill-cancel
+                   action-zoom session-name-for dirs-list dirs-deep dirs-preview doctor)
 EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load)
 # the ones whose work depends on the tmux server's size (-F both runs them on
 # the small fixture too), and the small fixture's default set
 # (preview-P is not one: the small fixture's windows have one pane each, and
 # the navigator lists no pane row for those)
-SIZED_SCENARIOS=(keypress first-frame first-frame-changed first-frame-bash list list-changed
-                 list-bash preview-S preview-W hint footer describe-create)
-SMALL_DEFAULT=(keypress first-frame first-frame-changed list list-changed preview-S preview-W
-               hint footer describe-create)
+SIZED_SCENARIOS=(keypress first-frame first-frame-changed first-frame-bash accept-W list
+                 list-changed list-bash preview-S preview-W hint footer describe-create)
+SMALL_DEFAULT=(keypress first-frame first-frame-changed accept-W list list-changed preview-S
+               preview-W hint footer describe-create)
 
 CLIENT_COLS=200 CLIENT_ROWS=50          # the attached client
 POPUP_COLS=158 POPUP_ROWS=35            # 80% x 75% of it, minus the popup border
@@ -1173,6 +1194,30 @@ pre_keypress() { # side fzf-out
 }
 post_keypress() { tm set-environment -gu BENCH_FZF_MODE \; set-environment -gu BENCH_FZF_OUT; }
 
+# The action scenarios': a popup held open on the attached client, as the
+# navigator's own is when a key runs --action in it -- its frame is what the
+# action repaints (display-popup with no command), and on a client with no
+# popup open that display-popup would OPEN a shell popup and wait in it.
+# prefix+f's size and title.  Checked before every run (its process alive),
+# opened once; closed after the scenario.
+held_up() { local p=""; { read -r p < "$WORK/hold/popup.pid"; } 2>/dev/null && kill -0 "$p" 2>/dev/null; }
+hold_popup() { # side fzf-out (unused)
+  held_up && return 0
+  rm -f "$WORK/hold/popup.pid"
+  tm display-popup -c "$CLIENT_NAME" -w 80% -h 75% -T "#[bold] interdimux · $CUR_SESSION " \
+    -E "echo \$\$ > '$WORK/hold/popup.pid.tmp' && mv '$WORK/hold/popup.pid.tmp' '$WORK/hold/popup.pid' && exec sleep 86400" \
+    </dev/null >/dev/null 2>&1 &
+  local i
+  for i in $(seq 1 250); do held_up && return 0; sleep 0.02; done
+  die "no popup opened on the client to hold for the action scenarios"
+}
+release_popup() {
+  tm display-popup -C -c "$CLIENT_NAME"
+  local i
+  for i in $(seq 1 250); do held_up || break; sleep 0.02; done
+  rm -f "$WORK/hold/popup.pid"
+}
+
 # The *-changed scenarios': before each pair, the fixture server goes to the
 # next of three states -- 0 is the fixture as built; 1 and 2 rename CHG_WIN
 # and retitle CHG_PANE -- so every pair finds the server changed since the
@@ -1209,6 +1254,7 @@ build_scenarios() {
   local ROW_D
   ROW_D=$(strip_ansi "$drows" | awk -F'\t' -v s="$DIR_PV" '$NF == s { print; exit }')
   local -a fz_reload fz_pv_S fz_pv_W fz_pv_P fz_focus fz_typed fz_zero fz_dreload fz_ddeep fz_dpv
+  local -a fz_kill fz_zoom
   # the navigator: preview hidden (the default) except for the preview itself
   fzf_env fz_reload nav ctrl-r async "" "$ntot" "$ntot" "$ROW_F" 0
   fzf_env fz_pv_S  nav down bg-cancel "" "$ntot" "$ntot" "$ROW_S" 1
@@ -1218,6 +1264,10 @@ build_scenarios() {
   typed_counts
   fzf_env fz_typed nav i bg-cancel "$TYPED_Q" "$TYPED_MC" "$ntot" "$ROW_F" 0
   fzf_env fz_zero  nav q bg-cancel "$NEW_Q" "$ZERO_MC" "$ntot" "$ROW_F" 0 0
+  # the row actions: their execute (kill) and execute-silent (zoom) children
+  fzf_env fz_kill  nav ctrl-x execute "" "$ntot" "$ntot" "$ROW_W" 0
+  fzf_env fz_zoom  nav ctrl-z execute-silent "" "$ntot" "$ntot" "$ROW_W" 0
+  printf 'n' > "$WORK/hold/answer-n"
   # the ctrl-o picker: its preview is always shown
   fzf_env fz_dreload dirs ctrl-r async "" "$nd" "$nd" "$ROW_D" 1
   fzf_env fz_ddeep   dirs ctrl-f async "$DEEP_Q" "$nd" "$nd" "$ROW_D" 1
@@ -1239,6 +1289,9 @@ build_scenarios() {
     e=("${pop[@]}" BENCH_FZF_MODE=first)
     define first-frame "$side" e bash "$wt/scripts/interdimux.sh"
     define first-frame-changed "$side" e bash "$wt/scripts/interdimux.sh"
+    # Enter on the current window: the switch-client leaves the fixture as it was
+    e=("${pop[@]}" BENCH_FZF_MODE=accept BENCH_FZF_ACCEPT="W:$CUR_SESSION:0")
+    define accept-W "$side" e bash "$wt/scripts/interdimux.sh"
     e=("${popb[@]}" BENCH_FZF_MODE=first)
     define first-frame-bash "$side" e bash "$wt/scripts/interdimux.sh"
     # the key itself, on the attached client: the side's binding (pre_keypress)
@@ -1258,6 +1311,9 @@ build_scenarios() {
     e=("${nav[@]}" "${fz_pv_S[@]}"); define preview-S "$side" e sh -c "bash $sq --preview '$S_SPEC'"
     e=("${nav[@]}" "${fz_pv_W[@]}"); define preview-W "$side" e sh -c "bash $sq --preview '$W_SPEC'"
     [ -z "$P_SPEC" ] || { e=("${nav[@]}" "${fz_pv_P[@]}"); define preview-P "$side" e sh -c "bash $sq --preview '$P_SPEC'"; }
+    e=("${nav[@]}" "${fz_kill[@]}" INTERDIMUX_TTY_IN="$WORK/hold/answer-n" INTERDIMUX_TTY_OUT=/dev/stdout)
+    define action-kill-cancel "$side" e sh -c "bash $sq --action kill '$W_SPEC'"
+    e=("${nav[@]}" "${fz_zoom[@]}"); define action-zoom "$side" e sh -c "bash $sq --action zoom '$W_SPEC'"
 
     if focus_snippet "$side-nav"; then
       local snip=$REPLY
@@ -1288,6 +1344,8 @@ build_scenarios() {
     SCN_TTY[$s]="-t ${POPUP_COLS}x${POPUP_ROWS}"; SCN_KIND[$s]=cmd; SCN_RC[$s]=0
   done
   for s in first-frame first-frame-changed first-frame-bash; do SCN_TTY[$s]+=" -p"; SCN_KIND[$s]=first; done
+  SCN_TTY[accept-W]+=" -p"; SCN_KIND[accept-W]=accept
+  for s in action-kill-cancel action-zoom; do SCN_PRE[$s]=hold_popup; SCN_POST[$s]=release_popup; done
   # a tmux client command: no terminal, and every process the server starts
   # meanwhile -- the popup -- waited for and counted (benchrun -P)
   SCN_TTY[keypress]="-P"; SCN_KIND[keypress]=key
@@ -1322,10 +1380,10 @@ run_one() { # scenario side [suffix] [state]
   # shellcheck disable=SC2178  # namerefs to the scenario's argv and environment arrays
   local -n _c="C_$key" _e="E_$key"
   local out="$WORK/out/$key.out" err="$WORK/out/$key.err" fz="$WORK/out/$key.fzf" res
-  local wall cpu srv rc rt0 orph killed jobs jkilled jobus first sum
+  local wall cpu srv rc rt0 orph killed jobs jkilled jobus first sum accepted
   local -a extra=()
-  case $kind in first|key) rm -f "$fz.t" "$fz.rows" ;; esac
-  [ "$kind" = first ] && extra=(BENCH_FZF_OUT="$fz")
+  case $kind in first|key|accept) rm -f "$fz.t" "$fz.rows" ;; esac
+  case $kind in first|accept) extra=(BENCH_FZF_OUT="$fz") ;; esac
   use_side "$side"
   [ -z "${SCN_PRE[$scn]:-}" ] || "${SCN_PRE[$scn]}" "$side" "$fz"
   # shellcheck disable=SC2086  # the runner flags are words
@@ -1341,6 +1399,20 @@ run_one() { # scenario side [suffix] [state]
       wall=-1
     fi
     [ "$wall" -ge 0 ] || { SCN_NOTE[$scn]+="$side: no row ever reached fzf"$'\n'; SCN_BAD[$scn]=1; }
+  elif [ "$kind" = accept ]; then
+    # from the accept (the stub's stamp, CLOCK_REALTIME) to the exit: rt0 is
+    # the fork's, on that clock, and the runner's wall the time since.  The
+    # output compared stays the terminal's: the rows are first-frame's, and
+    # every switch moves the session's last-attached time, which its row's
+    # "now" reads -- against the pinned clock, so they change once the bench
+    # has run past it
+    accepted=0
+    [ -s "$fz.t" ] && read -r _ _ _ _ accepted < "$fz.t"
+    if [ "${accepted:-0}" -gt 0 ]; then wall=$(( rt0 + wall - accepted ))
+    else
+      wall=-1
+      SCN_NOTE[$scn]+="$side: fzf was never handed the row to accept"$'\n'; SCN_BAD[$scn]=1
+    fi
   fi
   # the output, worktree paths normalised, as one checksum
   sum=$(norm_paths < "$out" 2>/dev/null | cksum)

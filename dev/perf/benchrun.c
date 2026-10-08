@@ -54,8 +54,17 @@
  *       --version anywhere in argv: prints $BENCH_FZF_VERSION, exits 0.
  *       BENCH_FZF_MODE=first: stamps CLOCK_REALTIME when the FIRST complete
  *         line arrives on stdin, drains the rest, writes
- *         "$BENCH_FZF_OUT.t" = "first_us last_us bytes lines" and the rows to
- *         "$BENCH_FZF_OUT.rows", exits 130 (what Esc makes fzf return).
+ *         "$BENCH_FZF_OUT.t" = "first_us last_us bytes lines accept_us" and
+ *         the rows to "$BENCH_FZF_OUT.rows", exits 130 (what Esc makes fzf
+ *         return).  Every mode that writes .t writes those five fields, and
+ *         accept_us is 0 unless accept took a row.
+ *       BENCH_FZF_MODE=accept: as first, then Enter on the row whose last
+ *         tab-separated field (the spec the navigator reads) is
+ *         $BENCH_FZF_ACCEPT, printed as fzf prints a selection: the query
+ *         line first under --print-query (empty: nothing was typed), then
+ *         the row with its ANSI codes stripped (--ansi); exits 0.  The
+ *         CLOCK_REALTIME of that moment is .t's accept_us.  No such row:
+ *         exits 130, accept_us 0.
  *       BENCH_FZF_MODE=hold: writes its argv (NUL-separated) to .args, its
  *         environment to .env, drains stdin to .rows, then .ready, and waits
  *         until "$BENCH_FZF_OUT.release" exists (or $BENCH_PID is gone), then
@@ -580,10 +589,43 @@ static int stub_fzf(int argc, char **argv) {
     last = t;
     len += (size_t)r;
   }
+  int rc = 130;
+  int64_t acc = 0;
+  if (!strcmp(mode, "accept")) {
+    const char *want = getenv("BENCH_FZF_ACCEPT");
+    size_t wl = want ? strlen(want) : 0;
+    int pq = 0;
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--print-query")) pq = 1;
+    char *plain = malloc(len + 1);
+    for (size_t s = 0; wl > 0 && s < len;) {
+      char *nl = memchr(rows + s, '\n', len - s);
+      size_t e = nl ? (size_t)(nl - rows) : len, pl = 0;
+      for (size_t k = s; k < e; k++) {
+        if (rows[k] == 0x1b && k + 1 < e && rows[k + 1] == '[') {   /* CSI ... final byte */
+          for (k += 2; k < e && !(rows[k] >= 0x40 && rows[k] <= 0x7e); k++) {}
+          continue;
+        }
+        plain[pl++] = rows[k];
+      }
+      char *tab = memrchr(plain, '\t', pl);
+      size_t from = tab ? (size_t)(tab - plain) + 1 : 0;
+      if (pl - from == wl && !memcmp(plain + from, want, wl)) {
+        acc = now_us(CLOCK_REALTIME);
+        if (pq) write_all(1, "\n", 1);
+        plain[pl++] = '\n';
+        write_all(1, plain, pl);
+        rc = 0;
+        break;
+      }
+      s = e + 1;
+    }
+    free(plain);
+  }
   if (strcmp(mode, "drain")) {
     save(out, ".rows", rows, len);
-    char t[128];
-    int tl = snprintf(t, sizeof t, "%lld %lld %zu %zu\n", (long long)first, (long long)last, len, lines);
+    char t[160];
+    int tl = snprintf(t, sizeof t, "%lld %lld %zu %zu %lld\n", (long long)first, (long long)last, len, lines,
+                      (long long)acc);
     save(out, ".t", t, (size_t)tl);
   }
   free(rows);
@@ -600,7 +642,7 @@ static int stub_fzf(int argc, char **argv) {
       nanosleep(&ts, NULL);
     }
   }
-  return 130;
+  return rc;
 }
 
 int main(int argc, char **argv) {
