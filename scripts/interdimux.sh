@@ -9995,8 +9995,46 @@ if [ "${1:-}" = "--doctor" ]; then
 
   # Every @interdimux-* actually set, global and session scope.  Each line comes
   # tagged with its scope (g/s), so a value can be re-read from the right one.
-  _seen=0
+  _optlines=$( { tmux show-options -g 2>/dev/null; echo '#session'; tmux show-options 2>/dev/null; } \
+            | awk '$0 == "#session" { sc = "s"; next }
+                   /^@interdimux-/ && !seen[$0]++ { print (sc == "" ? "g" : sc) " " $0 }' )
+  # The values show-options prints quoted or escaped are read back raw (see
+  # below), and when there are several -- every '#rrggbb' colour is one -- in
+  # ONE tmux client, each followed by a marker line: a client each cost ~3 ms,
+  # fifteen colours ~50 ms of the report.  Taken only if the markers frame the
+  # values exactly -- each in its place, none left over, as a value holding
+  # such a line would leave one -- and each one is then what $(show-option -v)
+  # gives; otherwise every value is read on its own, as it always was.
+  _rq=() _rv=() _rn=0 _rmark='interdimux:end-of-value'
   while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _scope="${_line%% *}"; _line="${_line#* }"; _name="${_line%% *}"
+    _val="${_line#* }"; [ "$_val" = "$_line" ] && _val=""
+    case "$_val" in
+      \"*|\'*|*\\*)
+        [ "$_rn" = 0 ] || _rq+=(\;)
+        if [ "$_scope" = g ]; then _rq+=(show-option -gqv "$_name"); else _rq+=(show-option -qv "$_name"); fi
+        _rq+=(\; display-message -p "$_rmark")
+        _rn=$((_rn + 1)) ;;
+    esac
+  done <<< "$_optlines"
+  if [ "$_rn" -gt 1 ]; then
+    _rall=$(tmux "${_rq[@]}" 2>/dev/null; printf x); _rall="${_rall%x}"
+    while [ "${#_rv[@]}" -lt "$_rn" ]; do
+      case "$_rall" in
+        "$_rmark"$'\n'*) _rv+=(""); _rall="${_rall#"$_rmark"$'\n'}" ;;    # unset since
+        *$'\n'"$_rmark"$'\n'*)
+          _r="${_rall%%$'\n'"$_rmark"$'\n'*}"; _rall="${_rall#*$'\n'"$_rmark"$'\n'}"
+          while [[ "$_r" == *$'\n' ]]; do _r="${_r%$'\n'}"; done
+          _rv+=("$_r") ;;
+        *) break ;;
+      esac
+    done
+    [ "${#_rv[@]}" = "$_rn" ] && [ -z "$_rall" ] || _rv=()
+  fi
+  _seen=0 _ri=0
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
     _scope="${_line%% *}"; _line="${_line#* }"
     _name="${_line%% *}"; _name="${_name#@interdimux-}"
     _val="${_line#* }"; [ "$_val" = "$_line" ] && _val=""
@@ -10008,9 +10046,11 @@ if [ "${1:-}" = "--doctor" ]; then
     _raw="$_val"
     case "$_val" in
       \"*|\'*|*\\*)
-        if [ "$_scope" = g ]; then _raw=$(tmux show-option -gqv "@interdimux-$_name" 2>/dev/null)
+        if [ "$_ri" -lt "${#_rv[@]}" ]; then _raw="${_rv[_ri]}"
+        elif [ "$_scope" = g ]; then _raw=$(tmux show-option -gqv "@interdimux-$_name" 2>/dev/null)
         else _raw=$(tmux show-option -qv "@interdimux-$_name" 2>/dev/null)
-        fi ;;
+        fi
+        _ri=$((_ri + 1)) ;;
     esac
     _val="${_val%\"}"; _val="${_val#\"}"
     _seen=$((_seen + 1))
@@ -10031,9 +10071,7 @@ if [ "${1:-}" = "--doctor" ]; then
     else
       _ok "@interdimux-$_name = '$_val'"
     fi
-  done < <( { tmux show-options -g 2>/dev/null; echo '#session'; tmux show-options 2>/dev/null; } \
-            | awk '$0 == "#session" { sc = "s"; next }
-                   /^@interdimux-/ && !seen[$0]++ { print (sc == "" ? "g" : sc) " " $0 }' )
+  done <<< "$_optlines"
   [ "$_seen" = 0 ] && _note 'nothing set — every option is at its default'
 
   # A hide pattern that matches no session is indistinguishable from a working
