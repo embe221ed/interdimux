@@ -4144,10 +4144,12 @@ if [ "${1:-}" = "--dirs-list" ]; then
           fi
           # Partially typed path: walk up to the deepest existing
           # ancestor, then scan it for dirs completing the typed prefix.
+          # A relative one (a relative search path's) never reaches "/":
+          # out of components, it has no ancestor to scan.
           anc="$qr"
           stripped=0
           while [ "$anc" != "/" ] && [ ! -d "$anc" ]; do
-            anc="${anc%/*}"
+            case "$anc" in */*) anc="${anc%/*}" ;; *) anc="/" ;; esac
             [ -z "$anc" ] && anc="/"
             stripped=$((stripped + 1))
           done
