@@ -43,6 +43,18 @@ set -euo pipefail
 # once their fzf has gone, which is when bash would run it anyway.
 case "${1:-}" in ''|--jobs|--doctor-view|--dashboard) trap 'exit 0' INT ;; esac
 
+# The navigator's one `stty size` (see term_cols_r), started now, while bash
+# has parsed next to nothing.  Asked for where it is needed, it cost two forks
+# of the fully parsed bash and the exec, 4.5 ms (small server) to 6.5 ms on
+# the way to the first frame; from here it runs on another CPU while the rest
+# of the file is parsed, and term_cols_r reads its one line.  Only where
+# term_cols_r would run stty: the navigator, not under an fzf that exports
+# its width.
+TTY_SIZE_FD=""
+if [ -z "${1:-}" ] && ! [[ "${FZF_COLUMNS:-}" =~ ^[1-9][0-9]*$ ]]; then
+  exec {TTY_SIZE_FD}< <(exec stty size 2>/dev/null </dev/tty)
+fi
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -3346,9 +3358,15 @@ term_cols_r() {
     return 0
   fi
   if [ -n "$_term_cols_cached" ]; then REPLY="$_term_cols_cached"; return 0; fi
-  local dims
+  local dims=""
   REPLY=80
-  if dims=$({ stty size </dev/tty; } 2>/dev/null); then
+  if [ -n "${TTY_SIZE_FD:-}" ]; then
+    # the navigator's, started at the top of the file; nothing when stty
+    # failed there
+    IFS= read -r -u "$TTY_SIZE_FD" dims || :
+    exec {TTY_SIZE_FD}<&-; TTY_SIZE_FD=""
+    [ -z "$dims" ] || REPLY="${dims#* }"
+  elif dims=$({ stty size </dev/tty; } 2>/dev/null); then
     REPLY="${dims#* }"
   fi
   [[ "$REPLY" =~ ^[0-9]+$ ]] || REPLY=80
