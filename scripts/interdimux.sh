@@ -5943,22 +5943,30 @@ IMUX_SECTIONS
 DLG_ROWS=24 DLG_COLS=80
 DLG_TOP=0 DLG_LEFT=0 DLG_W=0 DLG_H=0
 
-# The user's configured popup border (option defaults if unset)
-popup_user_lines() {
-  local l
-  l=$(tmux show-option -gv popup-border-lines 2>/dev/null) || l=""
-  printf '%s' "${l:-single}"
-}
-popup_user_style() {
-  local s
-  s=$(tmux show-option -gv popup-border-style 2>/dev/null) || s=""
-  printf '%s' "${s:-default}"
+# The user's configured popup border (option defaults if unset), in
+# POPUP_USER_LINES and POPUP_USER_STYLE: both options from ONE tmux client, read
+# once per process.  Each used to be a $(...) of its own around its own
+# show-option -- two forks and a client, twice, on every repaint, and an
+# --action repaints up to three times.  Both options are tmux 3.3's, as is
+# every caller (popup_accent, --launch), so the first one cannot fail and take
+# the second with it (a failed command ends tmux's list).  What the client did
+# print is kept even so: a failed second read defaults the style alone, as
+# its own read did.  (`exec`: with a redirection on its command, bash forks a
+# $(...) once more before running it.)
+POPUP_USER_LINES="" POPUP_USER_STYLE=""
+popup_user_border() {
+  [ -n "$POPUP_USER_LINES" ] && return 0
+  local o
+  o=$(exec tmux show-option -gv popup-border-lines \; show-option -gv popup-border-style 2>/dev/null) || :
+  POPUP_USER_LINES="${o%%$'\n'*}" POPUP_USER_STYLE=""
+  case "$o" in *$'\n'*) POPUP_USER_STYLE="${o#*$'\n'}" ;; esac
+  POPUP_USER_LINES="${POPUP_USER_LINES:-single}" POPUP_USER_STYLE="${POPUP_USER_STYLE:-default}"
 }
 
 # The user's border style with the frame colour swapped to the danger
 # red (later attributes win in tmux styles, so bg/attrs are preserved).
 #
-# danger_style [LINES] -- LINES is popup-border-lines, read when not given.
+# danger_style -- sets REPLY.
 #
 # With "padded" the frame is made of SPACES, so a red foreground on it is
 # invisible: the only thing left carrying the danger cue was the title text,
@@ -5969,27 +5977,25 @@ popup_user_style() {
 # zeroes its attributes.  ("none" draws no frame and no title, so no border
 # style can show anything there.)
 danger_style() {
-  # `ulines`, not `lines`: shellcheck tracks a name across the whole file, and
-  # the arrays called `lines` further up made this string one a warning.
-  local base ulines="${1:-}" tok ink=default
+  local base tok ink=default
   local -a toks=()
-  [ -n "$ulines" ] || ulines=$(popup_user_lines)
-  base=$(popup_user_style)
-  if [ "$ulines" = padded ]; then
+  popup_user_border
+  base="$POPUP_USER_STYLE"
+  if [ "$POPUP_USER_LINES" = padded ]; then
     IFS=', ' read -r -a toks <<< "$base"
     for tok in ${toks[@]+"${toks[@]}"}; do
       case "$tok" in bg=*) ink="${tok#bg=}" ;; esac
     done
     [ -n "$ink" ] || ink=default
     case "$base" in
-      default) printf 'bg=%s,fg=%s' "$POPUP_BORDER_DANGER" "$ink" ;;
-      *)       printf '%s,bg=%s,fg=%s' "$base" "$POPUP_BORDER_DANGER" "$ink" ;;
+      default) REPLY="bg=$POPUP_BORDER_DANGER,fg=$ink" ;;
+      *)       REPLY="$base,bg=$POPUP_BORDER_DANGER,fg=$ink" ;;
     esac
     return 0
   fi
   case "$base" in
-    default) printf 'fg=%s' "$POPUP_BORDER_DANGER" ;;
-    *)       printf '%s,fg=%s' "$base" "$POPUP_BORDER_DANGER" ;;
+    default) REPLY="fg=$POPUP_BORDER_DANGER" ;;
+    *)       REPLY="$base,fg=$POPUP_BORDER_DANGER" ;;
   esac
 }
 
@@ -6000,6 +6006,19 @@ danger_style() {
 # partial display-popup on >= 3.6 replaces omitted properties with
 # defaults (-T absent means title "", not "keep") — INTERDIMUX_TITLE is
 # forwarded into the popup by --launch.
+#
+# A repaint to the accent this process last applied is skipped: kill restores
+# the frame itself, and its EXIT trap asked for the same again a millisecond
+# later (in kill mode all three were the danger frame) -- a display-popup for a
+# frame tmux was already drawing.  Only what this process applied counts: a
+# repaint that failed is sent again.
+#
+# It starts empty, NOT as the accent the popup was opened with, which would
+# spare every other action its exit repaint: that repaint is no no-op.  On
+# tmux 3.7 it drops popup-style's foreground from the popup's text, and draws a
+# '#[...]' in a session name in the title as a style where the opened popup
+# showed it as text -- which is how a popup has looked after its first action.
+POPUP_ACCENT_NOW=""
 popup_accent() {
   tmux_ge 303 || return 0
   # Only INSIDE a popup that is still there.  This is a display-popup with no
@@ -6016,9 +6035,10 @@ popup_accent() {
   # shell one (BUG-52).
   [ -n "${INTERDIMUX_TITLE:-}" ] || return 0
   { : </dev/tty; } 2>/dev/null || return 0
-  local style lines
-  lines=$(popup_user_lines)
-  if [ "$1" = "danger" ]; then style=$(danger_style "$lines"); else style=$(popup_user_style); fi
+  [ "$1" = "$POPUP_ACCENT_NOW" ] && return 0
+  local style
+  popup_user_border
+  if [ "$1" = "danger" ]; then danger_style; style="$REPLY"; else style="$POPUP_USER_STYLE"; fi
   local -a t=()
   # -T is a FORMAT, and the title carries the session name, so any '#' in it
   # would be re-expanded on every repaint.  tmux expands a name it is GIVEN at
@@ -6030,7 +6050,9 @@ popup_accent() {
   # -c: the popup to repaint is the PRESSING client's.  Without it tmux picks
   # the most recently active client, and on any other client -- one with no
   # popup open -- a display-popup without -E OPENS a shell popup and blocks.
-  tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -b "$lines" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null || true
+  if tmux display-popup ${TMUX_C[@]+"${TMUX_C[@]}"} -b "$POPUP_USER_LINES" -S "$style" ${t[@]+"${t[@]}"} 2>/dev/null; then
+    POPUP_ACCENT_NOW="$1"
+  fi
 }
 
 # Truncate a PRE-COLOURED string to a visible column budget, keeping its escape
@@ -8388,7 +8410,7 @@ if [ "${1:-}" = "--launch" ]; then
     # after a directory 'x#(cmd)' would run cmd here (see _bk_title_fmt).
     # title itself stays raw for INTERDIMUX_TITLE, which popup_accent escapes.
     chrome=(-T "${POPUP_TITLE_STYLE}${title//'#'/##}")
-    [ "$mode" = "kill" ] && chrome+=(-S "$(danger_style)")
+    [ "$mode" = "kill" ] && { danger_style; chrome+=(-S "$REPLY"); }
     # A popup gets the server's global TMUX_PANE — forward ours so
     # current-target detection is exact.  It is the PRESSING pane only because
     # every route here passes it explicitly (the bindings' TMUX_PANE=#{pane_id},
