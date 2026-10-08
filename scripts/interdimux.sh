@@ -4182,7 +4182,13 @@ if [ "${1:-}" = "--dirs-list" ]; then
             query_roots+=("$sp/$expanded")
           done
         fi
+        # Each root once.  With no project dirs and none of the usual ones,
+        # search_paths is ($HOME), and $HOME/QUERY came twice: the same scans
+        # again, into what is a set (sort -u, seen[]).
+        declare -A _qseen=()
         for qr in "${query_roots[@]}"; do
+          [[ ${_qseen[$qr]+x} ]] && continue
+          _qseen["$qr"]=1
           if [ -d "$qr" ]; then
             collect_dir "$qr"
             collect_scan "$qr" "$SCAN_DEPTH"
