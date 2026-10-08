@@ -2569,12 +2569,17 @@ spec_target_r() {
 # A third argument is that round-trip's output, made by a caller that batched
 # it with more commands (the preview): `has-session -t T \; display-message -p
 # -t T "$SPEC_AT_FMT$FORMAT"`.
+#
+# `exec` in the $(...): with a redirection on its command, bash forks once more
+# inside a substitution before running it.  This one runs on Enter, between fzf
+# returning and the popup closing, and for --action swap's destination (and the
+# preview's, unbatched).
 SPEC_AT="" SPEC_AT_FMT="#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}"
 spec_at() {
   local info sid wid pid widx pidx
   SPEC_AT="" REPLY=""
   if [ $# -ge 3 ]; then info="$3"; else
-    info=$(tmux has-session -t "$1" \; display-message -p -t "$1" "$SPEC_AT_FMT${2:-}" 2>/dev/null)
+    info=$(exec tmux has-session -t "$1" \; display-message -p -t "$1" "$SPEC_AT_FMT${2:-}" 2>/dev/null)
   fi
   IFS="$US" read -r sid wid pid widx pidx REPLY <<< "$info"
   [ -n "$wid" ] && [ "$widx" = "$SPEC_WIDX" ] || { REPLY=""; return 1; }
@@ -2587,13 +2592,16 @@ spec_at() {
   return 0
 }
 
-# Human-readable spec label for prompts
-spec_label() {
+# Human-readable spec label for prompts.  spec_label_r sets REPLY, as
+# spec_target_r does, for --action, which needs it on every key.
+spec_label() { spec_label_r; printf '%s' "$REPLY"; }
+spec_label_r() {
   case "$SPEC_TYPE" in
-    S) printf '%s' "session '$SPEC_SESSION'" ;;
-    W) printf '%s' "window '$SPEC_SESSION:$SPEC_WIDX'" ;;
-    P) printf '%s' "pane '$SPEC_SESSION:$SPEC_WIDX.$SPEC_PIDX'" ;;
-    D) printf '%s' "directory '$SPEC_DIR'" ;;
+    S) REPLY="session '$SPEC_SESSION'" ;;
+    W) REPLY="window '$SPEC_SESSION:$SPEC_WIDX'" ;;
+    P) REPLY="pane '$SPEC_SESSION:$SPEC_WIDX.$SPEC_PIDX'" ;;
+    D) REPLY="directory '$SPEC_DIR'" ;;
+    *) REPLY="" ;;
   esac
 }
 
@@ -7535,8 +7543,9 @@ if [ "${1:-}" = "--action" ]; then
   spec="${spec%%	*}"
   [ -z "$spec" ] && exit 0
   parse_spec "$spec"
-  target=$(spec_target)
-  label=$(spec_label)
+  # in this process, not two forks of it: every action key pays for these
+  spec_target_r; target="$REPLY"
+  spec_label_r; label="$REPLY"
 
   # /dev/tty for interactive I/O; overridable for testing.  Both must be set
   # BEFORE the directory-row branch below: it calls info_flash -> dialog_open,
@@ -7600,7 +7609,7 @@ if [ "${1:-}" = "--action" ]; then
   # "=idx" form still falls back to a window NAMED exactly "3" once index 3 is
   # gone.  Free-text fields go last, where a stray separator cannot shift the
   # fields after them.  (The zoom and active flags are for ^z, below.)
-  _t_info=$(tmux has-session -t "$target" \; display-message -p -t "$target" \
+  _t_info=$(exec tmux has-session -t "$target" \; display-message -p -t "$target" \
     "#{session_id}${US}#{window_id}${US}#{pane_id}${US}#{window_index}${US}#{pane_index}${US}#{session_windows}${US}#{window_panes}${US}#{window_zoomed_flag}${US}#{pane_active}${US}#{session_group}${US}#{session_name}${US}#{window_name}${US}#{pane_current_command}" \
     2>/dev/null)
   IFS="$US" read -r T_SID T_WID T_PID T_WIDX T_PIDX T_SWINS T_WPANES T_WZOOM T_PACT T_SGRP T_SNAME T_WNAME T_PCMD <<< "$_t_info"
@@ -11436,8 +11445,9 @@ while true; do
     fi
     # The client that opened the picker, not whichever one tmux would guess
     # (see TMUX_C) -- a key on another terminal while this one was picking used
-    # to make THAT terminal the one that switched.
-    target=$(spec_target)
+    # to make THAT terminal the one that switched.  (spec_target_r: the popup
+    # closes only once this exits, so no fork of this bash for it.)
+    spec_target_r; target="$REPLY"
     # A window or pane row is checked by index first (spec_at): once its index
     # has closed, the target finds a window NAMED that number, and Enter went
     # there.  Switched to by the IDs the check found.
