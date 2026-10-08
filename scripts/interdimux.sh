@@ -8825,11 +8825,15 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     # front that it is unavailable.  The count rides in the Jobs label for the
     # same reason — an empty picker is a wasted keypress.
     #
-    # Two forks on the prefix+g path, which is not the hot path (prefix+f is) and
-    # already forks bash to get here.
+    # One fork on the prefix+g path, which is not the hot path (prefix+f is) and
+    # already forks bash to get here.  The lines are counted here, the
+    # non-empty ones, as `| grep -c .` counted them: a pipe and an exec fewer.
     _m_sched='Schedule' _m_jobs='-Jobs'
     if command -v at >/dev/null 2>&1; then
-      _njobs=$(atq -q "$SCHED_QUEUE" 2>/dev/null | grep -c . || true)
+      _njobs=0
+      while IFS= read -r _jline; do
+        [ -z "$_jline" ] || _njobs=$((_njobs + 1))
+      done <<< "$(atq -q "$SCHED_QUEUE" 2>/dev/null)"
       case "$_njobs" in
         ''|0) _m_jobs='-Jobs' ;;
         *)    _m_jobs="Jobs ($_njobs)" ;;
