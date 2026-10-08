@@ -3366,7 +3366,10 @@ term_cols_r() {
     IFS= read -r -u "$TTY_SIZE_FD" dims || :
     exec {TTY_SIZE_FD}<&-; TTY_SIZE_FD=""
     [ -z "$dims" ] || REPLY="${dims#* }"
-  elif dims=$({ stty size </dev/tty; } 2>/dev/null); then
+  elif dims=$(exec stty size 2>/dev/null </dev/tty); then
+    # (exec'd, with the 2> first so that a /dev/tty that will not open stays
+    # quiet: `{ stty size </dev/tty; } 2>/dev/null` forked the parsed script
+    # twice)
     REPLY="${dims#* }"
   fi
   [[ "$REPLY" =~ ^[0-9]+$ ]] || REPLY=80
@@ -5272,6 +5275,12 @@ gather_targets() {
   # that can fail is the current-target lookup (a stale $TMUX_PANE), and tmux
   # aborts the remainder of a command list on failure — so it goes LAST, where
   # it cannot swallow the bulk data.
+  #
+  # `exec`: bash runs a $(...) whose one command carries a redirection by
+  # forking the substitution's subshell AND, inside it, the command -- a second
+  # fork of the whole parsed script, ~0.7 ms, on every open and every reload.
+  # exec'd, the subshell becomes tmux.  Its 2> is set up before the exec, so
+  # stderr is as quiet as it was, and the status is tmux's either way.
   local _batched=0 _all RS=$'\x1e' _dump_reg=""
   local -a _parts=()
   if [ -n "${INTERDIMUX_DUMP_IN:-}" ]; then
@@ -5305,7 +5314,7 @@ gather_targets() {
     _dump_reg="${_parts[4]-}"; _dump_reg="${_dump_reg#$'\n'}"; _dump_reg="${_dump_reg%$'\n'}"
     _batched=1
   elif [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
-    _all=$(tmux \
+    _all=$(exec tmux \
       list-sessions -F "$_sfmt" \; \
       display-message -p "$RS" \; \
       list-windows -a -F "$_wfmt" \; \
@@ -5455,7 +5464,10 @@ gather_targets() {
     # assignments with NO command, so the binary would run without any of them.
     # Only the two VALUES that need a lookup are taken out, by the REPLY forms:
     # `$(term_cols)` and `$(live_preview_state)` in that list were a subshell
-    # each, on every open and every reload (review PERF-05).
+    # each, on every open and every reload (review PERF-05).  And the binary is
+    # exec'd, as tmux is above: the 2> and the heredoc made bash fork a second
+    # time to run it.  The assignments reach an exec'd command's environment
+    # just the same (bash 4.3 to 5.2).
     #
     # Its stderr is dropped.  Every failure falls back to the bash renderer
     # below, which draws the right list, and the one failure worth telling the
@@ -5495,7 +5507,7 @@ gather_targets() {
       INTERDIMUX_TITLE_RULESET="$TITLE_RULESET" \
       INTERDIMUX_STATE_OPTS="$STATE_OPTS" \
       INTERDIMUX_VIEW="$VIEW" \
-      "$IMUX_BIN" "$IMUX_PROTO" 2>/dev/null <<IMUX_SECTIONS
+      exec "$IMUX_BIN" "$IMUX_PROTO" 2>/dev/null <<IMUX_SECTIONS
 ${sessions_raw}
 $RS
 ${all_windows_raw}
