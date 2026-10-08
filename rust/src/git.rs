@@ -3,12 +3,18 @@
 //! where .git is a FILE containing "gitdir: <path>".
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub struct GitCache {
-    cache: HashMap<String, String>,
+    /// The answer for every directory a walk started from or passed through,
+    /// by its spelling there.  Where a directory has no repository of its
+    /// own, its answer IS its parent's, so a sibling's walk -- every pane and
+    /// directory row under one $HOME -- stops at the first ancestor already
+    /// walked instead of probing each level up to `/` again.
+    cache: HashMap<OsString, String>,
 }
 
 impl GitCache {
@@ -22,24 +28,36 @@ impl GitCache {
         if dir.is_empty() {
             return String::new();
         }
-        if let Some(v) = self.cache.get(dir) {
+        if let Some(v) = self.cache.get(OsStr::new(dir)) {
             return v.clone();
         }
-        let out = Self::lookup(dir);
-        self.cache.insert(dir.to_string(), out.clone());
+        let mut passed = Vec::new();
+        let out = self.lookup(dir, &mut passed);
+        for d in passed {
+            self.cache.insert(d.into_os_string(), out.clone());
+        }
         out
     }
 
-    fn lookup(dir: &str) -> String {
+    /// The walk from `dir`, every level of which goes into `passed`: each
+    /// one's answer is the one this returns.
+    fn lookup(&self, dir: &str, passed: &mut Vec<PathBuf>) -> String {
         let mut d = PathBuf::from(dir);
         loop {
+            if let Some(v) = self.cache.get(d.as_os_str()) {
+                return v.clone();
+            }
+            passed.push(d.clone());
             // Never probe a filesystem whose stat can block (mounts.rs): the
             // walk stops there, badge-less, rather than stall the first paint.
             if d.to_str().map_or(false, crate::mounts::is_remote) {
                 return String::new();
             }
             let dot = d.join(".git");
-            let head = if dot.is_dir() {
+            // One stat answers both questions: is_dir() and then is_file()
+            // were two for every level without a .git, nearly all of them.
+            let md = fs::metadata(&dot).ok();
+            let head = if md.as_ref().map_or(false, fs::Metadata::is_dir) {
                 // Only with a HEAD in it, as git's own discovery has it: an
                 // empty .git (a half-made clone, a stray `mkdir .git` inside a
                 // repository) is skipped and the walk goes on to the enclosing
@@ -47,7 +65,7 @@ impl GitCache {
                 // badge at all, where the bash renderer found the parent's.
                 let h = dot.join("HEAD");
                 if h.is_file() { Some(h) } else { None }
-            } else if dot.is_file() {
+            } else if md.as_ref().map_or(false, fs::Metadata::is_file) {
                 // "gitdir: <path>", possibly relative to d
                 let gd = fs::read_to_string(&dot).ok().and_then(|s| {
                     let line = s.lines().next()?.trim().to_string();
@@ -178,6 +196,28 @@ mod tests {
         let mut g = GitCache::new();
         assert_eq!(g.branch(d.join("a").to_str().unwrap()), "no-newline");
         assert_eq!(g.branch(d.join("wt").to_str().unwrap()), "wt", "CRLF HEAD, newline-less gitdir");
+        fs::remove_dir_all(&d).ok();
+    }
+
+    /// The walk's answers are kept for every directory it passed, and none of
+    /// them hides a nearer repository: a directory below one already walked
+    /// is probed itself before the walk reaches that ancestor.
+    #[test]
+    fn a_walk_answers_for_its_ancestors_and_never_hides_a_nearer_repo() {
+        let d = tmpdir("memo");
+        fs::create_dir_all(d.join(".git")).unwrap();
+        fs::write(d.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir_all(d.join("x/inner/.git")).unwrap();
+        fs::write(d.join("x/inner/.git/HEAD"), "ref: refs/heads/other\n").unwrap();
+        fs::create_dir_all(d.join("x/y")).unwrap();
+        fs::create_dir_all(d.join("x/inner/z")).unwrap();
+        let mut g = GitCache::new();
+        let at = |p: &str| d.join(p).to_str().unwrap().to_string();
+        assert_eq!(g.branch(&at("x/y")), "main");
+        assert_eq!(g.branch(&at("x")), "main", "an ancestor the walk passed");
+        assert_eq!(g.branch(&at("x/inner/z")), "other", "a repo below one walked");
+        assert_eq!(g.branch(&at("x/inner")), "other");
+        assert_eq!(g.branch(&format!("{}/", at("x/y"))), "main", "another spelling");
         fs::remove_dir_all(&d).ok();
     }
 
