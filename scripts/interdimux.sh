@@ -3882,7 +3882,18 @@ if [ "${1:-}" = "--dirs-preview" ]; then
   [ -d "$dir" ] || { echo "(directory not found)"; exit 0; }
 
   display_path="${dir/#$HOME/\~}"
-  printf "${BOLD_AMBER}%s${RST}\n" "$(basename "$dir")"
+  # What $(basename) printed, without its fork and exec (dir_base_name's
+  # steps, less its tr): trailing slashes off but for "/", the last
+  # component, the trailing newlines that $() dropped.  A name basename would
+  # take for an option still goes to it, for what it said to that.
+  case "$dir" in
+    -*) _bn=$(basename "$dir") ;;
+    *)  _bn="$dir"
+        while [ "${#_bn}" -gt 1 ] && [ "${_bn%/}" != "$_bn" ]; do _bn="${_bn%/}"; done
+        [ "$_bn" = / ] || _bn="${_bn##*/}"
+        while [ "${_bn%$'\n'}" != "$_bn" ]; do _bn="${_bn%$'\n'}"; done ;;
+  esac
+  printf "${BOLD_AMBER}%s${RST}\n" "$_bn"
   printf '\033[2m%s\033[0m\n\n' "$display_path"
 
   detect_project_type "$dir"
@@ -3910,10 +3921,17 @@ if [ "${1:-}" = "--dirs-preview" ]; then
     _git_to=""
     command -v timeout >/dev/null 2>&1 && _git_to="timeout 1"
 
-    last_commit=$($_git_to git -C "$dir" --no-optional-locks log -1 --oneline 2>/dev/null || true)
+    # exec'd by the substitution itself, which an `|| true` (moot under set
+    # +e) made fork once more.  The changes are counted here, not by `wc -l |
+    # tr` (two more processes): word splitting on newlines, which porcelain
+    # lines -- never empty, each ended by one -- come out of exactly as wc
+    # counted them.  head still bounds what is read.
+    last_commit=$(exec $_git_to git -C "$dir" --no-optional-locks log -1 --oneline 2>/dev/null)
     [ -n "$last_commit" ] && printf "  ${DIM_PATH}Commit:${RST} %s\n" "$last_commit"
 
-    changed=$($_git_to git -C "$dir" --no-optional-locks status --porcelain --ignore-submodules 2>/dev/null | head -200 | wc -l | tr -d ' ')
+    changed=$($_git_to git -C "$dir" --no-optional-locks status --porcelain --ignore-submodules 2>/dev/null | head -200)
+    set -f; IFS=$'\n'; _chg=($changed); unset IFS; set +f
+    changed=${#_chg[@]}
     [ "$changed" -eq 200 ] && changed="200+"
     [ "$changed" != "0" ] && printf "  ${DIM_CMD}Changes:${RST} %s files\n" "$changed"
   fi

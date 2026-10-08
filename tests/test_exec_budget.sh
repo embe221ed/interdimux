@@ -227,11 +227,12 @@ check "--scope-prompt" "" 1
 # A directory row's preview is the directory's (--dirs-preview), drawn by the
 # same process: no second bash (review MAINT-13).  As the ctrl-o picker's, on
 # every cursor move there: the two git calls, each under `timeout`, and the
-# listing's head; the changes counted by head, wc and tr.
+# heads that bound the changes read and the listing.  No basename, and the
+# changes are counted in-process, not by wc and tr.
 run on -- --preview "D:$TMPD/repo"
-check "--preview of a directory row" "basename=1 git=2 head=2 ls=1 timeout=2 tr=1 wc=1" 9
+check "--preview of a directory row" "git=2 head=2 ls=1 timeout=2" 6
 run on -- --dirs-preview "$TMPD/repo"
-check "--dirs-preview" "basename=1 git=2 head=2 ls=1 timeout=2 tr=1 wc=1" 9
+check "--dirs-preview" "git=2 head=2 ls=1 timeout=2" 6
 
 # --- the ctrl-o picker: nothing per row, nothing per match -------------------
 # A row used to fork the whole script for its padding (review PERF-07), and a
