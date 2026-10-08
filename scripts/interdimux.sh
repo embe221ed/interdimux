@@ -4702,9 +4702,12 @@ if [ "${1:-}" = "--dirs-hints" ]; then
   case "${2:-default}" in
     # The deep/browse forms lead with a STATUS (the text being searched), not a
     # hint, so they are left to truncate the way any status does — the escape
-    # hatch they would otherwise lose (^r) is on the prompt as well.
-    deep)   printf '%s%s\n' "$(hint '🔎 deep search' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
-    browse) printf '%s%s\n' "$(hint '⤷ browsing' "${3:-}")" "   $(hint ^r reset esc cancel)" ;;
+    # hatch they would otherwise lose (^r) is on the prompt as well.  Built by
+    # hint_r, not two $(hint) forks: what they printed, which ends in no newline.
+    deep)   hint_r '🔎 deep search' "${3:-}"; _dh="$REPLY"; hint_r ^r reset esc cancel
+            printf '%s%s\n' "$_dh" "   $REPLY" ;;
+    browse) hint_r '⤷ browsing' "${3:-}"; _dh="$REPLY"; hint_r ^r reset esc cancel
+            printf '%s%s\n' "$_dh" "   $REPLY" ;;
     *)      hint_bar_r enter create 2 ^f 'deep search' 5 ^g 'browse into' 4 ^r reset 3 esc cancel 1
             [ -n "$REPLY" ] && printf '%s\n' "$REPLY" ;;
   esac
