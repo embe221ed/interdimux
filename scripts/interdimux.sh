@@ -8756,7 +8756,7 @@ agents_waiting_r() {
 
 # The "who pressed the key" prefix for a `run-shell … --launch X` the dashboard
 # builds, in REPLY: "TMUX_PANE=%N INTERDIMUX_CLIENT=<client> ", either part
-# omitted when unknown.
+# omitted when unknown, and the versions this process resolved.
 #
 # run-shell does NOT pass the pressing pane: its job gets the tmux SERVER's
 # global environment, whose TMUX_PANE is whatever the process that started the
@@ -8767,10 +8767,16 @@ agents_waiting_r() {
 # client.  Menu item commands are not expanded in the pressing client's
 # context, so the values are baked in as literals; both are checked against a
 # charset that needs no quoting in /bin/sh or tmux's parser.
+#
+# The versions go along so that --launch does not ask `fzf --version` and
+# `tmux -V` again, seconds later, for the same two numbers -- which are what
+# it hands its popup (env_fwd) either way.  ~10 ms of every dashboard item
+# (fzf is a Go binary).  Integers, so they need no quoting either.
 launch_env_prefix() {
   REPLY=""
   [[ "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] && REPLY+="TMUX_PANE=$TMUX_PANE "
   [ -n "$INTERDIMUX_CLIENT" ] && REPLY+="INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT "
+  REPLY+="INTERDIMUX_TMUX_VNUM=$TMUX_VNUM INTERDIMUX_FZF_MINOR=$FZF_MINOR "
   return 0
 }
 
