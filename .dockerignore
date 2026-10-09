@@ -1,7 +1,10 @@
 # The dev image is built from dev/ and rust/Cargo.* alone (dev/Dockerfile);
 # the checkout is mounted at run time instead.  Allow-list, so nothing else --
 # rust/target, a stray socket, .claude/ -- is ever sent to the builder.
+# dev/perf/ is the A/B harness, which runs from the checkout's copy in /work:
+# the image does not use it (and dev/run.sh leaves it out of the checksum).
 *
 !dev/
+dev/perf/
 !rust/Cargo.toml
 !rust/Cargo.lock

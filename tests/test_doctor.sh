@@ -15,6 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+MODES="$SCRIPT_DIR/scripts/interdimux-modes.sh"   # the modes the navigator never runs, which it sources
 # --doctor reports on the INSTALL, and a renderer forced from outside is not
 # part of one: under tests/run_all.sh's IMUX_RENDERER=bash the inherited
 # INTERDIMUX_USE_RUST=off would make every report warn "rust helper disabled"
@@ -256,6 +257,59 @@ else
   ERRORS+="$(printf '%s' "$bad_good" | sed 's/^/    /' || true)"$'\n'
 fi
 for opt in "${!GOOD[@]}"; do unsetopt "$opt"; done
+
+# --- values tmux prints quoted are judged raw, several read at once -------------
+# show-options prints a value quoted or escaped ("#e78a4e", \~/src, \036), and
+# --doctor reads each such value back raw before judging it.  Several are read
+# in ONE tmux client, each followed by a marker line; a value that would upset
+# that framing (one of its lines IS the marker) sends every value back to a
+# read of its own.  Both ways the verdicts are the raw values' -- among them a
+# record separator, a value of two lines and a session's own -- and a tmux on
+# PATH that logs its arguments says which way was taken.
+mkdir -p "$TMPD/tlog"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/tlog/log"\nexec "%s" "$@"\n' "$TMPD" "$(command -v tmux)" > "$TMPD/tlog/tmux"
+chmod +x "$TMPD/tlog/tmux"
+setopt color-accent '#e78a4e'
+setopt color-path '#zz0000'
+setopt title-max '1 2'
+setopt agents $'claude\nco$dex'
+setopt agent-separator $'\x1e'
+tmux -L "$SOCK" set -t doc @interdimux-color-git '#00zz00'
+raw_verdicts() { # $1 = what the run is called, $2 = its report
+  local out="$2"
+  if grep -q "✓ @interdimux-color-accent = '#e78a4e'" <<< "$out" \
+     && grep -q "✗ @interdimux-color-path = '#zz0000' — a hex colour must be #rrggbb" <<< "$out" \
+     && grep -q "✗ @interdimux-color-git = '#00zz00' — a hex colour must be #rrggbb" <<< "$out" \
+     && grep -q "✗ @interdimux-title-max = '1 2' — expected a whole number from 8 to 200" <<< "$out" \
+     && grep -q "✗ @interdimux-agents = .* — skipped: 'co\$dex'" <<< "$out" \
+     && grep -q "✗ @interdimux-agent-separator = .* — holds a control character" <<< "$out"; then
+    report "$1: each quoted value is judged raw" pass
+  else
+    report "$1: each quoted value is judged raw" fail
+    ERRORS+="$(grep '@interdimux-' <<< "$out" | sed 's/^/    /' || true)"$'\n'
+  fi
+}
+: > "$TMPD/tlog/log"
+out=$(PATH="$TMPD/tlog:$PATH" doctor)
+raw_verdicts "read in one client" "$out"
+n=$(grep -c 'show-option -gqv @interdimux-color-path' "$TMPD/tlog/log" || true)
+if [ "$n" = 1 ] && grep -q 'show-option -gqv @interdimux-color-path ; display-message -p .* ; show-option' "$TMPD/tlog/log"; then
+  report "...in one tmux client" pass
+else
+  report "...in one tmux client ($n reads of color-path)" fail
+fi
+setopt hide $'x\ninterdimux:end-of-value'
+: > "$TMPD/tlog/log"
+out=$(PATH="$TMPD/tlog:$PATH" doctor)
+raw_verdicts "a value holding the marker" "$out"
+n=$(grep -c 'show-option -gqv @interdimux-color-path' "$TMPD/tlog/log" || true)
+if [ "$n" = 2 ]; then
+  report "...which sends every value back to a read of its own" pass
+else
+  report "...which sends every value back to a read of its own ($n reads of color-path)" fail
+fi
+for opt in color-accent color-path title-max agents agent-separator hide; do unsetopt "$opt"; done
+tmux -L "$SOCK" set -t doc -u @interdimux-color-git
 
 # --- an unwritable state dir is reported, not silently swallowed --------------------
 mkdir -p "$TMPD/ro"
@@ -752,7 +806,7 @@ unsetopt hide
 # previously-built binary stale for ever.
 if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then
   mkdir -p "$TMPD/fakerepo/scripts" "$TMPD/fakerepo/rust/src" "$TMPD/fakerepo/rust/target/release"
-  cp "$SCRIPT" "$TMPD/fakerepo/scripts/interdimux.sh"
+  cp "$SCRIPT_DIR"/scripts/*.sh "$TMPD/fakerepo/scripts/"   # the script and the files it sources
   cp "$SCRIPT_DIR/rust/target/release/imux" "$TMPD/fakerepo/rust/target/release/imux"
   : > "$TMPD/fakerepo/rust/Cargo.toml"
   : > "$TMPD/fakerepo/rust/src/main.rs"
@@ -933,17 +987,17 @@ _rms=$(grep -c 'interdimux-doctor-err\.' "$TMPD/derr/rm.log" || true)
 # with the entire block deleted, because the two `cmd=` lines in --launch already
 # make two.  (What the viewer actually DOES is asserted in test_dashboard.sh,
 # which drives prefix+g then h on a real client.)
-if grep -q '^if \[ "\${1:-}" = "--doctor-view" \]; then$' "$SCRIPT"; then
+if grep -q '^if \[ "\${1:-}" = "--doctor-view" \]; then$' "$MODES"; then
   report "--doctor-view has a handler" pass
 else
   report "--doctor-view has a handler" fail
 fi
-if grep -q "ctrl-r:reload(bash '\$SQ_SCRIPT' --doctor)" "$SCRIPT"; then
+if grep -q "ctrl-r:reload(bash '\$SQ_SCRIPT' --doctor)" "$MODES"; then
   report "...with a recheck binding" pass
 else
   report "...with a recheck binding" fail
 fi
-if grep -q "doctor) cmd=\"exec bash '\$sp' --doctor-view\"" "$SCRIPT"; then
+if grep -q "doctor) cmd=\"exec bash '\$sp' --doctor-view\"" "$MODES"; then
   report "--launch doctor opens the viewer in a popup" pass
 else
   report "--launch doctor opens the viewer in a popup" fail

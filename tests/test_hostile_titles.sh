@@ -38,6 +38,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+LIST_LIB="$SCRIPT_DIR/scripts/interdimux-list.sh"   # the title rules, which it sources
 BIN="$SCRIPT_DIR/rust/target/release/imux"
 SOCK="interdimux-hostile-test-$$"
 TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-hostile.XXXXXX")" && pwd -P)"
@@ -65,7 +66,7 @@ RENDERERS="off"
 [ -x "$BIN" ] || echo "  (the Rust core is not built: the Rust renderer's cases are skipped)"
 
 US=$'\x1f' RS=$'\x1e' GS=$'\x1d'
-NOPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$SCRIPT" | wc -w)
+NOPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$LIST_LIB" | wc -w)
 EMPTY_OPTS=$(printf "${GS}%.0s" $(seq "$NOPTS"))
 
 # A dump of one session whose window N runs app N with title N, one pane each:
@@ -228,7 +229,7 @@ done
 # characters -- a C1 control is one -- pass it in any number.  The row's
 # description is the value with each control made '?' and its blanks trimmed.
 : > "$TMPD/home/titles"
-read -r -a OPT_NAMES <<< "$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$SCRIPT")"
+read -r -a OPT_NAMES <<< "$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$LIST_LIB")"
 opt_values() { # name=value ...; OPTS
   local n kv v
   OPTS=""
@@ -328,7 +329,7 @@ render off "$TMPD/latin1.dump" 20 LANG=C LC_ALL=C
 # The core's own guard: the rule text handed to it directly, a Latin-1 line in
 # front of the built-in rules, as nothing in bash would pass it any more.
 if [ -x "$BIN" ]; then
-  defaults=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; next } on && /^'\$/ { exit } on" "$SCRIPT")
+  defaults=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; next } on && /^'\$/ { exit } on" "$LIST_LIB")
   proto=$(sed -n 's/^IMUX_PROTO=//p' "$SCRIPT")
   got=$(env -i INTERDIMUX_TITLE_RULESET="$(printf 'bar  -  caf\xe9:$1  x*')"$'\n'"$defaults" \
           INTERDIMUX_STATE_OPTS="$(printf '%s ' "${OPT_NAMES[@]}")" INTERDIMUX_COLS=200 \

@@ -26,6 +26,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+MODES="$SCRIPT_DIR/scripts/interdimux-modes.sh"   # the modes the navigator never runs, which it sources
 SOCK="interdimux-schedui-$$"
 PASS=0
 FAIL=0
@@ -589,7 +590,7 @@ fi
 
 # Kill is the only destructive entry; it carries the danger colour.
 if tmux -f /dev/null -L "$SOCK" show-option -gqv @nothing >/dev/null 2>&1; then :; fi
-if grep -q 'POPUP_BORDER_DANGER}\]Kill' "$SCRIPT"; then
+if grep -q 'POPUP_BORDER_DANGER}\]Kill' "$MODES"; then
   report "the Kill entry is styled with the danger colour" pass
 else
   report "the Kill entry is styled with the danger colour" fail

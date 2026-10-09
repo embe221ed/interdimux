@@ -27,8 +27,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 SOCK="interdimux-theme-test-$$"
-OUTER="${SOCK}-outer"
-DASH_OUT="${SOCK}-dash-o"
+# Every launch gets a NEW outer server, and every dashboard render a new
+# pair, rather than killing one and re-creating it on the same socket:
+# kill-server returns while the old server is still exiting, its socket still
+# open, and a new-session that connects then fails with "server exited
+# unexpectedly" (or lands in the dying server and vanishes with it).
+OUTER="${SOCK}-outer-0" OUTER_N=0
+DASH_OUT="${SOCK}-dash-o"   # dash_row's are "$DASH_OUT-<its pid>", "$DASH_IN-<its pid>"
 DASH_IN="${SOCK}-dash-i"
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-theme.XXXXXX")"
 PASS=0
@@ -37,7 +42,9 @@ ERRORS=""
 
 cleanup() {
   local s
-  for s in "$SOCK" "$OUTER" "$DASH_OUT" "$DASH_IN"; do
+  tmux -L "$SOCK" kill-server 2>/dev/null || true
+  # every other server this suite starts is named from $SOCK: sweep the family
+  for s in $(ls "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)" 2>/dev/null | grep "^$SOCK-" || true); do
     tmux -L "$s" kill-server 2>/dev/null || true
   done
   rm -rf "$TMPD"
@@ -147,6 +154,7 @@ launch() { # $1 = cols, $2 = rows, rest = NAME=value exports for the navigator
   local cols="$1" rows="$2"; shift 2
   local sh="$TMPD/launch.sh" e n v
   tmux -L "$OUTER" kill-server 2>/dev/null || true
+  OUTER_N=$((OUTER_N + 1)); OUTER="${SOCK}-outer-$OUTER_N"   # a new one: see the top
   rm -f "$XDG_STATE_HOME/interdimux/errors.log"
   {
     printf '#!/usr/bin/env bash\n'
@@ -216,32 +224,33 @@ fi
 # pair of servers; the key press selects the second item.
 dash_row() { # env... -> the selected menu row, escapes kept
   local i s
-  tmux -L "$DASH_IN" kill-server 2>/dev/null || true
-  tmux -L "$DASH_OUT" kill-server 2>/dev/null || true
-  tmux -f /dev/null -L "$DASH_OUT" new-session -d -s drv -x 90 -y 30 \
-    "tmux -f /dev/null -L '$DASH_IN' new-session -s host"
+  # a pair of its own (see the top): this runs in a $( ), the loop's last one
+  # just before it
+  local dout="$DASH_OUT-$BASHPID" din="$DASH_IN-$BASHPID"
+  tmux -f /dev/null -L "$dout" new-session -d -s drv -x 90 -y 30 \
+    "tmux -f /dev/null -L '$din' new-session -s host"
   for i in $(seq 1 100); do
-    s=$(tmux -L "$DASH_IN" list-clients 2>/dev/null || true)
+    s=$(tmux -L "$din" list-clients 2>/dev/null || true)
     [ -n "$s" ] && break
     sleep 0.1
   done
-  env -u TMUX_PANE TMUX="$(tmux -L "$DASH_IN" display-message -p '#{socket_path}'),99999,0" \
+  env -u TMUX_PANE TMUX="$(tmux -L "$din" display-message -p '#{socket_path}'),99999,0" \
       INTERDIMUX_OPTS_PRIMED=1 "$@" bash "$SCRIPT" --dashboard-launch >/dev/null 2>&1 &
   for i in $(seq 1 100); do
-    s=$(tmux -L "$DASH_OUT" capture-pane -t '=drv:' -p 2>/dev/null || true)
+    s=$(tmux -L "$dout" capture-pane -t '=drv:' -p 2>/dev/null || true)
     [[ "$s" == *"New session"* ]] && break
     sleep 0.1
   done
-  tmux -L "$DASH_OUT" send-keys -t '=drv:' Down
+  tmux -L "$dout" send-keys -t '=drv:' Down
   # poll until the highlight has moved onto "New session" (it is the row that
   # carries an SGR right before its label)
   for i in $(seq 1 50); do
-    s=$(tmux -L "$DASH_OUT" capture-pane -t '=drv:' -p -e 2>/dev/null | grep -a 'New session' || true)
+    s=$(tmux -L "$dout" capture-pane -t '=drv:' -p -e 2>/dev/null | grep -a 'New session' || true)
     [[ "$s" == *$'\033['*'m New session'* ]] && break
     sleep 0.1
   done
-  tmux -L "$DASH_IN" kill-server 2>/dev/null || true
-  tmux -L "$DASH_OUT" kill-server 2>/dev/null || true
+  tmux -L "$din" kill-server 2>/dev/null || true
+  tmux -L "$dout" kill-server 2>/dev/null || true
   wait 2>/dev/null || true
   printf '%s' "$s"
 }

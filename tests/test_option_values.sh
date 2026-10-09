@@ -25,6 +25,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+LIST_LIB="$SCRIPT_DIR/scripts/interdimux-list.sh"   # the title rules, which it sources
 BIN="$SCRIPT_DIR/rust/target/release/imux"
 TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-optvals.XXXXXX")" && pwd -P)"
 PASS=0
@@ -126,8 +127,8 @@ done
 # tests do this): it must read it exactly as bash would have.
 if [ -x "$BIN" ]; then
   RULESET=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; sub(/^DEFAULT_TITLE_RULES='/, \"\"); print; next }
-                 on && /^'\$/ { exit } on { print }" "$SCRIPT")
-  STATE_OPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\\(.*\\)'\$/\\1/p" "$SCRIPT")
+                 on && /^'\$/ { exit } on { print }" "$LIST_LIB")
+  STATE_OPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\\(.*\\)'\$/\\1/p" "$LIST_LIB")
   for c in "0040|codex ∣ approve ∣ Fix the login timeout that users hit af…" \
            "99999999999999999999999|codex ∣ approve ∣ $THREAD"; do
     v="${c%%|*}" want="${c#*|}"

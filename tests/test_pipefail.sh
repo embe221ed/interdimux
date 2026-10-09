@@ -105,40 +105,43 @@ fi
 # string that the reader drains far faster than any accept can arrive (pushed to
 # a 5 MB list with Enter pre-stuffed — never reproduced), and printf into a pipe
 # has no meaningful failure to mask.
+# The script and the files it sources, each on its own.
 unguarded=""
-while IFS=: read -r lineno _; do
-  [ -n "$lineno" ] || continue
-  producer=$(sed -n "${lineno}p" "$SCRIPT")
-  case "$producer" in
-    *'printf '*'| fzf'*) continue ;;      # in-memory, cannot lose the race
-    *'# '*)              continue ;;      # a comment mentioning the shape
-  esac
-  # look back for `set +o pipefail` without an intervening `set -o pipefail`
-  guarded=0
-  for back in $(seq 1 40); do
-    probe=$(( lineno - back ))
-    [ "$probe" -ge 1 ] || break
-    ctx=$(sed -n "${probe}p" "$SCRIPT")
-    case "$ctx" in
-      *'set +o pipefail'*) guarded=1; break ;;
-      *'set -o pipefail'*) break ;;
+for f in "$SCRIPT" "$SCRIPT_DIR"/scripts/interdimux-*.sh; do
+  while IFS=: read -r lineno _; do
+    [ -n "$lineno" ] || continue
+    producer=$(sed -n "${lineno}p" "$f")
+    case "$producer" in
+      *'printf '*'| fzf'*) continue ;;      # in-memory, cannot lose the race
+      *'# '*)              continue ;;      # a comment mentioning the shape
     esac
-  done
-  [ "$guarded" = 1 ] || unguarded+="$lineno "
-done < <(grep -n '| fzf' "$SCRIPT")
+    # look back for `set +o pipefail` without an intervening `set -o pipefail`
+    guarded=0
+    for back in $(seq 1 40); do
+      probe=$(( lineno - back ))
+      [ "$probe" -ge 1 ] || break
+      ctx=$(sed -n "${probe}p" "$f")
+      case "$ctx" in
+        *'set +o pipefail'*) guarded=1; break ;;
+        *'set -o pipefail'*) break ;;
+      esac
+    done
+    [ "$guarded" = 1 ] || unguarded+="$f:$lineno "
+  done < <(grep -n '| fzf' "$f")
+done
 
 if [ -z "$unguarded" ]; then
   report "every streaming '| fzf' pipeline sits inside a 'set +o pipefail' window" pass
 else
   report "every streaming '| fzf' pipeline sits inside a 'set +o pipefail' window" fail
   for l in $unguarded; do
-    ERRORS+="    unguarded at line $l: $(sed -n "${l}p" "$SCRIPT" | sed 's/^ *//')"$'\n'
+    ERRORS+="    unguarded at ${l#"$SCRIPT_DIR"/}: $(sed -n "${l##*:}p" "${l%:*}" | sed 's/^ *//')"$'\n'
   done
 fi
 
 # and the guard is closed again, so the rest of the script keeps pipefail
-opened=$(grep -c 'set +o pipefail' "$SCRIPT" || true)
-closed=$(grep -c '^ *set -o pipefail' "$SCRIPT" || true)
+opened=$(cat "$SCRIPT" "$SCRIPT_DIR"/scripts/interdimux-*.sh | grep -c 'set +o pipefail' || true)
+closed=$(cat "$SCRIPT" "$SCRIPT_DIR"/scripts/interdimux-*.sh | grep -c '^ *set -o pipefail' || true)
 if [ "$opened" = "$closed" ]; then
   report "each pipefail window is closed again ($opened opened, $closed closed)" pass
 else

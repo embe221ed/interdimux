@@ -15,6 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+SCRIPTS=("$SCRIPT" "$SCRIPT_DIR"/scripts/interdimux-*.sh)   # the script and the files it sources
 BIN="$SCRIPT_DIR/rust/target/release/imux"
 SOCK="interdimux-parity-test-$$"
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-parity.XXXXXX")"
@@ -330,8 +331,8 @@ done
 # 2 when the session name moved to the front, and a pattern pinned to the old
 # key would have matched nothing -- and passed -- from then on.  So the count
 # of sort sites is asserted too.)
-unstable=$(grep -nE "sort .*-k[0-9]+,[0-9]+nr" "$SCRIPT" | grep -v 'sort -s' || true)
-mru_sorts=$(grep -cE "sort .*-k[0-9]+,[0-9]+nr" "$SCRIPT" || true)
+unstable=$(grep -nE "sort .*-k[0-9]+,[0-9]+nr" "${SCRIPTS[@]}" | grep -v 'sort -s' || true)
+mru_sorts=$(cat "${SCRIPTS[@]}" | grep -cE "sort .*-k[0-9]+,[0-9]+nr" || true)
 if [ -z "$unstable" ] && [ "$mru_sorts" -ge 2 ]; then
   report "every MRU sort is stable (-s), including the kill-fallback hop" pass
 else

@@ -22,12 +22,16 @@ if [ ! -f /src/scripts/interdimux.sh ]; then
   exit 2
 fi
 # --no-D: a socket or fifo left in the tree (a dead `tmux -S` socket, say) is
-# not copied.  What it does copy under rust/ is then touched: rsync keeps the
-# source's mtime, and cargo, seeing a restored file OLDER than the build in
-# the volume (an edit undone, a stash, a run that changed /work), would keep
-# the stale binary.
-rsync -a --no-D --delete --chown=dev:dev --exclude=/rust/target/ --out-format='%n' /src/ /work/ \
-  | { grep '^rust/' || true; } | while IFS= read -r f; do [ -f "/work/$f" ] && touch "/work/$f"; done
+# not copied.  When it copies anything under rust/, the core's own cargo
+# fingerprints go: rsync keeps the source's mtime, and cargo, seeing a
+# restored file OLDER than the build in the volume (an edit undone, a stash,
+# a run that changed /work), would keep the stale binary.  (The copies used to
+# be touched instead, which left them newer than /src's: every later run
+# copied them again, and rebuilt the core, with nothing changed.)
+copied=$(rsync -a --no-D --delete --chown=dev:dev --exclude=/rust/target/ --out-format='%n' /src/ /work/)
+if printf '%s\n' "$copied" | grep -q '^rust/.*[^/]$'; then
+  find /work/rust/target -path '*/.fingerprint/imux-*' -prune -exec rm -rf {} + 2>/dev/null || true
+fi
 mkdir -p /work/rust/target
 chown dev:dev /work/rust/target
 

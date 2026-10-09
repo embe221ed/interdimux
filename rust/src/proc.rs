@@ -33,8 +33,29 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Read};
 
 use crate::macproc;
+
+/// fs::read, for a /proc file.  fs::read fstat()s the file for a size hint,
+/// which procfs always answers with 0, then grows its buffer from a 32-byte
+/// probe read, one read per doubling: a syscall wasted on each of the 176
+/// files a list of 90 panes reads, and 9 reads for a 4 KB mountinfo.  This
+/// opens, reads, reads again for the EOF -- a short read does not end a
+/// seq_file -- and closes.
+pub(crate) fn read_all(path: &str) -> io::Result<Vec<u8>> {
+    let mut f = fs::File::open(path)?;
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match f.read(&mut chunk) {
+            Ok(0) => return Ok(out),
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 /// Does this look like a login/interactive shell?  Mirrors bash SHELL_NAMES:
 /// sh bash zsh fish dash ash ksh tcsh csh or login, each with or without a
@@ -202,6 +223,7 @@ pub struct Resolver {
     ps_tried: bool,         // the ps snapshot has been attempted
     cache: HashMap<u32, String>, // argv memo (proc & libproc; ps holds its own map)
     mac_buf: Vec<u8>,       // reusable KERN_PROCARGS2 scratch buffer (libproc only)
+    resolved: HashMap<u32, String>, // full_command's answer per pid (see there)
 }
 
 impl Resolver {
@@ -217,6 +239,7 @@ impl Resolver {
             ps_tried: false,
             cache: HashMap::new(),
             mac_buf: Vec::new(),
+            resolved: HashMap::new(),
         };
         // Construction stays cheap.  On Linux /proc handles it (lazy per-pid).
         // Otherwise prefer the native macOS backend (fork-free, O(panes)) — but
@@ -255,7 +278,7 @@ impl Resolver {
         if let Some(v) = self.cache.get(&pid) {
             return v.clone();
         }
-        let raw = fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or_default();
+        let raw = read_all(&format!("/proc/{}/cmdline", pid)).unwrap_or_default();
         // Empty argv elements are DROPPED, which is a deliberate divergence from
         // both `ps args=` and the bash backend (it appends "$a " for every
         // segment, empty ones included).  A process with an empty argv element
@@ -308,7 +331,9 @@ impl Resolver {
         if self.proc_ok {
             // A pid that fails to parse ends the list, as a non-number would
             // never have matched anything on the bash side either.
-            return fs::read_to_string(format!("/proc/{}/task/{}/children", pid, pid))
+            return read_all(&format!("/proc/{}/task/{}/children", pid, pid))
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
                 .map(|s| s.split_whitespace().map_while(|w| w.parse().ok()).collect())
                 .unwrap_or_default();
         }
@@ -327,7 +352,7 @@ impl Resolver {
             return t.groups.get(&pid).copied();
         }
         if self.proc_ok {
-            let raw = fs::read(format!("/proc/{}/stat", pid)).ok()?;
+            let raw = read_all(&format!("/proc/{}/stat", pid)).ok()?;
             return parse_stat_ids(&String::from_utf8_lossy(&raw));
         }
         None
@@ -406,6 +431,11 @@ impl Resolver {
     /// #{pane_current_command}, used only as the fallback.  This tail is shared
     /// by both backends and mirrors bash `resolve_command`: tab->space, trim,
     /// and fall back to the short command when the result is empty.
+    ///
+    /// Resolved once per pid: a window row names its active pane's process,
+    /// and that pane's own row, drawn next, the same one -- for a shell, its
+    /// children and process groups read again.  Both rows now show one
+    /// snapshot of it, as they did whenever it did not change between them.
     pub fn full_command(&mut self, pid: u32, short: &str) -> String {
         // Only fork ps when neither fork-free backend is active.
         if !self.proc_ok && !self.libproc {
@@ -414,15 +444,21 @@ impl Resolver {
                 return short.replace('\t', " ");
             }
         }
-        let own = self.args_of(pid);
-        let argv0 = own.split(' ').next().unwrap_or("");
-        let resolved = if is_shell(argv0) { self.shell_command(pid, own) } else { own };
-        let r = resolved.replace('\t', " ");
-        let r = r.trim();
+        let r = match self.resolved.get(&pid) {
+            Some(r) => r.clone(),
+            None => {
+                let own = self.args_of(pid);
+                let argv0 = own.split(' ').next().unwrap_or("");
+                let resolved = if is_shell(argv0) { self.shell_command(pid, own) } else { own };
+                let r = resolved.replace('\t', " ").trim().to_string();
+                self.resolved.insert(pid, r.clone());
+                r
+            }
+        };
         if r.is_empty() {
             short.replace('\t', " ")
         } else {
-            r.to_string()
+            r
         }
     }
 }
@@ -461,6 +497,7 @@ mod tests {
             ps_tried: true,
             cache: HashMap::new(),
             mac_buf: Vec::new(),
+            resolved: HashMap::new(),
         }
     }
 
@@ -511,6 +548,7 @@ mod tests {
             ps_tried: false,
             cache: HashMap::new(),
             mac_buf: Vec::new(),
+            resolved: HashMap::new(),
         };
         assert_eq!(r.cmdline(0), "");
     }
@@ -540,6 +578,7 @@ mod tests {
             ps_tried: false,
             cache: HashMap::new(),
             mac_buf: Vec::new(),
+            resolved: HashMap::new(),
         };
         assert!(!r.ps_tried, "construction must not attempt the ps snapshot");
         assert!(r.ps.is_none());
@@ -814,6 +853,18 @@ mod tests {
             (201, 100, "some-later-child"),
         ]);
         assert_eq!(r.full_command(100, "zsh"), "nvim src/main.rs");
+    }
+
+    /// One resolution per pid, and the fallback per row: a window row and its
+    /// active pane's row name one process, each with tmux's short command.
+    #[test]
+    fn a_pid_is_resolved_once_and_the_fallback_is_per_row() {
+        let mut r = ps_resolver(&[(100, 1, "zsh"), (101, 100, "nvim a")]);
+        assert_eq!(r.full_command(100, "zsh"), "nvim a");
+        r.ps.as_mut().unwrap().args.insert(101, "nvim b".to_string());
+        assert_eq!(r.full_command(100, "nvim"), "nvim a", "one snapshot per list");
+        assert_eq!(r.full_command(99999, "top"), "top");
+        assert_eq!(r.full_command(99999, "htop"), "htop");
     }
 
     #[test]

@@ -25,20 +25,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 SOCK="interdimux-errlog-test-$$"
-OUTER="${SOCK}-o"
+OUTER="${SOCK}-o0" OUTER_N=0   # a new outer server per launch: see new_outer
 TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-errlog.XXXXXX")" && pwd -P)"
 PASS=0
 FAIL=0
 ERRORS=""
 
 cleanup() {
-  tmux -L "$OUTER" kill-server 2>/dev/null || true
+  local i
+  for (( i = 0; i <= OUTER_N; i++ )); do tmux -L "${SOCK}-o$i" kill-server 2>/dev/null || true; done
   tmux -L "$SOCK" kill-server 2>/dev/null || true
   # the socket files too: tmux leaves them behind after kill-server
-  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK" "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$OUTER"
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK"
+  for (( i = 0; i <= OUTER_N; i++ )); do rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/${SOCK}-o$i"; done
   rm -rf "$TMPD"
 }
 trap cleanup EXIT
+
+# Each launch gets a NEW outer server rather than killing one and re-creating
+# it on the same socket: kill-server returns while the old server is still
+# exiting, its socket still open, and a new-session that connects then fails
+# with "server exited unexpectedly" (or lands in the dying server and vanishes
+# with it).
+new_outer() {
+  tmux -L "$OUTER" kill-server 2>/dev/null || true
+  OUTER_N=$((OUTER_N + 1)); OUTER="${SOCK}-o$OUTER_N"
+}
 
 report() {
   local name="$1" result="$2"
@@ -135,6 +147,7 @@ fzf_minor=$(fzf --version 2>/dev/null | awk '{print $1}' | cut -d. -f2)
 if [ "${fzf_minor:-0}" -ge 53 ]; then
   cp "$SCRIPT_DIR/rust/tests/corpus/basic.dump" "$TMPD/nav.dump"
   rm -f "$LOG"
+  new_outer
   tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
     "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_STATE_HOME='$XDG_STATE_HOME' \
          XDG_DATA_HOME='$XDG_DATA_HOME' INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=$fzf_minor \
@@ -180,6 +193,7 @@ if [ "${fzf_minor:-0}" -ge 53 ]; then
   mkdir -p "$TMPD/locproj/alpha" "$TMPD/locproj/beta"
   rm -f "$LOG"
   before=$(msgs | grep -c 'interdimux:' || true)
+  new_outer
   tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
     "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_STATE_HOME='$XDG_STATE_HOME' \
          XDG_DATA_HOME='$XDG_DATA_HOME' INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=$fzf_minor \
@@ -327,6 +341,7 @@ rm -f "$LOG"
 if [ "${fzf_minor:-0}" -ge 53 ] && [ -r "/proc/$$/environ" ] && command -v pgrep >/dev/null 2>&1; then
   cp "$SCRIPT_DIR/rust/tests/corpus/basic.dump" "$TMPD/nav2.dump"
   rm -f "$LOG"
+  new_outer
   tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
     "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' XDG_STATE_HOME='$XDG_STATE_HOME' \
          XDG_DATA_HOME='$XDG_DATA_HOME' INTERDIMUX_OPTS_PRIMED=1 INTERDIMUX_FZF_MINOR=$fzf_minor \

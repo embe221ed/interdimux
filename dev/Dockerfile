@@ -70,6 +70,11 @@ ARG ACTIONLINT_VERSION HADOLINT_VERSION LYCHEE_VERSION
 COPY dev/install/linters.sh /dev-src/install/
 COPY dev/checksums/actionlint.sha256 dev/checksums/hadolint.sha256 dev/checksums/lychee.sha256 /dev-src/checksums/
 RUN bash /dev-src/install/linters.sh /opt/bin
+# zoxide for the A/B harness alone, kept off the PATH (dev/versions.env)
+ARG ZOXIDE_VERSION
+COPY dev/install/zoxide.sh /dev-src/install/
+COPY dev/checksums/zoxide.sha256 /dev-src/checksums/
+RUN bash /dev-src/install/zoxide.sh /opt/zoxide
 
 # --- Rust: the pinned toolchain, the MSRV, and the crates, fetched ------------
 FROM base AS rust
@@ -113,6 +118,7 @@ RUN apt-get update \
 COPY --from=tmux /opt/tmux/ /usr/local/
 COPY --from=binaries /opt/bin/ /usr/local/bin/
 COPY --from=binaries /opt/fzf-old/ /opt/fzf-old/
+COPY --from=binaries /opt/zoxide/ /opt/zoxide/
 COPY --from=bash-old /opt/bash-old/ /opt/bash-old/
 COPY --from=rust --chown=dev:dev /usr/local/rustup/ /usr/local/rustup/
 COPY --from=rust --chown=dev:dev /usr/local/cargo/ /usr/local/cargo/
@@ -120,12 +126,20 @@ COPY --from=rust --chown=dev:dev /usr/local/cargo/ /usr/local/cargo/
 # Only these INTERDIMUX_* may be set image-wide: test_bind_keys counts every
 # other one that reaches a popup, and the suites' tmux servers inherit this
 # environment.  INTERDIMUX_TEST_DOCKER=off as in CI: there is no docker here.
+# IMUX_PERF_ZOXIDE is the A/B harness's zoxide (dev/perf/), which nothing
+# else reads: no zoxide is on the PATH, as on CI's runner.
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     INTERDIMUX_OLD_FZF_DIR=/opt/fzf-old \
     INTERDIMUX_OLD_BASH_DIR=/opt/bash-old \
     INTERDIMUX_TEST_DOCKER=off \
+    IMUX_PERF_ZOXIDE=/opt/zoxide/zoxide \
     RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo CARGO_NET_OFFLINE=true \
     PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# A git worktree's repository is mounted read-only at its host path
+# (dev/run.sh), owned by the host's uid, which `dev` is not: git would refuse
+# it as "dubious ownership".  Every repository here is the user's own.
+RUN git config --system --add safe.directory '*'
 
 COPY dev/entrypoint.sh dev/cmd.sh /usr/local/lib/imux-dev/
 WORKDIR /work

@@ -492,11 +492,12 @@ fn control_bytes_in_a_path_are_neutralised() {
     assert!(!out.contains('\r'), "a CR in a path would redraw the row over itself");
 }
 
-/// The title rules the script ships (DEFAULT_TITLE_RULES).  bash owns them and
-/// hands them over as INTERDIMUX_TITLE_RULESET, so they are read from the
-/// script rather than copied here.
+/// The title rules the script ships (DEFAULT_TITLE_RULES, in
+/// scripts/interdimux-list.sh, which it sources).  bash owns them and hands
+/// them over as INTERDIMUX_TITLE_RULESET, so they are read from the script
+/// rather than copied here.
 fn shipped_title_rules() -> String {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/interdimux.sh");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/interdimux-list.sh");
     let s = std::fs::read_to_string(script).expect("read the script");
     let start = s.find("DEFAULT_TITLE_RULES='").expect("DEFAULT_TITLE_RULES") + "DEFAULT_TITLE_RULES='".len();
     let end = start + s[start..].find("\n'").expect("the closing quote");
@@ -504,9 +505,9 @@ fn shipped_title_rules() -> String {
 }
 
 /// The option names whose values the script puts on each pane line
-/// (DEFAULT_STATE_OPTS), in order.
+/// (DEFAULT_STATE_OPTS, beside the rules), in order.
 fn shipped_state_opts() -> String {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/interdimux.sh");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/interdimux-list.sh");
     let s = std::fs::read_to_string(script).expect("read the script");
     let start = s.find("\nDEFAULT_STATE_OPTS='").expect("DEFAULT_STATE_OPTS") + "\nDEFAULT_STATE_OPTS='".len();
     let end = start + s[start..].find('\'').expect("the closing quote");

@@ -39,6 +39,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+LIST_LIB="$SCRIPT_DIR/scripts/interdimux-list.sh"   # the title rules, which it sources
 SOCK="interdimux-dashcnt-$$"
 IN="$SOCK-i" OUT="$SOCK-o"
 TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-dashcnt.XXXXXX")" && pwd -P)"
@@ -122,7 +123,7 @@ tin new-session -d -s grp -t '=ag'             # every ag pane, listed again
 
 # --- DEFAULT_AW_CAN is what the default rules say --------------------------------
 rules_apps=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; next } on && /^'\$/ { exit }
-                  on && \$1 !~ /^#/ && \$1 !~ /^@/ && (\$2 == \"approve\" || \$2 == \"input\") { print \$1 }" "$SCRIPT" |
+                  on && \$1 !~ /^#/ && \$1 !~ /^@/ && (\$2 == \"approve\" || \$2 == \"input\") { print \$1 }" "$LIST_LIB" |
              tr ',' '\n' | grep . | sort -u | tr '\n' ' ')
 listed=$(sed -n "s/^DEFAULT_AW_CAN='\\(.*\\)'\$/\\1/p" "$SCRIPT" | tr ' ' '\n' | grep . | sort -u | tr '\n' ' ')
 if [ -n "$rules_apps" ] && [ "$rules_apps" = "$listed" ]; then

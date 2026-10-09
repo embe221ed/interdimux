@@ -149,34 +149,85 @@ pub fn project_type(dir: &str) -> Option<&'static str> {
     None
 }
 
-/// The directory `p` names, spelled one way: what `pwd -P` prints there, so
-/// every spelling of one directory -- a trailing or doubled '/', a path through
-/// a symlink -- comes out the same.  A directory row is hidden when a session
-/// was started in it (or its active window is in it) under ANY spelling, since
-/// Enter on the row resolves it and switches to that session: tmux keeps
-/// `-c ~/repo/` with its slash, and a session started from a shell in a
-/// symlinked directory keeps the logical path, while the recent list and zoxide
-/// have their own spellings.  bash's canon_dir -- keep them in step: runs of
-/// '/' collapse and trailing ones go, then the physical path of a directory
-/// that exists, except on a filesystem whose stat can block (mounts.rs), which
-/// keeps its spelling; so does a relative path.
-pub fn canon_dir(p: &str) -> String {
-    let mut s = String::with_capacity(p.len());
-    for c in p.chars() {
-        if c == '/' && s.ends_with('/') {
-            continue;
+/// What `Canon::canon_dir` learns of path prefixes (see `plain_path`): one
+/// per list, whose few milliseconds it holds for.
+#[derive(Default)]
+pub struct Canon {
+    /// prefixes known to be there and not symlinks
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    plain: std::collections::HashSet<String>,
+}
+
+impl Canon {
+    /// The directory `p` names, spelled one way: what `pwd -P` prints there,
+    /// so every spelling of one directory -- a trailing or doubled '/', a path
+    /// through a symlink -- comes out the same.  A directory row is hidden
+    /// when a session was started in it (or its active window is in it) under
+    /// ANY spelling, since Enter on the row resolves it and switches to that
+    /// session: tmux keeps `-c ~/repo/` with its slash, and a session started
+    /// from a shell in a symlinked directory keeps the logical path, while the
+    /// recent list and zoxide have their own spellings.  bash's canon_dir --
+    /// keep them in step: runs of '/' collapse and trailing ones go, then the
+    /// physical path of a directory that exists, except on a filesystem whose
+    /// stat can block (mounts.rs), which keeps its spelling; so does a
+    /// relative path.
+    pub fn canon_dir(&mut self, p: &str) -> String {
+        let mut s = String::with_capacity(p.len());
+        for c in p.chars() {
+            if c == '/' && s.ends_with('/') {
+                continue;
+            }
+            s.push(c);
         }
-        s.push(c);
+        while s.len() > 1 && s.ends_with('/') {
+            s.pop();
+        }
+        if !s.starts_with('/') || crate::mounts::is_remote(&s) || self.plain_path(&s) {
+            return s;
+        }
+        match fs::canonicalize(&s) {
+            Ok(r) if r.is_dir() => r.to_str().map(str::to_string).unwrap_or(s),
+            _ => s,
+        }
     }
-    while s.len() > 1 && s.ends_with('/') {
-        s.pop();
+
+    /// Is `s` (absolute, tidied) its own physical path?  It is when every
+    /// component is there and none is a symlink, `.` or `..`: realpath then
+    /// returns `s` as it is, and canon_dir returns `s` whether or not it names
+    /// a directory.  readlink(2) failing with EINVAL says "there, and not a
+    /// link" -- the probe realpath makes of every component anyway, here made
+    /// once per prefix per list: the rows' directories share most of theirs.
+    /// A link, a dot, any other answer: false, and realpath decides as before.
+    /// That holds for glibc's realpath (every version) and musl's since 1.2.2,
+    /// which Rust's musl targets bundle since 1.71 (rust-version is 1.74); an
+    /// older musl asked the kernel, which on a case-insensitive filesystem may
+    /// give back a name in another case.  Linux only: macOS's realpath also
+    /// respells a name in its case on disk.
+    #[cfg(target_os = "linux")]
+    fn plain_path(&mut self, s: &str) -> bool {
+        let mut end = 0;
+        for comp in s[1..].split('/') {
+            end += 1 + comp.len();
+            if comp.is_empty() || comp == "." || comp == ".." {
+                return false;
+            }
+            let prefix = &s[..end];
+            if self.plain.contains(prefix) {
+                continue;
+            }
+            match fs::read_link(prefix) {
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+                    self.plain.insert(prefix.to_string());
+                }
+                _ => return false,
+            }
+        }
+        true
     }
-    if !s.starts_with('/') || crate::mounts::is_remote(&s) {
-        return s;
-    }
-    match fs::canonicalize(&s) {
-        Ok(r) if r.is_dir() => r.to_str().map(str::to_string).unwrap_or(s),
-        _ => s,
+
+    #[cfg(not(target_os = "linux"))]
+    fn plain_path(&mut self, _s: &str) -> bool {
+        false
     }
 }
 
@@ -237,20 +288,32 @@ mod tests {
         let real = d.join("real");
         fs::create_dir_all(&real).unwrap();
         std::os::unix::fs::symlink(&real, d.join("link")).unwrap();
+        fs::create_dir_all(real.join("sub")).unwrap();
+        fs::write(real.join("file"), "").unwrap();
         let phys = fs::canonicalize(&real).unwrap().to_str().unwrap().to_string();
         let base = d.to_str().unwrap();
+        // one Canon for them all, as for a list: what it learnt of one
+        // spelling's prefixes must not change the answer for the next
+        let mut c = Canon::default();
         for spelling in [
             format!("{}/real", base),
             format!("{}/real/", base),
             format!("{}//real//", base),
             format!("{}/link", base),
             format!("{}/link/", base),
+            format!("{}/real/../real", base),
+            format!("{}/./real", base),
         ] {
-            assert_eq!(canon_dir(&spelling), phys, "{}", spelling);
+            assert_eq!(c.canon_dir(&spelling), phys, "{}", spelling);
         }
-        assert_eq!(canon_dir(&format!("{}//gone//", base)), format!("{}/gone", base));
-        assert_eq!(canon_dir("rel//x/"), "rel/x");
-        assert_eq!(canon_dir("//"), "/");
+        assert_eq!(c.canon_dir(&format!("{}/link/sub", base)), format!("{}/sub", phys));
+        assert_eq!(c.canon_dir(&format!("{}/real/sub", base)), format!("{}/sub", phys));
+        // not a directory, or not there: tidied only
+        assert_eq!(c.canon_dir(&format!("{}/real/file", base)), format!("{}/real/file", base));
+        assert_eq!(c.canon_dir(&format!("{}/real/file/x", base)), format!("{}/real/file/x", base));
+        assert_eq!(c.canon_dir(&format!("{}//gone//", base)), format!("{}/gone", base));
+        assert_eq!(c.canon_dir("rel//x/"), "rel/x");
+        assert_eq!(c.canon_dir("//"), "/");
         fs::remove_dir_all(&d).ok();
     }
 }

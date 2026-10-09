@@ -15,6 +15,13 @@
 #   check-macos        type-checks the Rust core for x86_64 and arm64 macOS
 #   msrv               builds and tests the Rust core with its rust-version
 #   bench [ARGS]       tests/bench.sh
+#   perfbench REF [ARGS]
+#                      dev/perf/bench.sh ARGS REF /work: is this checkout
+#                      slower than REF (CPU time, interleaved A/B)?
+#   uxdiff REF [ARGS]  dev/perf/uxdiff.sh ARGS REF /work: does it look any
+#                      different (text and real popups, byte for byte)?
+#                      REF is any commit, extracted with git archive and
+#                      given a Rust core of its own
 #   watch [FILTER...]  re-runs those suites whenever a file under /src changes
 #   shell              an interactive shell (the default)
 #   run CMD [ARGS]     any command
@@ -84,6 +91,10 @@ versions() {
   want_eq hadolint "$(hadolint --version 2>/dev/null | awk '{ print $NF }')" "$(pin HADOLINT_VERSION)"
   check lychee lychee --version
   want_eq lychee "$(lychee --version 2>/dev/null | awk '{ print $2 }')" "$(pin LYCHEE_VERSION)"
+  # the A/B harness's, off the PATH: the suites, as on CI, have none
+  check zoxide "${IMUX_PERF_ZOXIDE:-/opt/zoxide/zoxide}" --version
+  want_eq zoxide "$("${IMUX_PERF_ZOXIDE:-/opt/zoxide/zoxide}" --version 2>/dev/null | awk '{ print $2 }')" "$(pin ZOXIDE_VERSION)"
+  check 'zoxide PATH' sh -c 'if command -v zoxide; then exit 1; fi; echo "none on the PATH, as on CI"'
   check locale locale charmap
   check en_US.UTF-8 sh -c 'locale -a | grep -ix en_US.utf8'
   for v in ps pgrep setsid script perl python3 fdfind git timeout entr rsync; do
@@ -154,9 +165,110 @@ ci() {
   printf '%sCI legs passed: %s%s\n' "$GREEN" "$legs" "$RST"
 }
 
+# --- perfbench, uxdiff: REF against this checkout ---------------------------
+#
+# A tree of REF (any commit /work's git knows: main, HEAD~1, a sha), extracted
+# with git archive, with a Rust core of its own -- one built from other sources
+# cannot serve its script (the stdin protocol is versioned).  That core is
+# built offline once per rust/ tree and toolchain -- git's tree id, and a hash
+# of `rustc -vV`, the linker driver's version and the build's flags: the same
+# sources built the same way, the same binary -- and kept in the work volume,
+# under rust/target, which the entrypoint's copy leaves alone.  (The volume
+# outlives image rebuilds: after a RUST_VERSION bump, A must not keep a core
+# the old compiler built while B's is the new one's.)  Each use touches its
+# entry, and an entry unused for 30 days goes, as does one named in another
+# format than <tree>-<toolchain> (an older cmd.sh's).  REPLY = the tree.
+REF_FLAGS="--release --locked RUSTFLAGS=-Awarnings"
+REF_CACHE=/work/rust/target/perf-ref
+ref_tree() {
+  local ref=$1 sha rtree dir cache tc
+  git -C /work rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "git cannot read this checkout's repository from /work (for a worktree, dev/run.sh mounts its git dir)" >&2
+    return 2; }
+  sha=$(git -C /work rev-parse --verify --quiet "$ref^{commit}") || {
+    echo "no commit '$ref' in this checkout's repository" >&2; return 2; }
+  rtree=$(git -C /work rev-parse --verify --quiet "$sha:rust") || {
+    echo "$ref has no rust/: the harness compares two trees that both have the Rust core" >&2; return 2; }
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/imux-ref.XXXXXX")
+  git -C /work archive --format=tar "$sha" | tar -x -C "$dir" || {
+    echo "git archive $ref failed" >&2; return 1; }
+  tc=$({ rustc -vV; cc --version | head -n 1; printf '%s\n' "$REF_FLAGS"; } 2>&1 | cksum | cut -d' ' -f1)
+  if [ -d "$REF_CACHE" ]; then
+    find "$REF_CACHE" -mindepth 1 -maxdepth 1 -regextype posix-extended \
+      \( ! -regex '.*/[0-9a-f]{40,64}-[0-9]+' -o -mtime +30 \) -exec rm -rf {} + 2>/dev/null || true
+  fi
+  cache=$REF_CACHE/$rtree-$tc
+  if [ ! -x "$cache/imux" ]; then
+    say "build the Rust core of $ref (once per rust/ tree and toolchain: kept in the work volume)"
+    rm -rf "$cache"
+    mkdir -p "$cache"
+    # (-Awarnings: REF's warnings are not this checkout's business; lint
+    # levels change no code)
+    # (REF_FLAGS above names these flags, for the cache's key: change both)
+    CARGO_TARGET_DIR=$cache/target RUSTFLAGS=-Awarnings cargo build --release --locked --quiet \
+        --manifest-path "$dir/rust/Cargo.toml" || {
+      echo "$ref's Rust core does not build here (offline, from the crates the image fetched)" >&2; return 1; }
+    cp "$cache/target/release/imux" "$cache/imux.new" && mv "$cache/imux.new" "$cache/imux"
+    rm -rf "$cache/target"
+  fi
+  touch "$cache"
+  # copied, so newer than every file the archive restored: the harness insists
+  mkdir -p "$dir/rust/target/release"
+  cp "$cache/imux" "$dir/rust/target/release/imux"
+  REPLY=$dir
+}
+
+# The plain-text half of every diff uxdiff wrote (its colour-only diffs: the
+# start of the exact-bytes half), so a run's log shows what changed.
+show_diffs() {
+  local out=$1 f n=0
+  while IFS= read -r f; do
+    n=$((n + 1))
+    printf '\n%s==> %s%s\n' "$BOLD" "${f#"$out"/diff/}" "$RST"
+    if awk '/^# --- plain text/ { p = 1; next } /^# --- exact bytes/ { exit } p && /^[-+@]/ { found = 1 } END { exit !found }' "$f"; then
+      awk '/^# --- plain text/ { p = 1; next } /^# --- exact bytes/ { exit } p' "$f" | head -n 60
+    else
+      echo "(the text is the same: the difference is in colours or attributes)"
+      awk '/^# --- exact bytes/ { p = 1; next } p' "$f" | head -n 40
+    fi
+  done < <(find "$out/diff" -name '*.diff' -type f 2>/dev/null | LC_ALL=C sort)
+  [ "$n" = 0 ] || printf '\n%d diff file(s), each in full (exact bytes too) in this checkout'\''s work volume:\n  sh dev/run.sh run cat %s/diff/<file>\n' "$n" "$out"
+}
+
+perf_ab() {  # perfbench|uxdiff REF [ARGS...]
+  local mode=$1 ref a b rc=0 out=/work/rust/target/perf/uxdiff
+  shift
+  [ $# -ge 1 ] || { echo "usage: $mode REF [ARGS...]  (make $mode REF=main ARGS=...)" >&2; return 2; }
+  ref=$1; shift
+  # (called under ||, where set -e does not reach: each step is checked)
+  say "build this checkout's Rust core"
+  build_core || return 1
+  ref_tree "$ref" || return
+  a=$REPLY
+  b="$(git -C /work rev-parse --abbrev-ref HEAD 2>/dev/null) $(git -C /work rev-parse --short HEAD 2>/dev/null)"
+  # untracked files too: a new module or helper is a change as much as an edit
+  [ -z "$(git -C /work status --porcelain 2>/dev/null)" ] || b+=", with uncommitted changes"
+  printf 'A = %s: %s, in %s\n' "$ref" "$(git -C /work log -1 --format='%h %s' "$ref" -- | cut -c1-72)" "$a"
+  printf 'B = this checkout (%s), in /work\n' "$b"
+  # the image has everything the harness can use: a missing zoxide is a fault
+  if [ "$mode" = perfbench ]; then
+    IMUX_PERF_STRICT=1 bash dev/perf/bench.sh "$@" "$a" /work || rc=$?
+  else
+    rm -rf "$out"; mkdir -p "${out%/*}"
+    IMUX_PERF_STRICT=1 bash dev/perf/uxdiff.sh "$@" "$a" /work "$out" || rc=$?
+    [ "$rc" != 1 ] || show_diffs "$out"
+  fi
+  rm -rf "$a"
+  say "$mode took $SECONDS s (exit $rc)"
+  return "$rc"
+}
+
 sync_src() {  # the entrypoint's copy again, as dev (who owns /work already)
-  rsync -rlpt --no-D --delete --exclude=/rust/target/ --out-format='%n' /src/ /work/ \
-    | { grep '^rust/' || true; } | while IFS= read -r f; do [ -f "/work/$f" ] && touch "/work/$f"; done
+  local copied
+  copied=$(rsync -rlpt --no-D --delete --exclude=/rust/target/ --out-format='%n' /src/ /work/)
+  if printf '%s\n' "$copied" | grep -q '^rust/.*[^/]$'; then
+    find /work/rust/target -path '*/.fingerprint/imux-*' -prune -exec rm -rf {} + 2>/dev/null || true
+  fi
 }
 
 case "${1:-shell}" in
@@ -188,6 +300,8 @@ case "${1:-shell}" in
     msrv_test ;;
   bench)
     shift; build_core; exec bash tests/bench.sh "$@" ;;
+  perfbench|uxdiff)
+    rc=0; perf_ab "$@" || rc=$?; exit "$rc" ;;
   watch)
     shift
     [ -t 0 ] || { echo "watch needs a terminal: dev/run.sh gives it one" >&2; exit 2; }

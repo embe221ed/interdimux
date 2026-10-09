@@ -117,7 +117,7 @@ fi
 # command in it -- and the "older than its sources" warning, which says it is
 # RENDERING last build's layout, is not added on top: the list does not run it.
 mkdir -p "$TMPD/fakerepo/scripts" "$TMPD/fakerepo/rust/src" "$TMPD/fakerepo/rust/target/release"
-cp "$SCRIPT" "$TMPD/fakerepo/scripts/interdimux.sh"
+cp "$SCRIPT_DIR"/scripts/*.sh "$TMPD/fakerepo/scripts/"   # the script and the files it sources
 cp "$TMPD/old" "$TMPD/fakerepo/rust/target/release/imux"
 touch -d '1990-01-01' "$TMPD/fakerepo/rust/target/release/imux" 2>/dev/null \
   || touch -t 199001010000 "$TMPD/fakerepo/rust/target/release/imux"

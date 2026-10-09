@@ -18,6 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+SCRIPTS=("$SCRIPT" "$SCRIPT_DIR"/scripts/interdimux-*.sh)   # the script and the files it sources
 PASS=0
 FAIL=0
 ERRORS=""
@@ -40,25 +41,25 @@ echo
 # --- the three lists --------------------------------------------------------
 
 # Env var names referenced by get_opt calls: get_opt VAR "${INTERDIMUX_X:-}" @opt default
-mapfile -t GETOPT_ENV < <(grep -E '^[[:space:]]*get_opt ' "$SCRIPT" \
+mapfile -t GETOPT_ENV < <(cat "${SCRIPTS[@]}" | grep -E '^[[:space:]]*get_opt ' \
   | grep -oE '\$\{INTERDIMUX_[A-Z_]+:-\}' | grep -oE 'INTERDIMUX_[A-Z_]+' | sort -u)
 
 # Option names referenced by get_opt calls
-mapfile -t GETOPT_OPTS < <(grep -E '^[[:space:]]*get_opt ' "$SCRIPT" \
+mapfile -t GETOPT_OPTS < <(cat "${SCRIPTS[@]}" | grep -E '^[[:space:]]*get_opt ' \
   | grep -oE '@interdimux-[a-z-]+' | sed 's/^@interdimux-//' | sort -u)
 
 # Env vars actually forwarded into the popup by env_fwd_vars
-mapfile -t FWD_ENV < <(sed -n '/^env_fwd_vars()/,/^}/p' "$SCRIPT" \
+mapfile -t FWD_ENV < <(sed -n '/^env_fwd_vars()/,/^}/p' "${SCRIPTS[@]}" \
   | grep -oE '"INTERDIMUX_[A-Z_]+=' | grep -oE 'INTERDIMUX_[A-Z_]+' | sort -u)
 
 # Option names covered by the one-shot dump (derived from OPT_MAP)
-mapfile -t OPT_NAMES < <(sed -n '/^OPT_MAP=(/,/^)/p' "$SCRIPT" \
+mapfile -t OPT_NAMES < <(sed -n '/^OPT_MAP=(/,/^)/p' "${SCRIPTS[@]}" \
   | grep -oE '"[a-z-]+:[A-Z_]+"' | sed -e 's/^"//' -e 's/:.*$//' | sort -u)
 
 # Env suffixes OPT_MAP claims to feed -- this is what --bind-keys emits, so a
 # name here that get_opt does not read means the baked binding silently drops
 # the user's option.
-mapfile -t MAP_ENV < <(sed -n '/^OPT_MAP=(/,/^)/p' "$SCRIPT" \
+mapfile -t MAP_ENV < <(sed -n '/^OPT_MAP=(/,/^)/p' "${SCRIPTS[@]}" \
   | grep -oE '"[a-z-]+:[A-Z_]+"' | sed -e 's/^.*://' -e 's/"$//' \
   | sed 's/^/INTERDIMUX_/' | sort -u)
 
@@ -103,14 +104,14 @@ else
 fi
 
 # The sentinel itself must be forwarded, or the whole warm path is dead again.
-if sed -n '/^env_fwd_vars()/,/^}/p' "$SCRIPT" | grep -q 'INTERDIMUX_OPTS_PRIMED=1'; then
+if sed -n '/^env_fwd_vars()/,/^}/p' "${SCRIPTS[@]}" | grep -q 'INTERDIMUX_OPTS_PRIMED=1'; then
   report "env_fwd_vars forwards INTERDIMUX_OPTS_PRIMED" pass
 else
   report "env_fwd_vars forwards INTERDIMUX_OPTS_PRIMED" fail
 fi
 
 # ...and load_tmux_opts must actually honour it.
-if sed -n '/^load_tmux_opts()/,/^}/p' "$SCRIPT" | grep -q 'INTERDIMUX_OPTS_PRIMED'; then
+if sed -n '/^load_tmux_opts()/,/^}/p' "${SCRIPTS[@]}" | grep -q 'INTERDIMUX_OPTS_PRIMED'; then
   report "load_tmux_opts honours INTERDIMUX_OPTS_PRIMED" pass
 else
   report "load_tmux_opts honours INTERDIMUX_OPTS_PRIMED" fail
@@ -120,7 +121,7 @@ fi
 # the few --bind-keys reads when it bakes the bindings.  One read on its own
 # instead -- @interdimux-project-dirs, with `show-option -g` in the directory
 # search -- was global-only and cost every ctrl-o list a tmux round-trip (BUG-78).
-mapfile -t CODE_OPTS < <(grep -vE '^[[:space:]]*#' "$SCRIPT" \
+mapfile -t CODE_OPTS < <(cat "${SCRIPTS[@]}" | grep -vE '^[[:space:]]*#' \
   | grep -oE '@interdimux-[a-z-]+' | sed 's/^@interdimux-//' | sort -u)
 stray=""
 for o in ${CODE_OPTS[@]+"${CODE_OPTS[@]}"}; do

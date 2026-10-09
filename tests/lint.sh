@@ -58,10 +58,13 @@ rc=0
 # scripts/ excludes only what is deliberate there:
 #   SC2191  `--"$HINT_BAR"="$REPLY"` as an array element; the `=` is literal
 #   SC2206  the RS split and the grouping loops' line and field splits in
-#           gather_targets, unquoted on purpose under `set -f`
+#           gather_targets and list_fetch, unquoted on purpose under `set -f`
+# -x follows interdimux.sh into the files it sources, so a variable only one
+# of them reads is not unused.  shellcheck reports on the files it is given,
+# not on the ones it follows, so those are given too.
 echo "==> the plugin"
-"$SC" -S warning -e SC2191,SC2206 \
-  scripts/interdimux.sh interdimux.tmux || rc=1
+"$SC" -S warning -x -e SC2191,SC2206 \
+  scripts/interdimux.sh scripts/interdimux-list.sh scripts/interdimux-modes.sh interdimux.tmux || rc=1
 
 # tests/ additionally excludes the harness idioms:
 #   SC2155  `export TMUX="$(tmux …)"` — the masked exit status is not wanted
@@ -73,11 +76,12 @@ echo "==> the tests"
 "$SC" -S warning -e SC2155,SC2034,SC2164,SC2010,SC2154 \
   tests/*.sh || rc=1
 
-# dev/ -- the dev image's and CI's install recipes, and the host-side
-# dev/run.sh (POSIX sh, for macOS's /bin/sh) -- is held to the plugin's bar,
-# with nothing excluded.  -x follows each installer into dev/install/lib.sh.
+# dev/ -- the dev image's and CI's install recipes, the host-side dev/run.sh
+# (POSIX sh, for macOS's /bin/sh), and the A/B harness in dev/perf/ -- is held
+# to the plugin's bar, with nothing excluded.  -x follows each installer into
+# dev/install/lib.sh, and uxdiff.sh into the parts it sources.
 echo "==> the dev environment"
-"$SC" -S warning -x dev/*.sh dev/install/*.sh || rc=1
+"$SC" -S warning -x dev/*.sh dev/install/*.sh dev/perf/*.sh || rc=1
 
 [ "$rc" = 0 ] && echo "clean"
 exit "$rc"

@@ -27,14 +27,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 SOCK="interdimux-hint-test-$$"
-OUTER="${SOCK}-outer"
+OUTER="${SOCK}-outer"   # each render's server is "$OUTER-<its pid>": see render
 PASS=0
 FAIL=0
 ERRORS=""
 
 cleanup() {
+  local s
   tmux -L "$SOCK" kill-server 2>/dev/null || true
-  tmux -L "$OUTER" kill-server 2>/dev/null || true
+  # the renders' servers: each kills its own, so these are an interrupted run's
+  for s in $(ls "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)" 2>/dev/null | grep "^$OUTER-" || true); do
+    tmux -L "$s" kill-server 2>/dev/null || true
+  done
 }
 trap cleanup EXIT
 
@@ -166,12 +170,15 @@ case "$hint_case" in
 esac
 
 for t in "${TYPES[@]}"; do export "INTERDIMUX_HINTS_$t=${LADDER[$t]}"; done
+HINT_VARS=(INTERDIMUX_HINTS_S INTERDIMUX_HINTS_W INTERDIMUX_HINTS_P INTERDIMUX_HINTS_D INTERDIMUX_HINTS_X)
 
+# The handler with the ladders unset, building its own: given them, it reads
+# the snippet's own input, and the two could differ only in picking a rung.
 rm -f /tmp/imux_hint_pwned
 for spec in "${SPECS[@]}" '$(touch /tmp/imux_hint_pwned)'; do
   agree=1
   for w in 200 100 64 40 20 8; do
-    want=$(FZF_COLUMNS="$w" bash "$SCRIPT" --footer-for "$spec")
+    want=$(unset "${HINT_VARS[@]}"; FZF_COLUMNS="$w" bash "$SCRIPT" --footer-for "$spec")
     # fzf single-quotes the placeholder; printf %q is the closest stand-in
     got=$(FZF_COLUMNS="$w" sh -c "${hint_case/_\{-1\}/_$(printf '%q' "$spec")}")
     if [ "$want" != "$got" ]; then
@@ -187,6 +194,26 @@ if [ -e /tmp/imux_hint_pwned ]; then
 else
   report "a row spec cannot execute shell" pass
 fi
+
+# --footer-for reads the row type's ladder from the navigator's export rather
+# than building it again, so with the export it must print the bar it builds
+# without one: each row type, an empty query and a typed one (the create
+# entry after the row's hints), at a wide, a middling and a narrow width.
+agree=1
+for spec in "${SPECS[@]}"; do
+  for w in 200 64 20; do
+    for q in "" api; do
+      with=$(FZF_COLUMNS="$w" FZF_QUERY="$q" FZF_MATCH_COUNT=3 bash "$SCRIPT" --footer-for "$spec")
+      without=$(unset "${HINT_VARS[@]}"; FZF_COLUMNS="$w" FZF_QUERY="$q" FZF_MATCH_COUNT=3 bash "$SCRIPT" --footer-for "$spec")
+      if [ "$with" != "$without" ]; then
+        agree=0
+        ERRORS+="     '$spec' at $w, query '$q': '$(printf '%s' "$with" | plain)' vs built '$(printf '%s' "$without" | plain)'"$'\n'
+      fi
+    done
+  done
+done
+[ "$agree" = 1 ] && report "--footer-for prints the same bar from the exported ladders as from its own" pass \
+                 || report "--footer-for prints the same bar from the exported ladders as from its own" fail
 
 # The snippet reads the LIVE width, which is what keeps the bar right after ^/
 # and after a resize — neither is knowable when the navigator builds the string.
@@ -229,8 +256,16 @@ fi
 # every cursor move, at the exact row the eye uses to keep its place.  Assert it
 # against a rendered screen; the flag alone would pass even if fzf ignored it.
 render() { # $1 = rows, $2 = fzf minor to pretend to be; prints the screen
-  tmux -L "$OUTER" kill-server 2>/dev/null || true
-  tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 100 -y "$1" \
+  # A server of its own, named for this render's process and killed once the
+  # screen is captured.  Killing the last render's server and starting this
+  # one on the same socket raced it: kill-server returns while the old server
+  # is still exiting, its socket still open, and a new-session that connects
+  # then fails with "server exited unexpectedly" (measured: ~9 times in 10 the
+  # old server is still there when kill-server returns, ~1 in 8 still
+  # accepting) -- an empty screen, and under set -e the suite died at the
+  # grep below.
+  local outer="$OUTER-$BASHPID"
+  tmux -f /dev/null -L "$outer" new-session -d -s drv -x 100 -y "$1" \
     "env TMUX='$TMUX' TMUX_PANE='$TMUX_PANE' INTERDIMUX_OPTS_PRIMED=1 \
          INTERDIMUX_FZF_MINOR=${2:-74} INTERDIMUX_TMUX_VNUM=307 \
          INTERDIMUX_SHOW_DIRS=off FZF_DEFAULT_OPTS= \
@@ -240,10 +275,11 @@ render() { # $1 = rows, $2 = fzf minor to pretend to be; prints the screen
   # prompt, and on a loaded box that was not always long enough.
   local i s=""
   for i in $(seq 1 150); do
-    s=$(tmux -L "$OUTER" capture-pane -t '=drv:' -p 2>/dev/null | plain) || s=""
+    s=$(tmux -L "$outer" capture-pane -t '=drv:' -p 2>/dev/null | plain) || s=""
     [[ "$s" == *kill* && "$s" == *'▸ hint'* ]] && break
     sleep 0.1
   done
+  tmux -L "$outer" kill-server 2>/dev/null || true
   printf '%s\n' "$s"
 }
 
@@ -275,7 +311,6 @@ if [ -n "$old_bar" ] && [ -n "$old_row" ] && [ "$old_bar" -lt "$old_row" ]; then
 else
   report "on fzf < 0.63 it is still a header (bar=$old_bar list=$old_row)" fail
 fi
-tmux -L "$OUTER" kill-server 2>/dev/null || true
 
 # --- scope prompt --------------------------------------------------------------
 # Build the inline case by EVALUATING the script's own _scope_case assignments

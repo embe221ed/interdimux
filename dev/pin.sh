@@ -8,7 +8,7 @@
 # an artifact whose checksum is not recorded, or does not match.
 #
 # Components: tmux fzf fzf-old bash-old shellcheck actionlint hadolint lychee
-# rustup bash-macos libevent utf8proc jemalloc (default: all).  Platforms:
+# zoxide rustup bash-macos libevent utf8proc jemalloc (default: all).  Platforms:
 # linux amd64 and arm64 for everything the image runs (amd64 is this VPS's,
 # CI's and an Intel Mac's Docker; arm64 an Apple Silicon Mac's); macOS amd64
 # and arm64 for fzf, which CI's macOS job installs, and for shellcheck, which
@@ -26,7 +26,7 @@ set -euo pipefail
 # shellcheck source=dev/install/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/install/lib.sh"
 
-ALL="tmux fzf fzf-old bash-old shellcheck actionlint hadolint lychee rustup bash-macos libevent utf8proc jemalloc"
+ALL="tmux fzf fzf-old bash-old shellcheck actionlint hadolint lychee zoxide rustup bash-macos libevent utf8proc jemalloc"
 LINUX="linux:amd64 linux:arm64"
 
 from_file() {
@@ -51,6 +51,7 @@ targets() {
     actionlint) for p in $LINUX; do echo "$(from_file ACTIONLINT_VERSION) ${p%:*} ${p#*:}"; done ;;
     hadolint)   for p in $LINUX; do echo "$(from_file HADOLINT_VERSION) ${p%:*} ${p#*:}"; done ;;
     lychee)     for p in $LINUX; do echo "$(from_file LYCHEE_VERSION) ${p%:*} ${p#*:}"; done ;;
+    zoxide)     for p in $LINUX; do echo "$(from_file ZOXIDE_VERSION) ${p%:*} ${p#*:}"; done ;;
     rustup)     for p in $LINUX; do echo "$(from_file RUSTUP_INIT_VERSION) ${p%:*} ${p#*:}"; done ;;
     bash-macos) v=$(from_file MACOS_BASH_VERSION)
                 echo "${v%.*} - -"

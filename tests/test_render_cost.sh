@@ -17,14 +17,28 @@
 #     ~850 lines never parses them, and every one of them paid ~2 ms to parse
 #     code that only a list draws with.  The witness is bash's own execution
 #     trace (-x): the heavy agent layer's first top-level assignment,
-#     DEFAULT_TITLE_RULES, is in the trace of a --list and must not be in a
-#     callback's;
+#     DEFAULT_TITLE_RULES (in interdimux-list.sh, which the script sources:
+#     a sourced file's trace lines start `++`), is in the trace of a --list
+#     and must not be in a callback's;
 #     The callbacks and the scheduling modes never parse the rows' renderer
 #     either (gather_targets: bash -v echoes what bash reads), a list never
 #     parses the dashboard's agent count, and the dashboard and the popups it
 #     opens (--launch, Health, Jobs) are dispatched before the ~77 KB of
 #     --doctor and the agents' modes, and --agents (a status line runs it)
 #     before --doctor;
+#   * with the Rust core, --list draws its rows ahead of all of that (review
+#     PERF-17): it parses neither the renderer, nor a callback, nor the hint
+#     bar below the colours (tests/test_list_fast.sh holds its rows to the
+#     full path's).  The modes below the callbacks source that file too, and
+#     return before its end, which is that fast path and the navigator's
+#     first list;
+#   * each callback comes before what it never runs (review PERF-18): none
+#     parses the git badge or the pickers' fzf theme, which only the
+#     navigator, the renderer and the other modes run; the directory previews
+#     neither the hint bar nor the process lookup, the typed-query bar and
+#     ctrl-o's header not the process lookup, the badge not the hint bar.  And
+#     each runs clean -- exit 0 and nothing on stderr -- for every kind of
+#     row, a stale one too: what an ordering mistake would break;
 #   * the shortcut cmd_field takes for a row nothing can be added to (no
 #     option published, no registry record, not an agent, no title a rule
 #     reads -- review R09) is taken by no other row.  Each row below has
@@ -233,6 +247,7 @@ cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$TMPD"; }
 unset TMUX TMUX_PANE
 tmux -f /dev/null -L "$SOCK" new-session -d -s rc -x 120 -y 30
 tmux -L "$SOCK" new-window -d -t '=rc:' -n second
+tmux -L "$SOCK" split-window -d -t '=rc:1'   # a pane row for the preview
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=rc:0' -F '#{pane_id}')"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1 \
@@ -251,7 +266,7 @@ traced() {
     ERRORS+="      out: $(head -c 300 "$TMPD/cb.out")"$'\n'"      err: $(grep -v '^+' "$TMPD/cb.trace" | tail -3)"$'\n'
     return 0
   fi
-  if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace"; then
+  if grep -q '^++* DEFAULT_TITLE_RULES=' "$TMPD/cb.trace"; then
     report "$label: never reaches the agent layer" fail
   else
     report "$label: never reaches the agent layer" pass
@@ -261,15 +276,51 @@ traced() {
   else
     report "$label: never parses the rows' renderer" pass
   fi
+  # ...nor what only the navigator, the renderer and the other modes run,
+  # which the callbacks come before (review PERF-18): the git badge and the
+  # pickers' fzf theme are its first and its biggest
+  if grep -qx 'get_git_branch() {' "$TMPD/cb.trace" || grep -qx 'build_fzf_theme() {' "$TMPD/cb.trace"; then
+    report "$label: never parses the git badge or the pickers' theme" fail
+  else
+    report "$label: never parses the git badge or the pickers' theme" pass
+  fi
 }
+# $1 = label, $2 = what, $3 = a line of it (a definition or a dispatch): the
+# last traced run never read that line -- each callback comes before what it
+# never runs (review PERF-18).
+unparsed() {
+  if grep -qxF -- "$3" "$TMPD/cb.trace"; then
+    report "$1: never parses $2" fail
+  else
+    report "$1: never parses $2" pass
+  fi
+}
+PROC='full_command() {'                              # the process lookup
+HINTS='hint_r() {'                                    # the hint bar
+DLIST='if [ "${1:-}" = "--dirs-list" ]; then'         # ctrl-o's list
 traced "--preview (every cursor move)" "rc:1" \
   bash -xv "$SCRIPT" --preview 'W:rc:1'
+unparsed "--preview" "ctrl-o's list" "$DLIST"
+# A directory row's preview goes on to --dirs-preview in the same process:
+# that, and ctrl-o's preview itself, come before the hint bar and the
+# process lookup, which neither runs.
+mkdir -p "$TMPD/proj"
+traced "--preview of a directory row" "proj" \
+  bash -xv "$SCRIPT" --preview "D:$TMPD/proj"
+unparsed "--preview of a directory row" "the hint bar" "$HINTS"
+unparsed "--preview of a directory row" "the process lookup" "$PROC"
+traced "--dirs-preview (ctrl-o's preview, every cursor move)" "proj" \
+  bash -xv "$SCRIPT" --dirs-preview "$TMPD/proj"
+unparsed "--dirs-preview" "the hint bar" "$HINTS"
+unparsed "--dirs-preview" "the process lookup" "$PROC"
 traced "--footer-for (every move and keystroke)" "enter" \
   bash -xv "$SCRIPT" --footer-for 'W:rc:1'
 traced "--footer-for with a query typed" "newproj" \
   FZF_QUERY=newproj FZF_MATCH_COUNT=2 bash -xv "$SCRIPT" --footer-for 'W:rc:1'
+unparsed "--footer-for" "the process lookup" "$PROC"
 traced "--describe-create (every keystroke with no match)" "newproj" \
   bash -xv "$SCRIPT" --describe-create newproj
+unparsed "--describe-create" "the process lookup" "$PROC"
 traced "--scope-prompt (ctrl-])" "name" \
   FZF_NTH=1 bash -xv "$SCRIPT" --scope-prompt
 # ...which needs nothing at all, and answers before the preflight: parsing down
@@ -281,8 +332,10 @@ else
 fi
 traced "--session-name-for (the ctrl-o picker's badge)" "rc" \
   bash -xv "$SCRIPT" --session-name-for "$(tmux -L "$SOCK" display-message -p -t '=rc:0' '#{pane_current_path}')"
+unparsed "--session-name-for" "the hint bar" "$HINTS"
 traced "--dirs-hints (the ctrl-o picker's header on ^r)" "create" \
   bash -xv "$SCRIPT" --dirs-hints
+unparsed "--dirs-hints" "the process lookup" "$PROC"
 traced "--dirs-hints deep (on ^f)" "deep search" \
   bash -xv "$SCRIPT" --dirs-hints deep svc
 # Not a callback, but below them for the same reason: the scheduling modes
@@ -292,11 +345,40 @@ printf '#!/bin/sh\nexit 0\n' > "$TMPD/noat/atq"
 chmod +x "$TMPD/noat/atq"
 traced "--sched-list (the scheduling modes)" "no scheduled keys" \
   PATH="$TMPD/noat:$PATH" bash -xv "$SCRIPT" --sched-list
-# The witnesses are real: a list does reach the agent layer, and parse the
-# renderer.  It parses no more than it draws with, though: the dashboard's
-# count of the agents that need you is below it.
-env bash -xv "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
-if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -qx 'gather_targets() {' "$TMPD/cb.trace" \
+# Each also runs clean.  A callback that ran a function, or read a variable,
+# defined below its own dispatch would fail only when it runs: "command not
+# found", or under set -u "unbound variable" -- on stderr, which fzf shows in
+# the preview pane or drops.  So each, run as fzf runs it, with its stderr
+# kept: exit 0, some output, and nothing on stderr.
+clean() { # $1 = label, then the command (env assignments first)
+  local label="$1" rc=0; shift
+  env "$@" > "$TMPD/cb.out" 2> "$TMPD/cb.err" || rc=$?
+  if [ "$rc" = 0 ] && [ -s "$TMPD/cb.out" ] && [ ! -s "$TMPD/cb.err" ]; then
+    report "$label: exit 0, output, nothing on stderr" pass
+  else
+    report "$label: exit 0, output, nothing on stderr (rc $rc)" fail
+    ERRORS+="      $(head -3 "$TMPD/cb.err")"$'\n'
+  fi
+}
+clean "--preview of a session row" bash "$SCRIPT" --preview 'S:rc'
+clean "--preview of a window row" bash "$SCRIPT" --preview 'W:rc:1'
+clean "--preview of a pane row" bash "$SCRIPT" --preview 'P:rc:1:1'
+clean "--preview of a directory row" bash "$SCRIPT" --preview "D:$TMPD/proj"
+clean "--preview of a window row that is gone" bash "$SCRIPT" --preview 'W:rc:9'
+clean "--dirs-preview" bash "$SCRIPT" --dirs-preview "$TMPD/proj"
+clean "--footer-for" bash "$SCRIPT" --footer-for 'P:rc:1:1'
+clean "--footer-for with a query typed" FZF_QUERY=newproj FZF_MATCH_COUNT=2 bash "$SCRIPT" --footer-for 'W:rc:1'
+clean "--describe-create" bash "$SCRIPT" --describe-create newproj
+clean "--create-key" FZF_QUERY=newproj bash "$SCRIPT" --create-key
+clean "--session-name-for" bash "$SCRIPT" --session-name-for "$TMPD/proj"
+clean "--dirs-hints" bash "$SCRIPT" --dirs-hints
+clean "--hint-ladder" bash "$SCRIPT" --hint-ladder W
+
+# The witnesses are real: a list does reach the agent layer, and the bash
+# renderer's parses the renderer.  It parses no more than it draws with,
+# though: the dashboard's count of the agents that need you is below it.
+env INTERDIMUX_USE_RUST=off bash -xv "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
+if grep -q '^++* DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -qx 'gather_targets() {' "$TMPD/cb.trace" \
    && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
   report "premise: --list does run the agent layer and parse the renderer, and the trace shows it" pass
 else
@@ -307,12 +389,32 @@ if grep -qx 'agents_waiting_r() {' "$TMPD/cb.trace"; then
 else
   report "--list (^r, and after every action): never parses the dashboard's agent count" pass
 fi
+# With the Rust core, --list draws its rows ahead of everything it does not
+# run (review PERF-17): from interdimux-list.sh, sourced right after the
+# options.  It never parses the renderer, nor a callback -- the preview's
+# dispatch is the first -- nor the hint bar right below the colours.  (The
+# core pinned on: the bash renderer's leg turns it off for every suite.)
+if [ -x "$BIN" ]; then
+  env INTERDIMUX_USE_RUST=on bash -xv "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
+  if grep -q '^++* DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
+    report "rust: --list draws the rows, and reads the rules" pass
+  else
+    report "rust: --list draws the rows, and reads the rules" fail
+  fi
+  if grep -qx 'gather_targets() {' "$TMPD/cb.trace" || grep -qx 'hint_r() {' "$TMPD/cb.trace" \
+     || grep -qxF 'if [ "${1:-}" = "--preview" ]; then' "$TMPD/cb.trace"; then
+    report "rust: --list never parses the renderer, a callback or the hint bar" fail
+  else
+    report "rust: --list never parses the renderer, a callback or the hint bar" pass
+  fi
+fi
 
 # --- the modes below them -----------------------------------------------------
 # A mode no handler takes tests every dispatch in the file, in the order bash
 # parses them; a mode parses every section above its own test, on each run.
+# (The files it sources too: a sourced file's trace lines start `++`.)
 env bash -x "$SCRIPT" --no-such-mode > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
-order=" $(sed -n "s/^+ '\[' --no-such-mode = \(--[a-z-]*\) ']'\$/\1/p" "$TMPD/cb.trace" | tr '\n' ' ')"
+order=" $(sed -n "s/^++* '\[' --no-such-mode = \(--[a-z-]*\) ']'\$/\1/p" "$TMPD/cb.trace" | tr '\n' ' ')"
 # $1 = a mode -> REPLY: how many dispatch tests come before its own, or "".
 nth() {
   local pre="${order%% "$1" *}" w=()
@@ -340,6 +442,23 @@ if [ -n "$doc" ] && [ -n "$ag" ] && [ -n "$agn" ] && [ "$ag" -lt "$doc" ] && [ "
   report "--agents, --agent-next: parse no --doctor" pass
 else
   report "--agents, --agent-next: parse no --doctor (tests #$ag, #$agn; --doctor #$doc)" fail
+fi
+# They source interdimux-list.sh for its rules and registry, and return before
+# its end: --list's fast path and the navigator's first list, which only those
+# two run.  A mode no handler takes parses what every one of them does, and
+# more; the bash renderer's --list, which reads on past that return, is the
+# premise.  (bash -v echoes every line bash reads, a sourced file's too.)
+env INTERDIMUX_USE_RUST=off bash -v "$SCRIPT" --list > /dev/null 2> "$TMPD/cb.trace" || true
+w_tail=0
+grep -qx 'early_done() {' "$TMPD/cb.trace" && grep -qxF 'if [ "${1:-}" = "--list" ] && [ -n "$IMUX_BIN" ]; then' "$TMPD/cb.trace" \
+  && w_tail=1
+env bash -v "$SCRIPT" --no-such-mode > /dev/null 2> "$TMPD/cb.trace" || true
+if [ "$w_tail" = 1 ] && grep -qx "DEFAULT_TITLE_RULES='" "$TMPD/cb.trace" \
+   && ! grep -qx 'early_done() {' "$TMPD/cb.trace" \
+   && ! grep -qxF 'if [ "${1:-}" = "--list" ] && [ -n "$IMUX_BIN" ]; then' "$TMPD/cb.trace"; then
+  report "the modes below the callbacks: read the rules, parse neither --list's fast path nor the first list" pass
+else
+  report "the modes below the callbacks: read the rules, parse neither --list's fast path nor the first list (premise $w_tail)" fail
 fi
 
 echo

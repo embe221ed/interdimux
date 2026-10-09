@@ -667,7 +667,7 @@ myagent   working  $1   %spin *
   @codex_attention     done     -  1
   ```
 
-The built-in rules are `DEFAULT_TITLE_RULES` in `scripts/interdimux.sh`. Some
+The built-in rules are `DEFAULT_TITLE_RULES` in `scripts/interdimux-list.sh`. Some
 that are not, because they help only some setups:
 
 ```

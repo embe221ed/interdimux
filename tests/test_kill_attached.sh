@@ -23,14 +23,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 SOCK="interdimux-killatt-test-$$"
-OUTER="${SOCK}-outer"
+OUTER="${SOCK}-outer-0" OUTER_N=0   # a new outer server per attach: see attach_cur
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-killatt.XXXXXX")"
 PASS=0
 FAIL=0
 ERRORS=""
 
 cleanup() {
-  tmux -L "$OUTER" kill-server 2>/dev/null || true
+  local i
+  for (( i = 0; i <= OUTER_N; i++ )); do tmux -L "${SOCK}-outer-$i" kill-server 2>/dev/null || true; done
   tmux -L "$SOCK" kill-server 2>/dev/null || true
   rm -rf "$TMPD"
 }
@@ -69,8 +70,15 @@ unset INTERDIMUX_CLIENT
 # A client attached to 'cur', from an outer tmux.  Also used to re-attach when a
 # case (on a broken build) detached the last one, so one failure does not take
 # every later case down with it.
+#
+# Each attach gets a NEW outer server rather than killing one and re-creating
+# it on the same socket: kill-server returns while the old server is still
+# exiting, its socket still open, and a new-session that connects then fails
+# with "server exited unexpectedly" (or lands in the dying server and vanishes
+# with it).
 attach_cur() {
   tmux -L "$OUTER" kill-server 2>/dev/null || true
+  OUTER_N=$((OUTER_N + 1)); OUTER="${SOCK}-outer-$OUTER_N"
   tmux -f /dev/null -L "$OUTER" new-session -d -s drv -x 120 -y 30 \
     "TMUX= tmux -L $SOCK attach -t cur"
   wait_for '[ "$(client_sessions)" = cur ]'

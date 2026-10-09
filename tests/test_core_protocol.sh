@@ -174,7 +174,7 @@ check "a rebuilt binary that is still the wrong version is reported again" \
 # A copy of the plugin, so the in-repo path and the build lock are this test's.
 PLUG="$TMPD/plugin"
 mkdir -p "$PLUG/scripts"
-cp "$SCRIPT" "$PLUG/scripts/"
+cp "$SCRIPT_DIR"/scripts/*.sh "$PLUG/scripts/"   # the script and the files it sources
 make_old "$PLUG/rust/target/release/imux"
 LOCK="$PLUG/rust/target/.interdimux-autobuild.lock"
 ST="$TMPD/state2"

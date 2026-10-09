@@ -10,7 +10,8 @@
 #     status line, which outlives a popup.
 #   * 4.3 itself works: the list, and the paths where an empty array is
 #     "unbound" to bash < 4.4 under `set -u` -- the directory picker's deep
-#     search with no match, and a doubled ':' in @interdimux-project-markers.
+#     search with no match, or whose scan found only "/", and a doubled ':' in
+#     @interdimux-project-markers.
 #   * A '$' in a session name or a directory works on every bash from 4.3 to
 #     5.1 -- the ones that expand an array subscript twice -- and runs nothing.
 #
@@ -174,6 +175,22 @@ if old_bash 4.3; then
   ARGS=(--dirs-list --deep zzqqnomatch); run43 INTERDIMUX_PROJECT_DIRS="$TMPD/proj"
   check "a deep search that matches nothing ends quietly (rc $RC)" '[ "$RC" = 0 ] && [ -z "$ERR" ]'
   check "...and lists nothing" '[ -z "$OUT" ]'
+
+  # A scan whose one directory is "/" -- find's answer for that root at depth
+  # 0 -- strips its trailing slashes in this process, and to 4.3 a lone ("/")
+  # without them is no element at all: "unbound" under set -u, and the deep
+  # search died before its rows.  The PATH has find, and no fd to take over.
+  mkdir -p "$TMPD/findbin"
+  for t in bash sh env fzf sed sort find tmux cat head tail tr wc cut grep awk mkdir \
+           rm ln date uname basename dirname readlink mktemp timeout; do
+    p=$(command -v "$t" 2>/dev/null) || continue
+    case "$p" in /*) ln -sf "$p" "$TMPD/findbin/$t" ;; esac
+  done
+  ARGS=(--dirs-list --deep /)
+  run43 PATH="$TMPD/findbin" INTERDIMUX_SCAN_DEPTH=0 INTERDIMUX_PROJECT_DIRS="$TMPD/proj"
+  check "a deep search whose scan finds only / ends quietly (rc $RC, stderr: ${ERR%%$'\n'*})" \
+    '[ "$RC" = 0 ] && [ -z "$ERR" ]'
+  check "...and lists /" 'printf "%s\n" "$OUT" | cut -f3 | grep -qx /'
 
   # A doubled ':' is an empty marker, which the marker filter splits into no
   # parts at all -- on every invocation, since the markers are read at startup.
