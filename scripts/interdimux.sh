@@ -145,9 +145,8 @@ OPT_MAP=(
   "title-rules:TITLE_RULES"          "agent-separator:AGENT_SEPARATOR"
   "project-dirs:PROJECT_DIRS"
 )
-OPT_NAMES=()
-for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
-unset _m
+# One expansion, not a loop of 44: this runs at the top of every invocation.
+OPT_NAMES=("${OPT_MAP[@]%%:*}")
 
 # ---------------------------------------------------------------------------
 # --help / --version
@@ -529,7 +528,7 @@ shq() {
 # Config
 # ---------------------------------------------------------------------------
 
-# Config resolution.  get_opt sets the named variable via a nameref (no
+# Config resolution.  get_opt sets the named variable by printf -v (no
 # subshell): env override → the one-shot tmux options dump → default.  It is
 # called 27× at top level on every invocation, so the old VAR=$(get_opt …)
 # form cost 27 subshell forks per run (warm) plus 27 `tmux` execs (cold).
@@ -561,10 +560,9 @@ load_tmux_opts() {
   _tmux_opts_loaded=1
   local fmt="" name raw _noglob=0 IFS
   local -a vals
-  for name in "${OPT_NAMES[@]}"; do
-    [ -n "$fmt" ] && fmt+="$US"
-    fmt+="#{@interdimux-$name}"
-  done
+  # every name's format, US-separated, by one printf rather than a loop
+  printf -v fmt "#{@interdimux-%s}$US" "${OPT_NAMES[@]}"
+  fmt="${fmt%"$US"}"
   # Anchored to $TMUX_PANE for the same reason gather_targets is: @interdimux-*
   # lookups are target-relative, so a bare display-message resolves session-local
   # overrides against whichever session was most recently attached.
@@ -588,13 +586,13 @@ load_tmux_opts() {
   done
 }
 
+# get_opt VAR ENV_VALUE @option DEFAULT.  printf -v, not a nameref and three
+# locals: it runs 44 times before any mode does anything.
 get_opt() {
-  local -n _gv="$1"
-  local env_val="$2" opt_name="$3" default="$4"
-  if [ -n "$env_val" ]; then _gv="$env_val"; return 0; fi
+  if [ -n "$2" ]; then printf -v "$1" '%s' "$2"; return 0; fi
   load_tmux_opts
-  local v="${TMUX_OPTS[$opt_name]:-}"
-  _gv="${v:-$default}"
+  local v="${TMUX_OPTS[$3]:-}"
+  printf -v "$1" '%s' "${v:-$4}"
 }
 
 get_opt SHOW_PREVIEW      "${INTERDIMUX_SHOW_PREVIEW:-}"      @interdimux-show-preview      off
