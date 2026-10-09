@@ -145,9 +145,8 @@ OPT_MAP=(
   "title-rules:TITLE_RULES"          "agent-separator:AGENT_SEPARATOR"
   "project-dirs:PROJECT_DIRS"
 )
-OPT_NAMES=()
-for _m in "${OPT_MAP[@]}"; do OPT_NAMES+=("${_m%%:*}"); done
-unset _m
+# One expansion, not a loop of 44: this runs at the top of every invocation.
+OPT_NAMES=("${OPT_MAP[@]%%:*}")
 
 # ---------------------------------------------------------------------------
 # --help / --version
@@ -563,7 +562,7 @@ shq() {
 # Config
 # ---------------------------------------------------------------------------
 
-# Config resolution.  get_opt sets the named variable via a nameref (no
+# Config resolution.  get_opt sets the named variable by printf -v (no
 # subshell): env override → the one-shot tmux options dump → default.  It is
 # called 27× at top level on every invocation, so the old VAR=$(get_opt …)
 # form cost 27 subshell forks per run (warm) plus 27 `tmux` execs (cold).
@@ -595,10 +594,9 @@ load_tmux_opts() {
   _tmux_opts_loaded=1
   local fmt="" name raw _noglob=0 IFS
   local -a vals
-  for name in "${OPT_NAMES[@]}"; do
-    [ -n "$fmt" ] && fmt+="$US"
-    fmt+="#{@interdimux-$name}"
-  done
+  # every name's format, US-separated, by one printf rather than a loop
+  printf -v fmt "#{@interdimux-%s}$US" "${OPT_NAMES[@]}"
+  fmt="${fmt%"$US"}"
   # Anchored to $TMUX_PANE for the same reason gather_targets is: @interdimux-*
   # lookups are target-relative, so a bare display-message resolves session-local
   # overrides against whichever session was most recently attached.
@@ -622,13 +620,13 @@ load_tmux_opts() {
   done
 }
 
+# get_opt VAR ENV_VALUE @option DEFAULT.  printf -v, not a nameref and three
+# locals: it runs 44 times before any mode does anything.
 get_opt() {
-  local -n _gv="$1"
-  local env_val="$2" opt_name="$3" default="$4"
-  if [ -n "$env_val" ]; then _gv="$env_val"; return 0; fi
+  if [ -n "$2" ]; then printf -v "$1" '%s' "$2"; return 0; fi
   load_tmux_opts
-  local v="${TMUX_OPTS[$opt_name]:-}"
-  _gv="${v:-$default}"
+  local v="${TMUX_OPTS[$3]:-}"
+  printf -v "$1" '%s' "${v:-$4}"
 }
 
 get_opt SHOW_PREVIEW      "${INTERDIMUX_SHOW_PREVIEW:-}"      @interdimux-show-preview      off
@@ -1625,7 +1623,9 @@ record_recent_dir() {
   # Rebuild the file: new dir first, then surviving entries (pruning
   # duplicates and dirs that no longer exist), atomically replaced.
   local tmp d count=1
-  tmp=$(mktemp "$dir_parent/.recent_dirs.XXXXXX" 2>/dev/null) || return 0
+  # `exec`: a redirected command in $( ) is otherwise a second fork (it runs
+  # the mktemp on PATH, never a shell function of that name)
+  tmp=$(exec mktemp "$dir_parent/.recent_dirs.XXXXXX" 2>/dev/null) || return 0
   [ -n "$tmp" ] || return 0
   if ! echo "$dir" > "$tmp" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
   if [ -f "$RECENT_DIRS_FILE" ]; then
@@ -2358,18 +2358,26 @@ esc_fmt() {
 #     typed, found nothing, and silently left the user where they were -- with a
 #     junk session behind them and "duplicate session" on the next Enter.
 #     Only the two expanded arguments are escaped, and by esc_fmt.
-#   * the lookup goes through session_id_of, the one exact-name match: "=$1"
-#     means session ID 1 to tmux whatever the '=' says, and "=c:d" cannot name
-#     anything at all.
+#   * the lookup is an exact-name match (session_id_of, or the session table
+#     when the name is derived here): "=$1" means session ID 1 to tmux
+#     whatever the '=' says, and "=c:d" cannot name anything at all.
 #
 # The ID also goes to hydrate_session in place of the name: it builds "=$ID:",
 # and tmux resolves a '$' session part as an ID before any name.
 connect_dir() {
   local dir="$1" name="${2:-}" sid ename edir
-  [ -n "$name" ] || name=$(resolve_session_name "$dir")
+  if [ -n "$name" ]; then
+    session_id_of "$name"; sid="$REPLY"
+  else
+    # The name and the ID from one list-sessions, in-process: DIR_SID is the
+    # ID of the table's row of that exact name, which is what session_id_of
+    # would find.  $(resolve_session_name) and then session_id_of cost a
+    # subshell and a second list-sessions on every Enter that opens a directory.
+    load_session_table
+    dir_session "$dir"; name="$REPLY" sid="$DIR_SID"
+  fi
   [ -n "$name" ] || return 1
 
-  session_id_of "$name"; sid="$REPLY"
   if [ -z "$sid" ]; then
     esc_fmt "$name"; ename="$REPLY"
     esc_fmt "$dir"; edir="$REPLY"
@@ -2481,12 +2489,15 @@ imux_msg() {
 # spelling of "=c:d" names a session called "c:d" (legal since tmux 3.7).  A
 # plain string comparison over list-sessions has neither problem.  tmux escapes
 # control characters in names, so neither US nor a newline can occur in one.
+# (`exec` in the $( ): a redirected command there is a second fork otherwise,
+# and the footer and the zero-match bar ask this on every keystroke.  It runs
+# the tmux on PATH, as --launch's `exec tmux` does, never a shell function.)
 session_id_of() {
   local want="$1" id name
   REPLY=""
   while IFS="$US" read -r id name; do
     if [ "$name" = "$want" ]; then REPLY="$id"; return 0; fi
-  done <<< "$(tmux list-sessions -F "#{session_id}${US}#{session_name}" 2>/dev/null)"
+  done <<< "$(exec tmux list-sessions -F "#{session_id}${US}#{session_name}" 2>/dev/null)"
   return 0
 }
 
@@ -3790,6 +3801,8 @@ if [ "${1:-}" = "--preview" ]; then
   # bytes in its grid), and nothing in the header before it either, but a
   # pane's cwd can hold one, so what lies between is joined back on RS.
   # INTERDIMUX_NO_BATCH runs the commands one at a time, as gather_targets.
+  # `exec` in the batched $( ): a redirected command there costs bash a second
+  # fork otherwise (and it runs the tmux on PATH, never a shell function).
   RS=$'\x1e'
   pv_parts=()
   case "$SPEC_TYPE" in
@@ -3801,7 +3814,7 @@ if [ "${1:-}" = "--preview" ]; then
       # A failed command ends a command list, so a session that went away (or
       # anything else short of all three sections) asks again one at a time.
       if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
-        pv_all=$(tmux display-message -p -t "$target" "$s_fmt" \; display-message -p "$RS" \
+        pv_all=$(exec tmux display-message -p -t "$target" "$s_fmt" \; display-message -p "$RS" \
           \; list-windows -t "$target" -F "$w_fmt" \; display-message -p "$RS" \
           \; capture-pane -t "$target" -p -e -S -30 2>/dev/null)
         set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
@@ -3849,7 +3862,7 @@ if [ "${1:-}" = "--preview" ]; then
       p_pid="" p_cmd="" p_path="" p_look="" p_args="" pv_cap="" pv_at=()
       p_fmt="#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"
       if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
-        pv_all=$(tmux has-session -t "$target" \; display-message -p -t "$target" "$SPEC_AT_FMT$p_fmt" \
+        pv_all=$(exec tmux has-session -t "$target" \; display-message -p -t "$target" "$SPEC_AT_FMT$p_fmt" \
           \; display-message -p "$RS" \; capture-pane -t "$target" -p -e -S -50 2>/dev/null)
         set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
         pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
@@ -4372,7 +4385,13 @@ resolve_create_target() {
   else
     CREATE_DIR=""
     if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
-      CREATE_DIR=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
+      # Without --list zoxide prints its one best match, so no `| head -1`:
+      # that pipeline was a fork and an exec more on every keystroke at zero
+      # matches.  The cut keeps what head kept from a path with a newline in
+      # it.  `exec`, or the redirection costs bash a second fork; it runs the
+      # zoxide on PATH, never a shell function of that name.
+      CREATE_DIR=$(exec zoxide query -- "$query" 2>/dev/null) || true
+      CREATE_DIR="${CREATE_DIR%%$'\n'*}"
     fi
     if [ -d "$CREATE_DIR" ]; then CREATE_SRC="zoxide"; else CREATE_DIR="$HOME"; CREATE_SRC="home"; fi
     # What `tr '.: /' '----'` did, without its two forks: the bar's create-key
@@ -4635,7 +4654,18 @@ if [ "${1:-}" = "--footer-for" ]; then
   fi
   spec="${2:-}"
   spec="${spec%%	*}"
-  hint_set "${spec%%:*}"
+  # The row type's ladder.  The navigator exports all five for its inline
+  # snippet (INTERDIMUX_HINTS_<T>), built by hint_set and hint_tiers from the
+  # options and the fzf version this process inherits from it: the very
+  # ladder hint_tiers would build here, ~1 ms of every keystroke.  Built
+  # only where none was handed down.
+  case "${spec%%:*}" in S|W|P|D) _lv="INTERDIMUX_HINTS_${spec%%:*}" ;; *) _lv=INTERDIMUX_HINTS_X ;; esac
+  _ladder="${!_lv:-}"
+  if [ -z "$_ladder" ]; then
+    hint_set "${spec%%:*}"
+    hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+    _ladder="$REPLY"
+  fi
   # A typed query with rows matching: alt-enter would create from it, and the
   # bar says what, after the row's own hints (review UX-54).  Those get the
   # width that is left, dropping entries by their usual priority; the create
@@ -4648,14 +4678,13 @@ if [ "${1:-}" = "--footer-for" ]; then
     _ck="$REPLY" _ckw="$REPLY_W"
     hint_cols; _w="$REPLY"
     if [ -n "$_ck" ] && [ "$_ckw" -le "$_w" ]; then
-      hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
-      hint_pick $(( _w - _ckw - 2 )) "$REPLY"
+      hint_pick $(( _w - _ckw - 2 )) "$_ladder"
       if [ -n "$REPLY" ]; then REPLY+="  $_ck"; else REPLY="$_ck"; fi
       printf '%s\n' "$REPLY"
       exit 0
     fi
   fi
-  hint_bar_r ${HINT_SET[@]+"${HINT_SET[@]}"}
+  hint_cols; hint_pick "$REPLY" "$_ladder"
   # Nothing, not a bare newline: an EMPTY transform removes the footer section
   # and the list reflows into the row, where "\n" leaves a blank bar drawn.
   [ -n "$REPLY" ] && printf '%s\n' "$REPLY"
@@ -5588,7 +5617,14 @@ IMUX_SECTIONS
     # LC_ALL=C on the read: #{session_path} ends the line, raw, and a Latin-1
     # byte there joined the next session onto it -- which vanished from the
     # list, and could be the one you are in (see load_recent_dirs).
-    sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr)
+    #
+    # One line, one session: nothing to sort, and the sort is three forks and
+    # an exec.  (Sorted, one line comes back as it was: the $( ) drops the
+    # newline sort ends it with.)
+    case "$sessions_raw" in
+      *$'\n'*) sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr) ;;
+      *) sorted="$sessions_raw" ;;
+    esac
     while { LC_ALL=C IFS= read -r line; } 2>/dev/null; do
       [ -z "$line" ] && continue
       sn_check="${line%%"$US"*}"

@@ -38,9 +38,9 @@
 #                      those of them whose work depends on the tmux server
 #                      (SIZED below; by default keypress first-frame
 #                      first-frame-changed accept-W list list-changed
-#                      preview-S preview-W hint footer describe-create, which
-#                      is also -F small's default), each on a fixture of its
-#                      own, one table each
+#                      preview-S preview-W hint footer describe-create
+#                      connect-dir, which is also -F small's default), each
+#                      on a fixture of its own, one table each
 #   -w W        warm-up pairs per scenario, discarded (default 2)
 #   -b SECS     per-scenario time budget (default 25 when -n is not given):
 #               slow scenarios run fewer pairs, never fewer than 8; and while a
@@ -141,6 +141,18 @@
 #                 --dirs picker hands its fzf (mount table exported etc.)
 #   dirs-deep     ctrl-f deep search: --dirs-list --deep svc (~100 dirs match)
 #   dirs-preview  --dirs-preview on a git repo with changes and a README
+#   connect-dir   Enter on a directory row, ~/work/team-03/svc-03c, which has
+#                 no session: bash interdimux.sh --connect-dir DIR as a key
+#                 binding's run-shell runs it (the README's example: no
+#                 terminal, the server's environment, TMUX_PANE and
+#                 INTERDIMUX_CLIENT).  It records the directory (recent_dirs,
+#                 zoxide), creates its session and switches the attached
+#                 client there, as the navigator's Enter and ctrl-o's do.
+#                 Before every run, the client goes back and that session is
+#                 killed (and its shell reaped), outside the measurement;
+#                 after the scenario, each side's recent_dirs and zoxide
+#                 database are the fixture's again.  CPU: the script, and the
+#                 server creating the session; not the session's new shell
 #   doctor        bash interdimux.sh --doctor
 #  extra (only with -s, or -s all):
 #   first-frame-bash  first-frame with INTERDIMUX_USE_RUST=off
@@ -170,7 +182,7 @@
 #  SIZED (the ones -F both also runs on the small fixture): keypress
 #   first-frame first-frame-changed first-frame-bash accept-W list
 #   list-changed list-bash preview-S preview-W hint footer describe-create
-#   dashboard
+#   connect-dir dashboard
 #  -changed: a plain scenario runs against a server that never changes, so a
 #   cache -- each side has its own, below -- would show only its hit.  These
 #   move the server to the next of three states before every pair (the
@@ -368,7 +380,7 @@ BASH_BIN=$(command -v bash 2>/dev/null)
 
 DEFAULT_SCENARIOS=(keypress first-frame first-frame-changed accept-W list list-changed list-bash
                    preview-S preview-W preview-P hint footer describe-create action-kill-cancel
-                   action-zoom session-name-for dirs-list dirs-deep dirs-preview doctor)
+                   action-zoom session-name-for dirs-list dirs-deep dirs-preview connect-dir doctor)
 EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load dashboard launch jobs sched-list
                  doctor-opts)
 # the ones whose work depends on the tmux server's size (-F both runs them on
@@ -376,9 +388,10 @@ EXTRA_SCENARIOS=(first-frame-bash hint-ladder scope-prompt parse load dashboard 
 # (preview-P is not one: the small fixture's windows have one pane each, and
 # the navigator lists no pane row for those)
 SIZED_SCENARIOS=(keypress first-frame first-frame-changed first-frame-bash accept-W list
-                 list-changed list-bash preview-S preview-W hint footer describe-create dashboard)
+                 list-changed list-bash preview-S preview-W hint footer describe-create connect-dir
+                 dashboard)
 SMALL_DEFAULT=(keypress first-frame first-frame-changed accept-W list list-changed preview-S
-               preview-W hint footer describe-create)
+               preview-W hint footer describe-create connect-dir)
 
 CLIENT_COLS=200 CLIENT_ROWS=50          # the attached client
 POPUP_COLS=158 POPUP_ROWS=35            # 80% x 75% of it, minus the popup border
@@ -1415,6 +1428,42 @@ change_server() { # state
 }
 restore_server() { change_server 0; }
 
+# The connect-dir scenario's.  Each run creates CONN_SESSION, the session of
+# CONN_DIR, and switches the client to it.  Before every run the client goes
+# back to CUR_SESSION and CONN_SESSION is killed -- the shells of its panes
+# reaped too, or the server would count their CPU as a job of the next run --
+# so every run creates it anew.  A run after the first that left no
+# CONN_SESSION created nothing: the scenario would not be measuring what it
+# says.  After the scenario, each side's recent_dirs and zoxide database
+# (which every run writes) are the fixture's again.
+CONN_DIR="" CONN_SESSION=svc-03c CONN_RUNS=0
+pre_connect() { # side fzf-out
+  local pids pid i
+  # (has-session, not display-message -t: that one falls back to the client's
+  # pane when its target is not there)
+  if tm has-session -t "=$CONN_SESSION" 2>/dev/null; then
+    pids=$(tm list-panes -s -t "=$CONN_SESSION" -F '#{pane_pid}') || die "no pane in the session $CONN_SESSION"
+    tm switch-client -c "$CLIENT_NAME" -t "=$CUR_SESSION:" \; kill-session -t "=$CONN_SESSION" \
+      || die "cannot remove the session $CONN_SESSION"
+    # every pane's (one, unless a startup command split the window)
+    for pid in $pids; do
+      for (( i = 0; i < 200; i++ )); do [ -e "/proc/$pid" ] || break; sleep 0.01; done
+    done
+  elif [ "$CONN_RUNS" -gt 0 ] && [ -z "${SCN_BAD[connect-dir]:-}" ]; then
+    SCN_NOTE[connect-dir]+="a run created no session $CONN_SESSION (found before a run of $1)"$'\n'
+    SCN_BAD[connect-dir]=1
+  fi
+  CONN_RUNS=$((CONN_RUNS + 1))
+}
+post_connect() {
+  local s
+  pre_connect A; CONN_RUNS=0
+  for s in A B; do
+    cp -a "$FIX/data/." "$FIX/side-$s/data/" && cp -a "$FIX/zoxide/." "$FIX/side-$s/zoxide/" \
+      || die "cannot restore side $s's recent_dirs and zoxide database"
+  done
+}
+
 # shellcheck disable=SC2034  # the arrays named "e" here are read through define's nameref
 build_scenarios() {
   local side wt sq v
@@ -1430,6 +1479,9 @@ build_scenarios() {
   if [ -n "$P_SPEC" ]; then find_row "$rows" "$P_SPEC" || die "no row $P_SPEC in the list"; ROW_P=$REPLY; fi
   find_row "$rows" "W:$CUR_SESSION:0" || die "no row W:$CUR_SESSION:0"; ROW_F=$REPLY
   local DIR_PV="$H/src/api-gateway" DEEP_Q=svc
+  CONN_DIR="$H/work/team-03/svc-03c"
+  [ -d "$CONN_DIR" ] || die "no directory $CONN_DIR"
+  ! tm has-session -t "=$CONN_SESSION" 2>/dev/null || die "the fixture has a session $CONN_SESSION already"
   grep -qF "$DIR_PV" "$drows" || die "the ctrl-o picker does not list $DIR_PV"
   local ROW_D
   ROW_D=$(strip_ansi "$drows" | awk -F'\t' -v s="$DIR_PV" '$NF == s { print; exit }')
@@ -1532,6 +1584,10 @@ build_scenarios() {
       recorded "$side-job" e da
       define launch "$side" e sh -c "$REPLY"
     fi
+    # as `bind-key ... run-shell -b "TMUX_PANE=#{pane_id} INTERDIMUX_CLIENT=...
+    # bash interdimux.sh --connect-dir DIR"` runs it (the README's example)
+    e=("${SRV_ENV[@]}" "${sv[@]}" TMUX="$SOCK_PATH,$SRV_PID,0" TMUX_PANE="$CUR_PANE" INTERDIMUX_CLIENT="$CLIENT_NAME")
+    define connect-dir "$side" e sh -c "bash $sq --connect-dir '$CONN_DIR'"
   done
   local s
   for s in "${DEFAULT_SCENARIOS[@]}" "${EXTRA_SCENARIOS[@]}"; do
@@ -1544,7 +1600,8 @@ build_scenarios() {
   # meanwhile -- the popup -- waited for and counted (benchrun -P)
   SCN_TTY[keypress]="-P"; SCN_KIND[keypress]=key
   SCN_PRE[keypress]=pre_keypress; SCN_POST[keypress]=post_keypress
-  SCN_TTY[load]=""
+  SCN_TTY[load]="" SCN_TTY[connect-dir]=""
+  SCN_PRE[connect-dir]=pre_connect; SCN_POST[connect-dir]=post_connect
   # a run-shell job's: no terminal
   SCN_TTY[dashboard]="" SCN_KIND[dashboard]=menu SCN_PRE[dashboard]=pre_dashboard SCN_POST[dashboard]=post_dashboard
   SCN_TTY[launch]="" SCN_KIND[launch]=popup SCN_PRE[launch]=pre_launch SCN_POST[launch]=post_launch

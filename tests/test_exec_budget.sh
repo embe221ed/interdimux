@@ -50,9 +50,12 @@ PASS=0
 FAIL=0
 ERRORS=""
 
-SOCK_PATH=""
+SOCK_PATH="" SOCK1="$SOCK-one" SOCK1_PATH=""
 # kill-server leaves the socket file behind (tmux 3.7b): remove it by name
-cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -f ${SOCK_PATH:+"$SOCK_PATH"}; rm -rf "$TMPD"; }
+cleanup() {
+  tmux -L "$SOCK" kill-server 2>/dev/null || true; tmux -L "$SOCK1" kill-server 2>/dev/null || true
+  rm -f ${SOCK_PATH:+"$SOCK_PATH"} ${SOCK1_PATH:+"$SOCK1_PATH"}; rm -rf "$TMPD"
+}
 trap cleanup EXIT
 
 report() {
@@ -110,14 +113,18 @@ tmux -L "$SOCK" new-window -d -t '=alpha:' -n two -c "$TMPD/home" "$PC"
 tmux -L "$SOCK" split-window -d -t '=alpha:1' -c "$TMPD/home" "$PC"
 tmux -L "$SOCK" new-window -d -t '=alpha:' -n three -c "$TMPD/home" "$PC"
 tmux -L "$SOCK" new-session -d -s bravo -x 120 -y 30 -c "$TMPD/home" "$PC"
-settled() {
+# And a server of one session, the size the MRU sort has nothing to do at.
+tmux -f /dev/null -L "$SOCK1" new-session -d -s solo -x 120 -y 30 -c "$TMPD/home" "$PC"
+settled() { # $1 = socket
   local l
   while IFS= read -r l; do [ "$l" = "cwd sleep" ] || return 1; done \
-    < <(tmux -L "$SOCK" list-panes -a -F '#{?pane_current_path,cwd,nocwd} #{pane_current_command}' 2>/dev/null)
+    < <(tmux -L "$1" list-panes -a -F '#{?pane_current_path,cwd,nocwd} #{pane_current_command}' 2>/dev/null)
 }
-for _ in $(seq 1 100); do settled && break; sleep 0.1; done
+for _ in $(seq 1 100); do settled "$SOCK" && settled "$SOCK1" && break; sleep 0.1; done
 SOCK_PATH="$(tmux -L "$SOCK" display-message -p '#{socket_path}')"
 PANE="$(tmux -L "$SOCK" list-panes -t '=alpha:0' -F '#{pane_id}')"
+SOCK1_PATH="$(tmux -L "$SOCK1" display-message -p '#{socket_path}')"
+PANE1="$(tmux -L "$SOCK1" list-panes -t '=solo:0' -F '#{pane_id}')"
 
 # Directory fixtures for the per-row and per-match cases: N project dirs, each
 # with a subdirectory, named so that `svc` matches every one of them.
@@ -205,6 +212,9 @@ for r in "${renderers[@]}"; do
     run off -- --list; check "--list (bash renderer)" "sort=1 tmux=1 zoxide=1" 6
   fi
 done
+# One session is one line, and the bash renderer's MRU sort skips it.
+run off TMUX="$SOCK1_PATH,99999,0" TMUX_PANE="$PANE1" -- --list
+check "--list (bash renderer), one session" "tmux=1 zoxide=1" 4
 
 # --- the callbacks fzf runs on every cursor move and keystroke ---------------
 # A preview is one tmux client, whatever the row (review PERF-06).
@@ -214,9 +224,9 @@ run on -- --preview 'P:alpha:1:1'; check "--preview of a pane" "tmux=1" 2
 run on FZF_QUERY=api FZF_MATCH_COUNT=3 -- --footer-for 'W:alpha:1'
 check "--footer-for, a query with matches" "tmux=1" 2
 run on FZF_QUERY=newproj FZF_MATCH_COUNT=0 -- --footer-for 'W:alpha:1'
-check "--footer-for, a query with none" "head=1 tmux=1 zoxide=1" 4
+check "--footer-for, a query with none" "tmux=1 zoxide=1" 3
 run on -- --describe-create newproj
-check "--describe-create" "head=1 tmux=1 zoxide=1" 4
+check "--describe-create" "tmux=1 zoxide=1" 3
 run on FZF_NTH=1 -- --scope-prompt
 check "--scope-prompt" "" 1
 
