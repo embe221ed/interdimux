@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # tests/lint.sh holds every invocation, and why there are several, so the
       # lint runs on a developer's box and in the dev image exactly as here.
       # It also pins the shellcheck (SHELLCHECK_VERSION in dev/versions.env):
@@ -84,7 +84,7 @@ jobs:
         os: [ubuntu-24.04]
         renderer: [rust, bash]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The pins, as environment variables for every step after this one (the
       # cache keys and step names below, and dev/install/*.sh).  The file is
@@ -93,10 +93,39 @@ jobs:
       - name: Load the pinned versions (dev/versions.env)
         run: grep -E '^[A-Z][A-Z0-9_]*=' dev/versions.env >> "$GITHUB_ENV"
 
+      # apt-get can stall.  On the merge of PR #1 this step sat in it for the
+      # job's whole 30 minutes and was cancelled, while the other leg of the
+      # same run passed it in a minute.  The known causes on these runners: a
+      # slow mirror, unattended-upgrades holding dpkg's lock on a fresh boot,
+      # and man-db's trigger, which rebuilds its database after every install
+      # and takes seconds to minutes (curl's CI drops it for that).  So man-db
+      # is told not to, and no call can hang: each is bounded (timeout, and
+      # apt's own network timeouts), waits for the lock rather than failing
+      # on it, never prompts, and is tried three times -- an update that
+      # could not fetch counts as failed (Error-Mode=any), so it is retried
+      # too.  The step has a timeout of its own, so a stall that outlasts all
+      # of that fails here, by name, in minutes.
       - name: Install dependencies
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt_get() {
+            sudo DEBIAN_FRONTEND=noninteractive timeout 240 apt-get \
+              -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+              -o DPkg::Lock::Timeout=180 "$@"
+          }
+          retry() {
+            local i
+            for i in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::$* failed or stalled (attempt $i of 3)"
+              sudo dpkg --configure -a || true
+              sleep 10
+            done
+            return 1
+          }
+          sudo rm -f /var/lib/man-db/auto-update
+          retry apt_get -o APT::Update::Error-Mode=any update
+          retry apt_get install -y \
             fd-find at gawk locales strace zsh \
             build-essential libevent-dev libncurses-dev bison pkg-config
           # strace: tests/test_render_cost.sh counts the bash renderer's
@@ -124,7 +153,7 @@ jobs:
       # cold again (~4 minutes).
       - name: Cache tmux ${{ env.TMUX_VERSION }}
         id: tmux-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/tmux-prefix
           key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}-${{ hashFiles('dev/install/tmux.sh', 'dev/install/lib.sh') }}
@@ -135,7 +164,7 @@ jobs:
 
       - name: Save tmux ${{ env.TMUX_VERSION }}
         if: steps.tmux-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/tmux-prefix
           key: tmux-${{ env.TMUX_VERSION }}-${{ matrix.os }}-${{ hashFiles('dev/install/tmux.sh', 'dev/install/lib.sh') }}
@@ -173,7 +202,7 @@ jobs:
       # comma in it.
       - name: Cache bash ${{ env.OLD_BASH_VERSIONS }}
         id: old-bash-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/bash-old
           key: bash-old-${{ matrix.os }}-${{ hashFiles('dev/checksums/bash-old.sha256', 'dev/install/bash-old.sh', 'dev/install/lib.sh') }}
@@ -184,7 +213,7 @@ jobs:
 
       - name: Save bash ${{ env.OLD_BASH_VERSIONS }}
         if: steps.old-bash-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/bash-old
           key: bash-old-${{ matrix.os }}-${{ hashFiles('dev/checksums/bash-old.sha256', 'dev/install/bash-old.sh', 'dev/install/lib.sh') }}
@@ -329,7 +358,7 @@ jobs:
       LANG: en_US.UTF-8
       LC_ALL: en_US.UTF-8
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Load the pinned versions (dev/versions.env)
         run: grep -E '^[A-Z][A-Z0-9_]*=' dev/versions.env >> "$GITHUB_ENV"
@@ -338,7 +367,7 @@ jobs:
       # build, as the tests job does: a red smoke does not throw it away.
       - name: Cache the Mac's tools
         id: mac-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/imux-prefix
           key: mac-tools-${{ matrix.os }}-${{ hashFiles('dev/checksums/tmux.sha256', 'dev/checksums/fzf.sha256', 'dev/checksums/bash-macos.sha256', 'dev/checksums/libevent.sha256', 'dev/checksums/utf8proc.sha256', 'dev/checksums/jemalloc.sha256', 'dev/install/macos.sh', 'dev/install/tmux.sh', 'dev/install/fzf.sh', 'dev/install/lib.sh') }}
@@ -351,7 +380,7 @@ jobs:
 
       - name: Save the Mac's tools
         if: steps.mac-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/imux-prefix
           key: mac-tools-${{ matrix.os }}-${{ hashFiles('dev/checksums/tmux.sha256', 'dev/checksums/fzf.sha256', 'dev/checksums/bash-macos.sha256', 'dev/checksums/libevent.sha256', 'dev/checksums/utf8proc.sha256', 'dev/checksums/jemalloc.sha256', 'dev/install/macos.sh', 'dev/install/tmux.sh', 'dev/install/fzf.sh', 'dev/install/lib.sh') }}
