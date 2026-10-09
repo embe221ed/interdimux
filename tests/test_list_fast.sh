@@ -19,6 +19,9 @@
 #     renderer's rows, tmux asked once, the core run once, nothing said
 #   * the fast path parses neither the renderer nor a callback; the fall-through
 #     does parse the renderer (bash -v echoes what bash reads)
+#   * through a symlink to the script (absolute, relative, a link to a link),
+#     the files it sources are found beside the script itself: the same rows,
+#     and an argument no mode takes is still refused by name
 #
 # tmux and the core are stand-ins in front of the real ones that log each run.
 
@@ -122,7 +125,7 @@ run() {
       INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_USE_ZOXIDE=off \
       INTERDIMUX_NOW="$NOW" INTERDIMUX_BIN="$TMPD/core" LF_OUT="$TMPD/out" LF_TAG="$tag" \
       ${envs[@]+"${envs[@]}"} \
-      ${SETSID[@]+"${SETSID[@]}"} bash "$SCRIPT" ${args[@]+"${args[@]}"} \
+      ${SETSID[@]+"${SETSID[@]}"} bash "${RUN_SCRIPT:-$SCRIPT}" ${args[@]+"${args[@]}"} \
       </dev/null >"$TMPD/out/rows.$tag" 2>"$TMPD/out/err.$tag" || :
 }
 # How often stand-in TAG ran: tmux's queries (the list's starts with
@@ -194,6 +197,21 @@ check "the fast path parses neither the renderer nor a callback, nor --list's ow
   '[ "$(parsed fast-v "gather_targets() {")" = 0 ] && [ "$(parsed fast-v "if [ \"\${1:-}\" = \"--preview\" ]; then")" = 0 ] && [ "$(parsed fast-v "$LISTD")" = 0 ]'
 check "...a refusal falls through to the renderer and to --list's own dispatch" \
   '[ "$(parsed refuse-v "gather_targets() {")" = 1 ] && [ "$(parsed refuse-v "$LISTD")" = 1 ]'
+
+# --- through a symlink -----------------------------------------------------------
+mkdir -p "$TMPD/links/sub"
+ln -s "$SCRIPT" "$TMPD/links/abs"
+ln -s ../abs "$TMPD/links/sub/rel"   # relative, and to the first link
+for l in links/abs links/sub/rel; do
+  t="link-${l##*/}"
+  RUN_SCRIPT="$TMPD/$l" run "$t" FZF_COLUMNS=80
+  RUN_SCRIPT="$TMPD/$l" run "$t-bash" FZF_COLUMNS=80 INTERDIMUX_USE_RUST=off
+  RUN_SCRIPT="$TMPD/$l" run "$t-bad" -- --no-such-mode
+  check "through a symlink ($l): the core's rows and the bash renderer's" \
+    'same "$t" fast && same "$t-bash" bash && [ ! -s "$TMPD/out/err.$t" ] && [ ! -s "$TMPD/out/err.$t-bash" ]'
+  check "...and an argument no mode takes is refused by name" \
+    'grep -qx "interdimux: unknown mode '"'"'--no-such-mode'"'"' (see --help)" "$TMPD/out/err.$t-bad"'
+done
 
 echo
 if [ -n "$ERRORS" ]; then printf '%s' "$ERRORS"; echo; fi

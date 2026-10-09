@@ -335,8 +335,9 @@ fi
 # --- the modes below them -----------------------------------------------------
 # A mode no handler takes tests every dispatch in the file, in the order bash
 # parses them; a mode parses every section above its own test, on each run.
+# (The files it sources too: a sourced file's trace lines start `++`.)
 env bash -x "$SCRIPT" --no-such-mode > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
-order=" $(sed -n "s/^+ '\[' --no-such-mode = \(--[a-z-]*\) ']'\$/\1/p" "$TMPD/cb.trace" | tr '\n' ' ')"
+order=" $(sed -n "s/^++* '\[' --no-such-mode = \(--[a-z-]*\) ']'\$/\1/p" "$TMPD/cb.trace" | tr '\n' ' ')"
 # $1 = a mode -> REPLY: how many dispatch tests come before its own, or "".
 nth() {
   local pre="${order%% "$1" *}" w=()

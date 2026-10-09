@@ -15,6 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+MODES="$SCRIPT_DIR/scripts/interdimux-modes.sh"   # the modes the navigator never runs, which it sources
 # --doctor reports on the INSTALL, and a renderer forced from outside is not
 # part of one: under tests/run_all.sh's IMUX_RENDERER=bash the inherited
 # INTERDIMUX_USE_RUST=off would make every report warn "rust helper disabled"
@@ -986,17 +987,17 @@ _rms=$(grep -c 'interdimux-doctor-err\.' "$TMPD/derr/rm.log" || true)
 # with the entire block deleted, because the two `cmd=` lines in --launch already
 # make two.  (What the viewer actually DOES is asserted in test_dashboard.sh,
 # which drives prefix+g then h on a real client.)
-if grep -q '^if \[ "\${1:-}" = "--doctor-view" \]; then$' "$SCRIPT"; then
+if grep -q '^if \[ "\${1:-}" = "--doctor-view" \]; then$' "$MODES"; then
   report "--doctor-view has a handler" pass
 else
   report "--doctor-view has a handler" fail
 fi
-if grep -q "ctrl-r:reload(bash '\$SQ_SCRIPT' --doctor)" "$SCRIPT"; then
+if grep -q "ctrl-r:reload(bash '\$SQ_SCRIPT' --doctor)" "$MODES"; then
   report "...with a recheck binding" pass
 else
   report "...with a recheck binding" fail
 fi
-if grep -q "doctor) cmd=\"exec bash '\$sp' --doctor-view\"" "$SCRIPT"; then
+if grep -q "doctor) cmd=\"exec bash '\$sp' --doctor-view\"" "$MODES"; then
   report "--launch doctor opens the viewer in a popup" pass
 else
   report "--launch doctor opens the viewer in a popup" fail

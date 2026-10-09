@@ -731,17 +731,17 @@ fi
 # The navigator sources this file right after interdimux.sh's options and
 # colours, as --list does, and with the Rust core the list is this file and
 # nothing else: nothing the navigator does from here on feeds it.  The rest of
-# interdimux.sh is the callbacks, the bash renderer and the other modes
-# (~400 KB, parsed all the same, ~15 ms), and then the navigator's own setup
-# (~14 ms).  Fetched at the top of its loop, the list's 20 ms (small server)
-# to 40 ms came after all of that, and the rows reached fzf 20-35 ms after its
-# exec -- past the ~18 ms within which fzf 0.74 paints them on its first step,
-# so they were painted on its next, ~20 ms later.  Started here, in a process
-# substitution, the list is fetched while the rest is parsed, and fzf reads it
-# from the fd when it starts.  It was started below the bash renderer, as
-# early as a fork that may run it can be, and the large server's rows still
-# came ~14 ms after fzf's exec, near that edge; from here they are there
-# before it.
+# interdimux.sh is the callbacks and the bash renderer (~230 KB, parsed all the
+# same, ~10 ms; the other modes, interdimux-modes.sh, it never parses), and then
+# the navigator's own setup (~14 ms).  Fetched at the top of its loop, the
+# list's 20 ms (small server) to 40 ms came after all of that, and the rows
+# reached fzf 20-35 ms after its exec -- past the ~18 ms within which fzf 0.74
+# paints them on its first step, so they were painted on its next, ~20 ms later.
+# Started here, in a process substitution, the list is fetched while the rest is
+# parsed, and fzf reads it from the fd when it starts.  It was started below the
+# bash renderer, as early as a fork that may run it can be, and the large
+# server's rows still came ~14 ms after fzf's exec, near that edge; from here
+# they are there before it.
 #
 # The same list, from the same state.  The width is asked here (term_cols_r),
 # so the navigator draws the bar for the width the list was laid out for, and
