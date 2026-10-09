@@ -166,12 +166,15 @@ case "$hint_case" in
 esac
 
 for t in "${TYPES[@]}"; do export "INTERDIMUX_HINTS_$t=${LADDER[$t]}"; done
+HINT_VARS=(INTERDIMUX_HINTS_S INTERDIMUX_HINTS_W INTERDIMUX_HINTS_P INTERDIMUX_HINTS_D INTERDIMUX_HINTS_X)
 
+# The handler with the ladders unset, building its own: given them, it reads
+# the snippet's own input, and the two could differ only in picking a rung.
 rm -f /tmp/imux_hint_pwned
 for spec in "${SPECS[@]}" '$(touch /tmp/imux_hint_pwned)'; do
   agree=1
   for w in 200 100 64 40 20 8; do
-    want=$(FZF_COLUMNS="$w" bash "$SCRIPT" --footer-for "$spec")
+    want=$(unset "${HINT_VARS[@]}"; FZF_COLUMNS="$w" bash "$SCRIPT" --footer-for "$spec")
     # fzf single-quotes the placeholder; printf %q is the closest stand-in
     got=$(FZF_COLUMNS="$w" sh -c "${hint_case/_\{-1\}/_$(printf '%q' "$spec")}")
     if [ "$want" != "$got" ]; then
@@ -187,6 +190,26 @@ if [ -e /tmp/imux_hint_pwned ]; then
 else
   report "a row spec cannot execute shell" pass
 fi
+
+# --footer-for reads the row type's ladder from the navigator's export rather
+# than building it again, so with the export it must print the bar it builds
+# without one: each row type, an empty query and a typed one (the create
+# entry after the row's hints), at a wide, a middling and a narrow width.
+agree=1
+for spec in "${SPECS[@]}"; do
+  for w in 200 64 20; do
+    for q in "" api; do
+      with=$(FZF_COLUMNS="$w" FZF_QUERY="$q" FZF_MATCH_COUNT=3 bash "$SCRIPT" --footer-for "$spec")
+      without=$(unset "${HINT_VARS[@]}"; FZF_COLUMNS="$w" FZF_QUERY="$q" FZF_MATCH_COUNT=3 bash "$SCRIPT" --footer-for "$spec")
+      if [ "$with" != "$without" ]; then
+        agree=0
+        ERRORS+="     '$spec' at $w, query '$q': '$(printf '%s' "$with" | plain)' vs built '$(printf '%s' "$without" | plain)'"$'\n'
+      fi
+    done
+  done
+done
+[ "$agree" = 1 ] && report "--footer-for prints the same bar from the exported ladders as from its own" pass \
+                 || report "--footer-for prints the same bar from the exported ladders as from its own" fail
 
 # The snippet reads the LIVE width, which is what keeps the bar right after ^/
 # and after a resize — neither is knowable when the navigator builds the string.

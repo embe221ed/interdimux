@@ -4619,7 +4619,18 @@ if [ "${1:-}" = "--footer-for" ]; then
   fi
   spec="${2:-}"
   spec="${spec%%	*}"
-  hint_set "${spec%%:*}"
+  # The row type's ladder.  The navigator exports all five for its inline
+  # snippet (INTERDIMUX_HINTS_<T>), built by hint_set and hint_tiers from the
+  # options and the fzf version this process inherits from it: the very
+  # ladder hint_tiers would build here, ~1 ms of every keystroke.  Built
+  # only where none was handed down.
+  case "${spec%%:*}" in S|W|P|D) _lv="INTERDIMUX_HINTS_${spec%%:*}" ;; *) _lv=INTERDIMUX_HINTS_X ;; esac
+  _ladder="${!_lv:-}"
+  if [ -z "$_ladder" ]; then
+    hint_set "${spec%%:*}"
+    hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+    _ladder="$REPLY"
+  fi
   # A typed query with rows matching: alt-enter would create from it, and the
   # bar says what, after the row's own hints (review UX-54).  Those get the
   # width that is left, dropping entries by their usual priority; the create
@@ -4632,14 +4643,13 @@ if [ "${1:-}" = "--footer-for" ]; then
     _ck="$REPLY" _ckw="$REPLY_W"
     hint_cols; _w="$REPLY"
     if [ -n "$_ck" ] && [ "$_ckw" -le "$_w" ]; then
-      hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
-      hint_pick $(( _w - _ckw - 2 )) "$REPLY"
+      hint_pick $(( _w - _ckw - 2 )) "$_ladder"
       if [ -n "$REPLY" ]; then REPLY+="  $_ck"; else REPLY="$_ck"; fi
       printf '%s\n' "$REPLY"
       exit 0
     fi
   fi
-  hint_bar_r ${HINT_SET[@]+"${HINT_SET[@]}"}
+  hint_cols; hint_pick "$REPLY" "$_ladder"
   # Nothing, not a bare newline: an EMPTY transform removes the footer section
   # and the list reflows into the row, where "\n" leaves a blank bar drawn.
   [ -n "$REPLY" ] && printf '%s\n' "$REPLY"
