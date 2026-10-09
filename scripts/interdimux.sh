@@ -283,8 +283,37 @@ if [ "${1:-}" = "--bind-keys" ]; then
   [[ "$_bk_vstr" =~ ([0-9]+)\.([0-9]+) ]] && \
     _bk_tvnum=$(( BASH_REMATCH[1] * 100 + BASH_REMATCH[2] ))
 
-  _bk_nav=$(tmux show-option -gqv @interdimux-key 2>/dev/null);           _bk_nav="${_bk_nav:-f}"
-  _bk_dash=$(tmux show-option -gqv @interdimux-dashboard-key 2>/dev/null); _bk_dash="${_bk_dash:-g}"
+  # The four key options in one tmux client (one each cost every plugin load
+  # ~5 ms), by name so that each line says whose it is.  tmux prints a value
+  # as its parser would need it: as it is, quoted ('M-"', "M-1 M-2") or
+  # escaped ('#' as \#).  The quotes come off; an escaped value is read
+  # again, raw, as all were (the jump keys' raw read kept its last line).
+  _bk_nav="" _bk_dash="" _bk_jump="" _bk_an=""
+  while IFS= read -r _bk_l; do
+    case "$_bk_l" in
+      "@interdimux-key "*)            _bk_nav="${_bk_l#* }" ;;
+      "@interdimux-dashboard-key "*)  _bk_dash="${_bk_l#* }" ;;
+      "@interdimux-jump-keys "*)      _bk_jump="${_bk_l#* }" ;;
+      "@interdimux-agent-next-key "*) _bk_an="${_bk_l#* }" ;;
+    esac
+  done < <(tmux show-option -gq @interdimux-key \; show-option -gq @interdimux-dashboard-key \; \
+             show-option -gq @interdimux-jump-keys \; show-option -gq @interdimux-agent-next-key 2>/dev/null)
+  unset _bk_l
+  _bk_raw() { # $1 = option, $2 = its value as printed by name -> REPLY = the value
+    case "$2" in
+      *\\*) REPLY=$(tmux show-option -gqv "@interdimux-$1" 2>/dev/null) ;;
+      \"*\"|\'*\') REPLY="${2:1:${#2}-2}" ;;
+      *) REPLY="$2" ;;
+    esac
+  }
+  _bk_raw key "$_bk_nav";            _bk_nav="${REPLY:-f}"
+  _bk_raw dashboard-key "$_bk_dash"; _bk_dash="${REPLY:-g}"
+  _bk_raw agent-next-key "$_bk_an";  _bk_an="$REPLY"
+  case "$_bk_jump" in
+    *\\*) _bk_jump=$(tmux show-option -gqv @interdimux-jump-keys 2>/dev/null; echo .)
+          _bk_jump="${_bk_jump%.}"; _bk_jump="${_bk_jump%$'\n'}"; _bk_jump="${_bk_jump##*$'\n'}" ;;
+    *) _bk_raw jump-keys "$_bk_jump"; _bk_jump="$REPLY" ;;
+  esac
 
   # TMUX_PANE=#{pane_id} on every run-shell binding, not just the popup one.
   #
@@ -313,7 +342,7 @@ if [ "${1:-}" = "--bind-keys" ]; then
   _bk_who="TMUX_PANE=#{pane_id} INTERDIMUX_CLIENT=#{q:client_name}"
 
   # The dashboard is not the hot path — it keeps the simple launcher.
-  tmux bind-key "$_bk_dash" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --dashboard-launch"
+  _bk_dashcmd="$_bk_who bash '$SQ_SCRIPT_FMT' --dashboard-launch"
 
   # Opt-in numbered jumps (@interdimux-jump-keys 'M-1 M-2 M-3').  Space-separated
   # keys, in order: the first jumps to session #1 in the picker's own ordering,
@@ -329,41 +358,46 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # was bound to and restore it later, so the honest contract is "you named
   # these keys, they are ours now".
   #
-  # One tmux client reads both opt-in key options (@interdimux-agent-next-key
-  # is below): jump-keys with -v, so its raw value or no line at all, and
-  # agent-next-key by name, so its line can never be taken for jump-keys'.  A
-  # fourth show-option of its own cost every plugin load ~5 ms (+15%).  By name
-  # tmux escapes an odd key ('#' prints as \#), so such a value is read again,
-  # raw.
-  _bk_jump="" _bk_an=""
-  while IFS= read -r _bk_l; do
-    case "$_bk_l" in
-      "@interdimux-agent-next-key "*) _bk_an="${_bk_l#* }" ;;
-      *) _bk_jump="$_bk_l" ;;
-    esac
-  done < <(tmux show-option -gqv @interdimux-jump-keys \; show-option -gq @interdimux-agent-next-key 2>/dev/null)
-  case "$_bk_an" in *[\\\"\']*) _bk_an=$(tmux show-option -gqv @interdimux-agent-next-key 2>/dev/null) ;; esac
-  unset _bk_l
-  if [ -n "$_bk_jump" ]; then
-    _bk_i=0
-    for _bk_k in $_bk_jump; do
-      _bk_i=$(( _bk_i + 1 ))
-      tmux bind-key -n "$_bk_k" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --jump $_bk_i" 2>/dev/null
-    done
-    unset _bk_i _bk_k
-  fi
-
   # Opt-in too (@interdimux-agent-next-key 'a'): a prefix key that goes straight
   # to the next agent that needs you (--agent-next), with no popup.  Unset, no
   # key is bound; nor is the navigator's or the dashboard's, which it would take
   # without a word (--doctor says why it is not bound).
+  _bk_ancmd=""
   if [ -n "$_bk_an" ] && [ "$_bk_an" != "$_bk_nav" ] && [ "$_bk_an" != "$_bk_dash" ]; then
-    tmux bind-key "$_bk_an" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --agent-next" 2>/dev/null
+    _bk_ancmd="$_bk_who bash '$SQ_SCRIPT_FMT' --agent-next"
   fi
+
+  # Every key in one tmux client, in the order they were bound one by one, so
+  # a key two of them spell differently (^G, C-g) is still the later one's.
+  # A refused key ends a command list, and an argument ending in ';' splits
+  # it (what follows would run twice): then each is bound on its own, as all
+  # were, with the same errors.
+  _bk_bind() {
+    local -a all=(bind-key "$_bk_dash" run-shell -b "$_bk_dashcmd")
+    local k i=0
+    for k in $_bk_jump; do
+      i=$(( i + 1 ))
+      all+=(\; bind-key -n "$k" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --jump $i")
+    done
+    [ -z "$_bk_ancmd" ] || all+=(\; bind-key "$_bk_an" run-shell -b "$_bk_ancmd")
+    all+=(\; bind-key "$_bk_nav" "$@")
+    case "$_bk_dash $_bk_jump $_bk_an $_bk_nav " in
+      *\;[[:space:]]*) ;;
+      *) tmux "${all[@]}" 2>/dev/null && return 0 ;;
+    esac
+    tmux bind-key "$_bk_dash" run-shell -b "$_bk_dashcmd"
+    i=0
+    for k in $_bk_jump; do
+      i=$(( i + 1 ))
+      tmux bind-key -n "$k" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --jump $i" 2>/dev/null
+    done
+    [ -z "$_bk_ancmd" ] || tmux bind-key "$_bk_an" run-shell -b "$_bk_ancmd" 2>/dev/null
+    tmux bind-key "$_bk_nav" "$@"
+  }
 
   # run-shell -C needs tmux >= 3.4; below it, keep the original binding.
   if [ "$_bk_tvnum" -lt 304 ]; then
-    tmux bind-key "$_bk_nav" run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --launch switch"
+    _bk_bind run-shell -b "$_bk_who bash '$SQ_SCRIPT_FMT' --launch switch"
     exit 0
   fi
 
@@ -438,7 +472,7 @@ if [ "${1:-}" = "--bind-keys" ]; then
   # it, and a Ctrl-C in a dialog, or as the popup opens, killed that sh too, so
   # a navigator that had carried on (see its main loop) still left the popup
   # held as a failure.  Exec'd, the navigator is what the popup runs.
-  tmux bind-key "$_bk_nav" run-shell -bC \
+  _bk_bind run-shell -bC \
     "display-popup -w \"$_bk_w\" -h \"$_bk_h\" -T \"#[bold]$_bk_title_fmt\"$_bk_env $_bk_close \"exec bash '$SQ_SCRIPT_FMT'\""
   exit 0
 fi
@@ -3376,22 +3410,12 @@ term_cols() {
   printf '%s' "$REPLY"
 }
 
-# The pressing client's width or height in cells, or 0 when it cannot be read.
-# Sets REPLY.
+# The pressing client's height and width in cells, in one round-trip:
+# REPLY="<height> <width>", each 0 when they cannot be read.
 #
 # Targeted first, so the answer is the pressing client's when several are
 # attached; untargeted second, because a TMUX_PANE inherited from a DIFFERENT
 # server does not resolve here and would otherwise read as "unknown".
-client_dim() {
-  local fmt="$1" v
-  v=$(tmux display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} "$fmt" 2>/dev/null)
-  case "$v" in ''|*[!0-9]*) v=$(tmux display-message -p "$fmt" 2>/dev/null) ;; esac
-  case "$v" in ''|*[!0-9]*) v=0 ;; esac
-  REPLY="$v"
-}
-
-# Both, in one round-trip: REPLY="<height> <width>", each 0 when unknown.  The
-# same targeted-then-untargeted lookup as client_dim.
 client_dims() {
   local fmt='#{client_height} #{client_width}' v
   v=$(tmux display-message -p ${TMUX_C[@]+"${TMUX_C[@]}"} ${CUR_T[@]+"${CUR_T[@]}"} "$fmt" 2>/dev/null)
@@ -4871,7 +4895,9 @@ sched_job_body() {
 sched_rows() {
   local rows id when ln pane target desc seen
   if rows=$(atq -q "$SCHED_QUEUE" -o '%Y-%m-%d %H:%M' 2>/dev/null); then
-    rows=$(printf '%s\n' "$rows" | sort -k2)
+    # (no row or one needs no sort, nor its fork and exec: what --sched-list
+    # costs most often, and the Jobs picker with one job)
+    case "$rows" in *$'\n'*) rows=$(printf '%s\n' "$rows" | sort -k2) ;; esac
   else
     rows=$(atq -q "$SCHED_QUEUE" 2>/dev/null | while IFS=$'\t' read -r id when; do
       [ -n "$id" ] || continue
@@ -8481,10 +8507,13 @@ fi
 # would call a function that does not exist yet.
 
 # Rows for the picker: "<display>\t<pane>\t<id>", the last field being what
-# {-1} hands to the cancel binding.
-if [ "${1:-}" = "--jobs-list" ]; then
-  set +e
-  command -v atq >/dev/null 2>&1 || exit 0
+# {-1} hands to the cancel binding.  A function, so that the picker opening
+# lists them in its own process: `$(bash interdimux.sh --jobs-list)` started
+# a second bash, which parsed most of this file again (~20 ms).  fzf's
+# reloads still run --jobs-list.
+jobs_list_rows() {
+  local _id _when _tgt _pane _desc _c1 _c2 _p1 _p2
+  command -v atq >/dev/null 2>&1 || return 0
   while IFS="$US" read -r _id _when _tgt _pane _desc; do
     [ -n "$_id" ] || continue
     # Pad the FITTED text, not the raw text: %-20s counts escape bytes as
@@ -8498,6 +8527,10 @@ if [ "${1:-}" = "--jobs-list" ]; then
       "$DIM" "$_c2" "$_p2" "$RST" \
       "$_desc" "$_pane" "$_id"
   done < <(sched_rows)
+}
+if [ "${1:-}" = "--jobs-list" ]; then
+  set +e
+  jobs_list_rows
   exit 0
 fi
 
@@ -8547,7 +8580,7 @@ if [ "${1:-}" = "--jobs" ]; then
   _jl="bash '$SQ_SCRIPT' --jobs-list"
   # Read once, not twice: --jobs-list costs an `at -c` per job, and the
   # emptiness check and the picker want the same rows.
-  _jrows=$(bash "$SCRIPT_PATH" --jobs-list)
+  _jrows=$(jobs_list_rows)
   if [ -z "$_jrows" ]; then
     info_flash "$BOLD_AMBER" "Scheduled jobs" "Nothing is scheduled." \
       "Schedule one from the dashboard."
@@ -8753,7 +8786,7 @@ agents_waiting_r() {
 
 # The "who pressed the key" prefix for a `run-shell … --launch X` the dashboard
 # builds, in REPLY: "TMUX_PANE=%N INTERDIMUX_CLIENT=<client> ", either part
-# omitted when unknown.
+# omitted when unknown, and the versions this process resolved.
 #
 # run-shell does NOT pass the pressing pane: its job gets the tmux SERVER's
 # global environment, whose TMUX_PANE is whatever the process that started the
@@ -8764,10 +8797,16 @@ agents_waiting_r() {
 # client.  Menu item commands are not expanded in the pressing client's
 # context, so the values are baked in as literals; both are checked against a
 # charset that needs no quoting in /bin/sh or tmux's parser.
+#
+# The versions go along so that --launch does not ask `fzf --version` and
+# `tmux -V` again, seconds later, for the same two numbers -- which are what
+# it hands its popup (env_fwd) either way.  ~10 ms of every dashboard item
+# (fzf is a Go binary).  Integers, so they need no quoting either.
 launch_env_prefix() {
   REPLY=""
   [[ "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] && REPLY+="TMUX_PANE=$TMUX_PANE "
   [ -n "$INTERDIMUX_CLIENT" ] && REPLY+="INTERDIMUX_CLIENT=$INTERDIMUX_CLIENT "
+  REPLY+="INTERDIMUX_TMUX_VNUM=$TMUX_VNUM INTERDIMUX_FZF_MINOR=$FZF_MINOR "
   return 0
 }
 
@@ -8816,11 +8855,15 @@ if [ "${1:-}" = "--dashboard-launch" ]; then
     # front that it is unavailable.  The count rides in the Jobs label for the
     # same reason — an empty picker is a wasted keypress.
     #
-    # Two forks on the prefix+g path, which is not the hot path (prefix+f is) and
-    # already forks bash to get here.
+    # One fork on the prefix+g path, which is not the hot path (prefix+f is) and
+    # already forks bash to get here.  The lines are counted here, the
+    # non-empty ones, as `| grep -c .` counted them: a pipe and an exec fewer.
     _m_sched='Schedule' _m_jobs='-Jobs'
     if command -v at >/dev/null 2>&1; then
-      _njobs=$(atq -q "$SCHED_QUEUE" 2>/dev/null | grep -c . || true)
+      _njobs=0
+      while IFS= read -r _jline; do
+        [ -z "$_jline" ] || _njobs=$((_njobs + 1))
+      done <<< "$(atq -q "$SCHED_QUEUE" 2>/dev/null)"
       case "$_njobs" in
         ''|0) _m_jobs='-Jobs' ;;
         *)    _m_jobs="Jobs ($_njobs)" ;;
@@ -9180,10 +9223,6 @@ if [ "${1:-}" = "--doctor" ]; then
   # the display puts the ellipsis back, which is the one thing the layout has to
   # avoid, and it does so on exactly the narrow popup a floor was meant to help.
   [ "$_doc_w" -lt 1 ] && _doc_w=1
-
-  # Read once here: the scheduling note below wants it, and the key-bindings
-  # section further down re-reads it in its own idiom.
-  _dk_early=$(tmux show-option -gqv @interdimux-dashboard-key 2>/dev/null); _dk_early="${_dk_early:-g}"
 
   _sec environment
 
@@ -9632,7 +9671,11 @@ if [ "${1:-}" = "--doctor" ]; then
     # atd on Linux and atrun (launchd) on macOS; at_daemon_state knows the
     # difference and reads each without root, and says so honestly when it cannot
     # tell (BSD's cron-atrun, or a host without pgrep) rather than crying wolf.
-    _npend=$(atq -q "$SCHED_QUEUE" 2>/dev/null | grep -c . || true)
+    # (its non-empty lines, as `| grep -c .` counted them, without the grep)
+    _npend=0
+    while IFS= read -r _pl; do
+      [ -z "$_pl" ] || _npend=$((_npend + 1))
+    done <<< "$(atq -q "$SCHED_QUEUE" 2>/dev/null)"
     case "${_npend:-0}" in
       0) ;;
       1) _note "1 command is scheduled — see it under Jobs on the dashboard" ;;
@@ -9741,21 +9784,30 @@ if [ "${1:-}" = "--doctor" ]; then
   # Read the table once and match the key column ourselves: `list-keys -T prefix
   # <key>` prints nothing on tmux 3.7b, so filtering with it silently reports
   # every binding as missing.
-  # Here-strings, not `printf … | grep -q`: grep -q exits at its first match,
-  # and a printf still writing the rest of the table then dies of SIGPIPE —
-  # which pipefail (on for this whole file) turns into "no match".  Under load,
-  # or with a big enough table, the report said no bindings were installed.
+  # A pattern test and a here-string, not `printf … | grep -q`: grep -q exits
+  # at its first match, and a printf still writing the rest of the table then
+  # dies of SIGPIPE — which pipefail (on for this whole file) turns into "no
+  # match".  Under load, or with a big enough table, the report said no
+  # bindings were installed.
   _keytable=$(tmux list-keys -T prefix 2>/dev/null)
-  if grep -q interdimux <<< "$_keytable"; then
+  if [[ "$_keytable" == *interdimux* ]]; then
+    # Both keys in one pass over the table, not an awk each: a line per key,
+    # "1 <the fzf minor --bind-keys baked into it, if any>" (only prefix+f's
+    # carries one) when it is bound, else "0".
+    _bres=$(awk -v k1="${_k%%:*}" -v k2="${_dk%%:*}" '
+      function hit(i) {
+        f[i] = 1
+        if (match($0, /INTERDIMUX_FZF_MINOR=[0-9]+/)) m[i] = substr($0, RSTART + 21, RLENGTH - 21)
+      }
+      $2=="-T" && $3=="prefix" && /interdimux/ { if ($4==k1) hit(1); if ($4==k2) hit(2) }
+      END { for (i = 1; i <= 2; i++) print (f[i] ? "1 " m[i] : "0") }' <<< "$_keytable")
+    _bi=0
     for _pair in "$_k:navigator" "$_dk:dashboard"; do
       _key="${_pair%%:*}"; _what="${_pair#*:}"
-      # ...and the fzf minor --bind-keys baked into it, if any (only prefix+f's
-      # carries one).
-      if _bfz=$(awk -v k="$_key" '$2=="-T" && $3=="prefix" && $4==k && /interdimux/ {
-                                    f = 1
-                                    if (match($0, /INTERDIMUX_FZF_MINOR=[0-9]+/))
-                                      m = substr($0, RSTART + 21, RLENGTH - 21) }
-                                  END { if (f) print m; exit !f }' <<< "$_keytable"); then
+      _bi=$((_bi + 1))
+      if [ "$_bi" = 1 ]; then _bl="${_bres%%$'\n'*}"; else _bl="${_bres#*$'\n'}"; fi
+      if [ "${_bl%% *}" = 1 ]; then
+        _bfz="${_bl#1 }"
         _ok "prefix+$_key opens the $_what"
         # That number is fzf's version as it was when the plugin last loaded,
         # and every fzf feature the picker uses is gated on it.  Nothing
@@ -9787,8 +9839,7 @@ if [ "${1:-}" = "--doctor" ]; then
   # larger than the client.  Both are guarded now, so this is not a failure — but
   # it is worth saying which one the user is about to get, because they look
   # different and "prefix+g looks wrong" is otherwise unexplainable.
-  client_dim '#{client_height}'; _dh="$REPLY"
-  client_dim '#{client_width}';  _dwid="$REPLY"
+  client_dims; _dh="${REPLY% *}" _dwid="${REPLY#* }"
   if [ "$_dh" = 0 ]; then
     _note "no client attached here, so the dashboard's size could not be checked"
   elif ! tmux_ge 304; then
@@ -9810,7 +9861,10 @@ if [ "${1:-}" = "--doctor" ]; then
   # (`autobuild` is read by interdimux.tmux, at plugin load.)
   _known=("${OPT_NAMES[@]}" key dashboard-key jump-keys agent-next-key autobuild)
 
-  _is_known() { local n; for n in "${_known[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
+  # One pattern test, not a loop over the fifty names for every option set (a
+  # statement each).  A name here never holds a blank.
+  _known_s=" ${_known[*]} "
+  _is_known() { [[ "$_known_s" == *" $1 "* ]]; }
 
   # Longest-common-prefix suggestion.  Crude on purpose: the realistic typo is a
   # dropped or doubled character, not an anagram.
@@ -9828,37 +9882,41 @@ if [ "${1:-}" = "--doctor" ]; then
   }
 
   # A value's domain, by option name.  Empty always means "unset, use default".
-  _check_value() { # $1 = name, $2 = value -> prints a complaint, or nothing
+  # The complaint goes to _why (_cv: printf's formatting), not to stdout: a
+  # $(_check_value) was a fork for every option set, sixteen for the VPS
+  # user's.  fzf-opts alone is still judged in one, and prints (see the loop).
+  _cv() { local m; printf -v m "$@"; _why+="$m"; }
+  _check_value() { # $1 = name, $2 = value -> _why gets a complaint, or nothing
     local n="$1" v="$2" _d
     [ -n "$v" ] || return 0
     case "$n" in
       show-preview|show-full-command|show-git-branch|use-zoxide|dirs-live-search|hydrate|show-dirs|raw|session-rule|scope-highlight|autobuild)
-        case "$v" in on|off) ;; *) printf "expected 'on' or 'off'" ;; esac ;;
+        case "$v" in on|off) ;; *) _cv "expected 'on' or 'off'" ;; esac ;;
       order)
-        case "$v" in mru|index) ;; *) printf "expected 'mru' or 'index'" ;; esac ;;
+        case "$v" in mru|index) ;; *) _cv "expected 'mru' or 'index'" ;; esac ;;
       # The agent options, in the terms the script replaces a bad value in
       # (right after the get_opt calls): the default, which for agent-args is
       # off and for agent-state on -- so a `yes` does the opposite of what it
       # says for one of them.
       agent-args)
-        case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays off" ;; esac ;;
+        case "$v" in on|off) ;; *) _cv "expected 'on' or 'off', so it stays off" ;; esac ;;
       agent-state)
-        case "$v" in on|off) ;; *) printf "expected 'on' or 'off', so it stays on" ;; esac ;;
+        case "$v" in on|off) ;; *) _cv "expected 'on' or 'off', so it stays on" ;; esac ;;
       agent-separator)
         case "$v" in
           off) ;;
-          *[[:cntrl:]]*) printf "holds a control character, so the default, ∣, applies" ;;
-          *) [ "${#v}" -le 3 ] || printf 'at most 3 characters, so the default, ∣, applies' ;;
+          *[[:cntrl:]]*) _cv "holds a control character, so the default, ∣, applies" ;;
+          *) [ "${#v}" -le 3 ] || _cv 'at most 3 characters, so the default, ∣, applies' ;;
         esac ;;
       show-title)
-        case "$v" in known|all|off) ;; *) printf "expected 'known', 'all' or 'off', so it stays known" ;; esac ;;
+        case "$v" in known|all|off) ;; *) _cv "expected 'known', 'all' or 'off', so it stays known" ;; esac ;;
       title-max)
         # Decimal whatever the leading zeros, then clamped to 8..200.
         case "$v" in
-          *[!0-9]*) printf 'expected a whole number from 8 to 200, so the default, 40, applies' ;;
+          *[!0-9]*) _cv 'expected a whole number from 8 to 200, so the default, 40, applies' ;;
           *) _d="${v#"${v%%[!0]*}"}"; _d="${_d:-0}"
-             if [ "${#_d}" -gt 3 ] || [ "$_d" -gt 200 ]; then printf 'the most is 200, so 200 applies'
-             elif [ "$_d" -lt 8 ]; then printf 'the least is 8, so 8 applies'
+             if [ "${#_d}" -gt 3 ] || [ "$_d" -gt 200 ]; then _cv 'the most is 200, so 200 applies'
+             elif [ "$_d" -lt 8 ]; then _cv 'the least is 8, so 8 applies'
              fi ;;
         esac ;;
       agents)
@@ -9871,18 +9929,18 @@ if [ "${1:-}" = "--doctor" ]; then
             case "$_w" in *[!A-Za-z0-9._-]*) _skip+="${_skip:+, }'$_w'" ;; esac
           done
           set +f
-          [ -z "$_skip" ] || printf 'skipped: %s (a name is letters, digits, dots, underscores and hyphens)' "$_skip"
+          [ -z "$_skip" ] || _cv 'skipped: %s (a name is letters, digits, dots, underscores and hyphens)' "$_skip"
         fi ;;
       recent-limit|dirs-limit|scan-depth)
-        case "$v" in ''|*[!0-9]*) printf 'expected a whole number' ;; esac
+        case "$v" in ''|*[!0-9]*) _cv 'expected a whole number' ;; esac
         # Decimal, whatever the leading zeros, as the script reads it; and the
         # length first, as there: `[ -gt ]` on a 20-digit number is an error.
         [ "$n" = scan-depth ] && case "$v" in ''|*[!0-9]*) ;; *)
           _d="${v#"${v%%[!0]*}"}"; _d="${_d:-0}"
-          { [ "${#_d}" -gt 2 ] || [ "$_d" -gt 10 ]; } && printf 'deeper than 10 will not finish inside a popup' ;; esac ;;
+          { [ "${#_d}" -gt 2 ] || [ "$_d" -gt 10 ]; } && _cv 'deeper than 10 will not finish inside a popup' ;; esac ;;
       popup-width|popup-height)
-        case "$v" in *%) case "${v%\%}" in ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
-                     ''|*[!0-9]*) printf 'expected NN or NN%%' ;; esac ;;
+        case "$v" in *%) case "${v%\%}" in ''|*[!0-9]*) _cv 'expected NN or NN%%' ;; esac ;;
+                     ''|*[!0-9]*) _cv 'expected NN or NN%%' ;; esac ;;
       color-*)
         # Exactly: '#' and six hex digits, 0-255, -1, or default.  The length
         # alone let '#zzzzzz' through.  [[:xdigit:]] rather than a range: under
@@ -9890,13 +9948,13 @@ if [ "${1:-}" = "--doctor" ]; then
         case "$v" in
           default|-1) ;;
           '#'[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]) ;;
-          '#'*) printf 'a hex colour must be #rrggbb' ;;
-          ''|*[!0-9]*) printf 'expected #rrggbb, a 0-255 index, or default' ;;
+          '#'*) _cv 'a hex colour must be #rrggbb' ;;
+          ''|*[!0-9]*) _cv 'expected #rrggbb, a 0-255 index, or default' ;;
           # Length first: `[ "$v" -le 255 ]` on a 26-digit number is not false,
           # it is "integer expression expected" ON STDERR — which used to land
           # above the report's own title.
-          ????*) printf 'a colour index must be 0-255' ;;
-          *) [ "$v" -le 255 ] || printf 'a colour index must be 0-255' ;;
+          ????*) _cv 'a colour index must be 0-255' ;;
+          *) [ "$v" -le 255 ] || _cv 'a colour index must be 0-255' ;;
         esac ;;
       key|dashboard-key|agent-next-key)
         # Any key tmux can bind, not one character: --bind-keys hands the value to
@@ -9917,15 +9975,15 @@ if [ "${1:-}" = "--doctor" ]; then
         local _ke
         if [ "$n" = agent-next-key ]; then
           case "$v" in
-            "$_k")  printf 'prefix+%s opens the navigator, so it is not bound to --agent-next' "$v"; return 0 ;;
-            "$_dk") printf 'prefix+%s opens the dashboard, so it is not bound to --agent-next' "$v"; return 0 ;;
+            "$_k")  _cv 'prefix+%s opens the navigator, so it is not bound to --agent-next' "$v"; return 0 ;;
+            "$_dk") _cv 'prefix+%s opens the dashboard, so it is not bound to --agent-next' "$v"; return 0 ;;
           esac
         fi
         case "$v" in
-          ';') printf "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
+          ';') _cv "tmux reads a bare ';' as a command separator, so it cannot be bound this way" ;;
           *)   _ke=$(tmux list-keys -T prefix "$v" 2>&1 >/dev/null) \
                  || case "$_ke" in
-                      'invalid key'*) printf 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
+                      'invalid key'*) _cv 'not a key tmux knows (e.g. f, C-f, M-g, F5, Space)' ;;
                     esac ;;
         esac ;;
       fzf-opts)
@@ -9967,14 +10025,52 @@ if [ "${1:-}" = "--doctor" ]; then
         fi ;;
       jump-keys)
         # space-separated tmux key specs; the count is what maps to #1, #2, …
-        case "$v" in *[!A-Za-z0-9\ ^\-]*) printf 'expected space-separated tmux keys, e.g. "M-1 M-2 M-3"' ;; esac ;;
+        case "$v" in *[!A-Za-z0-9\ ^\-]*) _cv 'expected space-separated tmux keys, e.g. "M-1 M-2 M-3"' ;; esac ;;
     esac
   }
 
   # Every @interdimux-* actually set, global and session scope.  Each line comes
   # tagged with its scope (g/s), so a value can be re-read from the right one.
-  _seen=0
+  _optlines=$( { tmux show-options -g 2>/dev/null; echo '#session'; tmux show-options 2>/dev/null; } \
+            | awk '$0 == "#session" { sc = "s"; next }
+                   /^@interdimux-/ && !seen[$0]++ { print (sc == "" ? "g" : sc) " " $0 }' )
+  # The values show-options prints quoted or escaped are read back raw (see
+  # below), and when there are several -- every '#rrggbb' colour is one -- in
+  # ONE tmux client, each followed by a marker line: a client each cost ~3 ms,
+  # fifteen colours ~50 ms of the report.  Taken only if the markers frame the
+  # values exactly -- each in its place, none left over, as a value holding
+  # such a line would leave one -- and each one is then what $(show-option -v)
+  # gives; otherwise every value is read on its own, as it always was.
+  _rq=() _rv=() _rn=0 _rmark='interdimux:end-of-value'
   while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _scope="${_line%% *}"; _line="${_line#* }"; _name="${_line%% *}"
+    _val="${_line#* }"; [ "$_val" = "$_line" ] && _val=""
+    case "$_val" in
+      \"*|\'*|*\\*)
+        [ "$_rn" = 0 ] || _rq+=(\;)
+        if [ "$_scope" = g ]; then _rq+=(show-option -gqv "$_name"); else _rq+=(show-option -qv "$_name"); fi
+        _rq+=(\; display-message -p "$_rmark")
+        _rn=$((_rn + 1)) ;;
+    esac
+  done <<< "$_optlines"
+  if [ "$_rn" -gt 1 ]; then
+    _rall=$(tmux "${_rq[@]}" 2>/dev/null; printf x); _rall="${_rall%x}"
+    while [ "${#_rv[@]}" -lt "$_rn" ]; do
+      case "$_rall" in
+        "$_rmark"$'\n'*) _rv+=(""); _rall="${_rall#"$_rmark"$'\n'}" ;;    # unset since
+        *$'\n'"$_rmark"$'\n'*)
+          _r="${_rall%%$'\n'"$_rmark"$'\n'*}"; _rall="${_rall#*$'\n'"$_rmark"$'\n'}"
+          while [[ "$_r" == *$'\n' ]]; do _r="${_r%$'\n'}"; done
+          _rv+=("$_r") ;;
+        *) break ;;
+      esac
+    done
+    [ "${#_rv[@]}" = "$_rn" ] && [ -z "$_rall" ] || _rv=()
+  fi
+  _seen=0 _ri=0
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
     _scope="${_line%% *}"; _line="${_line#* }"
     _name="${_line%% *}"; _name="${_name#@interdimux-}"
     _val="${_line#* }"; [ "$_val" = "$_line" ] && _val=""
@@ -9986,9 +10082,11 @@ if [ "${1:-}" = "--doctor" ]; then
     _raw="$_val"
     case "$_val" in
       \"*|\'*|*\\*)
-        if [ "$_scope" = g ]; then _raw=$(tmux show-option -gqv "@interdimux-$_name" 2>/dev/null)
+        if [ "$_ri" -lt "${#_rv[@]}" ]; then _raw="${_rv[_ri]}"
+        elif [ "$_scope" = g ]; then _raw=$(tmux show-option -gqv "@interdimux-$_name" 2>/dev/null)
         else _raw=$(tmux show-option -qv "@interdimux-$_name" 2>/dev/null)
-        fi ;;
+        fi
+        _ri=$((_ri + 1)) ;;
     esac
     _val="${_val%\"}"; _val="${_val#\"}"
     _seen=$((_seen + 1))
@@ -10003,15 +10101,19 @@ if [ "${1:-}" = "--doctor" ]; then
         && _note "the helper's path comes from \$INTERDIMUX_BIN only — for the popups: tmux set-environment -g INTERDIMUX_BIN <path>"
       continue
     fi
-    _why=$(_check_value "$_name" "$_raw")
+    # fzf-opts in a $(…) still, its check as it was: the eval runs what the
+    # value holds, and what that prints or defines must land where it did, in
+    # the complaint or nowhere.
+    _why=""
+    if [ "$_name" = fzf-opts ]; then _why=$(_check_value "$_name" "$_raw")
+    else _check_value "$_name" "$_raw"
+    fi
     if [ -n "$_why" ]; then
       _bad "@interdimux-$_name = '$_val' — $_why"
     else
       _ok "@interdimux-$_name = '$_val'"
     fi
-  done < <( { tmux show-options -g 2>/dev/null; echo '#session'; tmux show-options 2>/dev/null; } \
-            | awk '$0 == "#session" { sc = "s"; next }
-                   /^@interdimux-/ && !seen[$0]++ { print (sc == "" ? "g" : sc) " " $0 }' )
+  done <<< "$_optlines"
   [ "$_seen" = 0 ] && _note 'nothing set — every option is at its default'
 
   # A hide pattern that matches no session is indistinguishable from a working
