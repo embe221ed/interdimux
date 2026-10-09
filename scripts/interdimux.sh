@@ -4340,7 +4340,13 @@ resolve_create_target() {
   else
     CREATE_DIR=""
     if [ "$USE_ZOXIDE" = "on" ] && command -v zoxide >/dev/null 2>&1; then
-      CREATE_DIR=$(zoxide query -- "$query" 2>/dev/null | head -1) || true
+      # Without --list zoxide prints its one best match, so no `| head -1`:
+      # that pipeline was a fork and an exec more on every keystroke at zero
+      # matches.  The cut keeps what head kept from a path with a newline in
+      # it.  `exec`, or the redirection costs bash a second fork; it runs the
+      # zoxide on PATH, never a shell function of that name.
+      CREATE_DIR=$(exec zoxide query -- "$query" 2>/dev/null) || true
+      CREATE_DIR="${CREATE_DIR%%$'\n'*}"
     fi
     if [ -d "$CREATE_DIR" ]; then CREATE_SRC="zoxide"; else CREATE_DIR="$HOME"; CREATE_SRC="home"; fi
     # What `tr '.: /' '----'` did, without its two forks: the bar's create-key

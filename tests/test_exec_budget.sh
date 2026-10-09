@@ -214,9 +214,9 @@ run on -- --preview 'P:alpha:1:1'; check "--preview of a pane" "tmux=1" 2
 run on FZF_QUERY=api FZF_MATCH_COUNT=3 -- --footer-for 'W:alpha:1'
 check "--footer-for, a query with matches" "tmux=1" 2
 run on FZF_QUERY=newproj FZF_MATCH_COUNT=0 -- --footer-for 'W:alpha:1'
-check "--footer-for, a query with none" "head=1 tmux=1 zoxide=1" 4
+check "--footer-for, a query with none" "tmux=1 zoxide=1" 3
 run on -- --describe-create newproj
-check "--describe-create" "head=1 tmux=1 zoxide=1" 4
+check "--describe-create" "tmux=1 zoxide=1" 3
 run on FZF_NTH=1 -- --scope-prompt
 check "--scope-prompt" "" 1
 
