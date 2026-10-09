@@ -201,6 +201,25 @@ else
   report "deep: \$HOME scan still finds non-Library dirs" fail
 fi
 
+# A relative search root makes a relative query root (ROOT/QUERY), and the
+# walk up to its deepest existing ancestor cut a component per step until it
+# reached "/" -- which a relative path never does: with no prefix of it there,
+# `--deep` spun at 100% CPU for good, and ctrl-f's reload with it.  Under a
+# timeout, so a hang fails this case rather than the suite.  The other root is
+# still searched.
+for q in camelproj tools/Camel; do
+  rc=0
+  out=$(env -i PATH="$PATH" HOME="$FIX_HOME" XDG_DATA_HOME="$FIX_HOME/.local/share" \
+        TMUX="$TMPDIR_TEST/no-such-socket,0,0" INTERDIMUX_USE_ZOXIDE=off \
+        INTERDIMUX_PROJECT_DIRS="no-such-root/below:$FIX_HOME/work" \
+        timeout 20 bash "$SCRIPT" --dirs-list --deep "$q" 2>/dev/null | cut -f3) || rc=$?
+  if [ "$rc" = 0 ] && printf '%s\n' "$out" | grep -qx "$FIX_HOME/work/tools/CamelProj"; then
+    report "deep '$q': a relative search root ends the ancestor walk" pass
+  else
+    report "deep '$q': a relative search root ends the ancestor walk (exit $rc)" fail
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # Scan mode
 # ---------------------------------------------------------------------------

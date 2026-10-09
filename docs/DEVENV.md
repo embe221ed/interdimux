@@ -100,21 +100,23 @@ Every scenario is a path a keypress waits on, invoked as its real caller
 invokes it -- prefix+f itself, the navigator opening to its first row,
 Enter on a row, the `--list` reload, a preview, the per-keystroke footer,
 a kill dialog cancelled and ^z (in a popup held open on the client, whose
-frame they repaint), the ctrl-o picker, `--doctor` and more -- against a
-fixture that A and B share, with an attached client and a real zoxide
-database.  There are two (`-F`): **large**, 12 sessions, 40 windows and 90
-panes, whose navigator lists 151 rows (12 sessions, 40 windows, 87 panes,
-12 directories), where a cost per row shows; and **small**, 1 session, 3
-windows, 3 panes -- the size of the server this plugin's user actually
-runs -- whose 19 rows are 4 of tmux's (the session and its one-pane
-windows, which list no pane row) and 15 directories, from the zoxide
-database and recent_dirs.  There the fixed costs (parsing the script,
-exec'ing the core, the tmux round-trips, zoxide) are nearly everything, and
-a saving per row all but vanishes under fzf's 20 ms paint floor.  The
-default, `-F both`, runs the scenarios on the large fixture, then those
-whose work depends on the server's size (keypress, first-frame, list and
-their `-changed` variants, accept-W, preview-S and -W, the footer
-callbacks) on the small one, whose windows give preview-P no pane row: two
+frame they repaint), ctrl-o to the picker's first row, its list and
+preview, `--doctor` and more -- against a fixture that A and B share, with
+an attached client and a real zoxide database.  There are two (`-F`):
+**large**, 12 sessions, 40 windows and 90 panes, whose navigator lists 151
+rows (12 sessions, 40 windows, 87 panes, 12 directories), where a cost per
+row shows; and **small**, 1 session, 3 windows, 3 panes -- the size of the
+server this plugin's user actually runs -- whose 19 rows are 4 of tmux's
+(the session and its one-pane windows, which list no pane row) and 15
+directories, from the zoxide database and recent_dirs.  There the fixed
+costs (parsing the script, exec'ing the core, the tmux round-trips,
+zoxide) are nearly everything, and a saving per row all but vanishes under
+fzf's 20 ms paint floor.  The default, `-F both`, runs the scenarios on the
+large fixture, then those whose work depends on the server's size
+(keypress, first-frame, list and their `-changed` variants, accept-W,
+preview-S, -W and -D, the footer callbacks, connect-dir) on the small one,
+whose windows give preview-P no pane row and whose directory rows include
+a repo (preview-D's row; every repo of the large one has a session): two
 tables.  Rank an optimisation by what it does on the small one; the large
 one is what resolves it.
 
