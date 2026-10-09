@@ -11,10 +11,10 @@
 # Rust core is all in here.  interdimux.sh sources this right after its option
 # table and colours for --list and for the navigator, whose fast path and first
 # list end the file, and above "Gather targets" for the modes below the
-# callbacks, which draw rows or read the agent layer too.  The callbacks fzf
-# runs while you type and move never parse it: they draw no row, and this is
-# where the agent layer's ~6 KB of rules are (review R15,
-# tests/test_render_cost.sh).  Review PERF-17.
+# callbacks, which draw rows or read the agent layer too, and return before
+# that end.  The callbacks fzf runs while you type and move never parse it:
+# they draw no row, and this is where the agent layer's ~6 KB of rules are
+# (review R15, tests/test_render_cost.sh).  Review PERF-17.
 #
 # Everything here reads what interdimux.sh has set up by then -- the options
 # (get_opt), US, CUR_T, AGENT_ON, VIEW, NOW_EPOCH, term_cols_r,
@@ -700,6 +700,16 @@ IMUX_SECTIONS
   return 1
 }
 
+# The rest of this file is for --list and the navigator alone: the fast path,
+# and the first list.  Every other mode that sources it (above "Gather
+# targets") returns here, and never parses the ~6 KB below, which cost each
+# of them ~0.3 ms a run (the --action dialogs, the dashboard, --doctor ...).
+# LIST_FETCHED is empty for them: only the fast path sets it, and
+# gather_targets reads it.
+# shellcheck disable=SC2034  # gather_targets reads it, in interdimux.sh
+LIST_FETCHED=""
+case "${1:-}" in ''|--list) ;; *) return 0 ;; esac
+
 # ---------------------------------------------------------------------------
 # --list's fast path (review PERF-17)
 # ---------------------------------------------------------------------------
@@ -711,10 +721,7 @@ IMUX_SECTIONS
 # interdimux.sh is parsed, down to --list's own dispatch, whose bash renderer
 # draws what was fetched here (LIST_FETCHED holds what list_core returned, and
 # the fetch is in this level's globals; see gather_targets): tmux is asked
-# once, and a refusal is said once, as before.  Sourced by any other mode
-# (above "Gather targets"), this is nothing but LIST_FETCHED's empty value.
-# shellcheck disable=SC2034  # gather_targets reads it, in interdimux.sh
-LIST_FETCHED=""
+# once, and a refusal is said once, as before.
 if [ "${1:-}" = "--list" ] && [ -n "$IMUX_BIN" ]; then
   set +e
   list_fetch || exit 0
@@ -767,8 +774,8 @@ fi
 # bash 4.4 on, whose `wait` can wait for a process substitution: the
 # navigator waits for this one as it did for the pipeline's left side, so
 # nothing it writes outlives the EXIT trap's rm.  Elsewhere the loop's first
-# pass gathers as every later one does.  Sourced by any other mode, this is
-# EARLY_FD's empty value and early_done, which does nothing then.
+# pass gathers as every later one does.  Reached by --list (when its core did
+# not draw the rows), this is EARLY_FD's empty value and early_done, unused.
 EARLY_FD="" EARLY_PID=""
 
 # The early list's end: its pipe closed -- so a list nobody reads anymore dies

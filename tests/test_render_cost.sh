@@ -29,7 +29,9 @@
 #   * with the Rust core, --list draws its rows ahead of all of that (review
 #     PERF-17): it parses neither the renderer, nor a callback, nor the hint
 #     bar below the colours (tests/test_list_fast.sh holds its rows to the
-#     full path's);
+#     full path's).  The modes below the callbacks source that file too, and
+#     return before its end, which is that fast path and the navigator's
+#     first list;
 #   * each callback comes before what it never runs (review PERF-18): none
 #     parses the git badge or the pickers' fzf theme, which only the
 #     navigator, the renderer and the other modes run; the directory previews
@@ -440,6 +442,23 @@ if [ -n "$doc" ] && [ -n "$ag" ] && [ -n "$agn" ] && [ "$ag" -lt "$doc" ] && [ "
   report "--agents, --agent-next: parse no --doctor" pass
 else
   report "--agents, --agent-next: parse no --doctor (tests #$ag, #$agn; --doctor #$doc)" fail
+fi
+# They source interdimux-list.sh for its rules and registry, and return before
+# its end: --list's fast path and the navigator's first list, which only those
+# two run.  A mode no handler takes parses what every one of them does, and
+# more; the bash renderer's --list, which reads on past that return, is the
+# premise.  (bash -v echoes every line bash reads, a sourced file's too.)
+env INTERDIMUX_USE_RUST=off bash -v "$SCRIPT" --list > /dev/null 2> "$TMPD/cb.trace" || true
+w_tail=0
+grep -qx 'early_done() {' "$TMPD/cb.trace" && grep -qxF 'if [ "${1:-}" = "--list" ] && [ -n "$IMUX_BIN" ]; then' "$TMPD/cb.trace" \
+  && w_tail=1
+env bash -v "$SCRIPT" --no-such-mode > /dev/null 2> "$TMPD/cb.trace" || true
+if [ "$w_tail" = 1 ] && grep -qx "DEFAULT_TITLE_RULES='" "$TMPD/cb.trace" \
+   && ! grep -qx 'early_done() {' "$TMPD/cb.trace" \
+   && ! grep -qxF 'if [ "${1:-}" = "--list" ] && [ -n "$IMUX_BIN" ]; then' "$TMPD/cb.trace"; then
+  report "the modes below the callbacks: read the rules, parse neither --list's fast path nor the first list" pass
+else
+  report "the modes below the callbacks: read the rules, parse neither --list's fast path nor the first list (premise $w_tail)" fail
 fi
 
 echo
