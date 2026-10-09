@@ -356,10 +356,10 @@
 #   checkout (dev/cmd.sh perfbench: REF is extracted with git archive and gets
 #   its own Rust core, B is the container's copy of the checkout, /work).  See
 #   docs/DEVENV.md.  Directly: bench.sh BASE MINE, two trees with their cores
-#   built.  A full default run (-F both) takes about 8 minutes in the dev
+#   built.  A full default run (-F both) takes about 10 minutes in the dev
 #   image on a 4-CPU box, the flagged scenarios' second measurement included
 #   (paint, the real fzf's, is ~25-60 s of each fixture's): give the command
-#   a 15-minute timeout, or run it in the background.  Re-run a single
+#   a 20-minute timeout, or run it in the background.  Re-run a single
 #   flagged scenario with -s to look closer.
 #   Work dirs go under $IMUX_BENCH_WORKROOT (default: ${TMPDIR:-/tmp}).
 #   IMUX_BENCH_SAME_ENV=1 (debugging the harness) gives B the very environments

@@ -62,7 +62,7 @@ compare `REF` -- any commit: `main` (the default), `HEAD~1`, a sha -- with
 this checkout as it is, uncommitted edits included:
 
 ```sh
-make perfbench                                   # both fixtures, every default scenario, ~8 min
+make perfbench                                   # both fixtures, every default scenario, ~10 min
 make perfbench ARGS='-n 100 -s preview-W,footer' # to keep or reject a change: what it touches, more pairs, 1-2 min
 make perfbench REF=HEAD~1 ARGS='-n 10 -s keypress,list,footer'   # a smoke check, ~30 s
 make perfbench ARGS='-F small'                   # the small fixture alone
