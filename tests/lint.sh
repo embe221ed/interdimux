@@ -58,10 +58,13 @@ rc=0
 # scripts/ excludes only what is deliberate there:
 #   SC2191  `--"$HINT_BAR"="$REPLY"` as an array element; the `=` is literal
 #   SC2206  the RS split and the grouping loops' line and field splits in
-#           gather_targets, unquoted on purpose under `set -f`
+#           gather_targets and list_fetch, unquoted on purpose under `set -f`
+# -x follows interdimux.sh into the files it sources, so a variable only one
+# of them reads is not unused.  shellcheck reports on the files it is given,
+# not on the ones it follows, so those are given too.
 echo "==> the plugin"
-"$SC" -S warning -e SC2191,SC2206 \
-  scripts/interdimux.sh interdimux.tmux || rc=1
+"$SC" -S warning -x -e SC2191,SC2206 \
+  scripts/interdimux.sh scripts/interdimux-list.sh scripts/interdimux-modes.sh interdimux.tmux || rc=1
 
 # tests/ additionally excludes the harness idioms:
 #   SC2155  `export TMUX="$(tmux …)"` — the masked exit status is not wanted

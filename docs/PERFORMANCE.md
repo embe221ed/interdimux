@@ -144,6 +144,12 @@ truth), children read env.
 
 ### 1.1 — Early-dispatch the callback modes  ·  **M**
 
+> ✅ **Done another way** ([Tier 11](#tier-11--the-layout-each-mode-parses-only-what-it-runs-2026-10)):
+> the setup stays shared, and the file is laid out so each mode parses only
+> what it runs -- `--list` and the navigator's first list from a file of
+> their own, each callback ahead of the code it never runs, and the modes the
+> navigator never runs in a file it never reads.
+
 Today the script runs all of preflight + config + `set_palette` + `build_fzf_theme` (lines
 1–218) **before** it looks at `$1`, so a `--scope-prompt` (which needs nothing) or a
 `--header-for` (which needs one colour) pays the entire startup. sesh's lesson: *a callback
@@ -919,6 +925,61 @@ refuses to compare unlike cores. Its run against main, 30 pairs, CPU ms, main
 matches) 1004 → 198; the footer, `--scope-prompt`, a directory row's preview,
 `--doctor`, the bash renderer's list and `bash -n` within ±5% (noise). A
 perf-relevant change pastes its table.
+
+## Tier 11 — the layout: each mode parses only what it runs (2026-10)
+
+bash parses a script as it runs it, so a mode pays for every line above its
+own dispatch, comments included (~35 µs a KB), and the file had grown to
+570 KB. Four changes, each measured on its own (the commit messages have
+their tables):
+
+* **`--list` draws its rows from a file of its own** (PERF-17). With the Rust
+  core a reload runs only the fetch, the core's handoff and the title rules
+  and registry they read: `scripts/interdimux-list.sh`, sourced right after
+  the options and colours, which ends in `--list`'s fast path. It parsed
+  ~400 KB first. A core that is missing, refuses or fails falls through to
+  the bash renderer with what was fetched: one query, one refusal
+  (`tests/test_list_fast.sh`). The modes below the callbacks source the file
+  for the rules and the registry, and return before that fast path and the
+  navigator's first list (~6 KB, ~0.3 ms a run).
+* **The navigator's first list starts right after that file** (PERF-16,
+  PERF-17): forked after ~27 KB of code instead of ~152 KB, so on the large
+  fixture its rows are there when fzf starts (they came ~14 ms after its
+  exec). A core that refuses or fails there hands the list to an exec'd
+  `--list`.
+* **The navigator no longer parses the modes it never runs** (PERF-13): the
+  dialogs and `--action`, ctrl-o's picker, `--jump`, the launcher, Jobs, the
+  dashboard, the agents' modes and `--doctor` are
+  `scripts/interdimux-modes.sh`, sourced for any invocation with an argument,
+  in their old order, so each parses what it did and one open more. ~180 KB
+  less before fzf starts; the fork's head start keeps the large fixture's
+  rows inside fzf's first paint step (~5 ms after its exec).
+* **Each callback ahead of the code it never runs** (PERF-18): the
+  preview's first half and the directory previews first, then a directory's
+  session, the hint bar, the create resolver and the typed-query bar, then
+  the preview of a session, window or pane; ctrl-o's list, a directory's
+  Enter and the scheduling modes after them, and below every callback what
+  only the navigator, the renderer and the other modes run (the pickers'
+  theme, the git badge, command formatting, the rows' width helpers).
+  `tests/test_render_cost.sh` holds the order, and runs each callback clean.
+
+`dev/perf/bench.sh` against the tree before them (perf-r4), default budget,
+large / small fixture, CPU unless said: the first paint -10.2% / -12.2% wall,
+on fzf's first step 87% → 90% / 98% → 100% of opens; first-frame wall -25.6%
+/ -21.2%, keypress wall -21.7% / -17.7%; `--list` -25.4% / -38.3%;
+previews of a session -9.7% / -10.5%, a window -11.5% / -8.8%, a directory
+row -24.6% / -15.6%; the footer -21.1% / -18.6%, `--describe-create` -18.2%
+/ -18.3%, `--session-name-for` -23.7%, ctrl-o's header -28.6% and its
+preview -18.4%; the rest level. The modes that source both files are not
+quite: a sourced file is read whole, and `--action`, first in
+`interdimux-modes.sh`, reads 128 KB of it that it never parses (~0.2 ms),
+and parses the files' headers and the layout's notes (6.5 KB more comments
+than before them, 339 bytes less code) — ^x, ^z and the other action keys
++1.7% to +1.9% over 200 pairs, which the bench calls ok, ~0.8 ms timed
+directly; `--doctor`, last in the file, +0.1%. Against main, with the rounds
+before: the first paint -35.8% / -34.2% wall (first step 0% → 100% / 16% →
+98%), `--list` -33.6% / -42.2%, the footer -27.2% / -25.0%, a directory
+row's preview -55.0% / -46.9%, `--action` (^x) -49.1%.
 
 ## Suggested rollout
 

@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+MODES="$SCRIPT_DIR/scripts/interdimux-modes.sh"   # the modes the navigator never runs, which it sources
 SOCK="interdimux-actionerr-test-$$"
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-actionerr.XXXXXX")"
 PASS=0
@@ -104,18 +105,18 @@ else
 fi
 
 # --- #22: the cleanup trap exists and restores both --------------------------
-if grep -q "trap '_action_cleanup; exit 130' INT TERM" "$SCRIPT"; then
+if grep -q "trap '_action_cleanup; exit 130' INT TERM" "$MODES"; then
   report "the action handler traps INT/TERM" pass
 else
   report "the action handler traps INT/TERM" fail
 fi
-if grep -q "trap '_action_cleanup' EXIT" "$SCRIPT"; then
+if grep -q "trap '_action_cleanup' EXIT" "$MODES"; then
   report "the action handler cleans up on every exit path" pass
 else
   report "the action handler cleans up on every exit path" fail
 fi
 # the cleanup must show the cursor again and restore the border
-_cleanup_body=$(sed -n '/_action_cleanup() {/,/^  }/p' "$SCRIPT")
+_cleanup_body=$(sed -n '/_action_cleanup() {/,/^  }/p' "$MODES")
 printf '%s' "$_cleanup_body" | grep -q '25h' \
   && report "cleanup makes the cursor visible again" pass \
   || report "cleanup makes the cursor visible again" fail

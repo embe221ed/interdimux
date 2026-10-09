@@ -25,6 +25,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+LIST_LIB="$SCRIPT_DIR/scripts/interdimux-list.sh"   # the title rules, which it sources
 BIN="$SCRIPT_DIR/rust/target/release/imux"
 CORPUS="$SCRIPT_DIR/rust/tests/corpus"
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-corpus.XXXXXX")"
@@ -101,10 +102,10 @@ render_script() {
       bash "$SCRIPT" --list
 }
 # The title rules the script ships, which it hands the binary itself -- read
-# out of the script exactly as golden.rs reads them.
+# out of interdimux-list.sh exactly as golden.rs reads them.
 RULESET=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; sub(/^DEFAULT_TITLE_RULES='/, \"\"); print; next }
-               on && /^'\$/ { exit } on { print }" "$SCRIPT")
-STATE_OPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\\(.*\\)'\$/\\1/p" "$SCRIPT")
+               on && /^'\$/ { exit } on { print }" "$LIST_LIB")
+STATE_OPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\\(.*\\)'\$/\\1/p" "$LIST_LIB")
 # the binary alone, exactly as golden.rs runs it
 render_bin() {
   local dump="$1" cols="$2" rule="$3"

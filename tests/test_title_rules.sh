@@ -22,6 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+LIST_LIB="$SCRIPT_DIR/scripts/interdimux-list.sh"   # the title rules, which it sources
 BIN="$SCRIPT_DIR/rust/target/release/imux"
 SOCK="interdimux-titlerules-test-$$"
 TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-titlerules.XXXXXX")" && pwd -P)"
@@ -51,9 +52,9 @@ RENDERERS="off"
 # --- 1. DEFAULT_STATE_OPTS against the default rules ------------------------
 # The rules' @names, parsed here with awk: the first word of every rule line
 # that starts with @, split on commas.
-defaults=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; next } on && /^'\$/ { exit } on" "$SCRIPT")
+defaults=$(awk "/^DEFAULT_TITLE_RULES='/ { on = 1; next } on && /^'\$/ { exit } on" "$LIST_LIB")
 from_rules=$(printf '%s\n' "$defaults" | awk '$1 ~ /^@/ { n = split($1, a, ","); for (i = 1; i <= n; i++) { sub(/^@/, "", a[i]); if (a[i] != "" && !seen[a[i]]++) print a[i] } }')
-listed=$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$SCRIPT" | tr ' ' '\n' | sed '/^$/d')
+listed=$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$LIST_LIB" | tr ' ' '\n' | sed '/^$/d')
 if [ -n "$from_rules" ] && [ "$from_rules" = "$listed" ]; then
   report "DEFAULT_STATE_OPTS is exactly the default rules' options, in order ($(printf '%s\n' "$listed" | wc -l))" pass
 else

@@ -22,6 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+MODES="$SCRIPT_DIR/scripts/interdimux-modes.sh"   # the modes the navigator never runs, which it sources
 SOCK="interdimux-dash-$$"
 PASS=0
 FAIL=0
@@ -188,7 +189,7 @@ printf '%s\n' "$cap" | grep -q 'Health' \
 # The one with teeth for the future: add an eleventh entry, forget to bump
 # MENU_ROWS, and the dead key comes back on exactly one client height — the
 # hardest kind of regression to notice.
-menu_block=$(awk "/tmux display-menu -x C -y C/,/^  else$/" "$SCRIPT")
+menu_block=$(awk "/tmux display-menu -x C -y C/,/^  else$/" "$MODES")
 entries=$(printf '%s\n' "$menu_block" | grep -c 'run-shell -b' || true)
 seps=$(printf '%s\n' "$menu_block" | grep -cE "^ +'' " || true)
 want=$(( entries + seps + 2 ))
@@ -221,9 +222,9 @@ fi
 # LAST is the one a too-short popup scrolls off, so the constant has to move with
 # the list.  The 5 is measured — border(2) + prompt + the rule under it + the
 # hint bar — and confirmed by rendering: 12 entries fit at -h 17 and not at 16.
-items_block=$(awk '/^  items=\$\(printf/,/\)$/' "$SCRIPT")
+items_block=$(awk '/^  items=\$\(printf/,/\)$/' "$MODES")
 fb_entries=$(printf '%s\n' "$items_block" | grep -cE '^ +"[a-z]+" +"' || true)
-fb_have=$(grep -oE '_pop_w=[0-9]+ _pop_h=[0-9]+' "$SCRIPT" | grep -oE '_pop_h=[0-9]+' | grep -oE '[0-9]+' || true)
+fb_have=$(grep -oE '_pop_w=[0-9]+ _pop_h=[0-9]+' "$MODES" | grep -oE '_pop_h=[0-9]+' | grep -oE '[0-9]+' || true)
 fb_want=$(( fb_entries + 5 ))
 if [ -n "$fb_have" ] && [ "$fb_entries" -ge 10 ] && [ "$fb_have" = "$fb_want" ]; then
   report "the fallback popup height ($fb_have) fits its $fb_entries entries exactly" pass

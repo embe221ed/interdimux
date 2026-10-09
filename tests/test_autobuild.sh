@@ -67,7 +67,7 @@ unset INTERDIMUX_BIN INTERDIMUX_USE_RUST
 PLUG="$TMPD/plugin"
 mkdir -p "$PLUG/scripts" "$PLUG/rust"
 cp "$REPO/interdimux.tmux" "$PLUG/"
-cp "$REPO/scripts/interdimux.sh" "$PLUG/scripts/"
+cp "$REPO"/scripts/*.sh "$PLUG/scripts/"   # the script and the files it sources
 cp -R "$REPO/rust/src" "$REPO/rust/Cargo.toml" "$REPO/rust/Cargo.lock" "$PLUG/rust/"
 BIN="$PLUG/rust/target/release/imux"
 LOCK="$PLUG/rust/target/.interdimux-autobuild.lock"
