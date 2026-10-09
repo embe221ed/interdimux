@@ -187,6 +187,22 @@ else
       report "at $w columns, eight cwds under one directory look up its .git once (rows=$rows lookups=$looks)" fail
     fi
   done
+  # The Rust core walks the same way, with one stat for both tests: a
+  # directory's .git is looked up once per list (it was twice per cwd, 16).
+  if [ -x "$BIN" ]; then
+    INTERDIMUX_DUMP_IN="$TMPD/tree.dump" INTERDIMUX_USE_RUST=on INTERDIMUX_BIN="$BIN" FZF_COLUMNS=200 \
+      strace -f -qq -e trace=%file -o "$TMPD/trace.rust" bash "$SCRIPT" --list > "$TMPD/rows.rust" 2>/dev/null || true
+    rows=$(grep -c 'W:infra-deploy-s01:' "$TMPD/rows.rust" || true)
+    looks=$(grep -cF "\"$H/w/.git\"" "$TMPD/trace.rust" || true)
+    rust=$(grep -c 'execve(".*imux"' "$TMPD/trace.rust" || true)
+    if [ "$rows" = 8 ] && [ "$rust" -ge 1 ] && [ "$looks" = 1 ]; then
+      report "the Rust core: eight cwds under one directory stat its .git once" pass
+    else
+      report "the Rust core: eight cwds under one directory stat its .git once (rows=$rows core=$rust lookups=$looks)" fail
+    fi
+  else
+    echo "  (skipped the Rust core's lookup count: $BIN not built)"
+  fi
 fi
 
 echo
