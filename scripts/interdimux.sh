@@ -1274,11 +1274,12 @@ is_utf8() {
 # it parsed the ~400 KB above that first.  So --list sources the file here,
 # ahead of all of it, and the file ends in its fast path: when the core draws
 # the rows, --list exits there.  Only when it does not is the rest of this
-# file parsed (see the file).  Every other mode that uses the file -- the ones
-# below the callbacks -- sources it where its lines used to be, above "Gather
+# file parsed (see the file).  The navigator sources it here too, and starts
+# its first list there.  Every other mode that uses the file -- the ones below
+# the callbacks -- sources it where its lines used to be, above "Gather
 # targets"; a callback never parses it (tests/test_render_cost.sh).
 case "${1:-}" in
-  --list)
+  ''|--list)
     # shellcheck source=scripts/interdimux-list.sh
     . "$IMUX_LIB/interdimux-list.sh" ;;
 esac
@@ -5218,9 +5219,14 @@ fi
 # a row: bash parses a script as it runs it, and these ~45 KB cost each of
 # them ~1.6 ms a run while they sat above the preview.  The list's own file,
 # interdimux-list.sh, is sourced here under the same rule, for every mode from
-# here on; --list has it already (see "The list's own file" above).
-# shellcheck source=scripts/interdimux-list.sh
-[ "${1:-}" = "--list" ] || . "$IMUX_LIB/interdimux-list.sh"
+# here on; --list and the navigator have it already (see "The list's own
+# file" above).
+case "${1:-}" in
+  ''|--list) ;;
+  *)
+    # shellcheck source=scripts/interdimux-list.sh
+    . "$IMUX_LIB/interdimux-list.sh" ;;
+esac
 
 # Path, then the Z/!/# flag slot, then the git badge, padded into the
 # CONTEXT column.  The flags are a column of their own (FLAG_W cells, sized
@@ -7096,73 +7102,6 @@ _dlg_esc() {
   esac
   return 0
 }
-
-# ---------------------------------------------------------------------------
-# The navigator's first list, started here (review PERF-16)
-# ---------------------------------------------------------------------------
-#
-# Everything gather_targets can run is defined by now, and nothing the
-# navigator does from here on feeds it: the rest of the file is the other
-# modes (parsed all the same, ~5 ms) and then the navigator's own setup
-# (~14 ms).  Fetched at the top of the loop, the list's 20 ms (small server)
-# to 40 ms came after all of that, and the rows reached fzf 20-35 ms after its
-# exec -- past the ~18 ms within which fzf 0.74 paints them on its first step,
-# so they were painted on its next, ~20 ms later.  Started here, in a process
-# substitution, the list is fetched while the rest of the file is parsed, and
-# fzf reads it from the fd when it starts.
-#
-# The same list, from the same state.  The width is asked here (term_cols_r),
-# so the navigator draws the bar for the width the list was laid out for, and
-# stty is not run twice; the scratch files' names are the ones the navigator
-# derives below, the same way; its stderr goes to ERR_FILE, created here and
-# not truncated below, which would erase what the list may have said already;
-# MOUNTS_FILE is cleared here, before the core can write it; the preview
-# state's file is written here, and the list reads the state back from it as
-# it did from the one the navigator wrote below -- with read -r, which trims
-# it, so the list is laid out for the file's state, not the option's raw
-# value.  Its environment lacks only what the navigator exports for fzf and
-# its binds, which neither tmux nor the core reads.
-#
-# Only on the Rust path (the bash renderer's list needs mounts_export, below),
-# with a private XDG_RUNTIME_DIR (elsewhere the names come from mktemp, below),
-# and from bash 4.4 on, whose `wait` can wait for a process substitution: the
-# navigator waits for this one as it did for the pipeline's left side, so
-# nothing it writes outlives the EXIT trap's rm.  Elsewhere the loop's first
-# pass gathers as every later one does.
-EARLY_FD="" EARLY_PID=""
-
-# The early list's end: its pipe closed -- so a list nobody reads anymore dies
-# of SIGPIPE rather than wait on a full pipe -- and its process waited for.
-# Once fzf is done, and in the EXIT traps (an exit before fzf, a hangup).
-early_done() {
-  [ -n "$EARLY_FD" ] || return 0
-  exec {EARLY_FD}<&-
-  wait "$EARLY_PID" 2>/dev/null || :
-  EARLY_FD="" EARLY_PID=""
-}
-
-if [ -z "${1:-}" ] && [ -n "$IMUX_BIN" ] && (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 )) \
-   && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
-  RESUME_FILE="$XDG_RUNTIME_DIR/interdimux-resume.$$"
-  ERR_FILE="${RESUME_FILE}.err"
-  fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null || ERR_FILE=""
-  MOUNTS_FILE="${RESUME_FILE}.mounts"
-  if [ -e "$MOUNTS_FILE" ] || [ -L "$MOUNTS_FILE" ]; then rm -f "$MOUNTS_FILE" 2>/dev/null || :; fi
-  export INTERDIMUX_MOUNTS_FILE="$MOUNTS_FILE"
-  PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
-  printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null || PREVIEW_STATE_FILE=""
-  export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
-  # until the navigator sets its own: an exit before that (a Ctrl-C while the
-  # rest of the file is parsed) leaves nothing behind either
-  trap 'early_done; rm -f ${ERR_FILE:+"$ERR_FILE"} ${PREVIEW_STATE_FILE:+"$PREVIEW_STATE_FILE"} "$MOUNTS_FILE"' EXIT
-  term_cols_r
-  exec {EARLY_FD}< <(
-    set +e +o pipefail
-    [ -z "$ERR_FILE" ] || exec 2>>"$ERR_FILE"
-    gather_targets
-  )
-  EARLY_PID=$!
-fi
 
 # ---------------------------------------------------------------------------
 # Actions (called by fzf keybindings via execute)

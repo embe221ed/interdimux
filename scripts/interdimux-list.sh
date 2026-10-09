@@ -4,16 +4,17 @@
 # from tmux, and the Rust core's rows.  Part of scripts/interdimux.sh, which
 # sources it; it is never run on its own.
 #
-# A file of its own so that what the list needs can come first for the list
-# and for nothing else.  bash parses a script as it runs it, so a mode parses
-# everything above its own dispatch: --list, on every ^r, ^/, resize and
-# action, parsed ~400 KB of callbacks, pickers and dialogs to reach code that
-# with the Rust core is all in here.  interdimux.sh sources this right after
-# its option table and colours for --list, whose fast path ends the file, and
-# above "Gather targets" for the modes below the callbacks, which draw rows or
-# read the agent layer too.  The callbacks fzf runs while you type and move
-# never parse it: they draw no row, and this is where the agent layer's ~6 KB
-# of rules are (review R15, tests/test_render_cost.sh).  Review PERF-17.
+# A file of its own so that what the list needs can come first for the list and
+# for nothing else.  bash parses a script as it runs it, so a mode parses
+# everything above its own dispatch: --list, on every ^r, ^/, resize and action,
+# parsed ~400 KB of callbacks, pickers and dialogs to reach code that with the
+# Rust core is all in here.  interdimux.sh sources this right after its option
+# table and colours for --list and for the navigator, whose fast path and first
+# list end the file, and above "Gather targets" for the modes below the
+# callbacks, which draw rows or read the agent layer too.  The callbacks fzf
+# runs while you type and move never parse it: they draw no row, and this is
+# where the agent layer's ~6 KB of rules are (review R15,
+# tests/test_render_cost.sh).  Review PERF-17.
 #
 # Everything here reads what interdimux.sh has set up by then -- the options
 # (get_opt), US, CUR_T, AGENT_ON, VIEW, NOW_EPOCH, term_cols_r,
@@ -721,4 +722,87 @@ if [ "${1:-}" = "--list" ] && [ -n "$IMUX_BIN" ]; then
   # shellcheck disable=SC2034  # as above
   LIST_FETCHED=$?
   set -e
+fi
+
+# ---------------------------------------------------------------------------
+# The navigator's first list, started here (reviews PERF-16, PERF-17)
+# ---------------------------------------------------------------------------
+#
+# The navigator sources this file right after interdimux.sh's options and
+# colours, as --list does, and with the Rust core the list is this file and
+# nothing else: nothing the navigator does from here on feeds it.  The rest of
+# interdimux.sh is the callbacks, the bash renderer and the other modes
+# (~400 KB, parsed all the same, ~15 ms), and then the navigator's own setup
+# (~14 ms).  Fetched at the top of its loop, the list's 20 ms (small server)
+# to 40 ms came after all of that, and the rows reached fzf 20-35 ms after its
+# exec -- past the ~18 ms within which fzf 0.74 paints them on its first step,
+# so they were painted on its next, ~20 ms later.  Started here, in a process
+# substitution, the list is fetched while the rest is parsed, and fzf reads it
+# from the fd when it starts.  It was started below the bash renderer, as
+# early as a fork that may run it can be, and the large server's rows still
+# came ~14 ms after fzf's exec, near that edge; from here they are there
+# before it.
+#
+# The same list, from the same state.  The width is asked here (term_cols_r),
+# so the navigator draws the bar for the width the list was laid out for, and
+# stty is not run twice; the scratch files' names are the ones the navigator
+# derives, the same way; its stderr goes to ERR_FILE, created here and not
+# truncated by the navigator, which would erase what the list may have said
+# already; MOUNTS_FILE is cleared here, before the core can write it; the
+# preview state's file is written here, and the list reads the state back
+# from it as it did from the one the navigator wrote -- with read -r, which
+# trims it, so the list is laid out for the file's state, not the option's
+# raw value.  Its environment lacks only what the navigator exports for fzf
+# and its binds, which neither tmux nor the core reads.
+#
+# The core draws it, or nothing in this fork does: the bash renderer is
+# further down interdimux.sh than it has parsed.  A core that refuses or fails
+# hands the list to a --list, exec'd, at the width asked here (FZF_COLUMNS,
+# which only term_cols_r reads there), which asks tmux and the core again,
+# says the refusal, and draws the bash renderer's rows -- as every reload does
+# then.
+#
+# Only on the Rust path (the bash renderer's list needs mounts_export), with a
+# private XDG_RUNTIME_DIR (elsewhere the names come from mktemp), and from
+# bash 4.4 on, whose `wait` can wait for a process substitution: the
+# navigator waits for this one as it did for the pipeline's left side, so
+# nothing it writes outlives the EXIT trap's rm.  Elsewhere the loop's first
+# pass gathers as every later one does.  Sourced by any other mode, this is
+# EARLY_FD's empty value and early_done, which does nothing then.
+EARLY_FD="" EARLY_PID=""
+
+# The early list's end: its pipe closed -- so a list nobody reads anymore dies
+# of SIGPIPE rather than wait on a full pipe -- and its process waited for.
+# Once fzf is done, and in the EXIT traps (an exit before fzf, a hangup).
+early_done() {
+  [ -n "$EARLY_FD" ] || return 0
+  exec {EARLY_FD}<&-
+  wait "$EARLY_PID" 2>/dev/null || :
+  EARLY_FD="" EARLY_PID=""
+}
+
+if [ -z "${1:-}" ] && [ -n "$IMUX_BIN" ] && (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 )) \
+   && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+  RESUME_FILE="$XDG_RUNTIME_DIR/interdimux-resume.$$"
+  ERR_FILE="${RESUME_FILE}.err"
+  fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null || ERR_FILE=""
+  MOUNTS_FILE="${RESUME_FILE}.mounts"
+  if [ -e "$MOUNTS_FILE" ] || [ -L "$MOUNTS_FILE" ]; then rm -f "$MOUNTS_FILE" 2>/dev/null || :; fi
+  export INTERDIMUX_MOUNTS_FILE="$MOUNTS_FILE"
+  PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
+  printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null || PREVIEW_STATE_FILE=""
+  export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
+  # until the navigator sets its own: an exit before that (a Ctrl-C while the
+  # rest of the file is parsed) leaves nothing behind either
+  trap 'early_done; rm -f ${ERR_FILE:+"$ERR_FILE"} ${PREVIEW_STATE_FILE:+"$PREVIEW_STATE_FILE"} "$MOUNTS_FILE"' EXIT
+  term_cols_r
+  exec {EARLY_FD}< <(
+    set +e +o pipefail
+    [ -z "$ERR_FILE" ] || exec 2>>"$ERR_FILE"
+    list_fetch || exit
+    list_core && exit
+    term_cols_r
+    FZF_COLUMNS="$REPLY" exec "$BASH" "$SCRIPT_PATH" --list
+  )
+  EARLY_PID=$!
 fi

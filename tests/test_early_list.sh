@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# The navigator's first list is started early (review PERF-16): forked as soon
-# as everything gather_targets can run is defined, in a process substitution,
-# while the rest of the file is parsed and the navigator sets itself up; fzf
-# reads it from the fd.  It used to be `gather_targets | fzf` at the top of
-# the loop, after all of that, so its rows reached fzf too late for fzf's first
-# paint step.  The loop's later passes (ctrl-o, then Esc) still gather that way.
+# The navigator's first list is started early (reviews PERF-16, PERF-17): forked
+# as soon as the list's own file (interdimux-list.sh) is sourced, in a process
+# substitution, while the rest of the file is parsed and the navigator sets
+# itself up; fzf reads it from the fd.  It used to be `gather_targets | fzf` at
+# the top of the loop, after all of that, so its rows reached fzf too late for
+# fzf's first paint step.  The loop's later passes (ctrl-o, then Esc) still
+# gather that way.
 #
 # What must not change, driven with a stand-in fzf (it saves what it reads and
 # cancels, as Esc does) and a stand-in core in front of the real one:
@@ -21,6 +22,9 @@
 #   * the mounts file the list's core writes is still there for fzf's
 #     callbacks: the navigator clears a leftover before the list starts, not
 #     after
+#   * a core that refuses (exit 2) or fails: the fork has parsed no bash
+#     renderer, so a --list draws the list, exec'd -- the pipeline's rows,
+#     which are the bash renderer's, byte for byte, and the refusal said once
 #   * no scratch file is left behind -- and none appears later: an fzf that
 #     ends before the list has (Esc as the popup opens) still has the
 #     navigator wait for the list, whose core writes the mounts file, before
@@ -104,10 +108,12 @@ exit 130
 FZF
 # The stand-in core: whether the loop had exported its hints yet, then the
 # real core (after EL_SLOW seconds; EL_BIG: its rows 3000 times over, ~1 MB),
-# then a mark that it is done.
+# then a mark that it is done.  EL_CORE=refuse refuses the protocol, =fail
+# fails.
 cat > "$TMPD/core" <<CORE
 #!/bin/sh
 if [ -n "\${INTERDIMUX_HINTS_X+x}" ]; then echo pipeline; else echo early; fi >> "\$EL_OUT/core.\$EL_TAG"
+case "\${EL_CORE:-}" in refuse) exit 2 ;; fail) exit 1 ;; esac
 [ -z "\${EL_SLOW:-}" ] || sleep "\$EL_SLOW"
 if [ -n "\${EL_BIG:-}" ]; then
   rows=\$("$BIN" "\$@") || exit
@@ -202,6 +208,32 @@ for tag in early pipeline; do
   else nav "dump-$tag" bash INTERDIMUX_DUMP_IN="$TMPD/nowhere" XDG_RUNTIME_DIR=; fi
   check "$tag: the list's error is in errors.log" \
     'grep -qF "INTERDIMUX_DUMP_IN: cannot read $TMPD/nowhere" "$TMPD/state/interdimux/errors.log" 2>/dev/null'
+done
+
+# --- a core that does not draw it ---------------------------------------------------
+# The fork has parsed the list's own file and nothing further, no bash
+# renderer: a core that refuses or fails hands the list to a --list, exec'd,
+# which runs the core again (so the stand-in says early twice) and, as every
+# reload then does, says a refusal and draws the bash renderer's rows.
+nav bashr bash INTERDIMUX_USE_RUST=off
+for mode in refuse fail; do
+  rm -rf "$TMPD/state/interdimux"
+  nav "core-$mode" bash EL_CORE="$mode"
+  log="$TMPD/state/interdimux/errors.log"
+  refused=$(grep -c 'rust core refused' "$log" 2>/dev/null || true); refused=${refused:-0}
+  check "a core that ${mode}s: the early list's (got: $(said "core-$mode" | tr '\n' ' '))" \
+    '[ "$(said "core-$mode")" = "$(printf "early\nearly")" ]'
+  check "...the bash renderer's rows, byte for byte" 'cmp -s "$TMPD/out/rows.core-$mode" "$TMPD/out/rows.bashr"'
+  if [ "$mode" = refuse ]; then
+    check "...the refusal said once (got $refused), and nothing on the navigator's stderr" \
+      '[ "$refused" = 1 ] && ! grep -q "navigator stderr" "$log"'
+  else
+    check "...nothing said (got $refused refusals), nothing on the navigator's stderr" \
+      '[ "$refused" = 0 ] && ! grep -q "navigator stderr" "$log" 2>/dev/null'
+  fi
+  nav "core-$mode-pipe" bash EL_CORE="$mode" XDG_RUNTIME_DIR=
+  check "...the pipeline's rows, byte for byte" 'cmp -s "$TMPD/out/rows.core-$mode" "$TMPD/out/rows.core-$mode-pipe"'
+  check "...and nothing is left behind (got: $(leftovers))" '[ -z "$(leftovers)" ]'
 done
 
 # --- the preview state, as the list reads it back ---------------------------------
