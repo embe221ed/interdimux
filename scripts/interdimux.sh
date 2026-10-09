@@ -5570,7 +5570,14 @@ IMUX_SECTIONS
     # LC_ALL=C on the read: #{session_path} ends the line, raw, and a Latin-1
     # byte there joined the next session onto it -- which vanished from the
     # list, and could be the one you are in (see load_recent_dirs).
-    sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr)
+    #
+    # One line, one session: nothing to sort, and the sort is three forks and
+    # an exec.  (Sorted, one line comes back as it was: the $( ) drops the
+    # newline sort ends it with.)
+    case "$sessions_raw" in
+      *$'\n'*) sorted=$(printf '%s\n' "$sessions_raw" | sort -s -t"$US" -k2,2nr) ;;
+      *) sorted="$sessions_raw" ;;
+    esac
     while { LC_ALL=C IFS= read -r line; } 2>/dev/null; do
       [ -z "$line" ] && continue
       sn_check="${line%%"$US"*}"
