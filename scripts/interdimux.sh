@@ -1591,7 +1591,9 @@ record_recent_dir() {
   # Rebuild the file: new dir first, then surviving entries (pruning
   # duplicates and dirs that no longer exist), atomically replaced.
   local tmp d count=1
-  tmp=$(mktemp "$dir_parent/.recent_dirs.XXXXXX" 2>/dev/null) || return 0
+  # `exec`: a redirected command in $( ) is otherwise a second fork (it runs
+  # the mktemp on PATH, never a shell function of that name)
+  tmp=$(exec mktemp "$dir_parent/.recent_dirs.XXXXXX" 2>/dev/null) || return 0
   [ -n "$tmp" ] || return 0
   if ! echo "$dir" > "$tmp" 2>/dev/null; then rm -f "$tmp" 2>/dev/null; return 0; fi
   if [ -f "$RECENT_DIRS_FILE" ]; then
@@ -2324,18 +2326,26 @@ esc_fmt() {
 #     typed, found nothing, and silently left the user where they were -- with a
 #     junk session behind them and "duplicate session" on the next Enter.
 #     Only the two expanded arguments are escaped, and by esc_fmt.
-#   * the lookup goes through session_id_of, the one exact-name match: "=$1"
-#     means session ID 1 to tmux whatever the '=' says, and "=c:d" cannot name
-#     anything at all.
+#   * the lookup is an exact-name match (session_id_of, or the session table
+#     when the name is derived here): "=$1" means session ID 1 to tmux
+#     whatever the '=' says, and "=c:d" cannot name anything at all.
 #
 # The ID also goes to hydrate_session in place of the name: it builds "=$ID:",
 # and tmux resolves a '$' session part as an ID before any name.
 connect_dir() {
   local dir="$1" name="${2:-}" sid ename edir
-  [ -n "$name" ] || name=$(resolve_session_name "$dir")
+  if [ -n "$name" ]; then
+    session_id_of "$name"; sid="$REPLY"
+  else
+    # The name and the ID from one list-sessions, in-process: DIR_SID is the
+    # ID of the table's row of that exact name, which is what session_id_of
+    # would find.  $(resolve_session_name) and then session_id_of cost a
+    # subshell and a second list-sessions on every Enter that opens a directory.
+    load_session_table
+    dir_session "$dir"; name="$REPLY" sid="$DIR_SID"
+  fi
   [ -n "$name" ] || return 1
 
-  session_id_of "$name"; sid="$REPLY"
   if [ -z "$sid" ]; then
     esc_fmt "$name"; ename="$REPLY"
     esc_fmt "$dir"; edir="$REPLY"
