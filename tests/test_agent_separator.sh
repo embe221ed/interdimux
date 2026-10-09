@@ -19,6 +19,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+LIST_LIB="$SCRIPT_DIR/scripts/interdimux-list.sh"   # the title rules, which it sources
 BIN="$SCRIPT_DIR/rust/target/release/imux"
 TMPD="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/interdimux-agentsep.XXXXXX")" && pwd -P)"
 PASS=0
@@ -45,7 +46,7 @@ RENDERERS="off"
 [ -x "$BIN" ] || echo "  (the Rust core is not built: the Rust renderer's cases are skipped)"
 
 US=$'\x1f' RS=$'\x1e' GS=$'\x1d'
-read -r -a ONAMES <<< "$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$SCRIPT")"
+read -r -a ONAMES <<< "$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$LIST_LIB")"
 EMPTY=""; for _ in "${ONAMES[@]}"; do EMPTY+="$GS"; done
 mkdir -p "$TMPD/home" "$TMPD/stub"
 printf '#!/bin/sh\nexit 1\n' > "$TMPD/stub/tmux"; chmod +x "$TMPD/stub/tmux"

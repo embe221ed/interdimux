@@ -17,14 +17,19 @@
 #     ~850 lines never parses them, and every one of them paid ~2 ms to parse
 #     code that only a list draws with.  The witness is bash's own execution
 #     trace (-x): the heavy agent layer's first top-level assignment,
-#     DEFAULT_TITLE_RULES, is in the trace of a --list and must not be in a
-#     callback's;
+#     DEFAULT_TITLE_RULES (in interdimux-list.sh, which the script sources:
+#     a sourced file's trace lines start `++`), is in the trace of a --list
+#     and must not be in a callback's;
 #     The callbacks and the scheduling modes never parse the rows' renderer
 #     either (gather_targets: bash -v echoes what bash reads), a list never
 #     parses the dashboard's agent count, and the dashboard and the popups it
 #     opens (--launch, Health, Jobs) are dispatched before the ~77 KB of
 #     --doctor and the agents' modes, and --agents (a status line runs it)
 #     before --doctor;
+#   * with the Rust core, --list draws its rows ahead of all of that (review
+#     PERF-17): it parses neither the renderer, nor a callback, nor the hint
+#     bar below the colours (tests/test_list_fast.sh holds its rows to the
+#     full path's);
 #   * the shortcut cmd_field takes for a row nothing can be added to (no
 #     option published, no registry record, not an agent, no title a rule
 #     reads -- review R09) is taken by no other row.  Each row below has
@@ -251,7 +256,7 @@ traced() {
     ERRORS+="      out: $(head -c 300 "$TMPD/cb.out")"$'\n'"      err: $(grep -v '^+' "$TMPD/cb.trace" | tail -3)"$'\n'
     return 0
   fi
-  if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace"; then
+  if grep -q '^++* DEFAULT_TITLE_RULES=' "$TMPD/cb.trace"; then
     report "$label: never reaches the agent layer" fail
   else
     report "$label: never reaches the agent layer" pass
@@ -292,11 +297,11 @@ printf '#!/bin/sh\nexit 0\n' > "$TMPD/noat/atq"
 chmod +x "$TMPD/noat/atq"
 traced "--sched-list (the scheduling modes)" "no scheduled keys" \
   PATH="$TMPD/noat:$PATH" bash -xv "$SCRIPT" --sched-list
-# The witnesses are real: a list does reach the agent layer, and parse the
-# renderer.  It parses no more than it draws with, though: the dashboard's
-# count of the agents that need you is below it.
-env bash -xv "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
-if grep -q '^+ DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -qx 'gather_targets() {' "$TMPD/cb.trace" \
+# The witnesses are real: a list does reach the agent layer, and the bash
+# renderer's parses the renderer.  It parses no more than it draws with,
+# though: the dashboard's count of the agents that need you is below it.
+env INTERDIMUX_USE_RUST=off bash -xv "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
+if grep -q '^++* DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -qx 'gather_targets() {' "$TMPD/cb.trace" \
    && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
   report "premise: --list does run the agent layer and parse the renderer, and the trace shows it" pass
 else
@@ -306,6 +311,25 @@ if grep -qx 'agents_waiting_r() {' "$TMPD/cb.trace"; then
   report "--list (^r, and after every action): never parses the dashboard's agent count" fail
 else
   report "--list (^r, and after every action): never parses the dashboard's agent count" pass
+fi
+# With the Rust core, --list draws its rows ahead of everything it does not
+# run (review PERF-17): from interdimux-list.sh, sourced right after the
+# options.  It never parses the renderer, nor a callback -- the preview's
+# dispatch is the first -- nor the hint bar right below the colours.  (The
+# core pinned on: the bash renderer's leg turns it off for every suite.)
+if [ -x "$BIN" ]; then
+  env INTERDIMUX_USE_RUST=on bash -xv "$SCRIPT" --list > "$TMPD/cb.out" 2> "$TMPD/cb.trace" || true
+  if grep -q '^++* DEFAULT_TITLE_RULES=' "$TMPD/cb.trace" && grep -q $'\tW:rc:1$' "$TMPD/cb.out"; then
+    report "rust: --list draws the rows, and reads the rules" pass
+  else
+    report "rust: --list draws the rows, and reads the rules" fail
+  fi
+  if grep -qx 'gather_targets() {' "$TMPD/cb.trace" || grep -qx 'hint_r() {' "$TMPD/cb.trace" \
+     || grep -qxF 'if [ "${1:-}" = "--preview" ]; then' "$TMPD/cb.trace"; then
+    report "rust: --list never parses the renderer, a callback or the hint bar" fail
+  else
+    report "rust: --list never parses the renderer, a callback or the hint bar" pass
+  fi
 fi
 
 # --- the modes below them -----------------------------------------------------

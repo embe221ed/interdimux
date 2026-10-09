@@ -805,7 +805,7 @@ unsetopt hide
 # previously-built binary stale for ever.
 if [ -x "$SCRIPT_DIR/rust/target/release/imux" ]; then
   mkdir -p "$TMPD/fakerepo/scripts" "$TMPD/fakerepo/rust/src" "$TMPD/fakerepo/rust/target/release"
-  cp "$SCRIPT" "$TMPD/fakerepo/scripts/interdimux.sh"
+  cp "$SCRIPT_DIR"/scripts/*.sh "$TMPD/fakerepo/scripts/"   # the script and the files it sources
   cp "$SCRIPT_DIR/rust/target/release/imux" "$TMPD/fakerepo/rust/target/release/imux"
   : > "$TMPD/fakerepo/rust/Cargo.toml"
   : > "$TMPD/fakerepo/rust/src/main.rs"

@@ -33,6 +33,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
+LIST_LIB="$SCRIPT_DIR/scripts/interdimux-list.sh"   # the title rules, which it sources
 BIN="$SCRIPT_DIR/rust/target/release/imux"
 SOCK="interdimux-titleapps-test-$$"
 ISOCK="interdimux-titleapps-inner-$$"
@@ -71,7 +72,7 @@ RENDERERS="off"
 
 # --- the dump seam ------------------------------------------------------------
 US=$'\x1f' RS=$'\x1e' GS=$'\x1d'
-NOPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$SCRIPT" | wc -w)
+NOPTS=$(sed -n "s/^DEFAULT_STATE_OPTS='\(.*\)'\$/\1/p" "$LIST_LIB" | wc -w)
 empty_opts=$(printf "${GS}%.0s" $(seq "$NOPTS"))
 mkdir -p "$TMPD/home" "$TMPD/stub"
 printf '#!/bin/sh\nexit 1\n' > "$TMPD/stub/tmux"; chmod +x "$TMPD/stub/tmux"
