@@ -27,15 +27,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$SCRIPT_DIR/scripts/interdimux.sh"
 SOCK="interdimux-render-test-$$"
-OUTER="${SOCK}-outer"
+# Every launch gets a NEW outer server rather than killing one and re-creating
+# it on the same socket: kill-server returns while the old server is still
+# exiting, its socket still open, and a new-session that connects then fails
+# with "server exited unexpectedly" (or lands in the dying server and vanishes
+# with it).
+OUTER="${SOCK}-outer-0" OUTER_N=0
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/interdimux-render.XXXXXX")"
 PASS=0
 FAIL=0
 ERRORS=""
 
 cleanup() {
+  local s
   tmux -L "$SOCK" kill-server 2>/dev/null || true
-  tmux -L "$OUTER" kill-server 2>/dev/null || true
+  # every outer server (launch starts a new one each time)
+  for s in $(ls "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)" 2>/dev/null | grep "^$SOCK-outer-" || true); do
+    tmux -L "$s" kill-server 2>/dev/null || true
+  done
   rm -rf "$TMPD"
 }
 trap cleanup EXIT
@@ -179,6 +188,7 @@ launch() { # $1 = cols, $2 = rows, rest = extra `export` lines for the launcher
   local cols="$1" rows="$2"; shift 2
   local sh="$TMPD/launch.sh"
   tmux -L "$OUTER" kill-server 2>/dev/null || true
+  OUTER_N=$((OUTER_N + 1)); OUTER="${SOCK}-outer-$OUTER_N"   # a new one: see the top
   {
     printf '#!/usr/bin/env bash\n'
     printf 'export TMUX=%q TMUX_PANE=%q\n' "$TMUX" "$TMUX_PANE"
