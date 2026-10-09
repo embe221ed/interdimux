@@ -455,6 +455,12 @@ o set -g status off; o set -s escape-time 0
 key() { o send-keys -t drv "$@"; }
 cap() { o capture-pane -p -t drv 2>/dev/null; }
 popup_up() { cap | grep -q '❯'; }
+# The popup itself, by its border, as the suites test it.  fzf's prompt goes
+# first: the popup stays up until its job has exited, ~5 ms later (80 ms
+# under load), and a key sent then goes to that dying job, not to tmux -- a
+# prefix+g lost there left no menu and no trace.  So the next key waits for
+# this.
+popup_open() { cap | grep -q '┌'; }
 # query TEXT: type TEXT into the picker and wait until its prompt shows it,
 # and the match count on that line (N/M) shows the filtering done -- the rows
 # alone prove nothing, they show every name before any filtering, and an
@@ -495,7 +501,7 @@ else
     wait_for 100 'popup_up'
     query gitrepo || bad "the navigator takes a query again after the kill" "$(cap)"
     key Enter
-    if wait_for 100 '[ "$(t display -p -c "$client" "#{client_session}")" = gitrepo ] && ! popup_up'; then
+    if wait_for 100 '[ "$(t display -p -c "$client" "#{client_session}")" = gitrepo ] && ! popup_open'; then
       ok "typing a name and Enter switches the client there, the popup closes"
     else
       bad "Enter switches to the session typed" "client on $(t display -p -c "$client" '#{client_session}')
@@ -507,7 +513,7 @@ $(cap)"
   key C-b f
   if wait_for 200 'popup_up'; then
     key Escape
-    wait_for 100 '! popup_up' && ok "Esc closes the navigator's popup" || bad "Esc closes the navigator's popup" "$(cap)"
+    wait_for 100 '! popup_open' && ok "Esc closes the navigator's popup" || bad "Esc closes the navigator's popup" "$(cap)"
   else
     bad "prefix+f opens the navigator again" "$(cap)"
   fi
