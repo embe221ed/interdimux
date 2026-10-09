@@ -30,6 +30,13 @@
 #     PERF-17): it parses neither the renderer, nor a callback, nor the hint
 #     bar below the colours (tests/test_list_fast.sh holds its rows to the
 #     full path's);
+#   * each callback comes before what it never runs (review PERF-18): none
+#     parses the git badge or the pickers' fzf theme, which only the
+#     navigator, the renderer and the other modes run; the directory previews
+#     neither the hint bar nor the process lookup, the typed-query bar and
+#     ctrl-o's header not the process lookup, the badge not the hint bar.  And
+#     each runs clean -- exit 0 and nothing on stderr -- for every kind of
+#     row, a stale one too: what an ordering mistake would break;
 #   * the shortcut cmd_field takes for a row nothing can be added to (no
 #     option published, no registry record, not an agent, no title a rule
 #     reads -- review R09) is taken by no other row.  Each row below has
@@ -238,6 +245,7 @@ cleanup() { tmux -L "$SOCK" kill-server 2>/dev/null || true; rm -rf "$TMPD"; }
 unset TMUX TMUX_PANE
 tmux -f /dev/null -L "$SOCK" new-session -d -s rc -x 120 -y 30
 tmux -L "$SOCK" new-window -d -t '=rc:' -n second
+tmux -L "$SOCK" split-window -d -t '=rc:1'   # a pane row for the preview
 export TMUX="$(tmux -L "$SOCK" display-message -p '#{socket_path}'),99999,0"
 export TMUX_PANE="$(tmux -L "$SOCK" list-panes -t '=rc:0' -F '#{pane_id}')"
 export INTERDIMUX_FZF_MINOR=74 INTERDIMUX_TMUX_VNUM=307 INTERDIMUX_OPTS_PRIMED=1 \
@@ -266,15 +274,51 @@ traced() {
   else
     report "$label: never parses the rows' renderer" pass
   fi
+  # ...nor what only the navigator, the renderer and the other modes run,
+  # which the callbacks come before (review PERF-18): the git badge and the
+  # pickers' fzf theme are its first and its biggest
+  if grep -qx 'get_git_branch() {' "$TMPD/cb.trace" || grep -qx 'build_fzf_theme() {' "$TMPD/cb.trace"; then
+    report "$label: never parses the git badge or the pickers' theme" fail
+  else
+    report "$label: never parses the git badge or the pickers' theme" pass
+  fi
 }
+# $1 = label, $2 = what, $3 = a line of it (a definition or a dispatch): the
+# last traced run never read that line -- each callback comes before what it
+# never runs (review PERF-18).
+unparsed() {
+  if grep -qxF -- "$3" "$TMPD/cb.trace"; then
+    report "$1: never parses $2" fail
+  else
+    report "$1: never parses $2" pass
+  fi
+}
+PROC='full_command() {'                              # the process lookup
+HINTS='hint_r() {'                                    # the hint bar
+DLIST='if [ "${1:-}" = "--dirs-list" ]; then'         # ctrl-o's list
 traced "--preview (every cursor move)" "rc:1" \
   bash -xv "$SCRIPT" --preview 'W:rc:1'
+unparsed "--preview" "ctrl-o's list" "$DLIST"
+# A directory row's preview goes on to --dirs-preview in the same process:
+# that, and ctrl-o's preview itself, come before the hint bar and the
+# process lookup, which neither runs.
+mkdir -p "$TMPD/proj"
+traced "--preview of a directory row" "proj" \
+  bash -xv "$SCRIPT" --preview "D:$TMPD/proj"
+unparsed "--preview of a directory row" "the hint bar" "$HINTS"
+unparsed "--preview of a directory row" "the process lookup" "$PROC"
+traced "--dirs-preview (ctrl-o's preview, every cursor move)" "proj" \
+  bash -xv "$SCRIPT" --dirs-preview "$TMPD/proj"
+unparsed "--dirs-preview" "the hint bar" "$HINTS"
+unparsed "--dirs-preview" "the process lookup" "$PROC"
 traced "--footer-for (every move and keystroke)" "enter" \
   bash -xv "$SCRIPT" --footer-for 'W:rc:1'
 traced "--footer-for with a query typed" "newproj" \
   FZF_QUERY=newproj FZF_MATCH_COUNT=2 bash -xv "$SCRIPT" --footer-for 'W:rc:1'
+unparsed "--footer-for" "the process lookup" "$PROC"
 traced "--describe-create (every keystroke with no match)" "newproj" \
   bash -xv "$SCRIPT" --describe-create newproj
+unparsed "--describe-create" "the process lookup" "$PROC"
 traced "--scope-prompt (ctrl-])" "name" \
   FZF_NTH=1 bash -xv "$SCRIPT" --scope-prompt
 # ...which needs nothing at all, and answers before the preflight: parsing down
@@ -286,8 +330,10 @@ else
 fi
 traced "--session-name-for (the ctrl-o picker's badge)" "rc" \
   bash -xv "$SCRIPT" --session-name-for "$(tmux -L "$SOCK" display-message -p -t '=rc:0' '#{pane_current_path}')"
+unparsed "--session-name-for" "the hint bar" "$HINTS"
 traced "--dirs-hints (the ctrl-o picker's header on ^r)" "create" \
   bash -xv "$SCRIPT" --dirs-hints
+unparsed "--dirs-hints" "the process lookup" "$PROC"
 traced "--dirs-hints deep (on ^f)" "deep search" \
   bash -xv "$SCRIPT" --dirs-hints deep svc
 # Not a callback, but below them for the same reason: the scheduling modes
@@ -297,6 +343,35 @@ printf '#!/bin/sh\nexit 0\n' > "$TMPD/noat/atq"
 chmod +x "$TMPD/noat/atq"
 traced "--sched-list (the scheduling modes)" "no scheduled keys" \
   PATH="$TMPD/noat:$PATH" bash -xv "$SCRIPT" --sched-list
+# Each also runs clean.  A callback that ran a function, or read a variable,
+# defined below its own dispatch would fail only when it runs: "command not
+# found", or under set -u "unbound variable" -- on stderr, which fzf shows in
+# the preview pane or drops.  So each, run as fzf runs it, with its stderr
+# kept: exit 0, some output, and nothing on stderr.
+clean() { # $1 = label, then the command (env assignments first)
+  local label="$1" rc=0; shift
+  env "$@" > "$TMPD/cb.out" 2> "$TMPD/cb.err" || rc=$?
+  if [ "$rc" = 0 ] && [ -s "$TMPD/cb.out" ] && [ ! -s "$TMPD/cb.err" ]; then
+    report "$label: exit 0, output, nothing on stderr" pass
+  else
+    report "$label: exit 0, output, nothing on stderr (rc $rc)" fail
+    ERRORS+="      $(head -3 "$TMPD/cb.err")"$'\n'
+  fi
+}
+clean "--preview of a session row" bash "$SCRIPT" --preview 'S:rc'
+clean "--preview of a window row" bash "$SCRIPT" --preview 'W:rc:1'
+clean "--preview of a pane row" bash "$SCRIPT" --preview 'P:rc:1:1'
+clean "--preview of a directory row" bash "$SCRIPT" --preview "D:$TMPD/proj"
+clean "--preview of a window row that is gone" bash "$SCRIPT" --preview 'W:rc:9'
+clean "--dirs-preview" bash "$SCRIPT" --dirs-preview "$TMPD/proj"
+clean "--footer-for" bash "$SCRIPT" --footer-for 'P:rc:1:1'
+clean "--footer-for with a query typed" FZF_QUERY=newproj FZF_MATCH_COUNT=2 bash "$SCRIPT" --footer-for 'W:rc:1'
+clean "--describe-create" bash "$SCRIPT" --describe-create newproj
+clean "--create-key" FZF_QUERY=newproj bash "$SCRIPT" --create-key
+clean "--session-name-for" bash "$SCRIPT" --session-name-for "$TMPD/proj"
+clean "--dirs-hints" bash "$SCRIPT" --dirs-hints
+clean "--hint-ladder" bash "$SCRIPT" --hint-ladder W
+
 # The witnesses are real: a list does reach the agent layer, and the bash
 # renderer's parses the renderer.  It parses no more than it draws with,
 # though: the dashboard's count of the agents that need you is below it.
