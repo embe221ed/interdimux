@@ -142,11 +142,15 @@ wait_cursor() { # $1 = fixed text the cursor row must contain (bounded)
   return 1
 }
 # The bar goes back to the row's hints: move off the row and back.  Then the
-# next guarded key's text is new on screen, not a leftover.
-reset_bar() { # $1 = row the cursor must be back on
-  keys Down; wait_cursor '▸ gamma' || true
-  keys Up;   wait_cursor "$1" || true
-  wait_text 'enter switch' || true
+# next guarded key's text is new on screen, not a leftover.  Each move waits
+# for its row's own bar, not only the cursor: with a query typed, focus runs
+# --footer-for in the background (bg-transform), and a key sent before that
+# bar lands has its text painted over by it -- under load, before the next
+# look at the screen.  'enter switch' could not tell them apart: every row's
+# bar says it.  gamma's says '^e rename', the pane row's '^z zoom'.
+reset_bar() { # $1 = the pane row the cursor must be back on
+  keys Down; wait_cursor '▸ gamma' || true; wait_text '^e rename' || true
+  keys Up;   wait_cursor "$1" || true;      wait_text '^z zoom' || true
 }
 DIMMSG='this row does not match'
 
