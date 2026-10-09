@@ -2455,12 +2455,15 @@ imux_msg() {
 # spelling of "=c:d" names a session called "c:d" (legal since tmux 3.7).  A
 # plain string comparison over list-sessions has neither problem.  tmux escapes
 # control characters in names, so neither US nor a newline can occur in one.
+# (`exec` in the $( ): a redirected command there is a second fork otherwise,
+# and the footer and the zero-match bar ask this on every keystroke.  It runs
+# the tmux on PATH, as --launch's `exec tmux` does, never a shell function.)
 session_id_of() {
   local want="$1" id name
   REPLY=""
   while IFS="$US" read -r id name; do
     if [ "$name" = "$want" ]; then REPLY="$id"; return 0; fi
-  done <<< "$(tmux list-sessions -F "#{session_id}${US}#{session_name}" 2>/dev/null)"
+  done <<< "$(exec tmux list-sessions -F "#{session_id}${US}#{session_name}" 2>/dev/null)"
   return 0
 }
 
@@ -3766,6 +3769,8 @@ if [ "${1:-}" = "--preview" ]; then
   # bytes in its grid), and nothing in the header before it either, but a
   # pane's cwd can hold one, so what lies between is joined back on RS.
   # INTERDIMUX_NO_BATCH runs the commands one at a time, as gather_targets.
+  # `exec` in the batched $( ): a redirected command there costs bash a second
+  # fork otherwise (and it runs the tmux on PATH, never a shell function).
   RS=$'\x1e'
   pv_parts=()
   case "$SPEC_TYPE" in
@@ -3777,7 +3782,7 @@ if [ "${1:-}" = "--preview" ]; then
       # A failed command ends a command list, so a session that went away (or
       # anything else short of all three sections) asks again one at a time.
       if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
-        pv_all=$(tmux display-message -p -t "$target" "$s_fmt" \; display-message -p "$RS" \
+        pv_all=$(exec tmux display-message -p -t "$target" "$s_fmt" \; display-message -p "$RS" \
           \; list-windows -t "$target" -F "$w_fmt" \; display-message -p "$RS" \
           \; capture-pane -t "$target" -p -e -S -30 2>/dev/null)
         set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
@@ -3825,7 +3830,7 @@ if [ "${1:-}" = "--preview" ]; then
       p_pid="" p_cmd="" p_path="" p_look="" p_args="" pv_cap="" pv_at=()
       p_fmt="#{pane_pid}${US}#{pane_current_command}${US}#{pane_current_path}"
       if [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
-        pv_all=$(tmux has-session -t "$target" \; display-message -p -t "$target" "$SPEC_AT_FMT$p_fmt" \
+        pv_all=$(exec tmux has-session -t "$target" \; display-message -p -t "$target" "$SPEC_AT_FMT$p_fmt" \
           \; display-message -p "$RS" \; capture-pane -t "$target" -p -e -S -50 2>/dev/null)
         set -f; IFS="$RS"; pv_parts=($pv_all$RS); unset IFS; set +f
         pv_cap="${pv_parts[${#pv_parts[@]}-1]#$'\n'}"
