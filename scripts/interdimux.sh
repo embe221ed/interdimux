@@ -43,6 +43,18 @@ set -euo pipefail
 # once their fzf has gone, which is when bash would run it anyway.
 case "${1:-}" in ''|--jobs|--doctor-view|--dashboard) trap 'exit 0' INT ;; esac
 
+# The navigator's one `stty size` (see term_cols_r), started now, while bash
+# has parsed next to nothing.  Asked for where it is needed, it cost two forks
+# of the fully parsed bash and the exec, 4.5 ms (small server) to 6.5 ms on
+# the way to the first frame; from here it runs on another CPU while the rest
+# of the file is parsed, and term_cols_r reads its one line.  Only where
+# term_cols_r would run stty: the navigator, not under an fzf that exports
+# its width.
+TTY_SIZE_FD=""
+if [ -z "${1:-}" ] && ! [[ "${FZF_COLUMNS:-}" =~ ^[1-9][0-9]*$ ]]; then
+  exec {TTY_SIZE_FD}< <(exec stty size 2>/dev/null </dev/tty)
+fi
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -3424,9 +3436,18 @@ term_cols_r() {
     return 0
   fi
   if [ -n "$_term_cols_cached" ]; then REPLY="$_term_cols_cached"; return 0; fi
-  local dims
+  local dims=""
   REPLY=80
-  if dims=$({ stty size </dev/tty; } 2>/dev/null); then
+  if [ -n "${TTY_SIZE_FD:-}" ]; then
+    # the navigator's, started at the top of the file; nothing when stty
+    # failed there
+    IFS= read -r -u "$TTY_SIZE_FD" dims || :
+    exec {TTY_SIZE_FD}<&-; TTY_SIZE_FD=""
+    [ -z "$dims" ] || REPLY="${dims#* }"
+  elif dims=$(exec stty size 2>/dev/null </dev/tty); then
+    # (exec'd, with the 2> first so that a /dev/tty that will not open stays
+    # quiet: `{ stty size </dev/tty; } 2>/dev/null` forked the parsed script
+    # twice)
     REPLY="${dims#* }"
   fi
   [[ "$REPLY" =~ ^[0-9]+$ ]] || REPLY=80
@@ -5374,6 +5395,12 @@ gather_targets() {
   # that can fail is the current-target lookup (a stale $TMUX_PANE), and tmux
   # aborts the remainder of a command list on failure — so it goes LAST, where
   # it cannot swallow the bulk data.
+  #
+  # `exec`: bash runs a $(...) whose one command carries a redirection by
+  # forking the substitution's subshell AND, inside it, the command -- a second
+  # fork of the whole parsed script, ~0.7 ms, on every open and every reload.
+  # exec'd, the subshell becomes tmux.  Its 2> is set up before the exec, so
+  # stderr is as quiet as it was, and the status is tmux's either way.
   local _batched=0 _all RS=$'\x1e' _dump_reg=""
   local -a _parts=()
   if [ -n "${INTERDIMUX_DUMP_IN:-}" ]; then
@@ -5407,7 +5434,7 @@ gather_targets() {
     _dump_reg="${_parts[4]-}"; _dump_reg="${_dump_reg#$'\n'}"; _dump_reg="${_dump_reg%$'\n'}"
     _batched=1
   elif [ -z "${INTERDIMUX_NO_BATCH:-}" ]; then
-    _all=$(tmux \
+    _all=$(exec tmux \
       list-sessions -F "$_sfmt" \; \
       display-message -p "$RS" \; \
       list-windows -a -F "$_wfmt" \; \
@@ -5557,7 +5584,10 @@ gather_targets() {
     # assignments with NO command, so the binary would run without any of them.
     # Only the two VALUES that need a lookup are taken out, by the REPLY forms:
     # `$(term_cols)` and `$(live_preview_state)` in that list were a subshell
-    # each, on every open and every reload (review PERF-05).
+    # each, on every open and every reload (review PERF-05).  And the binary is
+    # exec'd, as tmux is above: the 2> and the heredoc made bash fork a second
+    # time to run it.  The assignments reach an exec'd command's environment
+    # just the same (bash 4.3 to 5.2).
     #
     # Its stderr is dropped.  Every failure falls back to the bash renderer
     # below, which draws the right list, and the one failure worth telling the
@@ -5597,7 +5627,7 @@ gather_targets() {
       INTERDIMUX_TITLE_RULESET="$TITLE_RULESET" \
       INTERDIMUX_STATE_OPTS="$STATE_OPTS" \
       INTERDIMUX_VIEW="$VIEW" \
-      "$IMUX_BIN" "$IMUX_PROTO" 2>/dev/null <<IMUX_SECTIONS
+      exec "$IMUX_BIN" "$IMUX_PROTO" 2>/dev/null <<IMUX_SECTIONS
 ${sessions_raw}
 $RS
 ${all_windows_raw}
@@ -7650,6 +7680,73 @@ _dlg_esc() {
   esac
   return 0
 }
+
+# ---------------------------------------------------------------------------
+# The navigator's first list, started here (review PERF-16)
+# ---------------------------------------------------------------------------
+#
+# Everything gather_targets can run is defined by now, and nothing the
+# navigator does from here on feeds it: the rest of the file is the other
+# modes (parsed all the same, ~5 ms) and then the navigator's own setup
+# (~14 ms).  Fetched at the top of the loop, the list's 20 ms (small server)
+# to 40 ms came after all of that, and the rows reached fzf 20-35 ms after its
+# exec -- past the ~18 ms within which fzf 0.74 paints them on its first step,
+# so they were painted on its next, ~20 ms later.  Started here, in a process
+# substitution, the list is fetched while the rest of the file is parsed, and
+# fzf reads it from the fd when it starts.
+#
+# The same list, from the same state.  The width is asked here (term_cols_r),
+# so the navigator draws the bar for the width the list was laid out for, and
+# stty is not run twice; the scratch files' names are the ones the navigator
+# derives below, the same way; its stderr goes to ERR_FILE, created here and
+# not truncated below, which would erase what the list may have said already;
+# MOUNTS_FILE is cleared here, before the core can write it; the preview
+# state's file is written here, and the list reads the state back from it as
+# it did from the one the navigator wrote below -- with read -r, which trims
+# it, so the list is laid out for the file's state, not the option's raw
+# value.  Its environment lacks only what the navigator exports for fzf and
+# its binds, which neither tmux nor the core reads.
+#
+# Only on the Rust path (the bash renderer's list needs mounts_export, below),
+# with a private XDG_RUNTIME_DIR (elsewhere the names come from mktemp, below),
+# and from bash 4.4 on, whose `wait` can wait for a process substitution: the
+# navigator waits for this one as it did for the pipeline's left side, so
+# nothing it writes outlives the EXIT trap's rm.  Elsewhere the loop's first
+# pass gathers as every later one does.
+EARLY_FD="" EARLY_PID=""
+
+# The early list's end: its pipe closed -- so a list nobody reads anymore dies
+# of SIGPIPE rather than wait on a full pipe -- and its process waited for.
+# Once fzf is done, and in the EXIT traps (an exit before fzf, a hangup).
+early_done() {
+  [ -n "$EARLY_FD" ] || return 0
+  exec {EARLY_FD}<&-
+  wait "$EARLY_PID" 2>/dev/null || :
+  EARLY_FD="" EARLY_PID=""
+}
+
+if [ -z "${1:-}" ] && [ -n "$IMUX_BIN" ] && (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 )) \
+   && [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ] && [ -w "$XDG_RUNTIME_DIR" ]; then
+  RESUME_FILE="$XDG_RUNTIME_DIR/interdimux-resume.$$"
+  ERR_FILE="${RESUME_FILE}.err"
+  fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null || ERR_FILE=""
+  MOUNTS_FILE="${RESUME_FILE}.mounts"
+  if [ -e "$MOUNTS_FILE" ] || [ -L "$MOUNTS_FILE" ]; then rm -f "$MOUNTS_FILE" 2>/dev/null || :; fi
+  export INTERDIMUX_MOUNTS_FILE="$MOUNTS_FILE"
+  PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
+  printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null || PREVIEW_STATE_FILE=""
+  export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
+  # until the navigator sets its own: an exit before that (a Ctrl-C while the
+  # rest of the file is parsed) leaves nothing behind either
+  trap 'early_done; rm -f ${ERR_FILE:+"$ERR_FILE"} ${PREVIEW_STATE_FILE:+"$PREVIEW_STATE_FILE"} "$MOUNTS_FILE"' EXIT
+  term_cols_r
+  exec {EARLY_FD}< <(
+    set +e +o pipefail
+    [ -z "$ERR_FILE" ] || exec 2>>"$ERR_FILE"
+    gather_targets
+  )
+  EARLY_PID=$!
+fi
 
 # ---------------------------------------------------------------------------
 # Actions (called by fzf keybindings via execute)
@@ -10827,8 +10924,11 @@ elif ! RESUME_FILE=$(mktemp "${TMPDIR:-/tmp}/interdimux-resume.XXXXXX" 2>/dev/nu
   printf 'interdimux: %s\n' "$_m" >&2
   exit 1
 fi
-PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
-printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null || PREVIEW_STATE_FILE=""
+# (Written already when the first list was started early: see there.)
+if [ -z "$EARLY_FD" ]; then
+  PREVIEW_STATE_FILE="${RESUME_FILE}.preview"
+  printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null || PREVIEW_STATE_FILE=""
+fi
 export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
 
 # Errors go to the status line and a log, not across the list.
@@ -10857,17 +10957,24 @@ export INTERDIMUX_PREVIEW_STATE="$PREVIEW_STATE_FILE"
 # Hence >> here as well -- with > this fd keeps its own offset, and the
 # navigator's next line would overwrite what a child had appended.  Modes run
 # any other way (by the test suites, by the user) keep their real stderr.
-ERR_FILE="${RESUME_FILE}.err"
-if fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null; then
+#
+# When the first list was started early, ERR_FILE is the one made for it (see
+# there), and it may hold what the list has said already: not truncated again.
+if [ -z "$EARLY_FD" ]; then
+  ERR_FILE="${RESUME_FILE}.err"
+  fzf_ge 53 && : > "$ERR_FILE" 2>/dev/null || ERR_FILE=""
+fi
+if [ -n "$ERR_FILE" ]; then
   exec 2>>"$ERR_FILE"
   export INTERDIMUX_ERR_FILE="$ERR_FILE"
 else
-  ERR_FILE=""
   unset INTERDIMUX_ERR_FILE
 fi
 
 _report_stderr() {
   local rc=$? first="" log="$SCHED_LOGDIR/errors.log" size
+  # an early first list still running has said all it will once it has ended
+  early_done
   [ -n "$ERR_FILE" ] && [ -s "$ERR_FILE" ] || return 0
   # The first line that says something.  Stopping at a BLANK first line dropped
   # the whole error, from the status line and from the log alike (BUG-104).
@@ -10943,7 +11050,11 @@ elif [ -n "$IMUX_BIN" ]; then
   # A builtin test first: the file exists only after PID reuse (a navigator
   # that was SIGKILLed left it), and rm is a fork+exec (~4 ms) on the way to the
   # first frame.  tests/test_exec_budget.sh holds that path to nothing but fzf.
-  if [ -e "$MOUNTS_FILE" ] || [ -L "$MOUNTS_FILE" ]; then rm -f "$MOUNTS_FILE" 2>/dev/null || :; fi
+  # (Cleared already when the first list was started early: by now the file
+  # may be that list's.)
+  if [ -z "$EARLY_FD" ] && { [ -e "$MOUNTS_FILE" ] || [ -L "$MOUNTS_FILE" ]; }; then
+    rm -f "$MOUNTS_FILE" 2>/dev/null || :
+  fi
   export INTERDIMUX_MOUNTS_FILE="$MOUNTS_FILE"
 fi
 
@@ -10960,13 +11071,17 @@ ACTION_CMD="bash '$SCRIPT_PATH' --action"
 # the old dialog; an Enter switched nothing.
 trap : INT
 
+_hints_built=""   # the hint ladders, built on the loop's first pass (see there)
 while true; do
   : > "$RESUME_FILE"
   # Re-seed each iteration: the loop restarts fzf using the STATIC $SHOW_PREVIEW
   # to choose --preview-window …hidden, while compute_widths reads the file.
   # ctrl-o -> Esc re-enters the loop, so without this the two go permanently out
-  # of phase and rows are sized for a preview that is not shown.
-  [ -n "$PREVIEW_STATE_FILE" ] && printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null
+  # of phase and rows are sized for a preview that is not shown.  Not while the
+  # first list started early is running (see there): it was written for that
+  # list, which may be reading it right now, and a rewrite truncates it first
+  # -- a read in between found it empty and laid the list out for no preview.
+  [ -n "$PREVIEW_STATE_FILE" ] && [ -z "$EARLY_FD" ] && printf '%s' "$SHOW_PREVIEW" > "$PREVIEW_STATE_FILE" 2>/dev/null
 
   # Ties go to the LIST'S OWN ORDER, and nothing else does.  gather_targets
   # already emits the sessions in @interdimux-order (MRU by default), each with
@@ -11134,13 +11249,22 @@ while true; do
       # tiers ("W:line|W:line|…|0:"), so the focus bind can choose both the row
       # type and the tier inline instead of re-exec'ing this script on every
       # cursor move.
+      #
+      # Built on the first pass only.  They depend on nothing a pass changes --
+      # the palette's accent and fzf's version -- and a pass after the first is
+      # ctrl-o and then Esc, which spent ~5 ms rebuilding the same five strings
+      # before the navigator could come back.  The tier is still picked on
+      # every pass.
       hint_cols; _hint_w="$REPLY"
-      for _t in S W P D X; do
-        hint_set "$_t"
-        hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
-        printf -v "INTERDIMUX_HINTS_$_t" '%s' "$REPLY"
-        export "INTERDIMUX_HINTS_$_t"
-      done
+      if [ -z "$_hints_built" ]; then
+        for _t in S W P D X; do
+          hint_set "$_t"
+          hint_tiers ${HINT_SET[@]+"${HINT_SET[@]}"}
+          printf -v "INTERDIMUX_HINTS_$_t" '%s' "$REPLY"
+          export "INTERDIMUX_HINTS_$_t"
+        done
+        _hints_built=1
+      fi
       # The launch-time bar, fitted here rather than by the snippet: fzf has to
       # be told the string before it can draw a first frame.
       hint_pick "$_hint_w" "$INTERDIMUX_HINTS_X"; _hint_x="$REPLY"
@@ -11590,8 +11714,17 @@ while true; do
   # just closed having done nothing.  (PIPESTATUS is no help here: inside a
   # command substitution it describes the substitution, not the inner pipeline.)
   set +o pipefail
-  out=$(gather_targets | fzf "${fzf_opts[@]}")
-  fzf_rc=$?
+  if [ -n "$EARLY_FD" ]; then
+    # The first pass's list, started early (see there): fzf reads it from the
+    # fd, and only fzf -- not the children its binds start, hence the second
+    # redirection.  exec'd, so this $(...) forks once.
+    out=$(exec fzf "${fzf_opts[@]}" <&"$EARLY_FD" {EARLY_FD}<&-)
+    fzf_rc=$?
+    early_done
+  else
+    out=$(gather_targets | fzf "${fzf_opts[@]}")
+    fzf_rc=$?
+  fi
   set -o pipefail
   set -e
 
