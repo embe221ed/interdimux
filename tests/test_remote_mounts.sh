@@ -255,6 +255,35 @@ got=$(printf '%s\n' "$dl" | awk -F'\t' -v d="$TMPD/gpfs/u/other" '$3 == d { prin
 [ "$got" = Rust ] && report "--dirs-list: a dir in a symlinked NFS \$HOME is typed" pass \
                  || report "--dirs-list: a dir in a symlinked NFS \$HOME is typed (got: '$got')" fail
 
+# A relative $HOME ("home" here, run from $TMPD).  Both walks up $HOME -- to the
+# mount it is on (_mount_of) and for a component that is a symlink (the end of
+# _mounts_read) -- cut at the last '/' until "/", which a relative path never
+# reaches: out of components, "${p%/*}" is the path itself, and the walk spun at
+# 100% CPU for good (the same class as the deep search's relative root).  Each
+# returns early for a relative path; this holds them to it, under `timeout`, so
+# losing either fails here instead of hanging the suite.  The table is still
+# classified: the local row is badged, the NFS one is not probed.
+for r in $renderers; do
+  label=$([ "$r" = on ] && echo rust || echo bash)
+  rc=0
+  got=$(cd "$TMPD" && HOME=home INTERDIMUX_MOUNTINFO="$MI" INTERDIMUX_USE_RUST="$r" \
+          timeout 20 bash "$SCRIPT" --list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g') || rc=$?
+  loc=$(printf '%s\n' "$got" | awk -F'\t' -v s="D:$TMPD/local/proj" '$4 == s')
+  nas=$(printf '%s\n' "$got" | awk -F'\t' -v s="D:$TMPD/nas/proj" '$4 == s')
+  if [ "$rc" = 0 ] && badged "$loc" localbranch && [ -n "$nas" ] && ! printf '%s' "$nas" | grep -q -e '‹' -e 'Rust'; then
+    report "$label: a relative \$HOME lists, the NFS row unprobed and the local one badged" pass
+  else
+    report "$label: a relative \$HOME lists, the NFS row unprobed and the local one badged (rc $rc; local: $loc; nas: $nas)" fail
+  fi
+done
+rc=0
+got=$(cd "$TMPD" && HOME=home INTERDIMUX_MOUNTINFO="$MI" \
+        timeout 20 bash "$SCRIPT" --dirs-preview "$TMPD/local/proj" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g') || rc=$?
+case "$rc:$got" in
+  0:*localbranch*) report "--dirs-preview under a relative \$HOME draws the preview" pass ;;
+  *) report "--dirs-preview under a relative \$HOME draws the preview (rc $rc: $(printf '%s' "$got" | head -3 | tr '\n' '|'))" fail ;;
+esac
+
 # 9p by its transport (review #27).  WSL2's Windows drives are 9p over fd
 # (drvfs): the local disk, slow per stat but never a hung server -- every
 # project on /mnt/c had lost its badges.  9p over tcp is a network share.
