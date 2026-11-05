@@ -7,6 +7,7 @@
 //! fifth input section; this module only merges it into the row.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::format::format_command;
 use crate::palette::{Palette, RST};
@@ -16,8 +17,19 @@ use crate::titles;
 
 /// Recognised by argv0's basename (bash AGENT_KNOWN).
 const KNOWN: &[&str] = &[
-    "claude", "codex", "gemini", "qwen", "opencode", "amp", "goose", "crush", "kiro-cli",
-    "kiro-cli-chat", "aider", "copilot", "cursor-agent",
+    "claude",
+    "codex",
+    "gemini",
+    "qwen",
+    "opencode",
+    "amp",
+    "goose",
+    "crush",
+    "kiro-cli",
+    "kiro-cli-chat",
+    "aider",
+    "copilot",
+    "cursor-agent",
 ];
 /// Installed as a script an interpreter runs (bash AGENT_SCRIPTS).
 const SCRIPTS: &[&str] = &["codex", "gemini", "qwen", "copilot", "crush", "aider"];
@@ -31,6 +43,9 @@ pub enum ShowTitle {
 }
 
 pub struct Config {
+    /// Native config distinguishes explicit user suppression from generic
+    /// built-in fallbacks; gather3 keeps its supplied rules authoritative.
+    pub native_user_rule_count: Option<usize>,
     pub show_title: ShowTitle,
     pub title_max: usize,
     pub known: Vec<String>,
@@ -93,13 +108,16 @@ impl Config {
         };
         if names != "off" {
             for w in names.split([' ', '\t', '\n']).filter(|w| !w.is_empty()) {
-                if w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-') {
+                if w.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+                {
                     known.push(w.to_string());
                     scripts.push(w.to_string());
                 }
             }
         }
         Config {
+            native_user_rule_count: None,
             show_title,
             title_max,
             known,
@@ -292,7 +310,10 @@ fn this_host_prompt(desc: &str, hs: &str) -> bool {
         from += k + 1;
     }
     let tag = format!("[{}]", hs.chars().take(10).collect::<String>());
-    desc == tag || desc.strip_prefix(tag.as_str()).is_some_and(|r| r.starts_with(' '))
+    desc == tag
+        || desc
+            .strip_prefix(tag.as_str())
+            .is_some_and(|r| r.starts_with(' '))
 }
 
 /// The command a title's word would name: its basename -- or nothing, for a
@@ -310,7 +331,11 @@ fn cmd_base(w: &str) -> &str {
 /// default title (the host name), a prompt of this host, or -- from a preexec
 /// hook -- the command line itself.
 fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
-    if desc == name || desc == cfg.host || desc == cfg.host_short || this_host_prompt(desc, &cfg.host_short) {
+    if desc == name
+        || desc == cfg.host
+        || desc == cfg.host_short
+        || this_host_prompt(desc, &cfg.host_short)
+    {
         return true;
     }
     let a0 = raw.split(' ').next().unwrap_or("");
@@ -326,7 +351,15 @@ fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
         if x.contains('=')
             || matches!(
                 x,
-                "sudo" | "env" | "nohup" | "exec" | "time" | "command" | "builtin" | "noglob" | "nice"
+                "sudo"
+                    | "env"
+                    | "nohup"
+                    | "exec"
+                    | "time"
+                    | "command"
+                    | "builtin"
+                    | "noglob"
+                    | "nice"
             )
         {
             continue;
@@ -336,7 +369,12 @@ fn repeats_row(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
     let after = &raw[a0.len()..];
     // unstripped, as bash's `case "$b"` sees it: `-node` is no interpreter
     let r = if crate::format::is_interpreter(basename(a0)) {
-        after.strip_prefix(' ').unwrap_or(after).split(' ').next().unwrap_or("")
+        after
+            .strip_prefix(' ')
+            .unwrap_or(after)
+            .split(' ')
+            .next()
+            .unwrap_or("")
     } else {
         ""
     };
@@ -369,11 +407,197 @@ pub fn command_field(
     p: &Palette,
     now: i64,
 ) -> (String, String) {
+    command_field_inner(
+        raw,
+        pid,
+        pane,
+        title,
+        opts,
+        cfg,
+        reg,
+        p,
+        now,
+        NativeTitle::default(),
+    )
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct NativeTitle<'a> {
+    /// A verified foreground-owned conversation/task title.
+    pub current: bool,
+    /// An explicit foreground program report; messages stay secondary.
+    pub reported: bool,
+    /// A second verified explicit title if the primary OSC text is generic.
+    pub alternate: Option<&'a str>,
+}
+
+/// Native callers may promote an agent's current conversation title to the
+/// primary label. The caller must first verify the title belongs to the
+/// foreground process; a terminal can retain a previous program's OSC title.
+/// An alternate must likewise be a verified explicit title, not a status message.
+/// The legacy formatter never takes this path.
+#[allow(clippy::too_many_arguments)]
+pub fn native_command_field(
+    raw: &str,
+    pid: u32,
+    pane: &str,
+    title: &str,
+    opts: &str,
+    cfg: &Config,
+    reg: &Registry,
+    p: &Palette,
+    now: i64,
+    native: NativeTitle<'_>,
+) -> (String, String) {
+    command_field_inner(raw, pid, pane, title, opts, cfg, reg, p, now, native)
+}
+
+// The Claude/Codex rules used by the Bash frontend, with meaningful bare
+// owner-verified titles accepted too. An explicit caller rule always wins,
+// including one that deliberately suppresses a title.
+fn native_title_rules() -> &'static [titles::Rule] {
+    static RULES: OnceLock<Vec<titles::Rule>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        titles::parse(
+            "claude - - ✳ Claude Code\n\
+         claude - - Claude Code\n\
+         claude working $1 ◐ *\n\
+         claude working $1 ◑ *\n\
+         claude working $1 %spin *\n\
+         claude - $1 ✳ *\n\
+         codex approve $1 [ ! ] Action Required | * | *\n\
+         codex approve $1 [ . ] Action Required | * | *\n\
+         codex approve - [ ! ] Action Required*\n\
+         codex approve - [ . ] Action Required*\n\
+         codex approve $1 ● [ ! ] Action Required | * | *\n\
+         codex approve $1 ● [ . ] Action Required | * | *\n\
+         codex approve - ● [ ! ] Action Required*\n\
+         codex approve - ● [ . ] Action Required*\n\
+         codex working $1 %spin * | *\n\
+         codex working $1 %spin *\n\
+         codex - $1 * | *",
+        )
+    })
+}
+
+fn native_title_text(value: &str) -> String {
+    let text = titles::text(titles::head(value));
+    text.chars()
+        .map(|c| match c {
+            '\u{061c}' | '\u{2028}' | '\u{2029}' => ' ',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn generic_native_title(desc: &str, name: &str, raw: &str, cfg: &Config) -> bool {
+    if desc.is_empty()
+        || desc.eq_ignore_ascii_case(name)
+        || ["Claude Code", "Codex", "Codex CLI", "OpenAI Codex"]
+            .iter()
+            .any(|generic| desc.eq_ignore_ascii_case(generic))
+        || repeats_row(desc, name, raw, cfg)
+    {
+        return true;
+    }
+    // Rex may not supply the host's textual name. Still reject a conventional
+    // shell prompt such as user@host:~/project or host: /project.
+    let mut words = desc.split_whitespace();
+    let first = words.next().unwrap_or("");
+    if let Some((host, path)) = first.rsplit_once(':') {
+        let path = if path.is_empty() {
+            words.next().unwrap_or("")
+        } else {
+            path
+        };
+        if !host.is_empty()
+            && !host.contains('/')
+            && (path.starts_with('/') || path.starts_with('~'))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn native_title_candidate(title: &str, name: &str, raw: &str, cfg: &Config) -> (titles::Hit, bool) {
+    let text = native_title_text(title);
+    if text.is_empty() {
+        return (
+            titles::Hit {
+                state: String::new(),
+                desc: text,
+            },
+            false,
+        );
+    }
+    let user_count = cfg
+        .native_user_rule_count
+        .unwrap_or(cfg.rules.len())
+        .min(cfg.rules.len());
+    let custom = titles::apply(&cfg.rules[..user_count], name, &text);
+    let suppressed = custom.as_ref().is_some_and(|hit| hit.desc.is_empty());
+    let mut hit = custom
+        .or_else(|| {
+            titles::apply(&cfg.rules[user_count..], name, &text)
+                // Codex's legacy catch-all rejects unrecognised, potentially
+                // stale titles. Rex proves ownership, so bare task titles are
+                // useful here. Other apps' explicit generic-title rules stay.
+                .filter(|hit| name != "codex" || !hit.desc.is_empty() || !hit.state.is_empty())
+        })
+        .or_else(|| titles::apply(native_title_rules(), name, &text))
+        .unwrap_or(titles::Hit {
+            state: String::new(),
+            desc: text,
+        });
+    hit.desc = native_title_text(&titles::glyph(&hit.desc));
+    if generic_native_title(&hit.desc, name, raw, cfg) {
+        hit.desc.clear();
+    }
+    (hit, suppressed)
+}
+
+fn native_title_choice(
+    title: &str,
+    alternate_title: Option<&str>,
+    name: &str,
+    raw: &str,
+    cfg: &Config,
+) -> titles::Hit {
+    let (mut primary, suppressed) = native_title_candidate(title, name, raw, cfg);
+    if primary.desc.is_empty() && !suppressed {
+        if let Some(alternate) = alternate_title {
+            let (fallback, _) = native_title_candidate(alternate, name, raw, cfg);
+            primary.desc = fallback.desc;
+            if primary.state.is_empty() {
+                primary.state = fallback.state;
+            }
+        }
+    }
+    primary
+}
+
+#[allow(clippy::too_many_arguments)]
+fn command_field_inner(
+    raw: &str,
+    pid: u32,
+    pane: &str,
+    title: &str,
+    opts: &str,
+    cfg: &Config,
+    reg: &Registry,
+    p: &Palette,
+    now: i64,
+    native: NativeTitle<'_>,
+) -> (String, String) {
     let fc = format_command(raw, p).0;
     if !cfg.on() || fc.is_empty() || is_idle_shell(raw) {
         return (fc, String::new());
     }
     let agent = agent_of(raw, cfg);
+    let native_title = native.current && agent.is_some() && cfg.show_title != ShowTitle::Off;
     let a0 = raw.split(' ').next().unwrap_or("");
     let b0 = basename(a0);
     let name: &str = match &agent {
@@ -413,6 +637,20 @@ pub fn command_field(
         desc = odesc;
         known = true;
         pubd = true;
+    } else if native.reported && !native.current && !title.is_empty() {
+        // A validated program message is published text, like @agent_desc,
+        // rather than an ordinary OSC title for heuristic rules to interpret.
+        desc = native_title_text(title);
+        known = true;
+        pubd = true;
+    } else if native_title {
+        let hit = native_title_choice(title, native.alternate, name, raw, cfg);
+        known = true;
+        desc = hit.desc;
+        if cfg.state && state.is_empty() && !hit.state.is_empty() {
+            state = hit.state;
+            agent_row = true;
+        }
     } else if !title.is_empty() {
         let t = titles::text(titles::head(title));
         match titles::apply(&cfg.rules, name, &t) {
@@ -436,11 +674,25 @@ pub fn command_field(
     if !desc.is_empty() {
         // published text is shown as published: only a bare repeat of the
         // name goes (a title can be stale, or a copy of the command line)
-        let repeat = if pubd { desc == name } else { repeats_row(&desc, name, raw, cfg) };
+        let repeat = if pubd {
+            desc == name
+        } else if native_title {
+            desc = native_title_text(&desc);
+            generic_native_title(&desc, name, raw, cfg)
+        } else {
+            repeats_row(&desc, name, raw, cfg)
+        };
         if repeat {
             desc.clear();
         }
-        desc = cap(desc, cfg.title_max);
+        desc = cap(
+            desc,
+            if native_title && !pubd {
+                titles::CAP
+            } else {
+                cfg.title_max
+            },
+        );
     }
     if !agent_row && desc.is_empty() {
         // agent_row is set wherever a state is, so there is none here
@@ -463,12 +715,25 @@ pub fn command_field(
             st.push_str(&format!(" {}{}{}", p.dim_tree, age, RST));
         }
     }
-    let dsc = if desc.is_empty() { String::new() } else { format!("{}{}{}", p.dim_edit, desc, RST) };
-    let mut field = match &agent {
-        None => fc,
-        Some((n, r)) => {
-            let rest = if (!st.is_empty() || !dsc.is_empty()) && !cfg.keep_args { "" } else { *r };
-            format!("{}{}{}{}", p.dim_cmd, n, rest, RST)
+    let title_primary = native_title && !pubd && !desc.is_empty();
+    let dsc = if title_primary || desc.is_empty() {
+        String::new()
+    } else {
+        format!("{}{}{}", p.dim_edit, desc, RST)
+    };
+    let mut field = if title_primary {
+        format!("{}{}{}", p.dim_edit, desc, RST)
+    } else {
+        match &agent {
+            None => fc,
+            Some((n, r)) => {
+                let rest = if (!st.is_empty() || !dsc.is_empty()) && !cfg.keep_args {
+                    ""
+                } else {
+                    *r
+                };
+                format!("{}{}{}{}", p.dim_cmd, n, rest, RST)
+            }
         }
     };
     let bar = match &cfg.separator {
@@ -511,6 +776,7 @@ mod tests {
 
     fn cfg() -> Config {
         Config {
+            native_user_rule_count: None,
             show_title: ShowTitle::Known,
             title_max: 40,
             known: KNOWN.iter().map(|s| s.to_string()).collect(),
@@ -529,21 +795,51 @@ mod tests {
     fn agents_are_named_by_what_they_are() {
         let c = cfg();
         let n = |s: &str| agent_of(s, &c).map(|a| (a.0, a.1.to_string()));
-        assert_eq!(n("claude --resume x"), Some(("claude".into(), " --resume x".into())));
-        assert_eq!(n("/home/u/.local/share/claude/versions/2.1.281 -c"), Some(("claude".into(), " -c".into())));
-        assert_eq!(n("node /home/u/.nvm/v/bin/codex resume"), Some(("codex".into(), " resume".into())));
-        assert_eq!(n("python3.12 /home/u/.local/bin/aider --model x"), Some(("aider".into(), " --model x".into())));
+        assert_eq!(
+            n("claude --resume x"),
+            Some(("claude".into(), " --resume x".into()))
+        );
+        assert_eq!(
+            n("/home/u/.local/share/claude/versions/2.1.281 -c"),
+            Some(("claude".into(), " -c".into()))
+        );
+        assert_eq!(
+            n("node /home/u/.nvm/v/bin/codex resume"),
+            Some(("codex".into(), " resume".into()))
+        );
+        assert_eq!(
+            n("python3.12 /home/u/.local/bin/aider --model x"),
+            Some(("aider".into(), " --model x".into()))
+        );
         // not the script word, or not an agent script
         assert_eq!(n("node --inspect /x/codex"), None);
         assert_eq!(n("node /x/server.js"), None);
         assert_eq!(n("pythonw /x/aider"), None);
         // a package's file run by path; npx and the package it runs
-        assert_eq!(n("node /p/node_modules/@openai/codex/bin/codex.js resume"), Some(("codex".into(), " resume".into())));
-        assert_eq!(n("node /u/bin/npx @google/gemini-cli --yolo"), Some(("gemini".into(), " --yolo".into())));
-        assert_eq!(n("node /u/bin/npx -y @google/gemini-cli@latest"), Some(("gemini".into(), "".into())));
-        assert_eq!(n("node /u/bin/npx --package=@openai/codex codex exec x"), Some(("codex".into(), " exec x".into())));
-        assert_eq!(n("node /u/bin/npx -p @qwen-code/qwen-code qwen"), Some(("qwen".into(), "".into())));
-        assert_eq!(n("node /u/bin/npx -p something claude"), Some(("claude".into(), "".into())));
+        assert_eq!(
+            n("node /p/node_modules/@openai/codex/bin/codex.js resume"),
+            Some(("codex".into(), " resume".into()))
+        );
+        assert_eq!(
+            n("node /u/bin/npx @google/gemini-cli --yolo"),
+            Some(("gemini".into(), " --yolo".into()))
+        );
+        assert_eq!(
+            n("node /u/bin/npx -y @google/gemini-cli@latest"),
+            Some(("gemini".into(), "".into()))
+        );
+        assert_eq!(
+            n("node /u/bin/npx --package=@openai/codex codex exec x"),
+            Some(("codex".into(), " exec x".into()))
+        );
+        assert_eq!(
+            n("node /u/bin/npx -p @qwen-code/qwen-code qwen"),
+            Some(("qwen".into(), "".into()))
+        );
+        assert_eq!(
+            n("node /u/bin/npx -p something claude"),
+            Some(("claude".into(), "".into()))
+        );
         assert_eq!(n("node /u/bin/npx cowsay hi"), None);
         assert_eq!(n("node /u/bin/npx -c 'gemini'"), None);
         assert_eq!(n("node /u/bin/npx"), None);
@@ -562,7 +858,12 @@ mod tests {
         assert!(repeats_row("u@box:~/x", "", "sleep 3", &c));
         assert!(repeats_row("sleep 30 && echo done", "", "sleep 30", &c));
         assert!(repeats_row("FOO=1 sudo make -j8", "", "make -j8", &c));
-        assert!(repeats_row("python3 ./manage.py runserver", "", "/usr/bin/python3 /h/manage.py runserver", &c));
+        assert!(repeats_row(
+            "python3 ./manage.py runserver",
+            "",
+            "/usr/bin/python3 /h/manage.py runserver",
+            &c
+        ));
         assert!(!repeats_row("notes.md - NVIM", "", "nvim notes.md", &c));
     }
 
@@ -590,7 +891,12 @@ mod tests {
         assert!(!r("[boxer] ~/x", "ssh boxer"));
         let mut long = cfg();
         long.host_short = "krootabulon".into();
-        assert!(repeats_row("[krootabulo] ssh me@remote ~", "", "ssh me@remote", &long));
+        assert!(repeats_row(
+            "[krootabulo] ssh me@remote ~",
+            "",
+            "ssh me@remote",
+            &long
+        ));
         assert!(!repeats_row("[krootabulon] ~", "", "ssh me@remote", &long));
         // no host name known: nothing is this host's
         let mut none = cfg();
@@ -603,11 +909,31 @@ mod tests {
     fn a_command_line_is_recognised_when_its_prefix_is_argv0() {
         let c = cfg();
         // the row is sudo itself: its preexec line starts with it
-        assert!(repeats_row("sudo docker run --rm -it ubuntu bash", "", "sudo docker run --rm -it ubuntu bash", &c));
-        assert!(repeats_row("time make -j8", "", "/usr/bin/time make -j8", &c));
+        assert!(repeats_row(
+            "sudo docker run --rm -it ubuntu bash",
+            "",
+            "sudo docker run --rm -it ubuntu bash",
+            &c
+        ));
+        assert!(repeats_row(
+            "time make -j8",
+            "",
+            "/usr/bin/time make -j8",
+            &c
+        ));
         // a prefix that is not argv0 is still skipped
-        assert!(repeats_row("sudo docker run -v /a:/b img@sha256:ab bash", "", "docker run", &c));
-        assert!(!repeats_row("sudo root@3f2a: /", "", "docker exec -it 3f2a bash", &c));
+        assert!(repeats_row(
+            "sudo docker run -v /a:/b img@sha256:ab bash",
+            "",
+            "docker run",
+            &c
+        ));
+        assert!(!repeats_row(
+            "sudo root@3f2a: /",
+            "",
+            "docker exec -it 3f2a bash",
+            &c
+        ));
     }
 
     #[test]
@@ -628,7 +954,12 @@ mod tests {
         assert!(!repeats_row("deploy@web1:/etc/ssh", "ssh", "ssh web1", &c));
         assert!(!repeats_row("deploy@web1:~/ssh", "ssh", "ssh web1", &c));
         assert!(!repeats_row("web1:/srv/ssh", "ssh", "ssh web1", &c));
-        assert!(!repeats_row("root@3f2a9c1b:/var/lib/docker", "docker", "docker exec -it 3f2a bash", &c));
+        assert!(!repeats_row(
+            "root@3f2a9c1b:/var/lib/docker",
+            "docker",
+            "docker exec -it 3f2a bash",
+            &c
+        ));
         // a command path is still one, and so is a colon after its last '/'
         assert!(repeats_row("/usr/bin/ssh web1", "ssh", "ssh web1", &c));
         assert!(repeats_row("ssh web1:/etc", "ssh", "ssh web1", &c));
@@ -656,5 +987,487 @@ mod tests {
     fn the_cap_counts_characters() {
         assert_eq!(cap("abcdefghij".into(), 8), "abcdefg…");
         assert_eq!(cap("abcdefgh".into(), 8), "abcdefgh");
+    }
+
+    fn native_render(raw: &str, title: &str, cfg: &Config, prefer_title: bool) -> (String, String) {
+        native_render_alternate(raw, title, cfg, prefer_title, None)
+    }
+
+    fn native_render_alternate(
+        raw: &str,
+        title: &str,
+        cfg: &Config,
+        prefer_title: bool,
+        alternate: Option<&str>,
+    ) -> (String, String) {
+        let palette = Palette {
+            dim_cmd: String::new(),
+            bold_amber: String::new(),
+            marker: String::new(),
+            dim_path: String::new(),
+            dim_ssh: String::new(),
+            dim_edit: String::new(),
+            dim_git: String::new(),
+            dim_tree: String::new(),
+            bold_red: String::new(),
+            sep: String::new(),
+            sep_col: String::new(),
+        };
+        let (field, state) = native_command_field(
+            raw,
+            123,
+            "pane",
+            title,
+            "",
+            cfg,
+            &Registry::new(),
+            &palette,
+            1000,
+            NativeTitle {
+                current: prefer_title,
+                alternate,
+                ..NativeTitle::default()
+            },
+        );
+        (field.replace(RST, ""), state)
+    }
+
+    #[test]
+    fn native_codex_conversations_replace_executables_and_keep_state() {
+        let c = cfg();
+        for (title, name, state) in [
+            (
+                "⠸ Add Rex tmux keybindings | dotfiles",
+                "Add Rex tmux keybindings",
+                "working",
+            ),
+            (
+                "⠏ Port tmux keybindings to rex | dotfiles",
+                "Port tmux keybindings to rex",
+                "working",
+            ),
+            ("A conversation name | dotfiles", "A conversation name", ""),
+            ("Review requested changes", "Review requested changes", ""),
+            (
+                "⠴ Working without a project suffix",
+                "Working without a project suffix",
+                "working",
+            ),
+            (
+                "[ ! ] Action Required | Review changes | dotfiles",
+                "Review changes",
+                "approve",
+            ),
+            (
+                "● [ . ] Action Required | Review changes | dotfiles",
+                "Review changes",
+                "approve",
+            ),
+        ] {
+            let expected = if state.is_empty() {
+                name.into()
+            } else {
+                format!("{name} ∣ {state}")
+            };
+            assert_eq!(
+                native_render("codex", title, &c, true),
+                (expected, state.into()),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_claude_titles_and_interpreter_installs_use_the_conversation() {
+        let c = cfg();
+        for (raw, title, expected) in [
+            ("claude", "✳ Fix floating picker", "Fix floating picker"),
+            (
+                "/home/u/.local/share/claude/versions/2.1.281 -c",
+                "◐ Fix floating picker",
+                "Fix floating picker ∣ working",
+            ),
+            (
+                "node /p/node_modules/@openai/codex/bin/codex.js resume",
+                "⠋ Fix floating picker | project",
+                "Fix floating picker ∣ working",
+            ),
+            (
+                "node /u/bin/npx @anthropic-ai/claude-code",
+                "✳ Fix floating picker",
+                "Fix floating picker",
+            ),
+            (
+                "python3 /home/u/.local/bin/aider",
+                "A useful agent conversation",
+                "A useful agent conversation",
+            ),
+        ] {
+            assert_eq!(native_render(raw, title, &c, true).0, expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn native_primary_titles_keep_long_searchable_text() {
+        let mut c = cfg();
+        c.title_max = 8;
+        let title =
+            "A conversation with a long distinctive label and a deeply searchable ending sentinel";
+        assert_eq!(native_render("codex", title, &c, true).0, title);
+        let capped = native_render("codex", &"界".repeat(300), &c, true).0;
+        assert_eq!(capped.chars().count(), titles::CAP);
+        assert!(
+            !capped.contains('…'),
+            "the safety input cap is not a display-width truncation"
+        );
+    }
+
+    #[test]
+    fn native_custom_rules_override_defaults_and_can_suppress_titles() {
+        let mut c = cfg();
+        c.rules = titles::parse("codex input Custom:$1 ⠸ * | *\nclaude - - ✳ *");
+        assert_eq!(
+            native_render("codex", "⠸ Repair picker | project", &c, true),
+            ("Custom:Repair picker ∣ input".into(), "input".into()),
+        );
+        assert_eq!(
+            native_render("claude", "✳ Repair picker", &c, true).0,
+            "claude"
+        );
+    }
+
+    #[test]
+    fn native_generic_titles_and_shell_prompts_fall_back_to_the_command() {
+        let mut c = cfg();
+        // Prompt filtering also works when Rex knows a host ID but no name.
+        c.host.clear();
+        c.host_short.clear();
+        for title in [
+            "",
+            "Codex",
+            "Codex CLI",
+            "OpenAI Codex",
+            "codex --resume",
+            "user@unknown:~/project",
+            "unknown: /project",
+            "[ ! ] Action Required",
+        ] {
+            let (field, _) = native_render("codex", title, &c, true);
+            assert!(
+                field == "codex" || field == "codex ∣ approve",
+                "{title:?}: {field:?}"
+            );
+        }
+        for title in ["Claude Code", "✳ Claude Code", "claude"] {
+            assert_eq!(native_render("claude", title, &c, true).0, "claude");
+        }
+    }
+
+    #[test]
+    fn native_title_promotion_requires_current_ownership_and_honors_off() {
+        let mut c = cfg();
+        let title = "⠸ A stale conversation | project";
+        assert_eq!(native_render("codex", title, &c, false).0, "codex");
+        c.show_title = ShowTitle::Off;
+        assert_eq!(native_render("codex", title, &c, true).0, "codex");
+        // ShowTitle::Off means no native title parsing either; no synthetic
+        // title-derived state should appear when the title is explicitly off.
+        assert_eq!(
+            native_render("codex", title, &c, true),
+            native_render("codex", title, &c, false)
+        );
+    }
+
+    #[test]
+    fn native_nonagents_and_unverified_titles_preserve_legacy_formatting() {
+        let mut c = cfg();
+        c.show_title = ShowTitle::All;
+        let p = Palette::from_env();
+        let reg = Registry::new();
+        for (raw, title) in [
+            ("nvim README.md", "README.md - NVIM"),
+            ("cargo test", "Running tests"),
+            ("zsh", "user@box:~/project"),
+            ("codex", "⠸ A stale conversation | project"),
+        ] {
+            let legacy = command_field(raw, 123, "pane", title, "", &c, &reg, &p, 1000);
+            assert_eq!(
+                native_command_field(
+                    raw,
+                    123,
+                    "pane",
+                    title,
+                    "",
+                    &c,
+                    &reg,
+                    &p,
+                    1000,
+                    NativeTitle::default()
+                ),
+                legacy,
+            );
+            if !raw.starts_with("codex") {
+                assert_eq!(
+                    native_command_field(
+                        raw,
+                        123,
+                        "pane",
+                        title,
+                        "",
+                        &c,
+                        &reg,
+                        &p,
+                        1000,
+                        NativeTitle {
+                            current: true,
+                            ..NativeTitle::default()
+                        }
+                    ),
+                    legacy,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_primary_titles_cannot_inject_terminal_or_tsv_controls() {
+        let c = cfg();
+        let title = "Review\t日本語\n\u{1b}]52;c;unsafe\u{7}\u{202e}\u{061c}\u{2028}\u{2029}done";
+        let (field, _) = native_render("codex", title, &c, true);
+        assert!(field.contains("Review") && field.contains("日本語") && field.contains("done"));
+        assert!(!field
+            .chars()
+            .any(|c| c.is_control()
+                || matches!(c, '\u{202e}' | '\u{061c}' | '\u{2028}' | '\u{2029}')));
+    }
+
+    #[test]
+    fn native_primary_titles_preserve_registry_state_and_age() {
+        let c = cfg();
+        let mut registry = Registry::new();
+        registry.insert(
+            "pane".into(),
+            Record {
+                sid: "123".into(),
+                word: "approve".into(),
+                since: 880,
+            },
+        );
+        let p = Palette::from_env();
+        for (raw, title) in [
+            ("codex", "⠸ Repair picker | project"),
+            ("claude", "✳ Repair picker"),
+        ] {
+            let (field, state) = native_command_field(
+                raw,
+                123,
+                "pane",
+                title,
+                "",
+                &c,
+                &registry,
+                &p,
+                1000,
+                NativeTitle {
+                    current: true,
+                    ..NativeTitle::default()
+                },
+            );
+            assert_eq!(state, "approve");
+            assert!(field.contains("Repair picker"));
+            assert!(field.contains("approve") && field.contains("2m"));
+            assert!(!field.contains(raw) && !field.contains("working"));
+        }
+    }
+
+    #[test]
+    fn native_generic_osc_titles_allow_a_verified_explicit_title_fallback() {
+        let mut c = cfg();
+        for (raw, primary, state) in [
+            ("codex", "Codex", ""),
+            ("claude", "✳ Claude Code", ""),
+            ("codex", "user@unknown:~/project", ""),
+            ("codex", "[ ! ] Action Required", "approve"),
+        ] {
+            let expected = if state.is_empty() {
+                "Repair startup race".into()
+            } else {
+                format!("Repair startup race ∣ {state}")
+            };
+            assert_eq!(
+                native_render_alternate(raw, primary, &c, true, Some("Repair startup race")),
+                (expected, state.into()),
+            );
+        }
+        assert_eq!(
+            native_render_alternate(
+                "codex",
+                "⠸ Original conversation | project",
+                &c,
+                true,
+                Some("Other task")
+            )
+            .0,
+            "Original conversation ∣ working",
+        );
+        c.state = false;
+        assert_eq!(
+            native_render_alternate(
+                "codex",
+                "[ ! ] Action Required",
+                &c,
+                true,
+                Some("Repair startup race")
+            ),
+            ("Repair startup race".into(), String::new()),
+        );
+    }
+
+    #[test]
+    fn native_fallback_titles_obey_custom_rule_suppression_and_rewriting() {
+        let mut c = cfg();
+        c.rules = titles::parse("codex - - Codex");
+        assert_eq!(
+            native_render_alternate("codex", "Codex", &c, true, Some("Repair startup race")).0,
+            "codex",
+            "an explicit suppression must not be bypassed by another source",
+        );
+        c.rules = titles::parse("codex input $1 task:*");
+        assert_eq!(
+            native_render_alternate("codex", "Codex", &c, true, Some("task:Repair startup race")),
+            ("Repair startup race ∣ input".into(), "input".into()),
+        );
+        c.rules = titles::parse("codex - - task:*");
+        assert_eq!(
+            native_render_alternate("codex", "Codex", &c, true, Some("task:Repair startup race")).0,
+            "codex",
+        );
+    }
+
+    #[test]
+    fn native_fallback_titles_receive_the_same_sanitization_and_visibility_rules() {
+        let mut c = cfg();
+        let fallback = "Repair\t日本語\u{1b}]52;c;unsafe\u{7}\u{202e}\u{061c}\u{2028}done";
+        let (field, _) = native_render_alternate("codex", "Codex", &c, true, Some(fallback));
+        assert!(field.contains("日本語") && field.contains("done"));
+        assert!(!field
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{202e}' | '\u{061c}' | '\u{2028}')));
+        c.show_title = ShowTitle::Off;
+        assert_eq!(
+            native_render_alternate("codex", "Codex", &c, true, Some(fallback)).0,
+            "codex"
+        );
+        c.show_title = ShowTitle::Known;
+        assert_eq!(
+            native_render_alternate("codex", "Codex", &c, false, Some(fallback)).0,
+            "codex"
+        );
+    }
+    #[test]
+    fn native_published_messages_are_secondary_without_relaxing_ordinary_osc_rules() {
+        let mut c = cfg();
+        c.rules = titles::parse("codex - - *\ncargo - - *");
+        c.native_user_rule_count = Some(0);
+        let p = Palette::from_env();
+        let reg = Registry::new();
+        for raw in ["codex", "cargo"] {
+            let report = NativeTitle {
+                reported: true,
+                ..NativeTitle::default()
+            };
+            let (field, _) = native_command_field(
+                raw,
+                123,
+                "pane",
+                "Review requested changes",
+                "",
+                &c,
+                &reg,
+                &p,
+                1000,
+                report,
+            );
+            assert!(field.contains(raw) && field.contains("Review requested changes"));
+            assert!(field.find(raw).unwrap() < field.find("Review requested changes").unwrap());
+            assert!(!command_field(
+                raw,
+                123,
+                "pane",
+                "Review requested changes",
+                "",
+                &c,
+                &reg,
+                &p,
+                1000
+            )
+            .0
+            .contains("Review requested changes"));
+            c.show_title = ShowTitle::Off;
+            assert!(!native_command_field(
+                raw,
+                123,
+                "pane",
+                "Review requested changes",
+                "",
+                &c,
+                &reg,
+                &p,
+                1000,
+                report
+            )
+            .0
+            .contains("Review requested changes"));
+            c.show_title = ShowTitle::Known;
+        }
+        c.rules = titles::parse("codex - - *");
+        c.native_user_rule_count = Some(1);
+        assert!(!native_command_field(
+            "codex",
+            123,
+            "pane",
+            "Suppressed title",
+            "",
+            &c,
+            &reg,
+            &p,
+            1000,
+            NativeTitle {
+                current: true,
+                reported: true,
+                alternate: None
+            }
+        )
+        .0
+        .contains("Suppressed title"));
+    }
+    #[test]
+    fn native_published_secondary_messages_are_sanitized_and_description_capped() {
+        let mut c = cfg();
+        c.title_max = 16;
+        let p = Palette::from_env();
+        let text = "Review\t日本語\u{1b}]52;c;unsafe\u{7}\u{202e}\u{061c}done";
+        let (field, _) = native_command_field(
+            "codex",
+            123,
+            "pane",
+            text,
+            "",
+            &c,
+            &Registry::new(),
+            &p,
+            1000,
+            NativeTitle {
+                reported: true,
+                ..NativeTitle::default()
+            },
+        );
+        assert!(field.contains("Review") && field.contains('…'));
+        assert!(
+            !field.contains('\t')
+                && !field.contains('\u{202e}')
+                && !field.contains('\u{061c}')
+                && !field.contains("\u{1b}]52")
+        );
     }
 }

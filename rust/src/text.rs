@@ -7,6 +7,7 @@
 //! harness still validate the port; for wide characters this is simply correct
 //! where bash was not.
 
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 /// Terminal cells occupied by `s`.  Control characters count as zero, matching
@@ -43,16 +44,20 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
     let budget = max - 1; // room for the ellipsis
 
-    // Longest char-boundary prefix that fits, found by binary search over the
-    // boundaries and measured as a STRING each time.  Growing char by char and
-    // summing widths is what the old code did, and it cuts inside a cluster:
-    // "man + ZWJ" measures the same 2 cells as the whole "man-technologist", so
-    // the joiner looked free and was kept while the char after it was not.
+    // Common command/path labels need no Unicode boundary table at all.
+    if s.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+        return format!("{}…", &s[..budget]);
+    }
+
+    // Find a fitting prefix of complete grapheme clusters, measuring the whole
+    // prefix because terminal width is not additive across Unicode codepoints.
+    // Cutting at char boundaries can change an emoji's appearance ("❤️" to
+    // "❤"), split a flag, or detach a skin-tone modifier or combining mark.
     //
     // Prefix width is non-decreasing, so the search is sound; and since only
     // measured-fitting prefixes are ever accepted, a pathological sequence can
     // make the result shorter but never wider than the budget.
-    let bounds: Vec<usize> = s.char_indices().map(|(i, _)| i).collect();
+    let bounds: Vec<usize> = s.grapheme_indices(true).map(|(i, _)| i).collect();
     let (mut lo, mut hi) = (0usize, bounds.len());
     while lo + 1 < hi {
         let mid = (lo + hi) / 2;
@@ -63,18 +68,12 @@ pub fn truncate(s: &str, max: usize) -> String {
         }
     }
 
-    // Never strand a joiner or a variation selector on the ellipsis: cutting
-    // after the ZWJ left U+200D immediately before U+2026, which a terminal is
-    // free to render as anything.
-    let mut out = &s[..bounds[lo]];
-    while let Some(c) = out.chars().next_back() {
-        if matches!(c, '\u{200d}' | '\u{fe0f}' | '\u{fe0e}') {
-            out = &out[..out.len() - c.len_utf8()];
-        } else {
-            break;
-        }
+    // Malformed source text can itself end a grapheme with a dangling joiner.
+    // Drop that whole grapheme rather than joining it to the added ellipsis.
+    while lo > 0 && s[..bounds[lo]].ends_with('\u{200d}') {
+        lo -= 1;
     }
-    format!("{}…", out)
+    format!("{}…", &s[..bounds[lo]])
 }
 
 /// Pad `s` (whose visible width is `plain`) out to `target` cells.
@@ -134,11 +133,31 @@ pub fn trim_path(path: &str, max: usize) -> String {
 
 /// Replace `$HOME` with `~`, anchored at the start only.
 pub fn tildify(path: &str, home: &str) -> String {
-    if !home.is_empty() && path.starts_with(home) {
-        format!("~{}", &path[home.len()..])
-    } else {
-        path.to_string()
+    if !home.is_empty() && home.chars().all(|c| c == '/') {
+        return path
+            .strip_prefix('/')
+            .map(|rest| {
+                if rest.is_empty() {
+                    "~".into()
+                } else {
+                    format!("~/{rest}")
+                }
+            })
+            .unwrap_or_else(|| path.to_owned());
     }
+    let home = home.trim_end_matches('/');
+    if !home.is_empty() {
+        if path == home {
+            return "~".into();
+        }
+        if let Some(rest) = path
+            .strip_prefix(home)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            return format!("~/{rest}");
+        }
+    }
+    path.to_string()
 }
 
 /// Compact age of an epoch timestamp: "now", "5m", "2h", "3d", "1w".
@@ -224,7 +243,10 @@ mod tests {
             if it.next() == Some('…') {
                 let before = it.next();
                 assert!(
-                    !matches!(before, Some('\u{200d}') | Some('\u{fe0f}') | Some('\u{fe0e}')),
+                    !matches!(
+                        before,
+                        Some('\u{200d}') | Some('\u{fe0f}') | Some('\u{fe0e}')
+                    ),
                     "max={} left a dangling {:?} before the ellipsis: {:?}",
                     max,
                     before,
@@ -233,6 +255,26 @@ mod tests {
             }
             assert!(width(&out) <= max.max(1), "max={} gave {:?}", max, out);
         }
+    }
+
+    #[test]
+    fn truncation_preserves_complete_emoji_and_combining_graphemes() {
+        for cluster in ["❤️", "👍🏽", "🇵🇱", "👨‍💻", "👨‍👩‍👧‍👦", "1️⃣", "a\u{301}"]
+        {
+            let source = format!("{cluster}more");
+            let cells = width(cluster);
+            assert_eq!(truncate(&source, cells + 1), format!("{cluster}…"));
+            assert_eq!(truncate(&source, cells), "…");
+            for max in 0..width(&source) {
+                let shortened = truncate(&source, max);
+                assert!(width(&shortened) <= max);
+                let prefix = shortened.strip_suffix('…').unwrap_or(&shortened);
+                assert!(source
+                    .grapheme_indices(true)
+                    .any(|(index, _)| index == prefix.len()));
+            }
+        }
+        assert_eq!(truncate("c\u{200d}tail", 2), "…");
     }
 
     #[test]
@@ -283,6 +325,17 @@ mod tests {
         assert_eq!(tildify("/home/u/x", "/home/u"), "~/x");
         // must NOT rewrite an occurrence in the middle
         assert_eq!(tildify("/opt/home/u/x", "/home/u"), "/opt/home/u/x");
+        // A sibling with the same prefix is not inside this home directory.
+        assert_eq!(
+            tildify("/home/user/project", "/home/u"),
+            "/home/user/project"
+        );
+        assert_eq!(tildify("/home/u-other", "/home/u"), "/home/u-other");
+        assert_eq!(tildify("/home/u", "/home/u/"), "~");
+        assert_eq!(tildify("/home/u/x", "/home/u/"), "~/x");
+        assert_eq!(tildify("/tmp", ""), "/tmp");
+        assert_eq!(tildify("/tmp", "/"), "~/tmp");
+        assert_eq!(tildify("/", "/"), "~");
     }
 
     #[test]

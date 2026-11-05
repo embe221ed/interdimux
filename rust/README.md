@@ -1,10 +1,269 @@
-# imux — the interdimux core
+# imux — the shared interdimux core
 
-The heavy half of interdimux: parsing the tmux dumps, sizing the columns,
-resolving commands and git branches, and rendering the rows. This is the part
-that was ~181 ms of in-process bash.
+The Rust core supplies shared data processing, rendering, and a persistent
+fzf navigator for tmux and Rex. The existing tmux integration also uses it to
+parse dumps, size columns, resolve commands and git branches, and render rows.
+That processing was ~181 ms of in-process Bash before the Rust implementation.
 
-    cargo build --release      # -> target/release/imux
+    cargo build --release --locked      # -> target/release/imux
+
+## Shared navigator
+
+`imux pick --backend tmux|rex` starts fzf, owns the native target records for
+the invocation, and activates the selected session, window, or pane. Both
+backends use the same Rust model, palette presentation, fzf process control,
+selection, and cancellation behavior. Collection and native activation are
+adapters. The shared navigator requires fzf 0.74 or newer; the existing full
+tmux frontend retains its separate fzf version gates.
+
+```sh
+# Inside tmux; origin and socket defaults come from the tmux environment.
+./target/release/imux pick --backend tmux
+
+# Inspect candidate rows without opening fzf or switching a target.
+./target/release/imux list --backend tmux
+
+# Rex's Lua binding supplies the exact initiating client and origin IDs.
+./target/release/imux pick --backend rex \
+  --client CLIENT_ID --session SESSION_ID --window WINDOW_ID --block BLOCK_ID
+```
+
+Rex runs the navigator in a floating terminal created by its Lua binding.
+`--block` identifies the originating pane; `--picker-block` identifies the
+temporary picker and defaults to `REX_BLOCK`. Pass `--server ENDPOINT` when
+selecting a Rex server explicitly. Standalone invocation uses the official CLI
+for collection and activation. Hosted invocation instead accepts `--snapshot
+FILE --result FILE`: it reads the coordinator's snapshot and atomically writes
+one versioned selection, cancellation, or error result, without starting Rex's
+CLI. Neither path requires tmux, Python, or jq.
+
+To open the hosted float from the Rex CLI, pass the persistent app's full ID
+as an action argument (find it with `rex client ls`):
+
+```sh
+rex do interdimux -s SESSION_ID -b BLOCK_ID client_id=APP_CLIENT_ID
+```
+
+Rex's `-C` option routes queued client actions, but a configuration action's
+`ctx.client_id` still identifies the calling CLI. Interdimux requires the
+explicit `client_id` argument for CLI launches so its detached coordinator
+can restore focus after that CLI exits. App key bindings and palette actions
+supply their app identity automatically. The same argument applies to the
+dashboard, action modes, next-agent action, and optional session-jump actions.
+
+Tmux also accepts `--client CLIENT_TTY`, `--block %PANE`, and
+`--socket SOCKET_PATH`. Launchers should pass the initiating client explicitly
+when more than one client is attached. Defaults use `INTERDIMUX_CLIENT`,
+`TMUX_PANE`, and the socket in `TMUX`. The `list` command takes the same backend
+and origin options as `pick` and does not activate targets.
+
+The shared navigator now includes scoped raw filtering, previews, directory
+discovery, find-or-create, rename, confirmed close, zoom, swap, send, and
+refresh. `Ctrl+g` opens its actions menu and health information. `Alt+n`,
+`Alt+v`, and `Alt+h` create a window or split right/down. It keeps the same fzf
+process, query, and row position across in-place actions. Opaque tokens are
+never reused after refresh; removed objects cannot silently become new ones.
+The TPM plugin continues to open its original Bash frontend by default. The
+shared command is opt-in for tmux during this migration. See the key table in
+the main README.
+
+Native frontends read `INTERDIMUX_*` environment settings. They do not import
+tmux's `@interdimux-*` options; those continue to configure the TPM frontend.
+Set the corresponding environment values for Rex's server or native tmux
+launcher. `INTERDIMUX_SHOW_PREVIEW=on` is accepted as the legacy spelling of
+`INTERDIMUX_PREVIEW=on`; an explicit `INTERDIMUX_PREVIEW` takes precedence.
+
+Native action modes use `pick --mode switch|kill|rename|zoom|swap|send|dirs|agents|schedule|jobs|doctor|dashboard`.
+Enter repeats the selected action; Escape ends the mode. The dashboard provides
+the same entries with counts and backend capability checks. Agent views use
+exact shared state records, retain the tree and support the ordinary scopes.
+Contextual hints follow the current target and width. Directory suggestions in
+the main list come only from bounded recent history; scans and zoxide queries
+remain explicit actions.
+
+```sh
+imux agents --backend rex [ORIGIN_OPTIONS] --count --states approve,input
+imux agent-next --backend rex [ORIGIN_OPTIONS]
+imux jump --backend rex [ORIGIN_OPTIONS] 2
+imux connect-dir --backend rex [ORIGIN_OPTIONS] ~/code/project
+imux session-name-for --backend rex [ORIGIN_OPTIONS] ~/code/project
+imux send-in --backend rex [ORIGIN_OPTIONS] 30 . 'make test'
+imux send-at --backend rex [ORIGIN_OPTIONS] '17:30' block:ID 'C-c'
+imux jobs list
+imux jobs cancel ID
+imux jobs output ID
+imux doctor --backend rex [ORIGIN_OPTIONS]
+imux doctor --ack
+```
+
+Replace `[ORIGIN_OPTIONS]` with the client/session/window/pane flags above;
+tmux uses its corresponding flags. These direct commands also accept their
+legacy `--agents`, `--agent-next`, `--jump`, `--connect-dir`, `--send-in`,
+`--send-at`, `--sched-list` and `--sched-cancel` spellings. `jobs --backend ...`
+opens the job manager; `jobs list` prints JSON records.
+
+Native scheduling is a shared one-shot Rust worker and private versioned store
+under `${XDG_STATE_HOME:-~/.local/state}/interdimux/jobs/`. Workers detach from the
+picker's terminal. Resolved times support relative shorthand, clocks, tomorrow
+and ISO dates; additional `at` time expressions can be parsed when `at` exists
+without submitting an OS job. Cancellation is checked again at the atomic
+delivery claim. Guards bind a job to the original server incarnation and one
+native pane; sends never focus the app or broadcast. `sent` means input was
+delivered, not that the shell command finished. Logs describe delivery, while
+command output stays in the target pane. Jobs interrupted by machine shutdown
+are reported instead of being automatically replayed. The legacy Bash queue is
+separate and keeps its existing `at` behavior.
+
+Health checks include backend capabilities, configuration, and retained native
+errors in `interdimux/errors.log`. `doctor --ack` marks the existing errors as
+seen without deleting history; a later failure becomes a problem again.
+
+New sessions use `startup.conf`, `.interdimux-startup`, then
+`INTERDIMUX_STARTUP_COMMAND`; `INTERDIMUX_HYDRATE=off` disables delivery. Every
+line is literal text, including strings resembling key names. Existing
+sessions are activated without repeating startup commands. Custom project
+markers and shared recent/zoxide history follow the original directory picker.
+
+### Rex hosting
+
+The host integration belongs to interdimux at `integrations/rex.lua`. Load it
+from Rex's configuration with the checkout path:
+
+```lua
+local interdimux_root = "/path/to/interdimux"
+dofile(interdimux_root .. "/integrations/rex.lua").setup {
+  root = interdimux_root,
+  dashboard_ui = "terminal", -- Ctrl+b g opens the dedicated hotkey menu
+}
+```
+
+The default `dashboard_ui="terminal"` opens a dedicated grouped hotkey menu
+with no search field. It runs before any navigator tree is created, so Escape
+or `q` returns directly to the originating pane. Selecting a tool starts its
+existing shared Rust mode. The terminal dashboard is also available with
+`imux pick --mode dashboard`.
+
+The optional `dashboard_ui="native"` binds `Ctrl+b g` directly to Rex's command palette
+(`Cmd+Shift+P`). Interdimux actions have an `Interdimux:` title prefix, an
+Interdimux category, and `imux` search keywords. It is the app-wide palette;
+the installed API exposes no initial query or custom-palette provider.
+No terminal or Rust picker starts behind the palette; dismissal returns to the
+original pane. Choosing a tool launches its existing shared Rust mode.
+
+Build the release binary before using the binding, then run `rex config check`
+and reload the running app with its **Reload Config** action (`rex -C CLIENT do
+client.config.reload`). A server-only `rex config reload` can leave the Mac app
+using a cached keymap for newly added shortcuts. The integration registers
+`interdimux` and `ctrl+b>f`, captures the originating client/session/window/pane, and starts one
+detached Rex CLI coordinator. That Lua coordinator supplies the snapshot and
+opens a centered float. The terminal starts the binary directly with
+`shell="none"` and login disabled, so it does not print a login banner. The
+coordinator observes terminal completion to apply the selection and tear down
+the float. Enter and Escape start no additional CLI process.
+
+The float uses Rex's default font. A versioned `ready.json` gate waits only for
+the initial snapshot to be written; it never waits for GUI ownership, font
+changes, or stable-grid samples. Creating the float before collecting metadata
+overlaps GUI startup with collection. Initial size hints use the origin window
+and cached popup metrics, with exact reuse when the source geometry matches.
+An optional background observer updates a bounded per-client size cache under
+`${XDG_STATE_HOME:-~/.local/state}/interdimux/rex-picker-*.json`. On a cold cache
+or changed geometry Rex may refit once; subsequent matching opens use its exact
+grid. Observation errors cannot delay or dismiss the picker. Captured snapshots
+without a gate still start immediately.
+
+The finder retains its last frame until the disposable terminal closes.
+Ordinary inline tmux invocation still restores the caller's original screen.
+The UI uses a compact indented tree with one line per target. A single-pane
+window is one combined row targeting that pane; multi-pane windows have
+indented pane children. Full names remain searchable even beyond the viewport.
+Filtering does not recollect Rex state or scan project directories. Errors are published
+to the coordinator before the acknowledgement prompt, but it waits for the
+terminal program to exit before closing the float.
+
+Explicit actions use a private framed Unix socket between a small helper and
+the same Rust controller; fzf remains alive. The native Rex coordinator polls
+only its private action mailbox, executes operations on its existing connection,
+and publishes atomic responses and snapshots. Refresh asks for new data; normal
+action reloads reuse the snapshot already published with that action. Preview
+captures are bounded and briefly cached. Controller sockets block while idle.
+
+Hosted Rex pickers refresh live by default. Native layout, process, directory,
+title and program-status events update the open tree and preview, preserving
+the query and the selected target while it still exists. Background row reloads
+wait for a pause in typing. Bursts are coalesced
+into at most four collections per second. A process or status change refreshes
+only the affected pane's metadata; structural changes refresh the affected
+sessions. Stale layout revisions and the picker's own terminal events are
+ignored. There is no periodic backend scan while idle, and each event uses the
+existing coordinator connection. Rust checks the local snapshot file every
+100 ms and updates fzf through a private Unix socket only after publication.
+Set `INTERDIMUX_LIVE_REFRESH=off` in the Rex server environment to disable live
+refresh; `Ctrl+r` still performs a full refresh. Standalone Rex and tmux
+invocations retain explicit refresh.
+
+The three fields are identity, path/context, and command. Name+command is the
+default; `INTERDIMUX_MATCH_SCOPE=name|path|cmd|all|name+cmd` changes it.
+`INTERDIMUX_RAW=off` uses ordinary filtering, and `INTERDIMUX_PREVIEW=on` opens
+the preview initially. `INTERDIMUX_PROJECT_DIRS` supplies colon-separated
+directory roots. Directory browsing and bounded deep scanning run only after
+explicit actions; project previews show safe README excerpts and directory
+entries. A matched session directory switches to that existing session.
+
+Rex uses native program-status reports to show `approve`, `input`, `working`,
+`done`, and `error` through the same agent formatter as tmux. A reported owner
+must match the foreground PID and name; stale reports are ignored. Hosted
+agent rows use the current process's verified terminal conversation title as
+the command field, followed by status. Explicit program-status titles are a
+fallback; generic titles fall back to the process name. Message-only status
+reports do not replace a conversation title. Terminal previews also show the
+verified foreground program's task title, status message and percentage when
+reported, including programs that are not coding agents. These details update
+with native status events and stay within the preview's available space.
+Hosted snapshots prove local
+process provenance before reading argv or git metadata. Standalone collection
+requires the server to identify its exact CLI process as a local Unix peer.
+Rex MRU and explicit creation-directory associations persist under
+`${XDG_STATE_HOME:-~/.local/state}/interdimux/rex-mru.json`.
+
+Rex zoom is applied after the float closes so focusing the picker cannot undo
+it. Window swaps reorder tabs; pane swaps exchange panes. Both stay within one
+Rex session. Rex has no tmux-style client detach. The native shared scheduler
+supports both backends; the legacy tmux frontend retains its original queue.
+
+Validation from the checkout root:
+
+```sh
+cargo test --manifest-path rust/Cargo.toml --locked
+bash tests/test_rex_lua.sh
+```
+
+The Rust tests include real fzf in private PTYs and isolated native tmux servers.
+No live Rex server is needed for that suite. Live Rex validation uses separate
+disposable sessions; it never sends test input into existing user panes.
+The regular test runner and Linux CI also run the Rex Lua suites, including
+mailbox, geometry, lifecycle, history, bindings, event coalescing, incremental
+snapshot costs and exact-target operations.
+
+The November 2026 validation passed 320 Rust tests, five Lua suites, 31 legacy
+corpus checks, and live Rex action/scheduling workflows. On the development
+machine, captured picker rows took about 8 ms and warm native popups opened in
+about 119 ms median. A 10,000-record job history did not affect ordinary popup
+startup; its explicit Jobs listing still takes about
+550 ms. Changed-record detection cut idle CPU for 100 scheduled workers by 65%
+without changing their quarter-second cancellation cadence. Direct action
+modes collect one backend snapshot instead of two.
+
+The binary defaults to `<root>/rust/target/release/imux`; `INTERDIMUX_BIN` or
+the setup option `binary` can override it. `INTERDIMUX_FZF_BIN` selects fzf
+explicitly. `INTERDIMUX_REX_BIN` selects the coordinator CLI and standalone Rex
+transport; otherwise these search PATH and the installed Rex app bundle. The
+coordinator uses native Lua APIs over its existing connection. The host adds
+`/opt/homebrew/bin` and `/usr/local/bin` to the terminal's PATH. Environment
+overrides must be visible to the Rex server, which reads the
+configuration and creates the terminal. Errors remain visible until Enter.
+
+## Existing tmux renderer integration
 
 `scripts/interdimux.sh` picks the binary up automatically from
 `rust/target/release/imux`. Set `INTERDIMUX_BIN=/path/to/imux` to use one
@@ -38,9 +297,10 @@ which binary it was and how to rebuild it. One built from older sources that
 speak the same protocol is used, and renders as those sources did: only the
 build in `rust/target` is compared with `src/`.
 
-## The boundary
+## Legacy gather3 boundary
 
-**bash owns tmux and config. The binary owns rendering.**
+For the existing tmux frontend, **Bash owns tmux and config; Rust owns
+rendering**. The `pick` command additionally owns the shared navigator.
 
 bash performs the single batched tmux query, reads Claude Code's session
 registry, resolves every option (env → tmux option → built-in default), and

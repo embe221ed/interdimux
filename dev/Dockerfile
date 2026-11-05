@@ -97,6 +97,7 @@ FROM base AS dev
 #               collation differs from C's
 #   strace      read/exec counts (render_cost, gather_batch, git_probe, dirs_list)
 #   zsh         `zsh -f` and --with-shell='zsh -c' cases
+#   lua5.4      Rex adapter, mailbox, lifecycle and geometry regression suites
 #   build-essential  cargo's linker
 #   ncurses-term     terminfo for an interactive shell's client
 #   entr moreutils rsync jq tini  the dev loop (dev/cmd.sh) and PID 1
@@ -104,7 +105,7 @@ FROM base AS dev
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       at bash coreutils dash diffutils fd-find findutils gawk git grep jq \
-      libevent-core-2.1-7t64 locales mawk ncurses-base ncurses-bin ncurses-term \
+      libevent-core-2.1-7t64 locales lua5.4 mawk ncurses-base ncurses-bin ncurses-term \
       perl procps psmisc python3 sed strace tzdata util-linux zsh \
       build-essential entr less make moreutils rsync tini \
  && rm -rf /var/lib/apt/lists/* \

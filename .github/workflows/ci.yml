@@ -126,7 +126,7 @@ jobs:
           sudo rm -f /var/lib/man-db/auto-update
           retry apt_get -o APT::Update::Error-Mode=any update
           retry apt_get install -y \
-            fd-find at gawk locales strace zsh \
+            fd-find at gawk locales strace zsh lua5.4 \
             build-essential libevent-dev libncurses-dev bison pkg-config
           # strace: tests/test_render_cost.sh counts the bash renderer's
           # read(2) calls, the one measure of its cost a loaded runner cannot

@@ -251,6 +251,27 @@ mod imp {
         Some((i64::from(info.pbi_pgid), i64::from(info.e_tpgid)))
     }
 
+    /// Kernel creation time, independent of the executable name or argv.
+    pub fn start_time(pid: u32) -> Option<(u64, u64)> {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return None;
+        }
+        let mut info = std::mem::MaybeUninit::<ProcBsdInfo>::zeroed();
+        let size = std::mem::size_of::<ProcBsdInfo>() as c_int;
+        let got = unsafe {
+            proc_pidinfo(pid as c_int, PROC_PIDTBSDINFO, 0, info.as_mut_ptr() as *mut c_void, size)
+        };
+        if got != size {
+            return None;
+        }
+        // SAFETY: the kernel filled every byte of the zero-initialized record.
+        let info = unsafe { info.assume_init() };
+        if info.pbi_pid != pid || info.pbi_start_tvsec == 0 || info.pbi_start_tvusec >= 1_000_000 {
+            return None;
+        }
+        Some((info.pbi_start_tvsec, info.pbi_start_tvusec))
+    }
+
     /// libproc is usable if we can read our own argv.  Cheap self-test, run once.
     pub fn available() -> bool {
         let mut buf = vec![0u8; argmax()];
@@ -281,6 +302,8 @@ mod imp {
 }
 
 pub use imp::{argmax, available, children, group_ids, pid_argv};
+#[cfg(target_os = "macos")]
+pub use imp::start_time;
 
 #[cfg(test)]
 mod tests {

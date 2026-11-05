@@ -2,7 +2,146 @@
 
 A portal gun for your tmux sessions.
 
-`interdimux` is a fuzzy tmux navigator for quickly jumping between sessions, windows, and panes with a fast keyboard-driven workflow.
+`interdimux` is a fuzzy navigator for quickly jumping between sessions,
+windows, and panes. Its shared Rust navigator supports tmux and Rex; the
+existing tmux frontend provides the full set of actions below.
+
+## Shared Rust navigator for tmux and Rex
+
+The shared navigator runs the same Rust model, tree presentation, search scopes,
+previews, dialogs, directory picker, and action controller for both backends.
+It requires **fzf 0.74 or
+newer**. From the checkout root, build it once:
+
+```sh
+cargo build --manifest-path rust/Cargo.toml --release --locked
+```
+
+Inside tmux, run `./rust/target/release/imux pick --backend tmux`. Rex opens
+`imux pick --backend rex` in a floating terminal through its Lua binding on
+`Ctrl+b` then `f`; the binding passes the initiating client and origin IDs.
+Filter the list, press Enter to switch, or Escape/Ctrl+C to cancel. Use
+`imux list --backend tmux` or the corresponding Rex invocation to inspect
+rows without opening fzf or switching targets.
+
+The compact tree keeps the tmux layout: identity, directory/git context, and
+command columns, with session rules and pane children only for split windows.
+Single-pane windows use one combined row: Enter activates the exact pane;
+rename, close and swap act on the window. Full labels remain searchable.
+Raw filtering dims nonmatches while preserving the tree. The default scope is
+name+command; `Ctrl-]` cycles name/path/command/all/name+command. Inactive
+columns dim. Child rows lead with their window or pane name and keep the session
+breadcrumb at the end. Long rows scroll to reveal matching names, paths and
+commands, including on narrow terminals.
+
+| Key inside the picker | Shared action |
+| --- | --- |
+| Enter / Alt+Enter | Switch, or create from a query / force find-or-create |
+| Ctrl+e / Ctrl+x | Rename / confirmed close |
+| Ctrl+z / Ctrl+s | Zoom / mark swap source, then choose destination |
+| Ctrl+t | Send literal command text or one key such as `C-c`; parent rows address their terminal panes |
+| Ctrl+o | Project directory picker; Ctrl+g browse, Ctrl+f deep search, Ctrl+r reset |
+| Ctrl+] / Ctrl+/ / Ctrl+r | Search scope / terminal preview / refresh |
+| Ctrl+g | Actions, programs needing attention, and health information |
+| Alt+n / Alt+v / Alt+h | New window / split right / split down |
+| Escape | Close and restore origin focus/zoom |
+
+Rename, close, send, split, swap and refresh reload in place, preserving the
+query and fzf process. A dimmed row cannot trigger an action. Dialogs retain
+literal text and use explicit confirmation for closing targets. Ordinary
+query changes use fzf directly; optional previews run a small Rust helper and
+reuse the existing backend connection.
+
+This shared entry point is opt-in for tmux: TPM's `prefix + f` still opens
+the original tmux navigator documented below. The native frontend shares its
+action modes, projects, startup commands, agents, scheduler and jobs with Rex. See
+[Rust navigator usage and origin options](rust/README.md#shared-navigator).
+
+### Rex integration
+
+Add the integration to Rex's `~/.config/rex/init.lua`, using the path of this
+checkout:
+
+```lua
+local interdimux_root = "/path/to/interdimux"
+dofile(interdimux_root .. "/integrations/rex.lua").setup {
+  root = interdimux_root,
+  dashboard_ui = "terminal",
+}
+```
+
+Build the release binary, then run `rex config check` and `rex config reload`.
+The integration registers `Ctrl+b` then `f` for the navigator and `Ctrl+b` then
+`g` for the custom Interdimux dashboard. It groups actions and accepts one
+displayed hotkey, without a search box or a hidden navigator underneath it.
+The session/window/pane picker starts only after choosing a tool. Rex's native
+`Cmd+Shift+P` palette also keeps the grouped `Interdimux:` actions; type `imux`
+there to find them. Set `dashboard_ui="native"` to use that app-wide palette
+on `Ctrl+b g` instead.
+The action starts one detached Rex coordinator, which supplies the snapshot
+and opens a centered floating terminal. The terminal starts the shared Rust
+navigator directly with login disabled and explicit initiating-client/origin
+IDs. The navigator publishes a small result record; the coordinator applies
+it after the terminal program exits. Enter and Escape start no additional
+CLI process.
+
+The float uses Rex's default font and renders as soon as its snapshot is ready.
+It seeds the terminal grid from the current window and previously observed popup
+sizes; GUI ownership and font adjustments never delay rendering. A cold or
+resized window can refit once when Rex reports its exact grid.
+For agents such as Codex and Claude, the command column shows the conversation
+title and status when Rex verifies that the current process owns the title;
+otherwise it falls back to the process name.
+
+Hosted actions use a private, versioned request/response mailbox over the same
+coordinator connection, without a Rex CLI startup for each action. Rex adds
+native program-status reports, pane titles/labels, and native splits. Process
+arguments and git enrichment run only when the snapshot proves the pane is
+local to the worker. Zoom closes the float before applying focus and zoom.
+Rex swaps stay within one session; tmux-style client detach is unavailable.
+
+The dashboard offers repeatable action modes, exact agent counts and the next
+agent needing attention, project creation, scheduling, jobs and health checks.
+The agent view matches verified state records rather than words in labels.
+`INTERDIMUX_HIDE`, title-rule files, project markers, recent directories and
+startup-command configuration apply to the native frontends too. Startup lines
+run only in a newly created session after its shell is ready.
+
+Native frontends use `INTERDIMUX_*` environment settings rather than importing
+tmux's `@interdimux-*` options. Those options still configure the original TPM
+frontend. Set environment preferences in Rex's server environment; the native
+preview accepts both `INTERDIMUX_PREVIEW` and legacy `INTERDIMUX_SHOW_PREVIEW`.
+
+Scheduled sends resolve a session/window selection to one exact terminal pane.
+The shared Rust scheduler records the resolved time, supports Undo/cancel, and
+runs independently of the picker. It checks Rex's server instance or tmux's
+server PID/start time before sending; jobs for a restarted server fail without
+typing into another pane. Jobs lists pending/history records and delivery logs.
+This native queue needs no `at` daemon; the original Bash tmux frontend retains
+its separate `at` queue. Worker interruption is reported rather than silently
+resubmitted. All job discovery happens only when a job action is requested.
+
+`setup { root = ..., width = 0.78, height = 0.66 }` controls the centered Rex
+float. `INTERDIMUX_RAW=off`, `INTERDIMUX_PREVIEW=on`, and
+`INTERDIMUX_MATCH_SCOPE=path` select alternate shared defaults. Directory roots
+use `INTERDIMUX_PROJECT_DIRS` (colon-separated); scans happen only on explicit
+directory actions, with depth/time/entry limits and network-mount guards.
+`agent_next_key` optionally binds the next waiting agent; `jump_keys=true`
+opts into `Ctrl+b` then `1`–`9` session jumps. The default leaves those keys to
+your existing window bindings. `key` and `dashboard_key` replace the two default
+entry bindings.
+
+The binary defaults to `rust/target/release/imux` in that checkout. Set
+`INTERDIMUX_BIN` in the Rex server's environment, or pass `binary` to `setup`,
+to use a different build. The integration adds the standard Homebrew binary
+directories to the picker's PATH. Actual errors stay visible until Enter;
+cancellation closes the float normally. The last finder frame remains visible
+until the disposable terminal closes, preventing a return to its startup screen.
+
+Standalone Rex commands without host-supplied snapshot/result files use Rex's
+CLI, found on PATH or in the normal/Beta app bundle; `INTERDIMUX_REX_BIN` selects
+another CLI. The hosted binding also uses this CLI to start its coordinator
+once when opening the picker; that connection handles completion directly.
 
 ## Features
 
@@ -58,7 +197,12 @@ A portal gun for your tmux sessions.
 - Dedicated modes for kill, rename, zoom, swap, detach, and send operations
 - Configurable key binding, popup size, ordering, preview, and extra fzf flags
 
-## Dependencies
+## Tmux frontend dependencies
+
+The list below applies to the full tmux frontend. The shared Rex binding
+requires the built `imux` binary, fzf 0.74+, Rex's CLI, and Rex's Lua APIs.
+The hosted binding does not require tmux or Bash. See
+[shared navigator usage](rust/README.md#shared-navigator).
 
 - **`tmux` >= 3.6 — a hard requirement, not a recommendation.** Every row is
   delimited with a raw US byte (`\x1f`) inside a `tmux -F` format, and tmux
@@ -145,8 +289,8 @@ background whenever `rust/target/release/imux` is missing or older than its
 sources. Nothing waits for it: tmux starts and the keys are bound while it
 compiles, niced; the status line says when it is done or has failed, and the
 output goes to `~/.local/state/interdimux/build.log` (`$XDG_STATE_HOME`). The
-first build downloads one crate. A build that fails is announced once and not
-repeated on every load: it is tried again when the sources or cargo change, or
+first build downloads its Rust dependencies. A build that fails is announced
+once and not repeated on every load: it is tried again when the sources or cargo change, or
 quietly a day later, and `--doctor` names the failure meanwhile.
 `set -g @interdimux-autobuild 'off'` stops it, and this is the same build by
 hand (a retry at once, say):
