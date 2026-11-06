@@ -78,10 +78,29 @@ Set the corresponding environment values for Rex's server or native tmux
 launcher. `INTERDIMUX_SHOW_PREVIEW=on` is accepted as the legacy spelling of
 `INTERDIMUX_PREVIEW=on`; an explicit `INTERDIMUX_PREVIEW` takes precedence.
 
+`INTERDIMUX_THEME=auto` (the default) follows Rex's terminal colors and keeps
+the warm profile for native tmux. Set `terminal` or `warm` to choose explicitly.
+The terminal profile inherits foreground/background, uses Gruvbox Material
+orange (`#e78a4e`) for the primary accent and ANSI indices for other colors,
+including previews, nested dialogs and the dashboard. Selection uses
+a block pointer and bold text, preserving column colors and the terminal
+background. `INTERDIMUX_COLOR_ACCENT`,
+`INTERDIMUX_COLOR_PATH`, `INTERDIMUX_COLOR_GIT`, `INTERDIMUX_COLOR_SSH`,
+`INTERDIMUX_COLOR_EDITOR`, `INTERDIMUX_COLOR_DANGER`, `INTERDIMUX_COLOR_TREE`
+and `INTERDIMUX_COLOR_SEPARATOR` override individual accents with `#rrggbb`,
+`0`–`255`, or `-1`/`default`. Invalid overrides use the profile default. The
+original TPM frontend retains its existing palette and tmux options.
+
 Native action modes use `pick --mode switch|kill|rename|zoom|swap|send|dirs|agents|schedule|jobs|doctor|dashboard`.
 Enter repeats the selected action; Escape ends the mode. The dashboard provides
 the same entries with counts and backend capability checks. Agent views use
 exact shared state records, retain the tree and support the ordinary scopes.
+Attention defaults to `approve,input,error,done,idle`: blocking requests, failed
+or completed responses, and agents ready for your next message. Working agents
+and agents with no reported state are excluded. The dashboard count, Agents
+picker and next-agent shortcut use the same definition. `pick --agent-states`
+and direct modes' `--states` can narrow it; `approve,input` selects only blocking
+requests. The unfiltered `agents` listing still includes all known agent states.
 Contextual hints follow the current target and width. Directory suggestions in
 the main list come only from bounded recent history; scans and zoxide queries
 remain explicit actions.
@@ -181,7 +200,7 @@ The finder retains its last frame until the disposable terminal closes.
 Ordinary inline tmux invocation still restores the caller's original screen.
 The UI uses a compact indented tree with one line per target. A single-pane
 window is one combined row targeting that pane; multi-pane windows have
-indented pane children. Full names remain searchable even beyond the viewport.
+indented pane children. Search matches the displayed, width-limited fields.
 Filtering does not recollect Rex state or scan project directories. Errors are published
 to the coordinator before the acknowledgement prompt, but it waits for the
 terminal program to exit before closing the float.
@@ -212,6 +231,11 @@ invocations retain explicit refresh.
 
 The three fields are identity, path/context, and command. Name+command is the
 default; `INTERDIMUX_MATCH_SCOPE=name|path|cmd|all|name+cmd` changes it.
+Their maximum display widths are 40, 44, and 80 terminal cells, respectively,
+and narrow layouts shrink those limits. Names and commands end in `…` when
+clipped; paths begin with `…` so the tail stays visible. Unicode clusters and
+colours are preserved. Search uses the displayed text; actions and previews
+still receive the original records and native IDs.
 `INTERDIMUX_RAW=off` uses ordinary filtering, and `INTERDIMUX_PREVIEW=on` opens
 the preview initially. `INTERDIMUX_PROJECT_DIRS` supplies colon-separated
 directory roots. Directory browsing and bounded deep scanning run only after
@@ -219,7 +243,7 @@ explicit actions; project previews show safe README excerpts and directory
 entries. A matched session directory switches to that existing session.
 
 Rex uses native program-status reports to show `approve`, `input`, `working`,
-`done`, and `error` through the same agent formatter as tmux. A reported owner
+`idle`, `done`, and `error` through the same agent formatter as tmux. A reported owner
 must match the foreground PID and name; stale reports are ignored. Hosted
 agent rows use the current process's verified terminal conversation title as
 the command field, followed by status. Explicit program-status titles are a
@@ -253,9 +277,56 @@ The regular test runner and Linux CI also run the Rex Lua suites, including
 mailbox, geometry, lifecycle, history, bindings, event coalescing, incremental
 snapshot costs and exact-target operations.
 
-The November 2026 validation passed 320 Rust tests, five Lua suites, 31 legacy
-corpus checks, and live Rex action/scheduling workflows. On the development
-machine, captured picker rows took about 8 ms and warm native popups opened in
+For reproducible rendering measurements, build both revisions in release mode,
+then run on an otherwise idle machine:
+
+```sh
+python3 rust/tests/bench_native.py --baseline /tmp/before/imux \
+  --candidate rust/target/release/imux --repetitions 20 --json /tmp/native-bench.json
+cargo test --manifest-path rust/Cargo.toml --release --locked \
+  presentation::tests::rendering_benchmark -- --ignored --nocapture
+```
+
+The PTY benchmark alternates the binaries, uses synthetic 12- and 500-pane
+snapshots with owned local processes, and checks actual fzf frames for startup,
+query filtering, live updates and resize. It records medians, p95s and raw
+samples; timings do not gate CI. `--enrichment metadata` isolates rendering
+from local process/Git enrichment. The ignored Rust benchmark separately
+measures snapshot preparation and repeated rendering at several widths for
+100/1,000 panes. Neither benchmark measures Rex GUI creation or GPU paint.
+
+The November 2026 theme/rendering pass passed 360 Rust tests, eight Lua suites,
+31 legacy corpus checks, and the Rust 1.74 unit suite. Light and dark palette
+simulations covered captured fzf output for the picker, previews, dashboard and
+dialogs. A release comparison used 20 alternating paired runs per fixture,
+after two warmups per binary. All 80 measured runs passed their frame checks.
+Median milliseconds on the development machine were:
+
+| Visible result | 12 panes, before → after | 500 panes, before → after |
+| --- | ---: | ---: |
+| First frame | 42.4 → 42.4 | 56.2 → 55.1 |
+| Query result | 8.6 → 7.5 | 11.4 → 12.4 |
+| First live update | 589.3 → 96.7 | 615.1 → 125.9 |
+| Steady live update | 91.7 → 101.5 | 125.0 → 120.5 |
+| Complete resized layout | 33.6 → 32.9 | 47.6 → 44.3 |
+
+The large first-update improvement comes from retrying an acknowledged typing
+deferral promptly instead of waiting for the lost-command watchdog. Background
+transforms keep collection out of fzf's synchronous input path. Ordinary startup,
+query and steady-update timings remain broadly similar; the 100 ms snapshot
+watcher also contributes to update latency. First-frame terminal output fell
+by 12–14%. These figures exclude Rex GUI creation, producer event coalescing,
+and GPU paint.
+
+Five alternating in-process benchmark runs measured repeated rendering at
+0.836 → 0.381 ms for 100 panes and 8.432 → 3.537 ms for 1,000 panes. Parsed ANSI
+spans, grapheme boundaries and width maxima are cached per snapshot. Preparing
+that cache costs more time and memory: preparation rose from 0.721 → 1.003 ms
+and 6.405 → 9.281 ms respectively. Summing each run's preparation and rendering
+medians gives about 13% lower initial processing time, while repeated rendering
+is 55–58% faster. Local process/Git work is excluded from this CPU benchmark.
+
+Earlier live Rex action/scheduling validation measured warm native popups at
 about 119 ms median. A 10,000-record job history did not affect ordinary popup
 startup; its explicit Jobs listing still takes about
 550 ms. Changed-record detection cut idle CPU for 100 scheduled workers by 65%

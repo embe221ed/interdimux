@@ -38,6 +38,8 @@ rex = {
     local name = assert(method:match("^com%.superlogical%.terminal%.(.+)$"), method)
     assert(args.block_id ~= "app:a" and args.block_id ~= "block:picker", "queried a nonterminal or the picker")
     calls[name] = calls[name] + 1
+    local failure = name .. ":" .. args.block_id
+    if failures[failure] then failures[failure] = nil; return nil, "temporarily unavailable" end
     if name == "process" then
       if failures[args.block_id] then failures[args.block_id] = nil; return nil, "temporarily unavailable" end
       return { foreground = { pid = 123, name = "cargo" } }
@@ -97,6 +99,23 @@ updated = collect(updated, { ["block:new1"] = true }, {})
 assert(calls.total == 3 and updated.metadata["block:new1"] == nil, "failure must remove stale metadata")
 updated = collect(updated, {}, {})
 assert(calls.total == 5 and updated.metadata["block:new1"] ~= nil, "failed metadata is retried instead of cached")
+for _, method in ipairs({ "program_status", "title" }) do
+  failures[method .. ":block:new1"] = true
+  updated = collect(updated, { ["block:new1"] = true }, {})
+  assert(calls.total == 5 and updated.metadata["block:new1"].foreground.pid == 123,
+    "partial failure must preserve successful process metadata")
+  assert(updated.metadata["block:new1"][method] == nil
+      and updated.incomplete_metadata["block:new1"], "partial failure must not look cacheable")
+  local successful = method == "title" and "program_status" or "title"
+  assert(updated.metadata["block:new1"][successful] ~= nil, "partial failure must preserve other successful metadata")
+  updated = collect(updated, {}, {})
+  assert(calls.total == 5 and calls.process == 1 and calls[method] == 1,
+    "next collection must retry incomplete metadata without requiring another event from that pane")
+  assert(updated.metadata["block:new1"][method] ~= nil
+      and not updated.incomplete_metadata["block:new1"], "successful retry must clear incomplete state")
+  updated = collect(updated, {}, {})
+  assert(calls.total == 2 and calls.process == 0, "successful retry restores normal metadata caching")
+end
 collect()
 assert(calls.total == 157 and calls.views == 2 and calls.process == 51, "manual refresh still reads every terminal")
-print("passed: 304-to-2 session catalogs, 304-to-5 terminal updates, 153-to-3 layout updates, new/closed panes, simultaneous events, retry, explicit refresh")
+print("passed: 304-to-2 session catalogs, 304-to-5 terminal updates, 153-to-3 layout updates, new/closed panes, simultaneous events, process/title/status retry, explicit refresh")

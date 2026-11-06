@@ -429,6 +429,9 @@ pub struct NativeTitle<'a> {
     pub reported: bool,
     /// A second verified explicit title if the primary OSC text is generic.
     pub alternate: Option<&'a str>,
+    /// Native status verified against the current foreground PID and name.
+    /// An OSC title or an ordinary registry entry alone does not provide this.
+    pub foreground_status: bool,
 }
 
 /// Native callers may promote an agent's current conversation title to the
@@ -593,7 +596,12 @@ fn command_field_inner(
     native: NativeTitle<'_>,
 ) -> (String, String) {
     let fc = format_command(raw, p).0;
-    if !cfg.on() || fc.is_empty() || is_idle_shell(raw) {
+    let foreground_status = native.foreground_status
+        && cfg.state
+        && reg.get(pane).is_some_and(|record| {
+            !record.word.is_empty() && (record.sid.is_empty() || record.sid == pid.to_string())
+        });
+    if !cfg.on() || fc.is_empty() || (is_idle_shell(raw) && !foreground_status) {
         return (fc, String::new());
     }
     let agent = agent_of(raw, cfg);
@@ -1281,6 +1289,69 @@ mod tests {
     }
 
     #[test]
+    fn only_verified_native_status_overrides_idle_shell_suppression() {
+        let mut config = cfg();
+        let mut registry = Registry::new();
+        registry.insert(
+            "pane".into(),
+            Record {
+                sid: "123".into(),
+                word: "approve".into(),
+                since: 880,
+            },
+        );
+        let palette = Palette::from_env();
+        let render = |raw: &str, config: &Config, registry: &Registry, verified| {
+            native_command_field(
+                raw,
+                123,
+                "pane",
+                "Confirm operation",
+                "",
+                config,
+                registry,
+                &palette,
+                1000,
+                NativeTitle {
+                    current: true,
+                    reported: true,
+                    foreground_status: verified,
+                    ..NativeTitle::default()
+                },
+            )
+        };
+        for raw in ["bash", "-zsh", "/bin/sh -i"] {
+            let (field, state) = render(raw, &config, &registry, true);
+            assert_eq!(state, "approve");
+            assert!(field.contains("approve") && field.contains("2m"));
+            assert!(render(raw, &config, &registry, false).1.is_empty());
+            assert!(
+                command_field(
+                    raw,
+                    123,
+                    "pane",
+                    "Confirm operation",
+                    "",
+                    &config,
+                    &registry,
+                    &palette,
+                    1000
+                )
+                .1
+                .is_empty(),
+                "the legacy shell path must stay unchanged"
+            );
+        }
+        config.state = false;
+        assert!(render("bash", &config, &registry, true).1.is_empty());
+        config.state = true;
+        registry.get_mut("pane").unwrap().sid = "999".into();
+        assert!(render("bash", &config, &registry, true).1.is_empty());
+        registry.clear();
+        assert!(render("bash", &config, &registry, true).1.is_empty());
+    }
+
+    #[test]
     fn native_generic_osc_titles_allow_a_verified_explicit_title_fallback() {
         let mut c = cfg();
         for (raw, primary, state) in [
@@ -1435,7 +1506,8 @@ mod tests {
             NativeTitle {
                 current: true,
                 reported: true,
-                alternate: None
+                alternate: None,
+                foreground_status: false,
             }
         )
         .0

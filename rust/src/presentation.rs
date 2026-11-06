@@ -1,7 +1,8 @@
 //! Shared native navigator rows: measured tree, path/context, and command columns.
 //!
-//! Labels and available paths remain searchable in full. Optional git badges
-//! and padding give way first on a narrow terminal; fzf clips the final viewport.
+//! Every displayed field has a bounded cell budget. Names and commands shorten
+//! on the right; paths retain their useful suffix. Exact native targets and the
+//! original snapshot remain available to actions and previews.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,12 +10,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::agent;
 use crate::git::GitCache;
 use crate::model::{Pane, Row, Session, Snapshot, Target, Window};
-use crate::palette::{Palette, BOLD, RST};
+use crate::palette::{NativeTheme, Palette, BOLD, RST};
 use crate::proc::Resolver;
-use crate::text::{age_of, pad_to, tildify, truncate, width};
-use crate::widths::CMD_MIN;
+use crate::text::{age_of, tildify, truncate, truncate_ansi, truncate_left, width, PreparedAnsi};
 
-const PRIMARY: &str = "\x1b[38;2;212;190;152m";
+const IDENTITY_MAX: usize = 40;
+const CONTEXT_MAX: usize = 44;
+const COMMAND_MAX: usize = 80;
 
 /// Preserve readable Unicode, but never let a label change the terminal or TSV.
 fn plain(value: &str) -> String {
@@ -89,6 +91,7 @@ struct Facts {
 struct Enrichment<'a> {
     snapshot: &'a Snapshot,
     palette: Palette,
+    primary: String,
     resolver: Option<Resolver>,
     git: GitCache,
     config: agent::Config,
@@ -102,7 +105,8 @@ impl<'a> Enrichment<'a> {
     fn new(snapshot: &'a Snapshot) -> Self {
         Self {
             snapshot,
-            palette: Palette::from_env(),
+            palette: Palette::native(),
+            primary: NativeTheme::from_env().primary,
             // Supplied argv, foreign panes and short-command mode never need
             // local process access. Avoid its self-test and buffers until a
             // local pane actually asks for full argv.
@@ -167,6 +171,7 @@ impl<'a> Enrichment<'a> {
                 current: metadata.map_or(false, |m| m.current_title),
                 reported: metadata.map_or(false, |m| m.reported_title),
                 alternate: metadata.and_then(|m| m.alternate_title.as_deref()),
+                foreground_status: metadata.is_some_and(|m| m.program_status.is_some()),
             },
         )
         .0;
@@ -232,7 +237,7 @@ impl Flags {
 }
 
 struct Draft {
-    identity: String,
+    identity: PreparedAnsi,
     cells: usize,
     facts: Facts,
     flags: Flags,
@@ -247,9 +252,10 @@ fn identity(
     current: bool,
     bold: bool,
     palette: &Palette,
+    primary: &str,
 ) -> (String, usize) {
     let marker = if current {
-        format!("{}●{RST}", palette.marker)
+        format!("{}•{RST}", palette.dim_cmd)
     } else {
         " ".into()
     };
@@ -261,11 +267,34 @@ fn identity(
     let weight = if bold { BOLD } else { "" };
     (
         format!(
-            "{marker} {}{prefix}{RST}{weight}{PRIMARY}{name}{RST}{}{parent}{RST}",
+            "{marker} {}{prefix}{RST}{weight}{primary}{name}{RST}{}{parent}{RST}",
             palette.dim_tree, palette.dim_tree
         ),
         2 + width(prefix) + width(&parent) + width(name),
     )
+}
+
+/// These maxima belong to a snapshot, not a viewport. In particular, measuring
+/// long Unicode paths again on every resize adds work without changing them.
+#[derive(Default)]
+struct Measurements {
+    identity: usize,
+    path: usize,
+    flags: usize,
+    branch: usize,
+}
+
+impl Measurements {
+    fn new(rows: &[Draft]) -> Self {
+        let mut result = Self::default();
+        for row in rows {
+            result.identity = result.identity.max(row.cells);
+            result.path = result.path.max(width(&row.facts.path));
+            result.flags = result.flags.max(row.flags.len());
+            result.branch = result.branch.max(width(&row.facts.branch).min(18));
+        }
+        result
+    }
 }
 
 struct Layout {
@@ -274,59 +303,49 @@ struct Layout {
     flags: usize,
     branch: usize,
     context: usize,
+    command: usize,
 }
 impl Layout {
-    fn measure(rows: &[Draft], cols: usize) -> Self {
-        let identity_max = rows.iter().map(|r| r.cells).max().unwrap_or(0);
-        let path_max = rows.iter().map(|r| width(&r.facts.path)).max().unwrap_or(0);
-        let flags = rows.iter().map(|r| r.flags.len()).max().unwrap_or(0);
-        let mut branch = rows
-            .iter()
-            .map(|r| width(&r.facts.branch))
-            .max()
-            .unwrap_or(0)
-            .min(18);
-        let command = if rows.iter().any(|r| !r.facts.command.is_empty()) {
-            CMD_MIN.min(cols / 3)
+    fn measure(measured: &Measurements, cols: usize, directory_widths: (usize, usize)) -> Self {
+        // The TSV display has two one-cell separators. Even a zero-width
+        // viewport produces bounded empty fields without arithmetic underflow.
+        let usable = cols.saturating_sub(2);
+        let identity_max = measured.identity.max(directory_widths.0);
+        let path_max = measured.path.max(directory_widths.1);
+        let flags = measured.flags;
+        let branch_max = measured.branch;
+        let context_wanted = if path_max == 0 && flags == 0 && branch_max == 0 {
+            0
+        } else {
+            2 + path_max.min(CONTEXT_MAX)
+                + if flags > 0 { 1 + flags } else { 0 }
+                + if branch_max > 0 { 3 + branch_max } else { 0 }
+        };
+        // Give identity at most 40% and context at most one third of a narrow
+        // viewport, leaving command/status visible even under very long labels.
+        let identity = identity_max
+            .min(IDENTITY_MAX)
+            .min(usable.saturating_mul(2) / 5);
+        let context = context_wanted.min(CONTEXT_MAX).min(usable / 3);
+        let command = usable.saturating_sub(identity + context).min(COMMAND_MAX);
+        let fixed = 2 + if flags > 0 { 1 + flags } else { 0 };
+        let room = context.saturating_sub(fixed);
+        // Git is optional; retain flags and a useful path suffix before a badge.
+        let branch = if branch_max > 0 && room >= path_max.min(8) + 3 + branch_max {
+            branch_max
         } else {
             0
-        }
-        .max(
-            rows.iter()
-                .filter_map(|r| r.session_stats.as_ref())
-                .map(|s| width(s))
-                .max()
-                .unwrap_or(0),
-        );
-        let mut identity = identity_max;
-        let mut path = path_max;
-        let context_width = |path: usize, branch: usize| {
-            if path == 0 && flags == 0 && branch == 0 {
-                0
-            } else {
-                2 + path
-                    + if flags > 0 { 1 + flags } else { 0 }
-                    + if branch > 0 { 3 + branch } else { 0 }
-            }
         };
-        let over = |identity: usize, path: usize, branch: usize| {
-            (identity + context_width(path, branch) + command + 2).saturating_sub(cols)
-        };
-        if over(identity, path, branch) > 0 {
-            branch = 0;
-        }
-        // Squeeze padding, not searchable values. Overlong names/paths remain
-        // available to fzf while ordinary rows still align at these columns.
-        let give = over(identity, path, branch).min(path.saturating_sub(8));
-        path -= give;
-        let give = over(identity, path, branch).min(identity.saturating_sub(14));
-        identity -= give;
+        let path = room
+            .saturating_sub(if branch > 0 { 3 + branch } else { 0 })
+            .min(path_max);
         Self {
             identity,
             path,
             flags,
             branch,
-            context: context_width(path, branch),
+            context,
+            command,
         }
     }
 
@@ -334,19 +353,17 @@ impl Layout {
         if self.context == 0 {
             return String::new();
         }
-        let body = format!(
-            "{} {}{}{RST}",
-            palette.sep, palette.dim_path, row.facts.path
-        );
-        let mut output = pad_to(&body, 2 + width(&row.facts.path), 2 + self.path);
-        let mut cells = (2 + width(&row.facts.path)).max(2 + self.path);
+        let path = truncate_left(&row.facts.path, self.path);
+        let mut output = format!("{} {}{}{RST}", palette.sep, palette.dim_path, path);
+        output.extend(std::iter::repeat(' ').take(self.path.saturating_sub(width(&path))));
+        let mut cells = 2 + self.path;
         if self.flags > 0 {
             if row.flags.len() > 0 {
                 output.push_str(&format!(" {}", row.flags.render(palette)));
                 cells += 1 + row.flags.len();
             }
             let target = 2 + self.path + 1 + self.flags;
-            output = pad_to(&output, cells, target);
+            output.extend(std::iter::repeat(' ').take(target.saturating_sub(cells)));
             cells = cells.max(target);
         }
         if self.branch > 0 && !row.facts.branch.is_empty() {
@@ -354,7 +371,13 @@ impl Layout {
             output.push_str(&format!(" {}‹{branch}›{RST}", palette.dim_git));
             cells += 3 + width(&branch);
         }
-        pad_to(&output, cells, self.context)
+        if cells > self.context {
+            // Only tiny viewports can be narrower than the fixed ornaments.
+            truncate_ansi(&output, self.context)
+        } else {
+            output.extend(std::iter::repeat(' ').take(self.context - cells));
+            output
+        }
     }
 }
 
@@ -362,6 +385,7 @@ impl Layout {
 /// Recreate this value after a backend refresh or an action changes the snapshot.
 pub(crate) struct Prepared {
     drafts: Vec<Draft>,
+    measurements: Measurements,
     palette: Palette,
     session_rules: bool,
 }
@@ -403,23 +427,30 @@ impl Prepared {
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             let session_current = session.key == snapshot.current.session_key;
-            let (rendered, cells) =
-                identity("", "", &name, session_current, true, &enrichment.palette);
+            let (rendered, cells) = identity(
+                "",
+                "",
+                &name,
+                session_current,
+                true,
+                &enrichment.palette,
+                &enrichment.primary,
+            );
             let age = age_of(session.last, enrichment.now);
             let mut stats = format!(
                 "{} win{}",
                 children.len(),
-                if session.attached { " ●" } else { "" }
+                if session.attached { " •" } else { "" }
             );
             if !age.is_empty() {
                 stats.push_str(&format!(" {age}"));
             }
             drafts.push(Draft {
-                identity: rendered,
+                identity: PreparedAnsi::new(&rendered),
                 cells,
                 facts: Facts::default(),
                 flags: Flags::default(),
-                session_stats: Some(stats),
+                session_stats: Some(format!("{}{stats}{RST}", enrichment.palette.dim_tree)),
                 target: session.target.clone(),
             });
             for (index, window) in children.iter().enumerate() {
@@ -450,9 +481,10 @@ impl Prepared {
                                 || pane.key == snapshot.current.pane_key),
                         false,
                         &enrichment.palette,
+                        &enrichment.primary,
                     );
                     drafts.push(Draft {
-                        identity: rendered,
+                        identity: PreparedAnsi::new(&rendered),
                         cells,
                         facts,
                         flags: Flags::from_window(window),
@@ -467,9 +499,10 @@ impl Prepared {
                         window_current,
                         false,
                         &enrichment.palette,
+                        &enrichment.primary,
                     );
                     drafts.push(Draft {
-                        identity: rendered,
+                        identity: PreparedAnsi::new(&rendered),
                         cells,
                         facts,
                         flags: Flags::from_window(window),
@@ -497,10 +530,11 @@ impl Prepared {
                             window_current && pane.key == snapshot.current.pane_key,
                             false,
                             &enrichment.palette,
+                            &enrichment.primary,
                         );
                         let facts = enrichment.pane(pane);
                         drafts.push(Draft {
-                            identity: rendered,
+                            identity: PreparedAnsi::new(&rendered),
                             cells,
                             facts,
                             flags: Flags::default(),
@@ -511,8 +545,10 @@ impl Prepared {
                 }
             }
         }
+        let measurements = Measurements::new(&drafts);
         Self {
             drafts,
+            measurements,
             palette: enrichment.palette,
             session_rules: enabled("INTERDIMUX_SESSION_RULE"),
         }
@@ -520,54 +556,52 @@ impl Prepared {
 
     #[cfg(test)]
     pub(crate) fn rows(&self, cols: usize) -> Vec<Row> {
-        self.rows_and_widths(cols).0
+        self.rows_and_widths(cols, (0, 0)).0
     }
 
     /// Return padding budgets with rows so directory suggestions reuse the
     /// same measurement instead of scanning colored row strings again.
-    pub(crate) fn rows_and_widths(&self, cols: usize) -> (Vec<Row>, (usize, usize)) {
-        let layout = Layout::measure(&self.drafts, cols);
+    pub(crate) fn rows_and_widths(
+        &self,
+        cols: usize,
+        directory_widths: (usize, usize),
+    ) -> (Vec<Row>, (usize, usize, usize)) {
+        let layout = Layout::measure(&self.measurements, cols, directory_widths);
         let palette = &self.palette;
         let rows = self
             .drafts
             .iter()
             .map(|row| {
-                if let Some(stats) = &row.session_stats {
-                    let target = layout.identity
-                        + if layout.context > 0 {
-                            1 + layout.context
-                        } else {
-                            0
-                        };
-                    let dashes = target.saturating_sub(row.cells + 3);
-                    let identity = if self.session_rules && dashes >= 3 {
-                        format!(
-                            "{} {}{}{}  ",
-                            row.identity,
+                let (mut identity, mut cells) = row.identity.truncate(layout.identity);
+                let (context, command) = if let Some(stats) = &row.session_stats {
+                    let spare = layout.identity.saturating_sub(cells);
+                    if self.session_rules && spare >= 4 {
+                        identity.push_str(&format!(
+                            " {}{}{RST}",
                             palette.dim_tree,
-                            "─".repeat(dashes),
-                            RST
-                        )
+                            "─".repeat(spare - 1)
+                        ));
+                        cells = layout.identity;
+                    }
+                    let context = if self.session_rules && layout.context > 0 {
+                        format!("{}{}{RST}", palette.dim_tree, "─".repeat(layout.context))
                     } else {
-                        pad_to(&row.identity, row.cells, layout.identity)
+                        " ".repeat(layout.context)
                     };
-                    Row {
-                        identity,
-                        context: format!("{}{}{RST}", palette.dim_tree, stats),
-                        command: String::new(),
-                        target: row.target.clone(),
-                    }
+                    (context, stats.as_str())
                 } else {
-                    Row {
-                        identity: pad_to(&row.identity, row.cells, layout.identity),
-                        context: layout.context(&row, palette),
-                        command: row.facts.command.clone(),
-                        target: row.target.clone(),
-                    }
+                    (layout.context(row, palette), row.facts.command.as_str())
+                };
+                identity.extend(std::iter::repeat(' ').take(layout.identity.saturating_sub(cells)));
+                Row {
+                    identity,
+                    context,
+                    command: truncate_ansi(command, layout.command),
+                    target: row.target.clone(),
                 }
             })
             .collect();
-        (rows, (layout.identity, layout.context))
+        (rows, (layout.identity, layout.context, layout.command))
     }
 }
 
@@ -580,6 +614,7 @@ pub(crate) fn rows(snapshot: &Snapshot, cols: usize) -> Vec<Row> {
 mod tests {
     use super::*;
     use crate::model::{Current, PaneMetadata, Target};
+    use crate::text::ansi_width;
 
     fn target(session: &str, window: Option<&str>, pane: Option<&str>) -> Target {
         Target::Rex {
@@ -640,6 +675,94 @@ mod tests {
         }
     }
 
+    // Reproducible in-process measurement: all pane facts are supplied, so
+    // filesystem, subprocess and backend latency are deliberately excluded.
+    // Run: cargo test --release presentation::tests::rendering_benchmark -- --ignored --nocapture
+    #[test]
+    #[ignore = "manual rendering performance measurement"]
+    fn rendering_benchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        fn measure(mut operation: impl FnMut()) -> f64 {
+            for _ in 0..5 {
+                operation();
+            }
+            let started = Instant::now();
+            for _ in 0..10 {
+                operation();
+            }
+            let per_iteration = started.elapsed().as_secs_f64() / 10.0;
+            let iterations = (0.05 / per_iteration).ceil().clamp(10.0, 10000.0) as usize;
+            let mut samples = Vec::new();
+            for _ in 0..11 {
+                let started = Instant::now();
+                for _ in 0..iterations {
+                    operation();
+                }
+                samples.push(started.elapsed().as_secs_f64() * 1e6 / iterations as f64);
+            }
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        }
+        for count in [100, 1000] {
+            let seed = fixture();
+            let mut snapshot = Snapshot::default();
+            for session_index in 0..count / 20 {
+                let mut session = seed.sessions[0].clone();
+                session.key = format!("session:{session_index}");
+                session.name = format!("project-{session_index}-workspace");
+                session.last = 1_700_000_000;
+                session.target = target(&session.key, None, None);
+                snapshot.sessions.push(session.clone());
+                for window_index in 0..5 {
+                    let mut window = seed.windows[0].clone();
+                    window.key = format!("window:{session_index}-{window_index}");
+                    window.session_key = session.key.clone();
+                    window.ordinal = (window_index + 1).to_string();
+                    window.name = format!("service-{window_index}-editor-and-tests");
+                    window.pane_count = 4;
+                    window.target = target(&session.key, Some(&window.key), None);
+                    snapshot.windows.push(window.clone());
+                    for pane_index in 0..4 {
+                        let mut pane = seed.panes[0].clone();
+                        pane.key = format!("pane:{session_index}-{window_index}-{pane_index}");
+                        pane.session_key = session.key.clone();
+                        pane.window_key = window.key.clone();
+                        pane.ordinal = (pane_index + 1).to_string();
+                        pane.name = if pane_index == 0 {
+                            "review 👩🏽‍💻 日本語 e\u{301}".into()
+                        } else {
+                            format!("long-running-test-worker-{pane_index}")
+                        };
+                        pane.path = format!("/workspace/projects/service-{session_index}/packages/frontend/components/source");
+                        pane.cmd = "cargo".into();
+                        pane.target = target(&session.key, Some(&window.key), Some(&pane.key));
+                        snapshot.pane_metadata.insert(pane.key.clone(), PaneMetadata {
+                            command_line: format!("cargo test --package service-{session_index} --all-features --test integration -- --nocapture"),
+                            git_branch: Some("feature/rendering-review".into()),
+                            ..PaneMetadata::default()
+                        });
+                        snapshot.panes.push(pane);
+                    }
+                }
+            }
+            let prepare = measure(|| {
+                black_box(Prepared::new(black_box(&snapshot)));
+            });
+            let prepared = Prepared::new(&snapshot);
+            let mut resize = 0;
+            let rows = measure(|| {
+                let cols = [64, 120, 180][resize % 3];
+                resize += 1;
+                black_box(prepared.rows_and_widths(black_box(cols), (0, 0)));
+            });
+            println!(
+                "render_bench panes={count} rows={} prepare_us={prepare:.2} resize_us={rows:.2}",
+                prepared.drafts.len()
+            );
+        }
+    }
+
     fn strip(value: &str) -> String {
         let mut chars = value.chars();
         let mut plain = String::new();
@@ -662,10 +785,10 @@ mod tests {
         let snapshot = fixture();
         let result = rows(&snapshot, 100);
         assert_eq!(result.len(), 2);
-        assert!(strip(&result[0].identity).starts_with("● dotfiles"));
+        assert!(strip(&result[0].identity).starts_with("• dotfiles"));
         assert_eq!(
             strip(&result[1].identity).trim_end(),
-            "●   └─ 1: editor · review · dotfiles"
+            "•   └─ 1: editor · review · dotfiles"
         );
         assert_eq!(
             strip(&result[1].context).trim_end(),
@@ -714,13 +837,13 @@ mod tests {
         assert_eq!(
             &tree[1..],
             [
-                "●   ├─ 1: editor · dotfiles",
-                "●   │  ├─ 1.1: review · dotfiles",
+                "•   ├─ 1: editor · dotfiles",
+                "•   │  ├─ 1.1: review · dotfiles",
                 "    │  └─ 1.2: logs · dotfiles",
                 "    └─ 2: terminal · dotfiles"
             ]
         );
-        assert!(strip(&result[0].context).contains("2 win ●"));
+        assert!(strip(&result[0].command).contains("2 win •"));
         assert_eq!(
             strip(&result[1].context).trim_end(),
             "│ /opt/tools/interdimux"
@@ -739,26 +862,100 @@ mod tests {
     }
 
     #[test]
-    fn full_search_labels_processes_and_paths_are_not_truncated() {
+    fn every_display_column_is_bounded_without_changing_source_metadata_or_targets() {
         let mut snapshot = fixture();
-        let session = "前置き非常に長い名前-with-a-unique-session-suffix";
-        let window = "very-long-window-name-with-a-distinct-search-suffix";
-        let pane = "custom-pane-name-with-a-different-search-suffix";
-        snapshot.sessions[0].name = session.into();
-        snapshot.windows[0].name = window.into();
-        snapshot.panes[0].name = pane.into();
-        let result = rows(&snapshot, 24);
-        assert!(result[0].identity.contains(session));
-        assert!(result[1].identity.contains(window));
-        assert!(result[1].identity.contains(pane));
-        assert!(result[1].command.contains("nvim"));
-        assert!(result[1].context.contains("/opt/tools/interdimux"));
-        assert!(!result.iter().any(|row| row.identity.contains('…')));
-        assert!(
-            strip(&result[1].identity).find(window).unwrap()
-                < strip(&result[1].identity).find(session).unwrap(),
-            "the target name must lead the repeated session breadcrumb"
+        snapshot.sessions[0].name = "家庭🏠".repeat(35);
+        snapshot.windows[0].name = format!("editor-{}", "long-window-".repeat(15));
+        snapshot.panes[0].name = "👩🏽‍💻review".repeat(20);
+        snapshot.panes[0].path = format!("{}日本語/src", "/deep/parent/".repeat(20));
+        snapshot.panes[0].cmd = "python3".into();
+        snapshot.windows[0].zoomed = true;
+        snapshot.windows[0].bell = true;
+        snapshot.windows[0].activity = true;
+        let command = format!("python3 script.py {}", "--long-option=value ".repeat(25));
+        snapshot.pane_metadata.insert(
+            snapshot.panes[0].key.clone(),
+            PaneMetadata {
+                command_line: command.clone(),
+                git_branch: Some("feature/very-long-branch-name".into()),
+                ..PaneMetadata::default()
+            },
         );
+        let original_session = snapshot.sessions[0].name.clone();
+        let original_path = snapshot.panes[0].path.clone();
+        let prepared = Prepared::new(&snapshot);
+        for cols in 0..=240 {
+            let (result, budgets) = prepared.rows_and_widths(cols, (0, 0));
+            assert!(budgets.0 <= 40 && budgets.1 <= 44 && budgets.2 <= 80);
+            assert!(budgets.0 + budgets.1 + budgets.2 <= cols.saturating_sub(2));
+            assert_eq!(result[0].target, snapshot.sessions[0].target);
+            assert_eq!(result[1].target, snapshot.panes[0].target);
+            for row in &result {
+                let sizes = (
+                    ansi_width(&row.identity),
+                    ansi_width(&row.context),
+                    ansi_width(&row.command),
+                );
+                assert!(
+                    sizes.0 <= budgets.0 && sizes.1 <= budgets.1 && sizes.2 <= budgets.2,
+                    "cols={cols}, sizes={sizes:?}, budgets={budgets:?}"
+                );
+                if cols >= 2 {
+                    assert!(sizes.0 + sizes.1 + sizes.2 + 2 <= cols);
+                }
+            }
+        }
+        let wide = prepared.rows(300);
+        assert_eq!(ansi_width(&wide[1].identity), 40);
+        assert_eq!(ansi_width(&wide[1].context), 44);
+        assert_eq!(ansi_width(&wide[1].command), 80);
+        assert!(strip(&wide[1].identity).ends_with('…'));
+        assert!(strip(&wide[1].command).ends_with('…'));
+        assert!(strip(&wide[1].command).starts_with("python3 script.py "));
+        assert!(strip(&wide[1].context).contains("日本語/src"));
+        assert!(strip(&wide[1].context).starts_with("│ …"));
+        assert_eq!(snapshot.sessions[0].name, original_session);
+        assert_eq!(snapshot.panes[0].path, original_path);
+        assert_eq!(
+            snapshot.pane_metadata[&snapshot.panes[0].key].command_line,
+            command
+        );
+    }
+
+    #[test]
+    fn session_rules_and_stats_stay_in_their_own_columns() {
+        let mut snapshot = fixture();
+        snapshot.sessions[0].name = "a session with a very long heading ".repeat(8);
+        let prepared = Prepared::new(&snapshot);
+        for cols in [2, 8, 24, 60, 120, 300] {
+            let (result, (identity, context, command)) = prepared.rows_and_widths(cols, (0, 0));
+            assert_eq!(ansi_width(&result[0].identity), identity);
+            assert_eq!(ansi_width(&result[0].context), context);
+            assert!(ansi_width(&result[0].command) <= command);
+            assert_eq!(ansi_width(&result[1].identity), identity);
+            assert_eq!(ansi_width(&result[1].context), context);
+        }
+        let wide = prepared.rows(120);
+        assert_eq!(strip(&wide[0].command), "1 win •");
+        assert!(strip(&wide[0].context).chars().all(|c| c == '─'));
+        assert!(!strip(&wide[0].identity).contains("1 win"));
+    }
+
+    #[test]
+    fn directory_measurements_reserve_visible_columns_even_without_native_paths() {
+        let mut snapshot = fixture();
+        snapshot.panes[0].path = "/".into();
+        let prepared = Prepared::new(&snapshot);
+        let (_, native) = prepared.rows_and_widths(120, (0, 0));
+        let (_, with_directories) = prepared.rows_and_widths(120, (80, 160));
+        assert_eq!(native.1, 3);
+        assert!(with_directories.1 > native.1);
+        assert_eq!(with_directories, (40, 39, 39));
+
+        let empty = Prepared::new(&Snapshot::default());
+        let (rows, budgets) = empty.rows_and_widths(120, (20, 160));
+        assert!(rows.is_empty());
+        assert_eq!(budgets, (20, 39, 59));
     }
 
     #[test]
@@ -769,7 +966,8 @@ mod tests {
         snapshot.panes[0].path.clear();
         let result = rows(&snapshot, 160);
         assert!(result[1].context.is_empty());
-        assert!(result.iter().all(|row| row.command.is_empty()));
+        assert!(result[1].command.is_empty());
+        assert_eq!(strip(&result[0].command), "1 win •");
         assert!(!strip(&result[1].identity).contains("        "));
         assert!(result[1].identity.contains("dotfiles"));
     }
@@ -833,8 +1031,8 @@ mod tests {
         assert!(strip(&result[3].identity)
             .trim_end()
             .contains("1.2: review · dotfiles"));
-        assert!(result[2].identity.contains('●'));
-        assert!(!result[3].identity.contains('●'));
+        assert!(result[2].identity.contains('•'));
+        assert!(!result[3].identity.contains('•'));
         assert_ne!(result[2].target, result[3].target);
         assert!(strip(&result[2].context).contains("/opt/tools/interdimux"));
         assert!(!result.iter().any(|row| format!(
@@ -953,8 +1151,10 @@ mod tests {
         assert!(strip(&wide[1].context).contains("~/project/src ‹feature/picker›"));
         let narrow = rows(&snapshot, 38);
         assert!(!strip(&narrow[1].context).contains("feature/picker"));
-        assert!(strip(&narrow[1].context).contains("~/project/src"));
-        assert!(strip(&narrow[1].identity).contains("editor · review"));
+        assert!(strip(&narrow[1].context).starts_with("│ …"));
+        assert!(strip(&narrow[1].context).trim_end().ends_with("/src"));
+        assert!(strip(&narrow[1].identity).ends_with('…'));
+        assert_eq!(narrow[1].target, wide[1].target);
         assert_eq!(wide.len(), narrow.len());
     }
 

@@ -436,6 +436,7 @@ mod tests {
                 current: true,
                 reported: false,
                 alternate,
+                foreground_status: false,
             },
         )
         .0

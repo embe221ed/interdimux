@@ -5,6 +5,8 @@ use crate::palette::Palette;
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(crate) const DEFAULT_ATTENTION: &str = "approve,input,error,done,idle";
+
 #[derive(Debug, Clone)]
 pub(crate) struct Agent {
     pub key: String,
@@ -73,7 +75,7 @@ pub(crate) fn plain(text: &str) -> String {
 pub(crate) fn collect(snapshot: &Snapshot, wanted: &[String]) -> Vec<Agent> {
     let config =
         crate::native_config::agent_config(&snapshot.current.host, &snapshot.current.host_short);
-    let palette = Palette::from_env();
+    let palette = Palette::native();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -118,14 +120,21 @@ pub(crate) fn collect(snapshot: &Snapshot, wanted: &[String]) -> Vec<Agent> {
         } else {
             pane.cmd.clone()
         };
-        if crate::proc::is_idle_shell(&raw) {
-            continue;
-        }
-        let known = agent::agent_of(&raw, &config);
         let published = snapshot
             .registry
             .get(&pane.agent_id)
             .filter(|r| r.sid.is_empty() || r.sid == pane.pid.to_string());
+        let foreground_status = metadata.is_some_and(|m| m.program_status.is_some());
+        // A shell may itself report a task. A verified report is stronger
+        // evidence than its shell-shaped argv; retained titles are not.
+        if crate::proc::is_idle_shell(&raw)
+            && !(foreground_status
+                && config.state
+                && published.is_some_and(|record| !record.word.is_empty()))
+        {
+            continue;
+        }
+        let known = agent::agent_of(&raw, &config);
         let (_, option_description) =
             crate::titles::apply_options(&config.rules, &config.state_opts, &pane.opts);
         let (command, state) = agent::native_command_field(
@@ -142,6 +151,7 @@ pub(crate) fn collect(snapshot: &Snapshot, wanted: &[String]) -> Vec<Agent> {
                 current: metadata.map_or(false, |m| m.current_title),
                 reported: metadata.map_or(false, |m| m.reported_title),
                 alternate: metadata.and_then(|m| m.alternate_title.as_deref()),
+                foreground_status,
             },
         );
         if known.is_none()
@@ -395,5 +405,89 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["! duplicate", "? duplicate", "  parent"]
         );
+    }
+
+    #[test]
+    fn verified_rex_shell_reports_are_actionable_without_accepting_stale_owners() {
+        use serde_json::json;
+        use std::fs;
+        use std::path::PathBuf;
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("imux-shell-status-{}-{stamp}", std::process::id())),
+        );
+        fs::create_dir(&fixture.0).unwrap();
+        let mut blocks = Vec::new();
+        let mut metadata = serde_json::Map::new();
+        for (id, app, kind, owner_pid, owner_name) in [
+            ("known", "codex", "permission", 123, "bash"),
+            ("custom", "custom-reviewer", "question", 123, "bash"),
+            ("old-pid", "codex", "permission", 999, "bash"),
+            ("old-name", "codex", "permission", 123, "old-program"),
+        ] {
+            blocks.push(json!({"block_id":id,"label":id}));
+            metadata.insert(
+                id.into(),
+                json!({
+                    "foreground":{"pid":123,"name":"bash","argv0":"bash"},
+                    "program_status":{"records":[{
+                        "state":"blocked","kind":kind,"app":app,"title":"Confirm operation",
+                        "owner":{"pid":owner_pid,"name":owner_name}
+                    }]}
+                }),
+            );
+        }
+        let path = fixture.0.join("snapshot.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "version":1,"sessions":[{"session_id":"s","label":"Shell reports"}],
+                "views":{"s":{"active_window_id":"w","windows":[{
+                    "window_id":"w","label":"Shell tasks","focused_block_id":"known",
+                    "layers":[{"blocks":blocks}]
+                }]}},"metadata":metadata
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let snapshot = crate::rex::collect(&crate::rex::RexContext {
+            server: None,
+            client_id: "client:test".into(),
+            session_id: "s".into(),
+            window_id: "w".into(),
+            block_id: "known".into(),
+            picker_block_id: None,
+            origin_zoomed_block_id: None,
+            snapshot_file: Some(path),
+            result_file: None,
+        })
+        .unwrap();
+        let agents = collect(&snapshot, &states("approve,input").unwrap());
+        assert_eq!(
+            agents
+                .iter()
+                .map(|a| (a.key.as_str(), a.state.as_str()))
+                .collect::<Vec<_>>(),
+            [("known", "approve"), ("custom", "input")]
+        );
+        assert!(snapshot.pane_metadata["old-pid"].program_status.is_none());
+        assert!(snapshot.pane_metadata["old-name"].program_status.is_none());
+        let mut rows = crate::presentation::rows(&snapshot, 120);
+        mark_rows(&mut rows, &agents);
+        for agent in agents {
+            let row = rows.iter().find(|row| row.target == agent.target).unwrap();
+            assert!(row.identity.starts_with(mark(&agent.state)));
+            assert!(row.command.contains(&agent.state));
+        }
     }
 }

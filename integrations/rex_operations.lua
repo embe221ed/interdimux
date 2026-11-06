@@ -291,7 +291,7 @@ return function(request, context)
     local kind = options.kind or "session"
     if kind == "session" then
       local made = call("session.create", { label = options.name,
-        initial_windows = { { window_label = "Terminal", layout = shell(options.cwd) } } })
+        initial_windows = { { layout = shell(options.cwd) } } })
       local window = made.initial_windows[1]
       disown(made.session_id, window.block_ids)
       hydrate({ session_id = made.session_id, window_id = window.window_id, block_id = window.block_ids[1] }, options.startup_lines)

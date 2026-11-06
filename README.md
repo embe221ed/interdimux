@@ -27,12 +27,15 @@ rows without opening fzf or switching targets.
 The compact tree keeps the tmux layout: identity, directory/git context, and
 command columns, with session rules and pane children only for split windows.
 Single-pane windows use one combined row: Enter activates the exact pane;
-rename, close and swap act on the window. Full labels remain searchable.
+rename, close and swap act on the window. Search matches the displayed fields.
 Raw filtering dims nonmatches while preserving the tree. The default scope is
 name+command; `Ctrl-]` cycles name/path/command/all/name+command. Inactive
 columns dim. Child rows lead with their window or pane name and keep the session
-breadcrumb at the end. Long rows scroll to reveal matching names, paths and
-commands, including on narrow terminals.
+breadcrumb at the end. Columns have maximum widths of 40 cells for identity,
+44 for directory/git context, and 80 for command, and shrink to fit the picker.
+Names and commands truncate on the right with `…`; paths truncate on the left
+so their final directories remain visible. Columns stay aligned instead of
+scrolling sideways. Display shortening never changes the target or actual path.
 
 | Key inside the picker | Shared action |
 | --- | --- |
@@ -111,6 +114,12 @@ Rex swaps stay within one session; tmux-style client detach is unavailable.
 The dashboard offers repeatable action modes, exact agent counts and the next
 agent needing attention, project creation, scheduling, jobs and health checks.
 The agent view matches verified state records rather than words in labels.
+For native Rex/tmux, attention includes permission requests, blocking questions,
+errors, completed responses and idle agents waiting for your next message.
+Working agents and agents with no reported state are excluded. The picker,
+dashboard count and next-agent shortcut share this default; use
+`--agent-states approve,input` on `pick`, or `--states approve,input` on
+`agent-next`, to narrow it to blocking requests.
 `INTERDIMUX_HIDE`, title-rule files, project markers, recent directories and
 startup-command configuration apply to the native frontends too. Startup lines
 run only in a newly created session after its shell is ready.
@@ -119,6 +128,21 @@ Native frontends use `INTERDIMUX_*` environment settings rather than importing
 tmux's `@interdimux-*` options. Those options still configure the original TPM
 frontend. Set environment preferences in Rex's server environment; the native
 preview accepts both `INTERDIMUX_PREVIEW` and legacy `INTERDIMUX_SHOW_PREVIEW`.
+
+The Rex picker, dashboard, previews and dialogs follow your terminal theme by
+default: foreground and background are inherited, the primary accent is Gruvbox
+Material orange (`#e78a4e`), and other colors use the terminal's ANSI palette.
+A block pointer with bold text marks the selected row while
+preserving its column colors and the terminal background.
+A small `•` marks the active session, window and pane.
+`INTERDIMUX_THEME=warm` restores the previous warm colors;
+`INTERDIMUX_THEME=terminal` enables terminal colors for the native tmux picker
+too. The default `auto` selects terminal colors for Rex and warm colors for
+native tmux. Customize accents with `INTERDIMUX_COLOR_ACCENT`, `_PATH`, `_GIT`,
+`_SSH`, `_EDITOR`, `_DANGER`, `_TREE` and `_SEPARATOR` (each has the
+`INTERDIMUX_COLOR` prefix). Values accept `#rrggbb`, indices `0`–`255`, or
+`default`; invalid values fall back to the selected theme. Indices `0`–`15`
+follow your terminal's palette. No Rex theme configuration is changed.
 
 Scheduled sends resolve a session/window selection to one exact terminal pane.
 The shared Rust scheduler records the resolved time, supports Undo/cancel, and

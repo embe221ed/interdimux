@@ -79,16 +79,15 @@ pub(crate) fn options(scope: Scope, raw: bool) -> Vec<String> {
         "--with-nth=1..3".into(),
         format!("--nth={}", scope.nth()),
         format!("--prompt={}", scope.prompt()),
-        // A full identity can exceed the viewport. Freezing it prevents fzf
-        // from revealing matches in either its suffix or later columns.
+        // Presentation already bounds every column to the viewport.
         "--freeze-left=0".into(),
-        "--color=fg:dim,nth:regular,fg+:regular:bold".into(),
+        "--color=fg:dim,nth:regular".into(),
     ];
     if raw {
         options.extend([
             "--raw".into(),
             "--gutter-raw= ".into(),
-            "--color=nomatch:#7c6f64:strip:dim".into(),
+            crate::palette::NativeTheme::from_env().raw_color(),
         ]);
     }
     options
@@ -114,14 +113,14 @@ mod tests {
     }
 
     #[test]
-    fn raw_scope_options_never_launch_callbacks_or_hide_deep_matches() {
+    fn raw_scope_options_keep_display_fields_searchable_without_callbacks() {
         let configured = options(Scope::default(), true);
         assert!(configured.contains(&"--nth=1,3".into()));
         assert!(configured.contains(&"--freeze-left=0".into()));
         assert!(configured.contains(&"--raw".into()));
         assert!(!configured
             .iter()
-            .any(|o| o.contains("transform") || o.contains("execute") || o == "--no-hscroll"));
+            .any(|o| o.contains("transform") || o.contains("execute")));
         assert!(!options(Scope::Path, false).iter().any(|o| o == "--raw"));
         assert_eq!(CYCLE_ACTION, "change-nth(1|2|3|1,2,3|1,3)");
     }

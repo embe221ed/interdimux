@@ -154,16 +154,22 @@ def narrow_probe():
             'sessions': [{'session_id': 'session:origin', 'label': 'session-' + 's'*90 + '-session-tail'}],
             'views': {'session:origin': {'active_window_id': 'window:origin', 'windows': [{
                 'window_id': 'window:origin', 'label': 'Editor-' + 'w'*90 + '-window-tail', 'focused_block_id': 'block:origin',
-                'layers': [{'kind': 'tiled', 'blocks': [{'block_id': 'block:origin', 'label': '日本語-' + 'p'*90 + '-pane-tail'}]}],
+                'layers': [{'kind': 'tiled', 'blocks': [
+                    {'block_id': 'block:origin', 'label': '日本語-' + 'p'*90 + '-pane-tail'},
+                    {'block_id': 'block:other', 'label': 'Other-' + 'o'*90 + '-other-tail'},
+                ]}],
             }]}},
-            'metadata': {'block:origin': {'foreground': {'name': 'COMMAND_NEEDLE', 'cwd': '/deep/' + 'path/'*20 + 'path-tail', 'pid': 0}}},
+            'metadata': {key: {'foreground': {'name': 'CMD_NEEDLE-' + 'c'*90 + '-command-tail',
+                                              'cwd': '/deep/' + 'path/'*20 + 'path-tail', 'pid': 0}}
+                         for key in ('block:origin', 'block:other')},
             'errors': {}}
         (root/'snapshot.json').write_text(json.dumps(snapshot))
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(('INTERDIMUX_', 'REX_', 'FZF_')) and key not in ('TMUX', 'TMUX_PANE')}
         environment.update({'TERM': 'xterm-256color', 'HOME': str(root), 'XDG_DATA_HOME': str(root/'data'),
                             'INTERDIMUX_FZF_BIN': fzf, 'INTERDIMUX_REX_BIN': str(root/'missing-rex'),
-                            'INTERDIMUX_USE_ZOXIDE': 'off'})
+                            'INTERDIMUX_USE_ZOXIDE': 'off', 'INTERDIMUX_RAW': 'off',
+                            'INTERDIMUX_FZF_OPTS': '--tabstop=8 --tabstop 4'})
         gate_read, gate_write = os.pipe()
         command = [binary, 'pick', '--backend', 'rex', '--client', 'client:origin', '--session', 'session:origin',
                    '--window', 'window:origin', '--block', 'block:origin', '--picker-block', 'block:picker',
@@ -176,11 +182,33 @@ def narrow_probe():
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 18, 64, 0, 0))
         os.write(gate_write, b'x'); os.close(gate_write)
         cursor, pending, status = Cursor(18, 64), b'', None
-        queries = ['COMMAND_NEEDLE', 'pane-tail', 'window-tail', '日本語', 'session-tail']
-        stage, checked, started = -1, [], time.monotonic()
+        stage, checked, started = 0, [], time.monotonic()
+        changed = started
         output = bytearray()
+        def check_frame(columns):
+            entries = [row for row in cursor.visible(1, 17) if 'CMD_NEEDLE' in row and '│' in row]
+            assert entries, 'missing path/command columns: ' + repr(cursor.visible())
+            positions = []
+            for row in entries:
+                name, rest = row.split('│', 1)
+                path, command = rest.split('CMD_NEEDLE', 1)
+                assert name.rstrip().endswith('…'), 'name not shortened: ' + repr(row)
+                assert path.strip().startswith('…') and path.strip().endswith('path-tail'), 'path tail lost: ' + repr(row)
+                assert '/deep/' not in path and command.rstrip().endswith('…'), 'unbounded field: ' + repr(row)
+                assert '-command-tail' not in command and '-window-tail' not in name, row
+                cells = lambda text: sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in text)
+                assert cells(row) <= columns, row
+                positions.append((cells(name), cells(name + '│' + path)))
+            assert len(set(positions)) == 1, 'columns misaligned: ' + repr(entries)
+            checked.append({'columns': columns, 'positions': positions[0], 'rows': entries})
+            return positions[0]
+        def resize(columns):
+            cursor.columns = columns
+            cursor.grid.clear()
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 18, columns, 0, 0))
+            os.killpg(child, signal.SIGWINCH)
         try:
-            while time.monotonic()-started < 8:
+            while time.monotonic()-started < 10:
                 if select.select([master], [], [], .01)[0]:
                     try: data = os.read(master, 65536)
                     except OSError as error:
@@ -191,15 +219,23 @@ def narrow_probe():
                     pending = respond(master, pending, data)
                 body = cursor.visible(1, 17)
                 if cursor.synchronized: continue
-                if stage == -1 and any('Editor-' in row for row in body):
-                    stage = 0; os.write(master, queries[stage].encode())
-                elif 0 <= stage < len(queries):
-                    # Exclude row zero: the prompt echo is not evidence that a
-                    # matched suffix has actually become visible in the list.
-                    if any(queries[stage] in row for row in body):
-                        checked.append(queries[stage]); stage += 1
-                        if stage == len(queries): os.write(master, b'\x1b')
-                        else: os.write(master, b'\x15' + queries[stage].encode())
+                if time.monotonic()-changed < .15: continue
+                has_columns = any('Editor' in row and 'path-tail' in row and 'CMD_NEEDLE' in row for row in body)
+                if stage == 0 and has_columns and any('日本語' in row for row in body):
+                    initial_positions = check_frame(64)
+                    os.write(master, b'CMD_NEEDLE'); stage = 1; changed = time.monotonic()
+                elif stage == 1 and has_columns and 'CMD_NEEDLE' in cursor.visible(0, 1)[0] and not any('session-' in row for row in body):
+                    assert check_frame(64) == initial_positions, 'search scrolled the columns'
+                    resize(48); stage = 2; changed = time.monotonic()
+                elif stage == 2 and has_columns:
+                    assert check_frame(48)[1] < initial_positions[1], 'columns did not shrink'
+                    resize(120); stage = 3; changed = time.monotonic()
+                elif stage == 3 and has_columns:
+                    assert check_frame(120)[1] > initial_positions[1], 'columns did not expand'
+                    os.write(master, b'\x15' + '日本語'.encode()); stage = 4; changed = time.monotonic()
+                elif stage == 4 and '日本語' in cursor.visible(0, 1)[0] and any('日本語' in row for row in body) and not any('Editor-' in row for row in body):
+                    check_frame(120)
+                    os.write(master, b'\x1b'); stage = 5
             end = time.monotonic()+2
             while time.monotonic() < end:
                 found, child_status = os.waitpid(child, os.WNOHANG)
@@ -209,9 +245,9 @@ def narrow_probe():
                 time.sleep(.005)
             else: raise AssertionError('narrow picker did not exit; matched: '+repr(checked)+'; grid: '+repr(cursor.visible()))
             assert os.waitstatus_to_exitcode(status) == 0, repr(bytes(output[-1500:]))
-            assert checked == queries, 'invisible successful matches: '+repr(checked)+'; grid: '+repr(cursor.visible())
+            assert stage == 5, 'incomplete narrow/resize checks: '+repr(checked)+'; grid: '+repr(cursor.visible())
             assert json.loads((root/'result.json').read_text())['outcome'] == 'cancel'
-            return {'narrow_columns': 64, 'visible_matches': checked}
+            return {'bounded_columns': checked}
         finally:
             if status is None:
                 try: os.killpg(child, signal.SIGKILL)

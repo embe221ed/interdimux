@@ -8,7 +8,8 @@ import errno, fcntl, json, os, pty, re, select, signal, struct, sys, tempfile, t
 from pathlib import Path
 
 binary, real_fzf = sys.argv[1:]
-TREE = b'TREE_TARGET_SENTINEL'
+# Match the visible prefix; narrow identity columns shorten the full sentinel.
+TREE = b'TREE_TARGET'
 
 def respond(fd, pending, data):
     pending += data

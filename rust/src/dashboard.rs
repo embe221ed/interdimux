@@ -80,7 +80,7 @@ fn cell(text: &str, width: usize, color: &str) -> String {
 }
 
 fn section(title: &str, entries: &[Entry], width: usize) -> Vec<String> {
-    let palette = crate::palette::Palette::from_env();
+    let palette = crate::palette::Palette::native();
     let mut lines = vec![cell(title, width, &palette.dim_path)];
     for e in entries {
         let label = crate::text::truncate(&e.label, width.saturating_sub(5));
@@ -117,7 +117,7 @@ fn section(title: &str, entries: &[Entry], width: usize) -> Vec<String> {
 fn header(groups: &[(&str, Vec<Entry>)], columns: usize, tmux: bool) -> String {
     let wide = columns >= 62;
     let width = columns.saturating_sub(8).max(8);
-    let palette = crate::palette::Palette::from_env();
+    let palette = crate::palette::Palette::native();
     let mut lines = vec![
         format!(
             "{}INTERDIMUX\x1b[0m  \x1b[2m{}\x1b[0m",
@@ -237,6 +237,7 @@ pub(crate) fn choose(
             "--footer=Press a key · Esc / q close",
             "--footer-border=none",
         ])
+        .arg(crate::palette::NativeTheme::from_env().fzf_color())
         .arg(format!("--margin={vertical},{horizontal}"))
         .arg(format!("--header={header}"))
         .arg(format!("--bind={}", bindings.join(",")))

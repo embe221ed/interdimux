@@ -30,12 +30,12 @@ impl Fixture {
         ));
         fs::create_dir_all(root.join("project")).unwrap();
         let project = root.join("project").to_string_lossy().into_owned();
-        let status = |name: &str, pid: u32, state: &str, detail: &str| json!({"foreground":{"name":name,"pid":pid,"cwd":project},"program_status":{"records":[{"state":state,"detail":detail,"owner":{"name":name,"pid":pid}}]}});
+        let status = |name: &str, pid: u32, state: &str, kind: &str| json!({"foreground":{"name":name,"pid":pid,"cwd":project},"program_status":{"records":[{"state":state,"kind":kind,"owner":{"name":name,"pid":pid}}]}});
         let snapshot = json!({"version":1,"host_id":"host","sessions":[{"session_id":"session:o","label":"origin"},{"session_id":"session:t","label":"target-project"}],
             "mru":{"session:o":10,"session:t":20},"session_paths":{"session:t":project},
             "views":{"session:o":{"active_window_id":"window:o","windows":[{"window_id":"window:o","label":"origin","focused_block_id":"block:o","layers":[{"kind":"tiled","blocks":[{"block_id":"block:o","label":"origin","host_id":"host"}]}]}]},
             "session:t":{"active_window_id":"window:t","windows":[{"window_id":"window:t","label":"target","focused_block_id":"block:a","layers":[{"kind":"tiled","blocks":[{"block_id":"block:a","label":"review","host_id":"host"},{"block_id":"block:b","label":"question","host_id":"host"},{"block_id":"block:c","label":"approve input blocked","host_id":"host"}]}]}]}},
-            "metadata":{"block:o":{"foreground":{"name":"cat","pid":0}},"block:a":status("codex",12,"blocked","permission"),"block:b":status("claude",13,"blocked","input"),"block:c":{"foreground":{"name":"cat","pid":0}}},"errors":{}});
+            "metadata":{"block:o":{"foreground":{"name":"cat","pid":0}},"block:a":status("codex",12,"blocked","permission"),"block:b":status("claude",13,"blocked","question"),"block:c":{"foreground":{"name":"cat","pid":0}}},"errors":{}});
         fs::write(
             root.join("snapshot.json"),
             serde_json::to_vec(&snapshot).unwrap(),
@@ -106,6 +106,18 @@ fn exact_agents_counts_and_state_validation_do_not_fuzzy_match_labels() {
         ),
         "2\n"
     );
+    for state in ["approve", "input"] {
+        assert_eq!(
+            text(
+                f.origin("agents")
+                    .args(["--count", "--states", state])
+                    .output()
+                    .unwrap()
+            ),
+            "1\n",
+            "native status kind must distinguish permission from input"
+        );
+    }
     assert_eq!(
         text(
             f.origin("agents")
@@ -131,6 +143,65 @@ fn exact_agents_counts_and_state_validation_do_not_fuzzy_match_labels() {
         "read-only agents modes must not start backend transports"
     );
 }
+
+#[test]
+fn completed_idle_and_failed_agents_share_dashboard_and_next_defaults() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let snapshot_path = f.root.join("snapshot.json");
+    let mut snapshot: Value = serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+    snapshot["metadata"]["block:b"]["program_status"]["records"][0]["state"] = json!("working");
+    let chooser = f.root.join("fzf");
+    fs::write(
+        &chooser,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$IMUX_TEST_FZF_ARGS\"\nexit 130\n",
+    )
+    .unwrap();
+    fs::set_permissions(&chooser, fs::Permissions::from_mode(0o700)).unwrap();
+    let arguments = f.root.join("fzf-args");
+    for state in ["done", "idle", "error"] {
+        snapshot["metadata"]["block:a"]["program_status"]["records"][0]["state"] = json!(state);
+        fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        text(f.origin("agent-next").output().unwrap());
+        assert_eq!(
+            f.result()["target"]["block_id"],
+            "block:a",
+            "missing {state} agent"
+        );
+        text(
+            f.origin("agent-next")
+                .args(["--states", "approve,input"])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(
+            f.result()["outcome"],
+            "cancel",
+            "explicit narrow filter included {state}"
+        );
+
+        for (filter, expected) in [
+            (None, "1 need attention"),
+            (Some("approve,input"), "0 need attention"),
+        ] {
+            let mut command = f.origin("pick");
+            command
+                .args(["--mode", "dashboard"])
+                .env("INTERDIMUX_FZF_BIN", &chooser)
+                .env("IMUX_TEST_FZF_ARGS", &arguments);
+            if let Some(filter) = filter {
+                command.args(["--agent-states", filter]);
+            }
+            text(command.output().unwrap());
+            assert!(
+                fs::read_to_string(&arguments).unwrap().contains(expected),
+                "dashboard disagreed for {state}"
+            );
+        }
+    }
+}
+
 #[test]
 fn next_attention_visits_every_agent_then_wraps_using_native_ids() {
     let f = Fixture::new();

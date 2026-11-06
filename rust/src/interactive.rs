@@ -45,6 +45,7 @@ struct Directory(PathBuf);
 struct LiveUpdate {
     requested: AtomicU64,
     consumed: AtomicU64,
+    deferred: AtomicBool,
 }
 impl LiveUpdate {
     fn pending(&self) -> bool {
@@ -327,9 +328,13 @@ impl<A: Adapter> Runtime<'_, A> {
                 if !self.live_pending.pending() && !self.live_rows_dirty {
                     return Ok(json!({"text":""}));
                 }
-                // reload-sync temporarily blocks input in fzf. Let a burst
-                // of typing finish before applying background changes.
+                // fzf blocks input while restoring an --id-nth tracked item
+                // after reload. Let a burst of typing finish first.
                 if request["idle_ms"].as_u64().map_or(false, |idle| idle < 150) {
+                    // The helper received this update, so retry on the next
+                    // watcher tick. The longer watchdog is only for commands
+                    // fzf accepts but discards while opening a modal.
+                    self.live_pending.deferred.store(true, Ordering::Release);
                     return Ok(json!({"text":""}));
                 }
                 let generation = self.live_pending.requested.load(Ordering::Acquire);
@@ -636,6 +641,7 @@ impl<A: Adapter> Runtime<'_, A> {
                         args["other"] = target_json(&source);
                     } else {
                         self.swap_source = target;
+                        self.pending_query = Some(String::new());
                         self.message =
                             "Swap source marked; select the destination and press Ctrl+s again"
                                 .into();
@@ -741,7 +747,9 @@ fn watch_snapshot(
     let mut posted: Option<std::time::Instant> = None;
     let mut posted_generation = 0;
     while !stop.load(Ordering::Acquire) {
-        if updates.consumed.load(Ordering::Acquire) >= posted_generation {
+        if updates.deferred.swap(false, Ordering::AcqRel)
+            || updates.consumed.load(Ordering::Acquire) >= posted_generation
+        {
             posted = None;
         }
         let current = snapshot_stamp(path);
@@ -794,9 +802,9 @@ pub(crate) fn run<A: Adapter>(
         command.arg("--id-nth=4");
         command.env_remove("FZF_API_KEY");
     }
-    command.args(["--hscroll", "--cycle"]);
+    command.args(["--no-hscroll", "--cycle"]);
     let empty = if mode == Mode::Agents {
-        "No agent needs permission or input · clear the query to widen"
+        "No agent needs attention · clear the query to widen"
     } else if mode.operation().is_some() {
         "No matching target · Ctrl+r reload · Esc close"
     } else {
@@ -964,7 +972,11 @@ pub(crate) fn run<A: Adapter>(
         });
         let watcher = live_path.map(|path| {
             let stopping = Arc::clone(&stop);
-            let action = format!("transform({base} live {})", quote(&reload));
+            // Collection and rendering must not run inside a synchronous fzf
+            // transform: those commands stop it from accepting input. A focus
+            // change can cancel this background helper; the generation remains
+            // pending until rows are consumed, so the watcher retries it.
+            let action = format!("bg-transform({base} live {})", quote(&reload));
             scope.spawn(move || {
                 watch_snapshot(&path, &fzf_socket, &action, &stopping, &live_pending)
             })
@@ -1058,6 +1070,7 @@ fn chooser(
             "--delimiter=\t",
             "--with-nth=1",
         ])
+        .arg(crate::palette::NativeTheme::from_env().fzf_color())
         .arg(format!("--prompt={prompt} ❯ "))
         .arg(format!("--header={header}"))
         .arg(format!("--query={initial}"))
@@ -1071,7 +1084,7 @@ fn chooser(
         command.args(["--disabled", "--bind=enter:print-query+abort,ctrl-a:beginning-of-line,ctrl-e:end-of-line,ctrl-k:kill-line,ctrl-u:unix-line-discard,alt-b:backward-word,alt-f:forward-word,alt-d:kill-word,alt-backspace:backward-kill-word"]);
     }
     if prompt == "Confirm" {
-        command.arg("--color=border:#ea6962,prompt:#ea6962");
+        command.arg(crate::palette::NativeTheme::from_env().danger_color());
     }
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     if let Some(mut stream) = child.stdin.take() {
@@ -1103,6 +1116,7 @@ fn directory_picker(socket: &Path) -> Result<Option<(String, Option<Value>)>, St
         let mut command =
             Command::new(std::env::var("INTERDIMUX_FZF_BIN").unwrap_or_else(|_| "fzf".into()));
         command.args(["--ansi","--layout=reverse","--height=90%","--border=rounded","--no-multi","--print-query","--expect=ctrl-f,ctrl-g,ctrl-r","--delimiter=\t","--with-nth=1..3","--nth=1..3","--tabstop=2","--prompt=Directories ❯ ","--footer=Enter open · Ctrl+g browse · Ctrl+f deep search · Ctrl+r reset · Esc back"])
+            .arg(crate::palette::NativeTheme::from_env().fzf_color())
             .env_remove("FZF_DEFAULT_OPTS").env_remove("FZF_DEFAULT_OPTS_FILE").env_remove("FZF_DEFAULT_COMMAND")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         let binary = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -1205,7 +1219,7 @@ fn dashboard_picker(socket: &Path) -> Result<bool, String> {
         ),
         (
             "agents",
-            format!("Agents — {} need permission or input", info["agents"]),
+            format!("Agents — {} need attention", info["agents"]),
         ),
         ("agent-next", "Next agent needing attention".into()),
         ("dirs", "New session — choose a project directory".into()),
@@ -1461,6 +1475,7 @@ fn jobs_table(rows: &[String]) -> Result<Option<(String, String)>, String> {
             "--header=Enter inspect · Ctrl+x cancel · Ctrl+o output · Ctrl+r refresh · Esc back",
             "--expect=ctrl-x,ctrl-o,ctrl-r",
         ])
+        .arg(crate::palette::NativeTheme::from_env().fzf_color())
         .env_remove("FZF_DEFAULT_OPTS")
         .env_remove("FZF_DEFAULT_OPTS_FILE")
         .env_remove("FZF_DEFAULT_COMMAND")

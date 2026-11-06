@@ -89,7 +89,7 @@ pub(crate) fn agent_states(args: &[String]) -> Result<Vec<String>, String> {
         .windows(2)
         .find(|a| a[0] == "--agent-states")
         .map(|a| a[1].as_str())
-        .unwrap_or("approve,input");
+        .unwrap_or(crate::native_agents::DEFAULT_ATTENTION);
     crate::native_agents::states(value)
 }
 
@@ -120,16 +120,29 @@ pub(crate) fn hide(snapshot: &mut Snapshot) {
 pub(crate) struct PreparedRows {
     presentation: crate::presentation::Prepared,
     directories: Vec<crate::projects::Directory>,
+    directory_widths: (usize, usize),
     home: String,
     agents: Option<Vec<crate::native_agents::Agent>>,
 }
 
 impl PreparedRows {
     pub(crate) fn new(snapshot: &Snapshot) -> Self {
+        let directories = crate::projects::cached_directories(snapshot);
+        let home = crate::env_text("HOME");
+        let mut directory_widths = (0, 0);
+        for directory in directories.iter().filter(|d| d.existing_session.is_none()) {
+            directory_widths.0 = directory_widths
+                .0
+                .max(4 + crate::text::width(&crate::native_agents::plain(&directory.label)));
+            directory_widths.1 = directory_widths.1.max(crate::text::width(
+                &crate::native_agents::plain(&crate::text::tildify(&directory.path, &home)),
+            ));
+        }
         Self {
             presentation: crate::presentation::Prepared::new(snapshot),
-            directories: crate::projects::cached_directories(snapshot),
-            home: crate::env_text("HOME"),
+            directories,
+            directory_widths,
+            home,
             agents: None,
         }
     }
@@ -141,13 +154,21 @@ impl PreparedRows {
         mode: Mode,
         states: &[String],
     ) -> Vec<Row> {
-        let (mut rows, budgets) = self.presentation.rows_and_widths(width);
+        let (mut rows, budgets) = self.presentation.rows_and_widths(width, self.directory_widths);
         append_directories(&mut rows, &self.directories, &self.home, budgets);
         if mode == Mode::Agents {
             let agents = self
                 .agents
                 .get_or_insert_with(|| crate::native_agents::collect(snapshot, states));
+            for row in &mut rows {
+                row.identity.truncate(row.identity.trim_end().len());
+            }
             crate::native_agents::mark_rows(&mut rows, agents);
+            for row in &mut rows {
+                let identity = crate::text::truncate_ansi(&row.identity, budgets.0);
+                row.identity =
+                    crate::text::pad_to(&identity, crate::text::ansi_width(&identity), budgets.0);
+            }
         }
         rows
     }
@@ -184,25 +205,35 @@ fn append_directories(
     rows: &mut Vec<Row>,
     directories: &[crate::projects::Directory],
     home: &str,
-    budgets: (usize, usize),
+    budgets: (usize, usize, usize),
 ) {
     if directories.is_empty() {
         return;
     }
-    let (identity_width, context_width) = budgets;
+    let (identity_width, context_width, command_width) = budgets;
+    let description = format!(
+        "{}{}{}",
+        crate::palette::NativeTheme::from_env().muted,
+        crate::text::truncate("recent directory", command_width),
+        crate::palette::RST,
+    );
     for directory in directories {
         if directory.existing_session.is_some() {
             continue;
         }
-        let identity = format!("  ⌁ {}", crate::native_agents::plain(&directory.label));
-        let context = format!(
-            "│ {}",
-            crate::native_agents::plain(&crate::text::tildify(&directory.path, home))
+        let identity = crate::text::truncate(
+            &format!("  ⌁ {}", crate::native_agents::plain(&directory.label)),
+            identity_width,
         );
+        let path = crate::text::truncate_left(
+            &crate::native_agents::plain(&crate::text::tildify(&directory.path, home)),
+            context_width.saturating_sub(2),
+        );
+        let context = crate::text::truncate(&format!("│ {path}"), context_width);
         rows.push(Row {
             identity: crate::text::pad_to(&identity, crate::text::width(&identity), identity_width),
             context: crate::text::pad_to(&context, crate::text::width(&context), context_width),
-            command: "recent directory".into(),
+            command: description.clone(),
             target: Target::Directory {
                 path: directory.path.clone(),
             },
@@ -441,17 +472,17 @@ fn columns() -> usize {
 
 fn chooser_options(_snapshot: &Snapshot, keep_screen: bool) -> Vec<String> {
     let mut options: Vec<String> = [
-        "--ansi", "--delimiter=\t", "--with-nth=1..3", "--nth=1..3", "--tabstop=2", "--tiebreak=index",
+        "--ansi", "--delimiter=\t", "--with-nth=1..3", "--nth=1..3", "--tabstop=1", "--tiebreak=index",
         "--layout=reverse", "--height=100%", "--no-multi", "--style=minimal",
         // Rows are already complete before fzf starts. Avoid an empty first
         // finder frame and keep one physical screen line per target.
         "--sync", "--border=none", "--padding=0", "--gap=0", "--no-wrap", "--no-hscroll",
         "--prompt=❯ ", "--ghost=Search sessions, windows and panes", "--info=inline-right",
-        "--no-separator", "--highlight-line", "--pointer=›", "--marker=●", "--scrollbar=│",
+        "--no-separator", "--highlight-line", "--pointer=▌", "--marker=●", "--scrollbar=│",
         "--footer=Enter switch · Esc close", "--footer-border=none",
         "--bind=ctrl-n:down,ctrl-p:up,tab:down,shift-tab:up,change:first",
-        "--color=fg:-1,bg:-1,hl:#d8a657,fg+:#ddc7a1,bg+:#32302f,hl+:#d8a657,info:#928374,prompt:#d8a657,pointer:#d8a657,marker:#a9b665,spinner:#7daea3,header:#d4be98,border:#504945,label:#d4be98,footer:#928374,gutter:-1,separator:#504945,ghost:#7c6f64",
     ].iter().map(|s| (*s).to_owned()).collect();
+    options.push(crate::palette::NativeTheme::from_env().fzf_color());
     if keep_screen {
         // Only disposable Rex terminals retain fzf's final frame. An inline
         // tmux command must still restore the caller's terminal screen.
@@ -522,6 +553,7 @@ pub(crate) fn fzf_options(value: &str) -> Result<(Vec<String>, Vec<String>), Str
                 | "--nth"
                 | "--with-nth"
                 | "--delimiter"
+                | "--tabstop"
                 | "-d"
                 | "--read0"
                 | "--print0"
@@ -547,6 +579,7 @@ pub(crate) fn fzf_options(value: &str) -> Result<(Vec<String>, Vec<String>), Str
                     | "--nth"
                     | "--with-nth"
                     | "--delimiter"
+                    | "--tabstop"
                     | "-d"
                     | "--height"
                     | "--min-height"
@@ -674,8 +707,28 @@ fn choose(
     }
 }
 
+fn configure_theme(backend: &Backend) -> Result<(), String> {
+    let configured = crate::env_text("INTERDIMUX_THEME");
+    let resolved = match configured.as_str() {
+        "" | "auto" => {
+            if matches!(backend, Backend::Rex(_)) {
+                "terminal"
+            } else {
+                "warm"
+            }
+        }
+        "terminal" | "warm" => configured.as_str(),
+        _ => return Err("INTERDIMUX_THEME must be auto, terminal or warm".into()),
+    };
+    // Resolve before starting workers. fzf's helper processes inherit this
+    // choice, keeping every modal and preview on the initiating backend's theme.
+    std::env::set_var("INTERDIMUX_THEME", resolved);
+    Ok(())
+}
+
 pub(crate) fn run(args: &[String], list_only: bool) -> Result<(), String> {
     let backend = parse(args)?;
+    configure_theme(&backend)?;
     let result = run_backend(&backend, list_only, mode(args)?, agent_states(args)?);
     if !list_only {
         if let Err(error) = &result {
@@ -718,6 +771,7 @@ pub(crate) fn run_mode(verb: &str, args: &[String]) -> Result<(), String> {
         }
     }
     let backend = parse(&backend_args)?;
+    configure_theme(&backend)?;
     let result = (|| {
         let mut snapshot = match (&backend, verb) {
             (Backend::Rex(ctx), "jump") => crate::rex::collect_sessions(ctx)?,
@@ -765,7 +819,7 @@ pub(crate) fn run_mode(verb: &str, args: &[String]) -> Result<(), String> {
             }
             "agents" | "agent-next" => {
                 let fallback = if verb == "agent-next" {
-                    "approve,input"
+                    crate::native_agents::DEFAULT_ATTENTION
                 } else {
                     ""
                 };
@@ -907,7 +961,9 @@ pub(crate) fn run_mode(verb: &str, args: &[String]) -> Result<(), String> {
                     snapshot,
                     false,
                     Mode::parse(launch)?,
-                    crate::native_agents::states(wanted.as_deref().unwrap_or("approve,input"))?,
+                    crate::native_agents::states(
+                        wanted.as_deref().unwrap_or(crate::native_agents::DEFAULT_ATTENTION),
+                    )?,
                 )
             }
         }
@@ -1025,8 +1081,7 @@ fn run_snapshot(
 ) -> Result<(), String> {
     hide(&mut snapshot);
     if !list_only && mode == Mode::Dashboard {
-        let attention =
-            crate::native_agents::collect(&snapshot, &["approve".into(), "input".into()]);
+        let attention = crate::native_agents::collect(&snapshot, &states);
         match crate::dashboard::choose(
             matches!(backend, Backend::Tmux(_)),
             attention.len(),
@@ -1117,7 +1172,7 @@ mod tests {
                 existing_session: None,
             }],
             "/home/me",
-            (18, 24),
+            (18, 24, 20),
         );
         assert_eq!(field_width(&rows[2].identity), 18);
         assert_eq!(field_width(&rows[2].context), 24);
@@ -1149,11 +1204,34 @@ mod tests {
                 existing_session: None,
             }],
             "",
-            (18, 24),
+            (18, 24, 20),
         );
         assert_eq!(field_width(&rows[1].identity), 18);
         assert_eq!(field_width(&rows[1].context), 24);
         assert_eq!(rows[0].identity.len(), 300);
+    }
+
+    #[test]
+    fn recent_directory_columns_are_bounded_and_keep_the_path_tail_and_target() {
+        let path = format!("/very/long/{}/leaf-界", "parent/".repeat(20));
+        let mut rows = Vec::new();
+        append_directories(
+            &mut rows,
+            &[crate::projects::Directory {
+                path: path.clone(),
+                label: "Long directory name 🚀".repeat(10),
+                project: None,
+                existing_session: None,
+            }],
+            "",
+            (14, 18, 8),
+        );
+        assert_eq!(field_width(&rows[0].identity), 14);
+        assert_eq!(field_width(&rows[0].context), 18);
+        assert!(field_width(&rows[0].command) <= 8);
+        assert!(rows[0].context.starts_with("│ …"));
+        assert!(rows[0].context.trim_end().ends_with("leaf-界"));
+        assert_eq!(rows[0].target, Target::Directory { path });
     }
 
     #[test]

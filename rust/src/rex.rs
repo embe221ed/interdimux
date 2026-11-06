@@ -607,10 +607,9 @@ fn program_status(metadata: &Value) -> Option<ProgramStatus> {
             Some("error") => (50, "error"),
             Some("working") => (40, "working"),
             Some("done") => (30, "done"),
-            // Rex specifies unknown states as idle so newer reporting
-            // programs remain visible without inventing urgency.
-            Some(_) => (20, "idle"),
-            None => continue,
+            Some("idle") => (20, "idle"),
+            // Unknown reports must not become idle attention entries.
+            _ => continue,
         };
         if rank > priority {
             priority = rank;
@@ -1492,9 +1491,9 @@ rex = {
         metadata["program_status"]["records"][0]["state"] = json!("done");
         assert_eq!(program_status(&metadata).unwrap().progress, None);
         metadata["program_status"]["records"][0]["state"] = json!("future-state");
-        let status = program_status(&metadata).unwrap();
-        assert_eq!(status.state, "idle");
-        assert_eq!(status.progress, None);
+        assert!(program_status(&metadata).is_none());
+        metadata["program_status"]["records"][0]["state"] = json!("idle");
+        assert_eq!(program_status(&metadata).unwrap().state, "idle");
         metadata["foreground"]["pid"] = json!(999);
         assert!(program_status(&metadata).is_none());
     }

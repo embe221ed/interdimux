@@ -58,6 +58,10 @@ pub fn truncate(s: &str, max: usize) -> String {
     // measured-fitting prefixes are ever accepted, a pathological sequence can
     // make the result shorter but never wider than the budget.
     let bounds: Vec<usize> = s.grapheme_indices(true).map(|(i, _)| i).collect();
+    format!("{}…", &s[..prefix_index(s, &bounds, budget)])
+}
+
+fn prefix_index(s: &str, bounds: &[usize], budget: usize) -> usize {
     let (mut lo, mut hi) = (0usize, bounds.len());
     while lo + 1 < hi {
         let mid = (lo + hi) / 2;
@@ -73,7 +77,265 @@ pub fn truncate(s: &str, max: usize) -> String {
     while lo > 0 && s[..bounds[lo]].ends_with('\u{200d}') {
         lo -= 1;
     }
-    format!("{}…", &s[..bounds[lo]])
+    bounds[lo]
+}
+
+/// Keep the end of a plain label or path, using a leading ellipsis when it
+/// exceeds the viewport. Unlike trim_path, this also bounds a long basename.
+pub(crate) fn truncate_left(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if width(s) <= max {
+        return s.to_owned();
+    }
+    if max == 1 {
+        return "…".into();
+    }
+    let budget = max - 1;
+    if s.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+        return format!("…{}", &s[s.len() - budget..]);
+    }
+    let mut start = s.len();
+    let mut cells = 0;
+    for (index, cluster) in s.grapheme_indices(true).rev() {
+        let next = cells + width(cluster);
+        if next > budget {
+            break;
+        }
+        start = index;
+        cells = next;
+    }
+    // Whole-string width can differ from the sum of grapheme widths. Check
+    // the actual retained suffix as well, without cutting inside a cluster.
+    while width(&s[start..]) > budget {
+        start += s[start..].graphemes(true).next().unwrap().len();
+    }
+    format!("…{}", &s[start..])
+}
+
+/// Yield readable spans and SGR spans without allocating per character. The
+/// picker supplies sanitized SGR-only text; discard other terminal commands
+/// defensively instead of forwarding cursor movement or OSC strings.
+fn ansi_piece<'a>(remaining: &mut &'a str) -> Option<(&'a str, bool)> {
+    while !remaining.is_empty() {
+        let input = *remaining;
+        let bytes = input.as_bytes();
+        if bytes[0] == b'\x1b' {
+            if bytes.get(1) == Some(&b'[') {
+                let end = bytes[2..]
+                    .iter()
+                    .position(|byte| (b'@'..=b'~').contains(byte))
+                    .map(|index| index + 3)
+                    .unwrap_or(bytes.len());
+                *remaining = &input[end..];
+                if bytes.get(end.wrapping_sub(1)) == Some(&b'm')
+                    && bytes[2..end - 1]
+                        .iter()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b';' | b':'))
+                {
+                    return Some((&input[..end], true));
+                }
+            } else if matches!(bytes.get(1), Some(b']' | b'P' | b'X' | b'^' | b'_')) {
+                let mut end = 2;
+                while end < bytes.len() {
+                    if bytes[end] == b'\x07' {
+                        end += 1;
+                        break;
+                    }
+                    if bytes[end] == b'\x1b' && bytes.get(end + 1) == Some(&b'\\') {
+                        end += 2;
+                        break;
+                    }
+                    end += 1;
+                }
+                *remaining = &input[end..];
+            } else {
+                let count = if matches!(
+                    bytes.get(1),
+                    Some(b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/')
+                ) {
+                    3
+                } else {
+                    2
+                };
+                let end = input
+                    .char_indices()
+                    .nth(count)
+                    .map_or(input.len(), |(index, _)| index);
+                *remaining = &input[end..];
+            }
+        } else if input.chars().next().unwrap().is_control() {
+            *remaining = &input[input.chars().next().unwrap().len_utf8()..];
+        } else {
+            let end = input
+                .char_indices()
+                .find(|(_, character)| character.is_control())
+                .map_or(input.len(), |(index, _)| index);
+            *remaining = &input[end..];
+            return Some((&input[..end], false));
+        }
+    }
+    None
+}
+
+/// Visible terminal cells of a styled label; SGR between Unicode codepoints
+/// must not split the grapheme used for measuring an emoji or combining text.
+pub(crate) fn ansi_width(s: &str) -> usize {
+    let mut remaining = s;
+    if s.is_ascii() {
+        let mut cells = 0;
+        while let Some((piece, sgr)) = ansi_piece(&mut remaining) {
+            if !sgr {
+                cells += piece.len();
+            }
+        }
+        return cells;
+    }
+    if !s.chars().any(char::is_control) {
+        return width(s);
+    }
+    let mut plain = String::with_capacity(s.len());
+    while let Some((piece, sgr)) = ansi_piece(&mut remaining) {
+        if !sgr {
+            plain.push_str(piece);
+        }
+    }
+    width(&plain)
+}
+
+/// Clip styled text at the same grapheme boundary as plain truncation. Preserve
+/// SGR for the retained prefix, then reset any retained style after the ellipsis.
+pub(crate) fn truncate_ansi(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if !s.chars().any(char::is_control) {
+        return truncate(s, max);
+    }
+    let mut plain = String::with_capacity(s.len());
+    let mut remaining = s;
+    while let Some((piece, sgr)) = ansi_piece(&mut remaining) {
+        if !sgr {
+            plain.push_str(piece);
+        }
+    }
+    if plain.is_empty() {
+        return String::new();
+    }
+    let clipped = width(&plain) > max;
+    let keep = if clipped {
+        truncate(&plain, max).len() - '…'.len_utf8()
+    } else {
+        plain.len()
+    };
+    let mut output = String::with_capacity(s.len().min(keep.saturating_add(64)));
+    let mut remaining = s;
+    let mut copied = 0;
+    let mut styled = false;
+    while let Some((piece, sgr)) = ansi_piece(&mut remaining) {
+        if sgr {
+            output.push_str(piece);
+            styled = true;
+        } else {
+            let available = keep - copied;
+            if clipped && piece.len() >= available {
+                output.push_str(&piece[..available]);
+                break;
+            }
+            output.push_str(piece);
+            copied += piece.len();
+        }
+    }
+    if clipped {
+        output.push('…');
+        if styled {
+            output.push_str("\x1b[0m");
+        }
+    }
+    output
+}
+
+/// A snapshot's styled label, parsed once for repeated viewport changes.
+/// Retain grapheme boundaries across SGR spans: styling can change in the middle
+/// of an emoji, and neither parsing nor truncating a span separately is safe.
+pub(crate) struct PreparedAnsi {
+    text: String,
+    plain: String,
+    // End offsets in plain and styled text for each readable span.
+    spans: Vec<(usize, usize)>,
+    bounds: Vec<usize>,
+    cells: usize,
+    first_style: Option<usize>,
+}
+
+impl PreparedAnsi {
+    pub(crate) fn new(source: &str) -> Self {
+        let mut text = String::with_capacity(source.len());
+        let mut plain = String::with_capacity(source.len());
+        // Native identities typically have five readable spans. Reserving once
+        // avoids several small reallocations per row while building a snapshot.
+        let mut spans = Vec::with_capacity(8);
+        let mut first_style = None;
+        let mut remaining = source;
+        while let Some((piece, sgr)) = ansi_piece(&mut remaining) {
+            if sgr {
+                first_style.get_or_insert(text.len());
+                text.push_str(piece);
+            } else {
+                text.push_str(piece);
+                plain.push_str(piece);
+                spans.push((plain.len(), text.len()));
+            }
+        }
+        if plain.is_empty() {
+            text.clear();
+        }
+        let cells = width(&plain);
+        let bounds = if plain.is_ascii() {
+            Vec::new()
+        } else {
+            let mut bounds = Vec::with_capacity(plain.len().min(128));
+            bounds.extend(plain.grapheme_indices(true).map(|(index, _)| index));
+            bounds
+        };
+        Self {
+            text,
+            plain,
+            spans,
+            bounds,
+            cells,
+            first_style,
+        }
+    }
+
+    pub(crate) fn truncate(&self, max: usize) -> (String, usize) {
+        if max == 0 {
+            return (String::new(), 0);
+        }
+        if self.cells <= max {
+            return (self.text.clone(), self.cells);
+        }
+        let keep = if self.bounds.is_empty() {
+            max - 1
+        } else {
+            prefix_index(&self.plain, &self.bounds, max - 1)
+        };
+        let index = self
+            .spans
+            .partition_point(|&(plain_end, _)| plain_end < keep);
+        let (plain_end, styled_end) = self.spans[index];
+        let end = styled_end - (plain_end - keep);
+        let mut text = String::with_capacity(end + 7);
+        text.push_str(&self.text[..end]);
+        text.push('…');
+        if self.first_style.map_or(false, |style| style < end) {
+            text.push_str("\x1b[0m");
+        }
+        // Adding an ellipsis after a dangling joiner is prevented by prefix_index.
+        let cells = width(&self.plain[..keep]) + 1;
+        (text, cells)
+    }
 }
 
 /// Pad `s` (whose visible width is `plain`) out to `target` cells.
@@ -208,6 +470,165 @@ mod tests {
         assert_eq!(truncate("abc", 8), "abc");
         // a wide char must not be split into half a cell
         assert_eq!(truncate("日本語", 4), "日…");
+    }
+
+    #[test]
+    fn left_truncation_keeps_the_end_and_handles_zero_and_one_cell_limits() {
+        assert_eq!(truncate_left("/very/long/component", 10), "…component");
+        assert_eq!(truncate_left("abcdef", 4), "…def");
+        assert_eq!(truncate_left("abcdef", 0), "");
+        assert_eq!(truncate_left("abcdef", 1), "…");
+        assert_eq!(truncate_left("abcdef\u{200b}", 1), "…");
+        assert_eq!(truncate_left("abc", 3), "abc");
+        assert_eq!(truncate_left("", 0), "");
+        assert_eq!(truncate_left("prefix/日本語", 5), "…本語");
+    }
+
+    #[test]
+    fn left_truncation_preserves_complete_suffix_graphemes() {
+        for cluster in ["❤️", "👍🏽", "🇵🇱", "👨‍💻", "👨‍👩‍👧‍👦", "1️⃣", "a\u{301}"]
+        {
+            let source = format!("long-prefix/{cluster}");
+            assert_eq!(
+                truncate_left(&source, width(cluster) + 1),
+                format!("…{cluster}")
+            );
+            assert_eq!(truncate_left(&source, width(cluster)), "…");
+            for max in 0..width(&source) {
+                let clipped = truncate_left(&source, max);
+                assert!(width(&clipped) <= max, "{source:?} at {max}: {clipped:?}");
+                let suffix = clipped.strip_prefix('…').unwrap_or(&clipped);
+                assert!(source.ends_with(suffix));
+                let start = source.len() - suffix.len();
+                assert!(
+                    start == source.len()
+                        || source
+                            .grapheme_indices(true)
+                            .any(|(index, _)| index == start)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ansi_width_ignores_sgr_and_measures_graphemes_across_style_boundaries() {
+        assert_eq!(ansi_width("\x1b[31mabc\x1b[0m"), 3);
+        assert_eq!(ansi_width("\x1b[38;2;1;2;3m日本\x1b[0m"), 4);
+        assert_eq!(ansi_width("\x1b[1m👨\x1b[38:2::1:2:3m‍💻\x1b[0m"), 2);
+        assert_eq!(ansi_width("a\x1b[31m\u{301}\x1b[0m"), 1);
+        assert_eq!(ansi_width("\x1b[0m"), 0);
+    }
+
+    #[test]
+    fn ansi_truncation_keeps_prefix_colors_and_resets_after_the_ellipsis() {
+        let red = "\x1b[31mabcdef\x1b[0m";
+        assert_eq!(truncate_ansi(red, 0), "");
+        assert_eq!(truncate_ansi(red, 1), "\x1b[31m…\x1b[0m");
+        assert_eq!(truncate_ansi(red, 4), "\x1b[31mabc…\x1b[0m");
+        assert_eq!(truncate_ansi(red, 6), red);
+        assert_eq!(truncate_ansi("abc", 2), "a…");
+        assert_eq!(truncate_ansi("\x1b[0m", 2), "");
+        assert_eq!(
+            truncate_ansi("\x1b[31mab\x1b[34mcdef\x1b[0m", 3),
+            "\x1b[31mab…\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn ansi_truncation_never_splits_colored_unicode_clusters() {
+        for cluster in ["❤️", "👍🏽", "🇵🇱", "👨‍💻", "1️⃣", "a\u{301}", "日本"]
+        {
+            let source = format!("\x1b[32m{cluster}\x1b[1mmore\x1b[0m");
+            assert_eq!(
+                truncate_ansi(&source, width(cluster) + 1),
+                format!("\x1b[32m{cluster}…\x1b[0m")
+            );
+            for max in 0..12 {
+                assert!(ansi_width(&truncate_ansi(&source, max)) <= max);
+            }
+        }
+        let split_emoji = "\x1b[32m👨\x1b[1m‍💻more\x1b[0m";
+        assert_eq!(truncate_ansi(split_emoji, 3), "\x1b[32m👨\x1b[1m‍💻…\x1b[0m");
+        assert_eq!(truncate_ansi(split_emoji, 2), "\x1b[32m…\x1b[0m");
+    }
+
+    #[test]
+    fn measured_ansi_clipping_reports_actual_cells_including_short_grapheme_cuts() {
+        for source in [
+            "plain text",
+            "\x1b[31mascii\x1b[0m",
+            "\x1b[32m👨\x1b[1m‍💻wide 日本語\x1b[0m",
+            "\x1b[31m❤️👍🏽🇵🇱e\u{301}end\x1b[0m",
+            "\x1b]0;title\x07\x1b[2Jab\ncd\x1b[31m",
+            "\x1b[0m",
+        ] {
+            for budget in 0..24 {
+                let (text, cells) = PreparedAnsi::new(source).truncate(budget);
+                assert_eq!(cells, ansi_width(&text), "{source:?} at {budget}");
+                assert!(cells <= budget, "{source:?} at {budget}");
+            }
+        }
+        // A two-cell grapheme cannot fill a two-cell budget with an ellipsis;
+        // reporting the budget instead of the actual width would misalign it.
+        assert_eq!(PreparedAnsi::new("\x1b[31m日本\x1b[0m").truncate(2).1, 1);
+    }
+
+    #[test]
+    fn prepared_ansi_matches_safe_clipping_at_every_budget_and_style_boundary() {
+        for plain in ["ascii", "日本語", "👨‍💻🇵🇱❤️👍🏽e\u{301}", "c\u{200d}tail"]
+        {
+            // Move SGR into every character boundary, including inside emoji
+            // graphemes, rather than testing only neatly styled whole words.
+            for index in plain
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain([plain.len()])
+            {
+                let source = format!(
+                    "\x1b[32m{}\x1b[1m{}\x1b[0m",
+                    &plain[..index],
+                    &plain[index..]
+                );
+                let prepared = PreparedAnsi::new(&source);
+                for budget in 0..=width(plain) + 2 {
+                    let (actual, cells) = prepared.truncate(budget);
+                    assert_eq!(
+                        actual,
+                        truncate_ansi(&source, budget),
+                        "{source:?}, {budget}"
+                    );
+                    assert_eq!(cells, ansi_width(&actual));
+                    assert!(cells <= budget);
+                }
+            }
+        }
+        for source in [
+            "",
+            "\x1b[31m",
+            "\x1b]0;title\x07ab\x1b[2Jcd\x1b[",
+            "abc\n\tdef",
+        ] {
+            let prepared = PreparedAnsi::new(source);
+            for budget in 0..12 {
+                let expected = truncate_ansi(source, budget);
+                assert_eq!(
+                    prepared.truncate(budget),
+                    (expected.clone(), ansi_width(&expected))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ansi_helpers_discard_non_sgr_terminal_commands_and_unfinished_sequences() {
+        let source = "\x1b]0;invisible title\x07a\x1b[2Jb\x1bPignored\x1b\\c\n\x1b[31";
+        assert_eq!(ansi_width(source), 3);
+        assert_eq!(truncate_ansi(source, 20), "abc");
+        assert_eq!(truncate_ansi(source, 2), "a…");
+        for source in ["\x1b", "\x1b[", "\x1b]unterminated", "\x1bPunterminated"] {
+            assert_eq!(ansi_width(source), 0);
+            assert_eq!(truncate_ansi(source, 10), "");
+        }
     }
 
     #[test]

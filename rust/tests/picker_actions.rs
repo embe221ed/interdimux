@@ -30,7 +30,7 @@ def respond(fd, pending, data):
     return pending[end:][-128:]
 
 class Picker:
-    def __init__(self, raw=True, mode=None, live=False):
+    def __init__(self, raw=True, mode=None, live=False, theme=None, direct=False, snapshot_setup=None, agent_states=None):
         self.temp = tempfile.TemporaryDirectory(prefix='imux-actions-')
         self.root = Path(self.temp.name)
         self.snapshot_path = self.root / 'snapshot.json'
@@ -66,6 +66,7 @@ class Picker:
             },
             'errors': {},
         }
+        if snapshot_setup is not None: snapshot_setup(self.snapshot)
         write_json(self.snapshot_path, self.snapshot)
         if live: write_json(self.root / 'live.json', {'version': 1})
         probe = self.root / 'dashboard-result.py'
@@ -74,7 +75,7 @@ class Picker:
         wrapper.write_text('#!' + sys.executable + '''
 import json, os, shlex, sys
 with open(os.environ['IMUX_FZF_LOG'], 'a') as out:
-    out.write(json.dumps({'pid': os.getpid(), 'args': sys.argv[1:], 'query': os.environ.get('FZF_QUERY'), 'current_item': os.environ.get('FZF_CURRENT_ITEM')}) + '\\n')
+    out.write(json.dumps({'pid': os.getpid(), 'args': sys.argv[1:], 'query': os.environ.get('FZF_QUERY'), 'current_item': os.environ.get('FZF_CURRENT_ITEM'), 'theme': os.environ.get('INTERDIMUX_THEME')}) + '\\n')
 arguments = sys.argv[1:]
 command = shlex.quote(sys.executable) + ' ' + shlex.quote(os.environ['IMUX_DASHBOARD_PROBE'])
 if any(argument.startswith('--prompt=Dashboard ') for argument in arguments):
@@ -101,10 +102,11 @@ raise SystemExit(91)
         rex.chmod(0o700)
         environment = dict(os.environ)
         for key in list(environment):
-            if key.startswith(('INTERDIMUX_', 'REX_', 'FZF_')) or key in ('TMUX', 'TMUX_PANE', 'ESCDELAY'):
+            if key.startswith(('INTERDIMUX_', 'REX_', 'FZF_')) or key in ('TMUX', 'TMUX_PANE', 'ESCDELAY', 'NO_COLOR'):
                 environment.pop(key, None)
         environment.update({
             'TERM': 'xterm-256color', 'HOME': str(self.root), 'XDG_DATA_HOME': str(self.root / 'data'),
+            'XDG_STATE_HOME': str(self.root / 'state'),
             'PATH': str(self.root) + os.pathsep + os.environ.get('PATH', '/usr/bin:/bin'),
             'INTERDIMUX_FZF_BIN': str(wrapper), 'INTERDIMUX_REX_BIN': str(rex),
             'INTERDIMUX_ORDER': 'index', 'INTERDIMUX_COLS': '120', 'INTERDIMUX_USE_ZOXIDE': 'off',
@@ -117,17 +119,22 @@ raise SystemExit(91)
             'FZF_API_KEY': 'inherited-unrelated-key',
             'IMUX_LIVE_STARTUP': str(self.snapshot_path) if live == 'startup' else '',
         })
+        if theme is not None: environment['INTERDIMUX_THEME'] = theme
+        self.environment = environment
         (self.root / 'projects' / 'example').mkdir(parents=True)
+        command = [binary, mode if direct else 'pick', '--backend', 'rex', '--client', 'client:origin', '--session', 'session:origin',
+                   '--window', 'window:origin', '--block', 'block:origin', '--picker-block', 'block:picker',
+                   '--snapshot', str(self.snapshot_path), '--result', str(self.result_path)]
+        if mode and not direct: command += ['--mode', mode]
+        if agent_states is not None: command += ['--agent-states', agent_states]
         self.thread = threading.Thread(target=self.coordinate, daemon=True)
-        self.thread.start()
+        # Fork before starting a Python thread. A child cannot safely perform
+        # Python/exec setup with locks inherited from a running coordinator.
         self.child, self.master = pty.fork()
         if self.child == 0:
-            command = [binary, 'pick', '--backend', 'rex', '--client', 'client:origin', '--session', 'session:origin',
-                       '--window', 'window:origin', '--block', 'block:origin', '--picker-block', 'block:picker',
-                       '--snapshot', str(self.snapshot_path), '--result', str(self.result_path)]
-            if mode: command += ['--mode', mode]
             os.execve(binary, command, environment)
         fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack('HHHH', 28, 120, 0, 0))
+        self.thread.start()
         try:
             if mode == 'dashboard':
                 self.until(lambda: any('--no-input' in launch['args'] for launch in self.launches()), 'standalone Dashboard')
@@ -408,7 +415,7 @@ def plain_filter_global_actions(p):
     p.stable(); p.finish()
 
 def empty_agents_mode(p):
-    assert '--query=^! | ^?' in p.top_launches()[0]['args'], p.top_launches()
+    assert '--query=^! | ^? | ^× | ^✓ | ^·' in p.top_launches()[0]['args'], p.top_launches()
     p.pump(.15)
     assert not p.result_path.exists(), 'empty attention filter must stay open, not auto-exit'
     p.query('selected-pane')
@@ -553,7 +560,7 @@ def live_typing(p):
     def state(): return finder_state(p)
     blocks = p.snapshot['views']['session:target']['windows'][0]['layers'][0]['blocks']
     for round_number in range(2):
-        query = 'typing-target-round-' + str(round_number) + '-complete-suffix'
+        query = 'typing-round-' + str(round_number)
         p.query('')
         blocks[0]['label'] = query
         for index, character in enumerate(query):
@@ -563,7 +570,7 @@ def live_typing(p):
             blocks[1]['label'] = 'background-typing-' + str(round_number) + '-' + str(index)
             write_json(p.snapshot_path, p.snapshot)
             p.send(character.encode())
-            p.pump(.03)
+            p.pump(.09)
         p.pump(.1)
         assert state()['query'] == query, 'live reload lost typed characters: ' + repr(state())
         blocks[0]['label'] = query + '-latest'
@@ -606,8 +613,171 @@ scenario('plain-filter-zero-enter', plain_filter_create, raw=False)
 scenario('plain-filter-zero-global-actions', plain_filter_global_actions, raw=False)
 "###;
 
-#[test]
-fn shared_actions_keep_fzf_alive_and_use_only_hosted_native_ipc() {
+const AGENTS_PROBE: &str = r###"
+def attention_snapshot(snapshot):
+    statuses = [('permission', 'blocked', 'permission'), ('question', 'blocked', 'question'),
+                ('done', 'done', ''), ('working', 'working', ''),
+                ('idle', 'idle', ''), ('error', 'error', '')]
+    target = snapshot['views']['session:target']['windows'][0]
+    target['layers'][0]['blocks'] = []
+    for index, (label, state, detail) in enumerate(statuses):
+        split_id = 'block:selected' if index == 0 else 'block:split-' + label
+        split_label = 'selected-pane' if index == 0 else 'split-' + label
+        target['layers'][0]['blocks'].append({'block_id': split_id, 'label': split_label})
+        single_id, window_id = 'block:single-' + label, 'window:single-' + label
+        snapshot['views']['session:target']['windows'].append({
+            'window_id': window_id, 'label': 'single-' + label, 'focused_block_id': single_id,
+            'layers': [{'kind': 'tiled', 'blocks': [{'block_id': single_id, 'label': 'single-' + label}]}],
+        })
+        for offset, block_id in enumerate([split_id, single_id]):
+            # Rex hooks can publish a current, owned status from the shell
+            # hosting an agent. Verify both row shapes survive shell guards.
+            process = 'zsh' if label == 'permission' and offset == 1 else 'bash' if label == 'question' and offset == 0 else 'codex'
+            owner = {'name': process, 'pid': 1000 + index * 2 + offset}
+            snapshot['metadata'][block_id] = {
+                'foreground': dict(owner),
+                'program_status': {'records': [{'owner': owner, 'state': state, 'kind': detail,
+                                                 'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 10))}]},
+            }
+
+for wanted, raw in [('approve,input', True), ('approve,input', False), (None, True), (None, False)]:
+    p = Picker(raw=raw, mode='agents', live=True, snapshot_setup=attention_snapshot,
+               agent_states=wanted)
+    try:
+        expected = [('selected-pane', '!'), ('split-question', '?'),
+                    ('single-permission', '!'), ('single-question', '?')]
+        if wanted is None:
+            for label, marker in [('done', '✓'), ('idle', '·'), ('error', '×')]:
+                expected += [('split-' + label, marker), ('single-' + label, marker)]
+        p.until(lambda: finder_state(p)['matchCount'] == len(expected),
+                'attention rows including collapsed single panes: ' + repr(wanted))
+        state = finder_state(p)
+        if wanted is not None: assert state['query'] == '^! | ^?', state
+        labels = [row['text'] for row in state['matches']]
+        for label, marker in expected:
+            matches = [line for line in labels if label in line]
+            assert len(matches) == 1 and matches[0].startswith(marker + ' '), (label, labels)
+        excluded = ['working'] + (['done', 'idle', 'error'] if wanted is not None else [])
+        assert all('single-' + label not in line and 'split-' + label not in line
+                   for label in excluded for line in labels), labels
+        # A waiting program can resume while another starts asking a question.
+        # The snapshot replacement must replace the cached marker set as well.
+        p.snapshot['metadata']['block:selected']['program_status']['records'][0]['state'] = 'working'
+        incoming = p.snapshot['metadata']['block:split-working']['program_status']['records'][0]
+        incoming.update(state='blocked', kind='question')
+        write_json(p.snapshot_path, p.snapshot)
+        p.until(lambda: any('split-working' in row['text'] for row in finder_state(p)['matches']),
+                'new waiting program in live attention rows')
+        updated = finder_state(p)
+        assert updated['matchCount'] == len(expected), updated
+        assert not any('selected-pane' in row['text'] for row in updated['matches']), updated
+        # Both row shapes must still activate the precise native block.
+        label, block = ('single-permission', 'block:single-permission') if raw else ('split-question', 'block:split-question')
+        p.query(label)
+        p.until(lambda: finder_state(p)['matchCount'] == 1, 'exact attention row selection')
+        p.send(b'\r')
+        record = p.finish(cancel=False)
+        assert record['outcome'] == 'select' and record['target']['block_id'] == block, record
+        assert not p.calls('create'), 'status filters must never create a session'
+        print(json.dumps({'attention_raw': raw, 'states': wanted or 'default', 'matched': len(expected),
+                          'selected_block': block, 'live_state_change': True}), flush=True)
+    finally: p.close()
+"###;
+
+const THEME_PROBE: &str = r###"
+import subprocess
+
+def theme_colors(launch):
+    result = {}
+    for argument in launch['args']:
+        if argument.startswith('--color='):
+            for item in argument[len('--color='):].split(','):
+                key, _, value = item.partition(':')
+                result[key] = value
+    return result
+
+def assert_theme(launch, profile, danger=False):
+    assert launch['theme'] == profile, 'helper lost resolved profile: ' + repr(launch)
+    colors = theme_colors(launch)
+    assert colors['bg'] == '-1' and colors['preview-bg'] == '-1', colors
+    if profile == 'terminal':
+        assert colors['fg+'] == '-1:regular:bold', colors
+        assert colors['bg+'] == '-1', colors
+        assert colors['hl+'] == '#e78a4e:bold', colors
+        assert colors['prompt'] == ('1' if danger else '#e78a4e'), colors
+        assert colors['pointer'] == '#e78a4e', colors
+    else:
+        assert colors['fg+'] == '#ddc7a1:regular:bold' and colors['bg+'] == '#32302f', colors
+        assert colors['prompt'] == ('#ea6962' if danger else '#d8a657'), colors
+    return colors
+
+def check_list_profiles(p):
+    # A read-only tmux fixture exercises backend resolution without using or
+    # starting a tmux server. Each response is the collector's single batch.
+    u = '\x1f'
+    sections = [
+        u.join(['$1', 'theme-session', '0', '1', '', str(p.root)]),
+        u.join(['$1', '@1', 'theme-session', '0', 'theme-window', '1', 'sh', str(p.root), '1', '0', '']),
+        u.join(['$1', '@1', '%1', 'theme-session', '0', '0', '1', 'sh', str(p.root), '0', '1', '%1', 'theme-pane', '']),
+        u.join(['theme-session', '0', '0', 'fixture', 'fixture']), '',
+    ]
+    tmux = p.root / 'tmux'
+    tmux.write_text('#!' + sys.executable + '\nimport sys\nassert sys.argv[1] == "list-sessions", sys.argv\nsys.stdout.write(' + repr('\x1e'.join(sections)) + ')\n')
+    tmux.chmod(0o700)
+    for backend, configured, terminal in [('rex', None, True), ('rex', 'auto', True), ('rex', 'warm', False),
+                                          ('tmux', None, False), ('tmux', 'auto', False), ('tmux', 'terminal', True)]:
+        environment = dict(p.environment)
+        environment.pop('INTERDIMUX_THEME', None)
+        if configured is not None: environment['INTERDIMUX_THEME'] = configured
+        command = [binary, 'list', '--backend', backend]
+        if backend == 'rex': command += ['--client', 'client:origin', '--session', 'session:origin',
+                                        '--window', 'window:origin', '--block', 'block:origin',
+                                        '--snapshot', str(p.snapshot_path)]
+        output = subprocess.run(command, env=environment, capture_output=True, timeout=10)
+        assert output.returncode == 0, output.stderr
+        assert output.stdout, (backend, configured)
+        has_warm_primary = b'\x1b[38;2;212;190;152m' in output.stdout
+        assert has_warm_primary != terminal, (backend, configured, output.stdout)
+
+for configured, profile in [(None, 'terminal'), ('warm', 'warm')]:
+    p = Picker(theme=configured)
+    try:
+        colors = assert_theme(p.top_launches()[0], profile)
+        assert colors['nomatch'] == ('-1' if profile == 'terminal' else '#7c6f64') + ':strip:dim', colors
+        p.query()
+        for key, prompt in [(b'\x05', 'Rename'), (b'\x18', 'Confirm'), (b'\x0f', 'Directories'),
+                            (b'\x1bj', 'Jobs'), (b'\x07', 'Actions')]:
+            assert_theme(p.dialog(key, prompt), profile, danger=prompt == 'Confirm')
+            p.send(b'\x1b'); p.pump(.15)
+        # Scopes change the matching fields, not the selected-row attributes.
+        for _ in range(5): p.send(b'\x1d'); p.pump(.06)
+        assert_theme(p.top_launches()[0], profile)
+        helper_environment = dict(p.environment, INTERDIMUX_THEME=profile,
+                                  FZF_PREVIEW_COLUMNS='60', FZF_PREVIEW_LINES='14')
+        for arguments in [['preview', 'imux:0'], ['dir-preview', str(p.root)]]:
+            preview = subprocess.run([binary, 'ui', str(p.root / 'ui' / 'c'), *arguments],
+                                     env=helper_environment, capture_output=True, timeout=10)
+            assert preview.returncode == 0, preview.stderr
+            accent = b'\x1b[1;38;2;231;138;78m' if profile == 'terminal' else b'\x1b[1;38;2;216;166;87m'
+            assert accent in preview.stdout, (profile, arguments, preview.stdout)
+        if configured is None: check_list_profiles(p)
+        assert not p.calls('rename') and not p.calls('close'), p.requests
+        p.stable(); p.finish()
+        print(json.dumps({'theme': profile, 'surfaces': ['main', 'rename', 'confirm', 'directories', 'jobs', 'actions', 'previews']}), flush=True)
+    finally: p.close()
+
+# Direct commands travel through run_mode instead of pick's run entry point.
+for mode, configured, profile in [('dashboard', None, 'terminal'), ('dashboard', 'warm', 'warm'),
+                                  ('dirs', 'auto', 'terminal')]:
+    p = Picker(mode=mode, theme=configured, direct=True)
+    try:
+        for launch in p.launches(): assert_theme(launch, profile)
+        p.finish()
+        print(json.dumps({'theme': profile, 'direct_mode': mode}), flush=True)
+    finally: p.close()
+"###;
+
+fn run_pty_probe(code: &str) {
     let Ok(python) = Command::new("python3").arg("--version").output() else {
         eprintln!("Python 3 unavailable; skipping action PTY coverage");
         return;
@@ -635,7 +805,7 @@ fn shared_actions_keep_fzf_alive_and_use_only_hosted_native_ipc() {
         .output()
         .unwrap();
     let fzf = String::from_utf8(fzf.stdout).unwrap();
-    let probe = format!("{}\n{}", include_str!("terminal_screen.py"), PROBE);
+    let probe = format!("{}\n{}", include_str!("terminal_screen.py"), code);
     let output = Command::new("python3")
         .args(["-c", &probe, env!("CARGO_BIN_EXE_imux"), fzf.trim()])
         .output()
@@ -647,4 +817,21 @@ fn shared_actions_keep_fzf_alive_and_use_only_hosted_native_ipc() {
         String::from_utf8_lossy(&output.stderr)
     );
     eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+}
+
+#[test]
+fn shared_actions_keep_fzf_alive_and_use_only_hosted_native_ipc() {
+    run_pty_probe(PROBE);
+}
+
+#[test]
+fn native_themes_follow_the_backend_through_helpers_and_direct_modes() {
+    let definitions = PROBE.split("scenario('live-typing-raw'").next().unwrap();
+    run_pty_probe(&format!("{definitions}\n{THEME_PROBE}"));
+}
+
+#[test]
+fn native_attention_states_match_real_fzf_for_collapsed_and_split_rows() {
+    let definitions = PROBE.split("scenario('live-typing-raw'").next().unwrap();
+    run_pty_probe(&format!("{definitions}\n{AGENTS_PROBE}"));
 }

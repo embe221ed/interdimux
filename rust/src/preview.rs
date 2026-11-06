@@ -7,9 +7,6 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const ACCENT: &str = "\x1b[1;38;2;216;166;87m";
-const MUTED: &str = "\x1b[38;2;124;111;100m";
-
 #[derive(Default)]
 struct Selection<'a> {
     session: Option<&'a Session>,
@@ -254,7 +251,7 @@ fn summary(snapshot: &Snapshot, selected: &Selection<'_>) -> Vec<String> {
             .map(|p| {
                 format!(
                     "{} {}  {}  {}",
-                    if p.active { "●" } else { " " },
+                    if p.active { "•" } else { " " },
                     numbered(
                         &p.ordinal,
                         if p.name.is_empty() { &p.cmd } else { &p.name },
@@ -274,7 +271,7 @@ fn summary(snapshot: &Snapshot, selected: &Selection<'_>) -> Vec<String> {
             .map(|w| {
                 format!(
                     "{} {}  {}  {}",
-                    if w.active { "●" } else { " " },
+                    if w.active { "•" } else { " " },
                     numbered(&w.ordinal, &w.name, "Window"),
                     plain(&w.cmd),
                     plain(&w.path)
@@ -294,6 +291,9 @@ pub(crate) fn render(
     columns: usize,
     lines: usize,
 ) -> String {
+    let theme = crate::palette::NativeTheme::from_env();
+    let accent = &theme.preview_accent;
+    let muted = &theme.muted;
     let columns = columns.clamp(1, 1_024);
     let lines = lines.clamp(1, 1_000);
     let selected = selection(snapshot, target);
@@ -318,7 +318,7 @@ pub(crate) fn render(
             "Pane",
         ));
     }
-    output.push(format!("{ACCENT}{heading}{RST}"));
+    output.push(format!("{accent}{heading}{RST}"));
     let representative = selected
         .pane
         .or_else(|| selected.window.and_then(|w| active_pane(snapshot, w)))
@@ -363,11 +363,11 @@ pub(crate) fn render(
             } else {
                 format!(" · {app}")
             };
-            output.push(format!("{ACCENT}{state}{progress}{app}{RST}"));
+            output.push(format!("{accent}{state}{progress}{app}{RST}"));
             let title = plain(&report.title);
             let message = plain(&report.message);
             if budget > 1 && !title.is_empty() {
-                output.push(format!("{MUTED}task {RST}{title}"));
+                output.push(format!("{muted}task {RST}{title}"));
             }
             if budget > 2 && !message.is_empty() && message != title {
                 output.push(message);
@@ -375,22 +375,22 @@ pub(crate) fn render(
         }
     }
     if !command.is_empty() {
-        output.push(format!("{MUTED}cmd  {RST}{}", plain(command)));
+        output.push(format!("{muted}cmd  {RST}{}", plain(command)));
     }
     if !path.is_empty() {
-        output.push(format!("{MUTED}path {RST}{}", plain(path)));
+        output.push(format!("{muted}path {RST}{}", plain(path)));
     }
     let children = summary(snapshot, &selected);
     let summary_limit = (lines.saturating_sub(output.len() + 3) / 2).min(8);
     output.extend(children.iter().take(summary_limit).cloned());
     if children.len() > summary_limit && summary_limit > 0 {
         output.push(format!(
-            "{MUTED}… {} more{RST}",
+            "{muted}… {} more{RST}",
             children.len() - summary_limit
         ));
     }
     if output.len() < lines {
-        output.push(format!("{MUTED}{}{RST}", "─".repeat(columns.min(120))));
+        output.push(format!("{muted}{}{RST}", "─".repeat(columns.min(120))));
     }
     let remaining = lines.saturating_sub(output.len());
     match capture {
@@ -403,7 +403,7 @@ pub(crate) fn render(
                 .map_or(0, |i| i + 1);
             let first = last.saturating_sub(remaining);
             if last == 0 && remaining > 0 {
-                output.push(format!("{MUTED}(empty terminal){RST}"));
+                output.push(format!("{muted}(empty terminal){RST}"));
             } else {
                 output.extend(
                     capture_lines[first..last]
@@ -413,7 +413,7 @@ pub(crate) fn render(
             }
         }
         Err(error) if remaining > 0 => {
-            output.push(format!("{MUTED}Preview unavailable: {}{RST}", plain(error)))
+            output.push(format!("{muted}Preview unavailable: {}{RST}", plain(error)))
         }
         Err(_) => {}
     }
@@ -428,12 +428,15 @@ pub(crate) fn render(
 /// previews. Branches come from GitCache's direct reads; no git/shell process,
 /// startup script, recursive walk or arbitrary preview command is executed.
 pub(crate) fn directory(path: &str, columns: usize, lines: usize) -> String {
+    let theme = crate::palette::NativeTheme::from_env();
+    let accent = &theme.preview_accent;
+    let muted = &theme.muted;
     let columns = columns.clamp(1, 1_024);
     let lines = lines.clamp(1, 1_000);
-    let mut output = vec![format!("{ACCENT}{}{RST}", plain(path))];
+    let mut output = vec![format!("{accent}{}{RST}", plain(path))];
     if crate::projects::excluded_network(path) {
         output.push(format!(
-            "{MUTED}Directory preview is disabled on network mounts{RST}"
+            "{muted}Directory preview is disabled on network mounts{RST}"
         ));
         return formatted(output, columns, lines);
     }
@@ -446,13 +449,13 @@ pub(crate) fn directory(path: &str, columns: usize, lines: usize) -> String {
             .map_or(true, crate::projects::excluded_network)
         {
             output.push(format!(
-                "{MUTED}Directory preview is disabled on network mounts{RST}"
+                "{muted}Directory preview is disabled on network mounts{RST}"
             ));
             return formatted(output, columns, lines);
         }
     }
     let Ok(entries) = fs::read_dir(root) else {
-        output.push(format!("{MUTED}Directory unavailable{RST}"));
+        output.push(format!("{muted}Directory unavailable{RST}"));
         return formatted(output, columns, lines);
     };
     let mut git = crate::git::GitCache::new();
@@ -464,7 +467,7 @@ pub(crate) fn directory(path: &str, columns: usize, lines: usize) -> String {
         detail.push_str(" · ");
         detail.push_str(&plain(&branch));
     }
-    output.push(format!("{MUTED}{detail}{RST}"));
+    output.push(format!("{muted}{detail}{RST}"));
     let started = Instant::now();
     let mut names = Vec::new();
     let mut limited = false;
@@ -512,7 +515,7 @@ pub(crate) fn directory(path: &str, columns: usize, lines: usize) -> String {
             continue;
         }
         let text = safe_text(&String::from_utf8_lossy(&bytes), false);
-        output.push(format!("{MUTED}── README{RST}"));
+        output.push(format!("{muted}── README{RST}"));
         output.extend(
             text.lines()
                 .filter(|line| !line.trim().is_empty())
@@ -522,12 +525,12 @@ pub(crate) fn directory(path: &str, columns: usize, lines: usize) -> String {
         break;
     }
     if output.len() < lines {
-        output.push(format!("{MUTED}── Files{RST}"));
+        output.push(format!("{muted}── Files{RST}"));
     }
     let available = lines.saturating_sub(output.len()).min(30);
     output.extend(names.iter().take(available).cloned());
     if output.len() < lines && (limited || names.len() > available) {
-        output.push(format!("{MUTED}… more entries{RST}"));
+        output.push(format!("{muted}… more entries{RST}"));
     }
     formatted(output, columns, lines)
 }
