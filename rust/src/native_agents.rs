@@ -5,7 +5,8 @@ use crate::palette::Palette;
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const DEFAULT_ATTENTION: &str = "approve,input,error,done,idle";
+// Attention means progress is blocked on a response or action from the user.
+pub(crate) const DEFAULT_ATTENTION: &str = "approve,input";
 
 #[derive(Debug, Clone)]
 pub(crate) struct Agent {

@@ -415,7 +415,7 @@ def plain_filter_global_actions(p):
     p.stable(); p.finish()
 
 def empty_agents_mode(p):
-    assert '--query=^! | ^? | ^× | ^✓ | ^·' in p.top_launches()[0]['args'], p.top_launches()
+    assert '--query=^! | ^?' in p.top_launches()[0]['args'], p.top_launches()
     p.pump(.15)
     assert not p.result_path.exists(), 'empty attention filter must stay open, not auto-exit'
     p.query('selected-pane')
@@ -616,6 +616,7 @@ scenario('plain-filter-zero-global-actions', plain_filter_global_actions, raw=Fa
 const AGENTS_PROBE: &str = r###"
 def attention_snapshot(snapshot):
     statuses = [('permission', 'blocked', 'permission'), ('question', 'blocked', 'question'),
+                ('auth', 'blocked', 'auth'), ('click', 'blocked', 'other'),
                 ('done', 'done', ''), ('working', 'working', ''),
                 ('idle', 'idle', ''), ('error', 'error', '')]
     target = snapshot['views']['session:target']['windows'][0]
@@ -640,37 +641,58 @@ def attention_snapshot(snapshot):
                                                  'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 10))}]},
             }
 
-for wanted, raw in [('approve,input', True), ('approve,input', False), (None, True), (None, False)]:
+for wanted, raw in [('approve,input', True), ('approve,input', False), (None, True), (None, False),
+                    ('approve,input,error,done,idle', True), ('approve,input,error,done,idle', False)]:
     p = Picker(raw=raw, mode='agents', live=True, snapshot_setup=attention_snapshot,
                agent_states=wanted)
     try:
+        broad = wanted == 'approve,input,error,done,idle'
         expected = [('selected-pane', '!'), ('split-question', '?'),
                     ('single-permission', '!'), ('single-question', '?')]
-        if wanted is None:
+        for label in ['auth', 'click']:
+            expected += [('split-' + label, '?'), ('single-' + label, '?')]
+        if broad:
             for label, marker in [('done', '✓'), ('idle', '·'), ('error', '×')]:
                 expected += [('split-' + label, marker), ('single-' + label, marker)]
+        initial_count = len(expected)
         p.until(lambda: finder_state(p)['matchCount'] == len(expected),
                 'attention rows including collapsed single panes: ' + repr(wanted))
         state = finder_state(p)
-        if wanted is not None: assert state['query'] == '^! | ^?', state
+        assert state['query'] == ('^! | ^? | ^× | ^✓ | ^·' if broad else '^! | ^?'), state
         labels = [row['text'] for row in state['matches']]
         for label, marker in expected:
             matches = [line for line in labels if label in line]
             assert len(matches) == 1 and matches[0].startswith(marker + ' '), (label, labels)
-        excluded = ['working'] + (['done', 'idle', 'error'] if wanted is not None else [])
+        excluded = ['working'] + ([] if broad else ['done', 'idle', 'error'])
         assert all('single-' + label not in line and 'split-' + label not in line
                    for label in excluded for line in labels), labels
-        # A waiting program can resume while another starts asking a question.
-        # The snapshot replacement must replace the cached marker set as well.
-        p.snapshot['metadata']['block:selected']['program_status']['records'][0]['state'] = 'working'
+        # Only blocked programs need attention by default. Finishing, idling,
+        # failing without a user request, and resuming must all remove their
+        # cached waiting markers. Explicit broad filters still include the
+        # first three states after a live update.
+        transitions = [('block:selected', 'selected-pane', 'done', '✓'),
+                       ('block:single-question', 'single-question', 'idle', '·'),
+                       ('block:split-auth', 'split-auth', 'error', '×'),
+                       ('block:single-auth', 'single-auth', 'working', None)]
+        for block, label, new_state, marker in transitions:
+            p.snapshot['metadata'][block]['program_status']['records'][0]['state'] = new_state
+            expected = [(name, value) for name, value in expected if name != label]
+            if broad and marker is not None: expected.append((label, marker))
         incoming = p.snapshot['metadata']['block:split-working']['program_status']['records'][0]
         incoming.update(state='blocked', kind='question')
+        expected.append(('split-working', '?'))
         write_json(p.snapshot_path, p.snapshot)
-        p.until(lambda: any('split-working' in row['text'] for row in finder_state(p)['matches']),
-                'new waiting program in live attention rows')
+        p.until(lambda: any(row['text'].startswith('? ') and 'split-working' in row['text']
+                            for row in finder_state(p)['matches']),
+                'new blocked program in live attention rows')
         updated = finder_state(p)
         assert updated['matchCount'] == len(expected), updated
-        assert not any('selected-pane' in row['text'] for row in updated['matches']), updated
+        for label, marker in expected:
+            matches = [row['text'] for row in updated['matches'] if label in row['text']]
+            assert len(matches) == 1 and matches[0].startswith(marker + ' '), (label, updated)
+        for _, label, _, marker in transitions:
+            if not broad or marker is None:
+                assert not any(label in row['text'] for row in updated['matches']), (label, updated)
         # Both row shapes must still activate the precise native block.
         label, block = ('single-permission', 'block:single-permission') if raw else ('split-question', 'block:split-question')
         p.query(label)
@@ -679,7 +701,8 @@ for wanted, raw in [('approve,input', True), ('approve,input', False), (None, Tr
         record = p.finish(cancel=False)
         assert record['outcome'] == 'select' and record['target']['block_id'] == block, record
         assert not p.calls('create'), 'status filters must never create a session'
-        print(json.dumps({'attention_raw': raw, 'states': wanted or 'default', 'matched': len(expected),
+        print(json.dumps({'attention_raw': raw, 'states': wanted or 'default', 'matched': initial_count,
+                          'matched_after_update': len(expected),
                           'selected_block': block, 'live_state_change': True}), flush=True)
     finally: p.close()
 "###;

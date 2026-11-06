@@ -114,12 +114,12 @@ Rex swaps stay within one session; tmux-style client detach is unavailable.
 The dashboard offers repeatable action modes, exact agent counts and the next
 agent needing attention, project creation, scheduling, jobs and health checks.
 The agent view matches verified state records rather than words in labels.
-For native Rex/tmux, attention includes permission requests, blocking questions,
-errors, completed responses and idle agents waiting for your next message.
-Working agents and agents with no reported state are excluded. The picker,
-dashboard count and next-agent shortcut share this default; use
-`--agent-states approve,input` on `pick`, or `--states approve,input` on
-`agent-next`, to narrow it to blocking requests.
+For native Rex/tmux, attention means an agent is blocked on your action:
+permission requests, questions, authentication or another required interaction.
+Completed, idle, working and error-only states are excluded. The picker,
+dashboard count and next-agent shortcut share the `approve,input` default.
+Use `--agent-states` on `pick`, or `--states` on `agent-next`, to explicitly
+select other states.
 `INTERDIMUX_HIDE`, title-rule files, project markers, recent directories and
 startup-command configuration apply to the native frontends too. Startup lines
 run only in a newly created session after its shell is ready.

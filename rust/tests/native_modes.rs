@@ -145,7 +145,7 @@ fn exact_agents_counts_and_state_validation_do_not_fuzzy_match_labels() {
 }
 
 #[test]
-fn completed_idle_and_failed_agents_share_dashboard_and_next_defaults() {
+fn completed_idle_and_failed_agents_are_excluded_from_attention_defaults() {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     let snapshot_path = f.root.join("snapshot.json");
@@ -165,25 +165,25 @@ fn completed_idle_and_failed_agents_share_dashboard_and_next_defaults() {
 
         text(f.origin("agent-next").output().unwrap());
         assert_eq!(
-            f.result()["target"]["block_id"],
-            "block:a",
-            "missing {state} agent"
+            f.result()["outcome"],
+            "cancel",
+            "default attention included {state}"
         );
         text(
             f.origin("agent-next")
-                .args(["--states", "approve,input"])
+                .args(["--states", state])
                 .output()
                 .unwrap(),
         );
         assert_eq!(
-            f.result()["outcome"],
-            "cancel",
-            "explicit narrow filter included {state}"
+            f.result()["target"]["block_id"],
+            "block:a",
+            "explicit filter omitted {state}"
         );
 
         for (filter, expected) in [
-            (None, "1 need attention"),
-            (Some("approve,input"), "0 need attention"),
+            (None, "0 need attention"),
+            (Some(state), "1 need attention"),
         ] {
             let mut command = f.origin("pick");
             command

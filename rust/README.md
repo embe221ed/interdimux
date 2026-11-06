@@ -95,12 +95,12 @@ Native action modes use `pick --mode switch|kill|rename|zoom|swap|send|dirs|agen
 Enter repeats the selected action; Escape ends the mode. The dashboard provides
 the same entries with counts and backend capability checks. Agent views use
 exact shared state records, retain the tree and support the ordinary scopes.
-Attention defaults to `approve,input,error,done,idle`: blocking requests, failed
-or completed responses, and agents ready for your next message. Working agents
-and agents with no reported state are excluded. The dashboard count, Agents
+Attention defaults to `approve,input`: agents blocked on a question, approval,
+authentication or another required user action. Completed, idle, working,
+error-only and unreported states are excluded. The dashboard count, Agents
 picker and next-agent shortcut use the same definition. `pick --agent-states`
-and direct modes' `--states` can narrow it; `approve,input` selects only blocking
-requests. The unfiltered `agents` listing still includes all known agent states.
+and direct modes' `--states` can explicitly select other states. The unfiltered
+`agents` listing still includes all known agent states.
 Contextual hints follow the current target and width. Directory suggestions in
 the main list come only from bounded recent history; scans and zoxide queries
 remain explicit actions.
