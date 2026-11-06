@@ -450,10 +450,9 @@ class LiveActions:
             recent_project = self.directory(main_projects, self.project)
             require(not recent_project.get("context_only") and not main_projects.get("can_create"),
                     "A recent project must be selectable directly from the main search")
-            live_matches = [row["id"] for row in main_projects["rows"]
-                            if row.get("kind") != "directory" and not row.get("context_only")]
-            require(main_projects.get("preferred_id") in (live_matches or [recent_project["id"]]),
-                    "Main search must prefer matching live targets before projects")
+            direct_matches = [row["id"] for row in main_projects["rows"] if not row.get("context_only")]
+            require(main_projects.get("preferred_id") in direct_matches,
+                    "Main search must prefer a selectable match using relevance across target kinds")
             self.helper.request("activate", expected="activated", target_id=recent_project["id"])
         finally:
             self.recover_created()

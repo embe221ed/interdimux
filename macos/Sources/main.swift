@@ -37,6 +37,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var searchField: String { content.searchField.selectedItem?.representedObject as? String ?? "all" }
     private var pending = 0
     private var displayedRequest = -1
+    private var displayedSearch: PickerSearchIdentity?
     private var activation: Int?
     private var actionRequest: Int?
     private var presentingDialog = false
@@ -202,6 +203,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         items = openingClientID == supplied["client_id"] ? openingItems : []
         tree = PickerTreeLayout.positions(for: items)
         displayedRequest = -1
+        displayedSearch = nil
         if !showDashboard {
             updateTable()
             content.table.deselectAll(nil)
@@ -280,6 +282,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         dashboardVisible = false
         dashboardOrigin = true
         targetRoute = route
+        displayedSearch = nil
         content.setDashboardRoute(route.title)
         presentSurface()
         updateTable()
@@ -304,6 +307,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         targetRoute = nil
         dashboardOrigin = false
         dashboardVisible = true
+        displayedSearch = nil
         content.setDashboardRoute(nil)
         content.search.stringValue = ""
         content.clear.isHidden = true
@@ -381,13 +385,16 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         tree = PickerTreeLayout.positions(for: items)
         displayedRequest = id
         if !dashboardVisible { updateTable() }
-        if !dashboardVisible, let first = items.firstIndex(where: { !$0.contextOnly }) {
-            let preferred = message["preferred_id"] as? String
-            let selected = items.firstIndex(where: { $0.id == previous && !$0.contextOnly })
-                ?? items.firstIndex(where: { $0.id == preferred && !$0.contextOnly }) ?? first
-            content.table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
-            content.table.scrollRowToVisible(selected)
+        let search = PickerSearchIdentity(query: resultQuery, scope: resultScope, field: resultField, actionFilter: resultAction,
+            directoryBase: scope == "directory" ? directoryBase : nil, directoryDeep: scope == "directory" && directoryDeep)
+        if !dashboardVisible {
+            if let selected = PickerSelection.index(in: items, previousID: previous, preferredID: message["preferred_id"] as? String,
+                    previousSearch: displayedSearch, search: search) {
+                content.table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
+                content.table.scrollRowToVisible(selected)
+            } else { content.table.deselectAll(nil) }
         }
+        displayedSearch = search
         let matched = (message["matched"] as? NSNumber)?.intValue ?? items.count
         let total = (message["total"] as? NSNumber)?.intValue ?? items.count
         let shown = (message["shown_matches"] as? NSNumber)?.intValue ?? items.count
@@ -493,6 +500,12 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func query() {
+        let search = PickerSearchIdentity(query: content.search.stringValue, scope: scope, field: searchField,
+            actionFilter: targetRoute?.operation ?? "", directoryBase: scope == "directory" ? directoryBase : nil,
+            directoryDeep: scope == "directory" && directoryDeep)
+        // Reset at dispatch, not only at receipt: A → B → A while requests
+        // are pending must still choose the best result for the edited query.
+        if displayedSearch != search { displayedSearch = nil }
         guard !loading, activation == nil, actionRequest == nil, dashboardRequest == nil else { return }
         // Results can arrive while AppKit tracks a menu or sheet. Remember a
         // corrective query instead of leaving old rows permanently unselectable.
@@ -507,6 +520,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func controlTextDidChange(_ notification: Notification) {
+        displayedSearch = nil
         content.clear.isHidden = content.search.stringValue.isEmpty
         previewGate.noteInput(at: ProcessInfo.processInfo.systemUptime)
         previewGate.select(nil, at: ProcessInfo.processInfo.systemUptime)
@@ -569,6 +583,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     func loadDirectories(_ extra: [String: Any] = [:], clearQuery: Bool = false) {
         guard !loading, actionRequest == nil, activation == nil, !presentingDialog, swapSource == nil, targetRoute?.operation == nil else { return }
         stopPreview()
+        if clearQuery || extra["reload"] as? Bool != true { displayedSearch = nil }
         if clearQuery { content.search.stringValue = ""; content.clear.isHidden = true }
         scope = "directory"
         content.setDirectoryVisible(true)
@@ -771,6 +786,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         case "swap":
             guard item.kind == "window" || item.kind == "pane" else { return }
             swapSource = item
+            displayedSearch = nil
             content.search.stringValue = ""
             content.clear.isHidden = true
             changeScope(content.scopes[item.kind == "window" ? 2 : 3])
@@ -781,6 +797,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func cancelSwap() {
         swapSource = nil
+        displayedSearch = nil
         content.search.stringValue = ""
         content.clear.isHidden = true
         changeScope(content.scopes[targetRoute?.scope ?? 0])

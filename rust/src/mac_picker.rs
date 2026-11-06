@@ -516,22 +516,17 @@ impl Picker {
         };
         let total = self.rows.iter().filter(in_scope).count();
         let mut ranked = Vec::with_capacity(self.matcher.snapshot().matched_item_count() as usize);
-        let mut projects = Vec::new();
         let mut ranks = vec![usize::MAX; self.rows.len()];
         for item in self.matcher.snapshot().matched_items(..) {
             let index = *item.data;
             let row = &self.rows[index];
             if in_scope(&row) {
-                if row.kind == "directory" {
-                    projects.push(index);
-                } else {
-                    ranked.push(index);
-                }
+                ranked.push(index);
             }
         }
-        // A project is a useful fallback, but Enter should keep selecting a
-        // matching live target even when its fuzzy score is slightly lower.
-        ranked.extend(projects);
+        // Preserve matcher relevance across kinds: a contiguous project name
+        // must outrank a weak fuzzy hit in a live target's metadata. Identical
+        // matches retain Nucleo's stable source-order tie break.
         for (rank, &index) in ranked.iter().enumerate() {
             ranks[index] = rank;
         }
@@ -1523,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn mac_picker_main_search_prioritizes_live_targets_and_keeps_warm_recents() {
+    fn mac_picker_main_search_ranks_relevance_and_keeps_warm_recents() {
         let fixture = Fixture::new(json!([
             {"id":"recent","kind":"directory","title":"needle","path":"/Network/no-probe/needle"},
             {"id":"live","kind":"pane","title":"xxneedle"},
@@ -1534,8 +1529,8 @@ mod tests {
         assert_eq!(result_ids(&opened), ["live", "recent"]);
         assert_eq!(opened["total"], 2);
         let matched = query(&mut picker, "needle", "all");
-        assert_eq!(matched["preferred_id"], "live");
-        assert_eq!(result_ids(&matched), ["live", "recent"]);
+        assert_eq!(matched["preferred_id"], "recent");
+        assert_eq!(result_ids(&matched), ["recent", "live"]);
         assert_eq!(matched["can_create"], false);
         fs::remove_file(&fixture.0).unwrap();
         let browsed =
@@ -1551,6 +1546,75 @@ mod tests {
         let recent = query(&mut picker, "'Network/no-probe/needle", "all");
         assert_eq!(recent["preferred_id"], "recent");
         assert_eq!(recent["can_create"], false);
+    }
+
+    #[test]
+    fn mac_picker_strong_project_matches_outrank_weak_live_matches() {
+        let fixture = Fixture::new(json!([
+            {"id":"weak-name","kind":"pane","title":"frontend logs utilities index diagnostics"},
+            {"id":"weak-command","kind":"pane","title":"build","command":"find logs under integration directory"},
+            {"id":"fluid-project","kind":"directory","title":"fluid-packages-sui","path":"/workspace/fluid-packages-sui"},
+            {"id":"unicode-weak","kind":"pane","title":"c a f e · 開 notes 発"},
+            {"id":"unicode-project","kind":"directory","title":"café-開発","path":"/workspace/café-開発"}
+        ]));
+        let mut picker = fixture.picker();
+        picker.request(&json!({"id":1,"type":"open"}));
+        fs::remove_file(&fixture.0).unwrap();
+        for text in ["flui", "fluid", "'fluid", "^fluid", "fluid-packages-sui"] {
+            let result = query(&mut picker, text, "all");
+            assert_eq!(result["preferred_id"], "fluid-project", "{text}");
+            assert_eq!(result_ids(&result)[0], "fluid-project");
+        }
+        for field in ["all", "name", "path"] {
+            let result = picker.request(
+                &json!({"id":2,"type":"query","query":"fluid","scope":"all","search_field":field}),
+            );
+            assert_eq!(result["preferred_id"], "fluid-project", "{field}");
+        }
+        let panes = picker.request(
+            &json!({"id":3,"type":"query","query":"fluid","scope":"pane","search_field":"all"}),
+        );
+        assert!(panes["matched"].as_u64().unwrap() > 0);
+        assert!(panes["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["kind"] == "pane"));
+        let directories = query(&mut picker, "fluid", "directory");
+        assert_eq!(directories["matched"], 1);
+        assert_eq!(directories["preferred_id"], "fluid-project");
+        for text in ["cafe", "'cafe", "開発"] {
+            let result = query(&mut picker, text, "all");
+            assert_eq!(result["preferred_id"], "unicode-project", "{text}");
+        }
+        let excluded = query(&mut picker, "!fluid", "all");
+        assert!(!result_ids(&excluded).contains(&"fluid-project"));
+        let smart_case = query(&mut picker, "Fluid", "all");
+        assert!(!result_ids(&smart_case).contains(&"fluid-project"));
+    }
+
+    #[test]
+    fn mac_picker_equal_quality_live_matches_keep_stable_preference() {
+        let fixture = Fixture::new(json!([
+            {"id":"project","kind":"directory","title":"fluid","path":"/workspace/fluid","search":"fluid","search_name":"fluid"},
+            {"id":"live","kind":"session","title":"fluid","path":"/workspace/fluid","search":"fluid","search_name":"fluid"},
+            {"id":"prefix","kind":"pane","title":"fluid-packages-sui","path":"/workspace/fluid-packages-sui"}
+        ]));
+        let mut picker = fixture.picker();
+        picker.request(&json!({"id":1,"type":"open"}));
+        for text in ["fluid", "'fluid", "^fluid$", "fluid$"] {
+            let result = query(&mut picker, text, "all");
+            assert_eq!(result["preferred_id"], "live", "{text}");
+            let ids = result_ids(&result);
+            assert!(
+                ids.iter().position(|id| *id == "live")
+                    < ids.iter().position(|id| *id == "project")
+            );
+        }
+        let scoped = query(&mut picker, "fluid", "directory");
+        assert_eq!(scoped["preferred_id"], "project");
+        let scoped = query(&mut picker, "fluid", "pane");
+        assert_eq!(scoped["preferred_id"], "prefix");
     }
 
     #[test]

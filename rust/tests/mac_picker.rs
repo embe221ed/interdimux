@@ -163,8 +163,22 @@ fn native_picker_json_lines_process_keeps_queries_local_and_ids_stable() {
         .as_str()
         .unwrap()
         .contains("no longer available"));
+    fs::write(&path,json!({"rows":[
+        {"id":"weak-live","kind":"pane","title":"frontend logs utilities index diagnostics"},
+        {"id":"fluid-project","kind":"directory","title":"fluid-packages-sui","path":"/Network/no-probe/fluid-packages-sui"}
+    ]}).to_string()).unwrap();
+    exchange(json!({"id":200,"type":"refresh"}));
+    fs::remove_file(&path).unwrap();
+    for query in ["flui", "fluid", "'fluid", "^fluid"] {
+        let ranked = exchange(
+            json!({"id":201,"type":"query","query":query,"scope":"all","search_field":"all"}),
+        );
+        assert_eq!(ranked["preferred_id"], "fluid-project");
+        assert_eq!(ranked["rows"][0]["id"], "fluid-project");
+    }
+    let scoped = exchange(json!({"id":202,"type":"query","query":"fluid","scope":"pane"}));
+    assert_eq!(scoped["preferred_id"], "weak-live");
     drop(exchange);
     drop(input);
     assert!(child.wait().unwrap().success());
-    fs::remove_file(path).unwrap();
 }
