@@ -1,0 +1,14 @@
+{
+  "rows": [
+    {"id":"session:work","kind":"session","title":"Workbench","current":true},
+    {"id":"window:work","parent_id":"session:work","kind":"window","title":"Editor","current":true},
+    {"id":"pane:work","parent_id":"window:work","kind":"pane","title":"Review project discovery","detail":"codex --resume directory-picker","command":"codex --resume directory-picker","path":"/Users/fixture/projects/interdimux","current":true,"agent_state":"working","agent_name":"Codex"},
+    {"id":"project:interdimux","kind":"directory","title":"interdimux","name":"interdimux","path":"/Users/fixture/projects/interdimux","detail":"Rust · existing session","current":true},
+    {"id":"project:unicode","kind":"directory","title":"東京-design-system","name":"東京-design-system","path":"/Users/fixture/projects/東京-design-system","detail":"TypeScript · component library"},
+    {"id":"project:long","kind":"directory","title":"customer-insights-service","name":"customer-insights-service","path":"/Users/fixture/projects/company/platform/services/customer-experience/analytics/customer-insights-service","detail":"Python · analytics pipeline"},
+    {"id":"project:research","kind":"directory","title":"Research & notes","name":"Research & notes","path":"/Users/fixture/projects/Research & notes","detail":"Recent directory"},
+    {"id":"project:rust","kind":"directory","title":"rust","name":"rust","path":"/Users/fixture/projects/interdimux/rust","detail":"Rust · picker backend"},
+    {"id":"project:macos","kind":"directory","title":"macos","name":"macos","path":"/Users/fixture/projects/interdimux/macos","detail":"Swift · native picker"},
+    {"id":"project:tests","kind":"directory","title":"Tests","name":"Tests","path":"/Users/fixture/projects/interdimux/macos/Tests","detail":"Project · UI regression fixtures"}
+  ]
+}

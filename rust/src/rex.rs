@@ -40,6 +40,30 @@ pub(crate) fn collect(context: &RexContext) -> Result<Snapshot, String> {
     collect_with_scope(context, false)
 }
 
+/// The native companion must validate its direct local connection and app
+/// clients on every open. Share one CLI connection with collection rather than
+/// paying a second process startup just for that read-only discovery.
+#[cfg(feature = "macos-picker")]
+pub(crate) fn collect_native(
+    context: &RexContext,
+    discovery: &str,
+) -> Result<(Value, Snapshot), String> {
+    let source = format!(
+        "local clients=(function()\n{discovery}\nend)()\n\
+         local snapshot=(function()\n{SNAPSHOT_SCRIPT}\nend)()\n\
+         local history=(function()\n{HISTORY_SCRIPT}\nend)()\n\
+         return {{clients=clients,snapshot=history.enrich(snapshot)}}\n"
+    );
+    let output = run_script(context, &source, None, &json!({}))?;
+    let mut result: Value = serde_json::from_slice(&output)
+        .map_err(|error| format!("Cannot decode Rex collection: {error}"))?;
+    let bytes = serde_json::to_vec(&result["snapshot"])
+        .map_err(|error| format!("Cannot decode Rex snapshot: {error}"))?;
+    let mut snapshot = parse_snapshot(&bytes, context)?;
+    crate::native_config::merge_registry(&mut snapshot);
+    Ok((result["clients"].take(), snapshot))
+}
+
 pub(crate) fn collect_sessions(context: &RexContext) -> Result<Snapshot, String> {
     collect_with_scope(context, true)
 }
@@ -326,7 +350,7 @@ fn activation_args(context: &RexContext, target: &Target) -> Result<Value, Strin
     }
 }
 
-fn run_script(
+pub(crate) fn run_script(
     context: &RexContext,
     script: &str,
     session: Option<&str>,

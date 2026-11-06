@@ -41,7 +41,7 @@ fn expand_home(value: &str, home: &str) -> String {
     }
 }
 
-fn words(query: &str) -> Result<String, String> {
+pub(crate) fn words(query: &str) -> Result<String, String> {
     if query.chars().any(|c| c.is_control()) {
         return Err("A session query cannot contain control characters".into());
     }

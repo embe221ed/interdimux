@@ -19,6 +19,8 @@ mod git;
 mod interactive;
 mod jobs;
 mod macproc;
+#[cfg(feature = "macos-picker")]
+mod mac_picker;
 mod model;
 mod mounts;
 mod native_agents;
@@ -76,6 +78,18 @@ pub(crate) fn env_text(name: &str) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("macos-serve") => {
+            #[cfg(feature = "macos-picker")]
+            if let Err(error) = mac_picker::serve(&args[1..]) {
+                eprintln!("imux: {error}");
+                std::process::exit(1);
+            }
+            #[cfg(not(feature = "macos-picker"))]
+            {
+                eprintln!("imux: rebuild with --features macos-picker to use the native picker helper");
+                std::process::exit(2);
+            }
+        }
         Some(PROTOCOL) => tmux_input::gather(),
         Some("pick" | "list") => {
             let list_only = args[0] == "list";

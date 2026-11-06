@@ -62,6 +62,14 @@ action modes, projects, startup commands, agents, scheduler and jobs with Rex. S
 
 ### Rex integration
 
+An optional [native macOS picker](macos/README.md) provides an AppKit tree with
+local fuzzy filtering, session/tab/pane switching, core editing actions,
+project browsing, field-specific search, inline previews, a grouped native dashboard,
+and an agents-needing-attention filter. Its integration defaults to prefix+f for
+the picker and prefix+g for the dashboard; prefix+w can retain the terminal picker.
+Build it with `./macos/build.sh` and open it with `./macos/open.sh`; it is separate
+from the terminal picker described below.
+
 Add the integration to Rex's `~/.config/rex/init.lua`, using the path of this
 checkout:
 

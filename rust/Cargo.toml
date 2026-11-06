@@ -8,10 +8,17 @@ rust-version = "1.74"
 name = "imux"
 path = "src/main.rs"
 
+[features]
+macos-picker = ["dep:nucleo"]
+
 [dependencies]
 unicode-width = "0.1"
 unicode-segmentation = "=1.12.0"
 serde_json = "=1.0.145"
+nucleo = { version = "=0.5.0", optional = true }
+
+[patch.crates-io]
+nucleo-matcher = { path = "vendor/nucleo-matcher" }
 
 [profile.release]
 opt-level     = 3
