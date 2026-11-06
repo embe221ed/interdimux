@@ -53,6 +53,12 @@ function M.new(rx, args, refresh)
   end
   return {
     changed = changed,
+    pending = function()
+      local copy = { sessions = {}, blocks = {} }
+      for id in pairs(sessions) do copy.sessions[id] = true end
+      for id in pairs(blocks) do copy.blocks[id] = true end
+      return copy
+    end,
     update = function(snapshot)
       if stopped then return end
       revisions = {}

@@ -26,10 +26,14 @@ io.open = function(path, mode)
   return { write=function(_, text) files[path]=text; return true end, close=function() return true end }
 end
 os.getenv = function(key) if key == "XDG_STATE_HOME" then return "/private-state" elseif key == "HOME" then return "/home/local" end end
-os.rename = function(from, to) if files[from] then files[to]=files[from]; files[from]=nil end; return true end
+os.rename = function(from, to)
+  if from == to then return nil, "file exists" end -- macOS directory rename
+  if files[from] then files[to]=files[from]; files[from]=nil end
+  return true
+end
 os.remove = function(path) files[path]=nil; return true end
 os.time = function() return 100 end
-local handlers, timer, stopped = {}, nil, nil
+local handlers, timer, stopped, commands = {}, nil, nil, {}
 local principal = { kind="peer",transport="unix",pid=123,uid=501 }
 local snapshot = { version=1,host_id="host:local",sessions={
   {session_id="session:origin",label="origin"},{session_id="session:hosted",label="hosted"}},
@@ -37,7 +41,7 @@ local snapshot = { version=1,host_id="host:local",sessions={
 rex = {
   args={root=root,binary="/unused/imux",client_id="client:origin",session_id="session:origin",window_id="window:origin",block_id="block:origin"},
   json={encode=encode,decode=function(text) return copy(assert(encoded[text],"invalid mock JSON")) end},
-  exec=function() return {ok=true,stdout="/private-picker\n"} end,
+  exec=function(command) commands[#commands+1]=command; return {ok=true,stdout="/private-picker\n"} end,
   call=function(method)
     if method == "server.whoami" then return {principal=principal} end
     if method == "server.status" then return {host_id="host:local"} end
@@ -56,7 +60,10 @@ dofile = function(path)
   if path == root .. "/rust/src/rex_snapshot.lua" then return copy(snapshot) end
   if path == root .. "/rust/src/rex_activate.lua" then return function() end end
   if path == root .. "/integrations/rex_geometry.lua" then
-    return {initial=function() end,observe=function() return {cancel=function() end} end}
+    return {initial=function() end,observe=function(_,_,_,callback)
+      callback {columns=80,rows=24,cell_width_px=10,cell_height_px=20}
+      return {cancel=function() end}
+    end}
   end
   if path == root .. "/integrations/rex_operations.lua" then
     return function(request) assert(request.operation=="create");return {target={session_id="session:new-hosted"}} end
@@ -65,6 +72,8 @@ dofile = function(path)
 end
 real_dofile(root .. "/integrations/rex_coordinator.lua")
 assert(reads[history_path] == 1, "opening must reuse its initial history read")
+assert(#commands == 1 and commands[1][1] == "mktemp",
+  "existing history and grid directories must not spawn mkdir on macOS")
 assert(disk().sessions["session:origin"] == 101)
 local helper = assert(load("local imux_collector_pid,imux_collector_uid=123,501\n" .. helper_source))()
 local direct = helper.enrich {host_id="host:local",local_host_id="host:local"}
@@ -89,4 +98,14 @@ principal.path=nil; principal.pid=124; helper.remember("wrong-process", "/wrong"
 assert(files[history_path] == before and reads[history_path] == count)
 principal.pid=123; principal.transport="tcp"; helper.remember("tcp", "/wrong")
 assert(files[history_path] == before and reads[history_path] == count)
+-- The configuration runs on the server, so it needs no CLI-locality probe.
+local config_history = helper.for_server_config()
+rex.call = function(method) error("Config history must not make API calls: " .. method) end
+rex.exec = function() error("An initialized history directory needs no process") end
+config_history.remember("session:fast", "session:hosted", "client:keyboard")
+local fast = config_history.read()
+assert(fast.sessions["session:fast"] == fast.last)
+assert(fast.sessions["session:hosted"] == fast.last - 1)
+assert(fast.paths["session:later"] == "/later/project", "keyboard toggles must preserve project metadata")
 print("passed: direct/hosted MRU, creation directories, merge, bounded initial reads, local-only persistence")
+print("passed: server configuration shares history without CLI probes or subprocesses")

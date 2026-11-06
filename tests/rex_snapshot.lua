@@ -26,6 +26,10 @@ rex = {
   args = { picker_block_id = "block:picker" },
   call = function(method, args)
     calls.total = calls.total + 1
+    if method == "session.list" then
+      assert(rex.args.sessions_only and next(args) == nil)
+      return { sessions = copy(sessions) }
+    end
     if method == "session.attach_all" then
       assert(args.event_scope == (rex.args.live_refresh and "all" or "session"))
       return { sessions = copy(sessions) }
@@ -56,6 +60,13 @@ end
 local initial = collect()
 assert(calls.total == 304 and calls.views == 2 and calls.process == 100)
 assert(initial.metadata["app:a"] == nil and initial.metadata["block:picker"] == nil)
+rex.args.sessions_only = true
+local catalog = collect()
+assert(calls.total == 2 and calls.views == 0 and calls.process == 0,
+  "session jumps must not attach to sessions or scan their panes")
+assert(catalog.sessions_only and #catalog.sessions == 2
+  and next(catalog.views) == nil and next(catalog.metadata) == nil)
+rex.args.sessions_only = nil
 rex.args.live_refresh = true
 generations["block:a1"] = 42
 local updated = collect(initial, { ["block:a1"] = true }, {})
@@ -63,8 +74,18 @@ assert(calls.total == 5 and calls.views == 0 and calls.process == 1, "one termin
 assert(updated.metadata["block:a1"].program_status.records[1].progress == 42)
 assert(initial.metadata["block:a1"].program_status.records[1].progress == 0, "cache updates must not mutate the prior snapshot")
 assert(updated.metadata["block:b1"] == initial.metadata["block:b1"], "reuse unaffected terminal metadata")
+views["session:a"].windows[1].label = "renamed"
 updated = collect(updated, {}, { ["session:a"] = true })
-assert(calls.total == 153 and calls.views == 1 and calls.process == 50, "structural changes invalidate only their session")
+assert(calls.total == 3 and calls.views == 1 and calls.process == 0, "layout-only changes must preserve terminal metadata")
+assert(updated.views["session:a"].windows[1].label == "renamed")
+assert(updated.metadata["block:a1"].program_status.records[1].progress == 42)
+blocks[#blocks + 1] = { block_id = "block:added", creator_name = "com.superlogical.terminal" }
+updated = collect(updated, {}, { ["session:a"] = true })
+assert(calls.total == 6 and calls.process == 1 and updated.metadata["block:added"], "new panes still fetch their metadata")
+generations["block:a1"] = 43
+updated = collect(updated, { ["block:a1"] = true }, { ["session:a"] = true })
+assert(calls.total == 6 and calls.process == 1, "terminal and layout events in one batch must refresh the changed process")
+assert(updated.metadata["block:a1"].program_status.records[1].progress == 43)
 table.remove(sessions, 1); views["session:a"] = nil
 updated = collect(updated, {}, { ["session:a"] = true })
 assert(calls.total == 2 and updated.views["session:a"] == nil and updated.metadata["block:a1"] == nil, "closed sessions must leave no cached candidates")
@@ -78,4 +99,4 @@ updated = collect(updated, {}, {})
 assert(calls.total == 5 and updated.metadata["block:new1"] ~= nil, "failed metadata is retried instead of cached")
 collect()
 assert(calls.total == 157 and calls.views == 2 and calls.process == 51, "manual refresh still reads every terminal")
-print("passed: mixed panes, live subscription scope, 304-to-5 RPC budget, dirty block/session invalidation, new/closed sessions, retry, explicit refresh")
+print("passed: 304-to-2 session catalogs, 304-to-5 terminal updates, 153-to-3 layout updates, new/closed panes, simultaneous events, retry, explicit refresh")

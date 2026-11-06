@@ -37,22 +37,35 @@ pub(crate) struct RexContext {
 }
 
 pub(crate) fn collect(context: &RexContext) -> Result<Snapshot, String> {
+    collect_with_scope(context, false)
+}
+
+pub(crate) fn collect_sessions(context: &RexContext) -> Result<Snapshot, String> {
+    collect_with_scope(context, true)
+}
+
+fn collect_with_scope(context: &RexContext, sessions_only: bool) -> Result<Snapshot, String> {
     let output = if let Some(path) = &context.snapshot_file {
         crate::rex_ready::wait(path)?;
         fs::read(path).map_err(|e| format!("Cannot read Rex snapshot {}: {e}", path.display()))?
     } else {
-        let args = context
+        let mut args = context
             .picker_block_id
             .as_ref()
             .map(|id| json!({"picker_block_id":id}))
             .unwrap_or_else(|| json!({}));
+        if sessions_only {
+            args["sessions_only"] = json!(true);
+        }
         let source = format!(
             "local snapshot=(function()\n{SNAPSHOT_SCRIPT}\nend)()\nlocal history=(function()\n{HISTORY_SCRIPT}\nend)()\nreturn history.enrich(snapshot)\n"
         );
         run_script(context, &source, None, &args)?
     };
     let mut snapshot = parse_snapshot(&output, context)?;
-    crate::native_config::merge_registry(&mut snapshot);
+    if !sessions_only {
+        crate::native_config::merge_registry(&mut snapshot);
+    }
     Ok(snapshot)
 }
 
@@ -681,11 +694,12 @@ fn parse_snapshot(bytes: &[u8], context: &RexContext) -> Result<Snapshot, String
     }
     for session in sessions {
         let session_id = id(session, "session_id")?;
-        let view = match views.get(session_id) {
-            Some(view) => view,
+        let view = views.get(session_id);
+        let windows = match view {
+            Some(view) => array(view.get("windows"))?,
+            None if data["sessions_only"] == true => &[],
             None => continue, // Closed during collection; never offer its stale row.
         };
-        let windows = array(view.get("windows"))?;
         let raw_name = label(&session["label"]);
         let name = if raw_name.trim().is_empty() {
             format!("Session {}", short_id(session_id))
@@ -763,7 +777,7 @@ fn parse_snapshot(bytes: &[u8], context: &RexContext) -> Result<Snapshot, String
                 session_key: session_id.into(),
                 ordinal,
                 name,
-                active: view["active_window_id"].as_str() == Some(window_id),
+                active: view.and_then(|v| v["active_window_id"].as_str()) == Some(window_id),
                 cmd: active_command,
                 path: active_path,
                 pane_count: blocks.len(),
@@ -970,6 +984,27 @@ mod tests {
                 block_id: None,
             }
         );
+    }
+
+    #[test]
+    fn session_catalog_preserves_names_mru_and_targets_without_views() {
+        let result = parse(json!({"version":1, "sessions_only":true,
+            "sessions":[{"session_id":"session:a","label":"same"},{"session_id":"session:b","label":"same"}],
+            "views":{}, "metadata":{}, "mru":{"session:a":10,"session:b":20}
+        }));
+        assert_eq!(result.sessions.len(), 2);
+        assert_ne!(result.sessions[0].name, result.sessions[1].name);
+        assert_eq!(result.sessions[1].last, 20);
+        assert_eq!(result.current.session_key, "session:a");
+        assert_eq!(
+            result.sessions[1].target,
+            Target::Rex {
+                session_id: "session:b".into(),
+                window_id: None,
+                block_id: None,
+            }
+        );
+        assert!(result.windows.is_empty() && result.panes.is_empty());
     }
 
     #[test]

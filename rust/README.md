@@ -37,6 +37,11 @@ FILE --result FILE`: it reads the coordinator's snapshot and atomically writes
 one versioned selection, cancellation, or error result, without starting Rex's
 CLI. Neither path requires tmux, Python, or jq.
 
+Direct numbered Rex jumps collect only the session catalog and MRU history,
+preserving the picker's ordering and hidden-session rules without inspecting
+every terminal. A direct next-agent shortcut that finds no match leaves focus
+alone and skips the activation CLI call.
+
 To open the hosted float from the Rex CLI, pass the persistent app's full ID
 as an action argument (find it with `rex client ls`):
 
@@ -193,9 +198,12 @@ title and program-status events update the open tree and preview, preserving
 the query and the selected target while it still exists. Background row reloads
 wait for a pause in typing. Bursts are coalesced
 into at most four collections per second. A process or status change refreshes
-only the affected pane's metadata; structural changes refresh the affected
-sessions. Stale layout revisions and the picker's own terminal events are
-ignored. There is no periodic backend scan while idle, and each event uses the
+only the affected pane's metadata; layout changes refresh the affected session
+views while reusing existing pane metadata. New panes always collect fresh
+metadata. Mutations refresh their affected sessions and merge any pending
+terminal events; explicit refresh still recollects everything. Stale layout
+revisions and the picker's own terminal events are ignored. There is no periodic
+backend scan while idle, and each event uses the
 existing coordinator connection. Rust checks the local snapshot file every
 100 ms and updates fzf through a private Unix socket only after publication.
 Set `INTERDIMUX_LIVE_REFRESH=off` in the Rex server environment to disable live

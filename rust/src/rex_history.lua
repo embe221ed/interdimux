@@ -1,5 +1,5 @@
--- Standalone Rex commands share the hosted picker's MRU and project identity.
--- This runs in the CLI worker: never read its filesystem for a remote server.
+-- Shared MRU for standalone commands and the server's configuration actions.
+-- CLI workers must prove locality before accessing the server's history.
 local M = {}
 
 local function local_peer()
@@ -44,17 +44,13 @@ function M.enrich(snapshot)
   return snapshot
 end
 
-function M.remember(session_id, cwd, origin_id)
+local function remember(session_id, cwd, origin_id, writer)
   -- Persistence is best effort and must never turn successful navigation into
   -- an error. Read immediately before writing, preserving other commands' data.
   pcall(function()
-    if type(session_id) ~= "string" or session_id == "" or not local_peer() then return end
+    if type(session_id) ~= "string" or session_id == "" then return end
     local parent, path = location()
     if not path then return end
-    if not os.rename(parent, parent) then
-      local made = rex.exec { "mkdir", "-p", parent }
-      if not made or not made.ok then return end
-    end
     local history = read(path) or { version = 1, last = 0, sessions = {}, paths = {} }
     if type(origin_id) == "string" and origin_id ~= "" and origin_id ~= session_id then
       history.last = math.max(os.time(), (tonumber(history.last) or 0) + 1)
@@ -63,8 +59,15 @@ function M.remember(session_id, cwd, origin_id)
     history.last = math.max(os.time(), (tonumber(history.last) or 0) + 1)
     history.sessions[session_id] = history.last
     if type(cwd) == "string" and cwd ~= "" then history.paths[session_id] = cwd end
-    local temporary = path .. ".tmp-direct-" .. tostring(imux_collector_pid)
+    local temporary = path .. ".tmp-" .. writer
     local file = io.open(temporary, "wb")
+    -- Opening the temporary file also checks the directory. Renaming a
+    -- directory to itself fails on macOS and would spawn mkdir on every key.
+    if not file then
+      local made = rex.exec { "mkdir", "-p", parent }
+      if not made or not made.ok then return end
+      file = io.open(temporary, "wb")
+    end
     if not file then return end
     local written = pcall(function()
       assert(file:write(rex.json.encode(history))); assert(file:close())
@@ -73,6 +76,28 @@ function M.remember(session_id, cwd, origin_id)
     local renamed = os.rename(temporary, path)
     if not renamed then os.remove(temporary) end
   end)
+end
+
+function M.remember(session_id, cwd, origin_id)
+  pcall(function()
+    if local_peer() then
+      remember(session_id, cwd, origin_id, "direct-" .. tostring(imux_collector_pid))
+    end
+  end)
+end
+
+-- Only init.lua uses this entry point: its filesystem and environment belong
+-- to the Rex server already, even when the invoking app is on another device.
+function M.for_server_config()
+  return {
+    read = function()
+      local _, path = location()
+      return path and read(path)
+    end,
+    remember = function(session_id, origin_id, client_id)
+      remember(session_id, nil, origin_id, "config-" .. client_id:gsub("[^%w_-]", "_"))
+    end,
+  }
 end
 
 return M

@@ -172,6 +172,46 @@ function M.setup(options)
     args = { client_id = "string?" },
     run = function(ctx, arguments) direct(app_context(ctx, arguments), "agent-next") end }
   if options.agent_next_key then rex.bind(options.agent_next_key, "interdimux_agent_next") end
+  -- A session toggle needs only IDs and MRU, not a full picker snapshot or
+  -- child processes. Sidebar switches still aren't exposed to configuration.
+  local session_history = dofile(root .. "/rust/src/rex_history.lua").for_server_config()
+  rex.action { name = "interdimux_last_session", title = "Interdimux: Last Session", category = "Interdimux",
+    description = "Return to the most recent other session in Interdimux's history",
+    keywords = "interdimux imux mux session last previous toggle",
+    args = { client_id = "string?" },
+    run = function(ctx, arguments)
+      local app = app_context(ctx, arguments)
+      if not ctx.session_id then error("Select a Rex session first", 0) end
+      local listed, list_error = rex.call("session.list", {})
+      if not listed then error(list_error, 0) end
+      local history = session_history.read()
+      local recent = history and history.sessions or {}
+      local target, newest, origin_found
+      for _, session in ipairs(listed.sessions or {}) do
+        if session.session_id == ctx.session_id then
+          origin_found = true
+        else
+          local stamp = tonumber(recent[session.session_id]) or 0
+          if not target or stamp > newest then target, newest = session.session_id, stamp end
+        end
+      end
+      if not origin_found then error("The originating Rex session no longer exists", 0) end
+      if not target then return end
+      local selection = { session_id = target }
+      if ctx.client_id == app.client_id then
+        -- Keyboard actions return this native selection to their own app.
+        rex.client.queue("session.select", selection)
+      else
+        -- An explicit CLI target still needs routing to the persistent app.
+        local selected, select_error = rex.call("client.perform", {
+          client_id = app.client_id, action = "session.select", args = selection,
+          origin = "cli", timeout_ms = 5000,
+        })
+        if not selected then error(select_error, 0) end
+      end
+      session_history.remember(target, ctx.session_id, app.client_id)
+    end }
+  if options.last_session_key then rex.bind(options.last_session_key, "interdimux_last_session") end
   local function jump(index)
     local name = "interdimux_jump_" .. index
     rex.action { name = name, title = "Interdimux: Session " .. index, category = "Interdimux",

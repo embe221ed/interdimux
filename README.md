@@ -78,7 +78,15 @@ The session/window/pane picker starts only after choosing a tool. Rex's native
 `Cmd+Shift+P` palette also keeps the grouped `Interdimux:` actions; type `imux`
 there to find them. Set `dashboard_ui="native"` to use that app-wide palette
 on `Ctrl+b g` instead.
-The action starts one detached Rex coordinator, which supplies the snapshot
+Set `last_session_key="ctrl+b>shift+l"` to toggle to the most recent other
+session recorded by Interdimux. This shortcut always uses MRU order, even with
+`INTERDIMUX_ORDER=index`; sidebar clicks and other native Rex switches aren't
+tracked. The same action is available as `Interdimux: Last Session` in the
+palette. It reads the session list and shared history in Lua and switches
+through Rex's native action. Until there is recorded history, it uses
+Interdimux's session order.
+
+Picker actions start one detached Rex coordinator, which supplies the snapshot
 and opens a centered floating terminal. The terminal starts the shared Rust
 navigator directly with login disabled and explicit initiating-client/origin
 IDs. The navigator publishes a small result record; the coordinator applies

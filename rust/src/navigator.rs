@@ -719,7 +719,10 @@ pub(crate) fn run_mode(verb: &str, args: &[String]) -> Result<(), String> {
     }
     let backend = parse(&backend_args)?;
     let result = (|| {
-        let mut snapshot = backend.collect()?;
+        let mut snapshot = match (&backend, verb) {
+            (Backend::Rex(ctx), "jump") => crate::rex::collect_sessions(ctx)?,
+            _ => backend.collect()?,
+        };
         hide(&mut snapshot);
         match verb {
             "send-in" | "send-at" => {
@@ -780,7 +783,11 @@ pub(crate) fn run_mode(verb: &str, args: &[String]) -> Result<(), String> {
                         backend.activate(&next.target)?;
                     } else {
                         eprintln!("interdimux: no agent needs you");
-                        backend.restore()?;
+                        // A direct shortcut never changed focus. Only a hosted
+                        // or separate picker terminal needs cancellation.
+                        if backend.disposable_terminal() {
+                            backend.restore()?;
+                        }
                     }
                 } else if count {
                     println!("{}", agents.len());

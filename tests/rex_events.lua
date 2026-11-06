@@ -34,6 +34,10 @@ for _ = 1, 100 do emit("terminal.program_status_changed", { session_id = "s", bl
 emit("terminal.progress_report", { session_id = "s", block_id = "b2" })
 emit("session_view_changed", { session_id = "s", revision = 11 })
 assert(#timers == 1 and #calls == 0, "one hundred native changes schedule only one delayed collection")
+local pending_copy = watcher.pending()
+assert(pending_copy.sessions.s and pending_copy.blocks.b1 and pending_copy.blocks.b2)
+pending_copy.blocks.b1 = nil
+assert(watcher.pending().blocks.b1, "reading pending changes must not mutate the observer")
 snapshot.views.s.revision = 11
 timers[1].callback()
 assert(#calls == 1 and calls[1].blocks.b1 and calls[1].blocks.b2 and calls[1].sessions.s)

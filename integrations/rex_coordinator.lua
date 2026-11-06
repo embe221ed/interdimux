@@ -14,7 +14,7 @@ local last_request = 0
 local operation_context = {}
 for key, value in pairs(args) do operation_context[key] = value end
 operation_context.hosted = true
-local history, history_path
+local history, history_path, history_parent
 local grid_cache, grid_path, grid_parent, grid_fingerprint
 local picker_block, picker_layer
 local notice_block, notice_layer
@@ -25,13 +25,17 @@ local finished = false
 local bounds = args.bounds or { 0.11, 0.17, 0.78, 0.66 }
 local writes = 0
 
-local function atomic_json(path, value)
+local function atomic_json(path, value, parent)
   local temporary = path .. ".tmp"
   if directory and path:sub(1, #directory + 1) ~= directory .. "/" then
     writes = writes + 1
     temporary = path .. ".tmp-" .. directory:match("([^/]+)$") .. "-" .. writes
   end
   local file, open_error = io.open(temporary, "wb")
+  if not file and parent then
+    local made = rex.exec { "mkdir", "-p", parent }
+    if made and made.ok then file, open_error = io.open(temporary, "wb") end
+  end
   if not file then error(open_error, 0) end
   local ok, write_error = pcall(function()
     assert(file:write(rex.json.encode(value)))
@@ -75,11 +79,7 @@ local function remember_grid(size)
   end
   table.sort(entries, function(a, b) return (a.used or 0) > (b.used or 0) end)
   for index = 65, #entries do grid_cache.windows[entries[index].key] = nil end
-  if not os.rename(grid_parent, grid_parent) then
-    local made = rex.exec { "mkdir", "-p", grid_parent }
-    if not made or not made.ok or finished then return end
-  end
-  local written, write_error = pcall(atomic_json, grid_path, grid_cache)
+  local written, write_error = pcall(atomic_json, grid_path, grid_cache, grid_parent)
   if not written then rex.log("error", "interdimux picker size cache: " .. tostring(write_error)) end
 end
 
@@ -109,7 +109,7 @@ local function remember(session_id, already_loaded)
   if not already_loaded then merge_history() end
   history.last = math.max(os.time(), (tonumber(history.last) or 0) + 1)
   history.sessions[session_id] = history.last
-  local stored, store_error = pcall(atomic_json, history_path, history)
+  local stored, store_error = pcall(atomic_json, history_path, history, history_parent)
   if not stored then rex.log("error", "interdimux MRU: " .. tostring(store_error)) end
 end
 
@@ -120,13 +120,8 @@ local function load_history(snapshot)
   if not home or home == "" then return end
   local state = os.getenv("XDG_STATE_HOME")
   if not state or state == "" then state = home .. "/.local/state" end
-  local parent = state .. "/interdimux"
-  local exists = os.rename(parent, parent)
-  if not exists then
-    local created = rex.exec { "mkdir", "-p", parent }
-    if not created or not created.ok then return end
-  end
-  history_path = parent .. "/rex-mru.json"
+  history_parent = state .. "/interdimux"
+  history_path = history_parent .. "/rex-mru.json"
   local file = io.open(history_path, "rb")
   if file then
     local text = file:read("*a"); file:close()
@@ -160,11 +155,52 @@ local function collect_snapshot(changes)
 end
 
 local function save_snapshot(changes)
+  -- A scoped operation refresh must also consume changes already waiting in
+  -- the event batch; update() cancels that batch after publication.
+  if changes and live_updates then
+    local pending_changes = live_updates.pending()
+    for id in pairs(pending_changes.sessions) do changes.sessions[id] = true end
+    for id in pairs(pending_changes.blocks) do changes.blocks[id] = true end
+  end
   local snapshot = collect_snapshot(changes)
   if history then snapshot.mru = history.sessions; snapshot.session_paths = history.paths end
   atomic_json(snapshot_path, snapshot)
   latest_snapshot = snapshot
   if live_updates then live_updates.update(snapshot) end
+end
+
+local scoped_operations = { rename = true, close = true, swap = true,
+  create = true, split = true, send = true, zoom = true }
+local function operation_changes(request, data)
+  -- Explicit refresh and operation without live events still refresh every
+  -- process. Known mutations only invalidate the sessions they can affect.
+  if not live_updates or not scoped_operations[request.operation] then return end
+  local changes = { sessions = {}, blocks = {} }
+  local function add(target)
+    if type(target) == "table" and type(target.session_id) == "string" then
+      changes.sessions[target.session_id] = true
+    end
+  end
+  add(request.target)
+  add(request.args and request.args.other)
+  add(type(data) == "table" and data.target)
+  if not next(changes.sessions) then return end
+  if request.operation == "send" then
+    local target = request.target
+    local view = target and latest_snapshot and latest_snapshot.views[target.session_id]
+    for _, window in ipairs(view and view.windows or {}) do
+      if not target.window_id or window.window_id == target.window_id then
+        for _, layer in ipairs(window.layers or {}) do
+          for _, block in ipairs(layer.blocks or {}) do
+            if not target.block_id or block.block_id == target.block_id then
+              changes.blocks[block.block_id] = true
+            end
+          end
+        end
+      end
+    end
+  end
+  return changes
 end
 
 local function clean()
@@ -439,7 +475,7 @@ local function prepare()
         and type(request.args.cwd) == "string" and data.target then
       merge_history()
       history.paths[data.target.session_id] = request.args.cwd
-      local stored, store_error = pcall(atomic_json, history_path, history)
+      local stored, store_error = pcall(atomic_json, history_path, history, history_parent)
       if not stored then rex.log("error", tostring(store_error)) end
     end
     -- These queries do not change the tree. Recollecting every session and
@@ -447,7 +483,7 @@ local function prepare()
     -- full refresh before the request can return.
     if request.operation ~= "preview" and request.operation ~= "health"
         and request.operation ~= "schedule-target" then
-      local refreshed, refresh_error = pcall(save_snapshot)
+      local refreshed, refresh_error = pcall(save_snapshot, operation_changes(request, data))
       if not refreshed and ok then ok, data = false, refresh_error end
     end
     local response = { version = 1, id = request.id, ok = ok }

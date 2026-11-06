@@ -1,13 +1,20 @@
 -- Embedded in imux. One CLI process and connection; no per-session process.
-local listed, err = rex.call("session.attach_all", {
-  event_scope = rex.args and rex.args.live_refresh and "all" or "session",
-})
+local args = rex.args or {}
+-- Numbered jumps need only labels and MRU; avoid attaching to or inspecting
+-- every session's terminals just to select a session ID.
+local listed, err
+if args.sessions_only then
+  listed, err = rex.call("session.list", {})
+else
+  listed, err = rex.call("session.attach_all", {
+    event_scope = args.live_refresh and "all" or "session",
+  })
+end
 if listed == nil then error(err, 0) end
 
 local views = {}
 local errors = {}
 local metadata = {}
-local args = rex.args or {}
 local picker_block_id = args.picker_block_id
 -- The hosted event observer supplies a complete prior snapshot and exact dirty
 -- IDs. Ordinary refreshes deliberately omit these arguments and collect fresh
@@ -32,7 +39,7 @@ if imux_collector_pid and imux_collector_uid then
     local_host_id = status and status.host_id
   end
 end
-for _, session in ipairs(listed.sessions or {}) do
+for _, session in ipairs(not args.sessions_only and listed.sessions or {}) do
   local session_id = session.session_id
   local session_dirty = not previous or args.live_dirty_sessions[session_id]
   local view = not session_dirty and previous.views[session_id] or nil
@@ -48,7 +55,9 @@ for _, session in ipairs(listed.sessions or {}) do
         for _, block in ipairs(layer.blocks or {}) do
           if block.creator_name == "com.superlogical.terminal"
               and block.block_id ~= picker_block_id then
-            local cached = previous and not session_dirty and not args.live_dirty_blocks[block.block_id]
+            -- Layout changes do not invalidate terminal process metadata.
+            -- New blocks have no cache; terminal events explicitly dirty IDs.
+            local cached = previous and not args.live_dirty_blocks[block.block_id]
               and previous.metadata[block.block_id]
             if cached then
               metadata[block.block_id] = cached
@@ -85,4 +94,5 @@ end
 
 -- ID-keyed maps avoid Lua's ambiguous empty-array JSON representation.
 return { version = 1, sessions = listed.sessions, views = views, errors = errors,
-  metadata = metadata, host_id = status and status.host_id, local_host_id = local_host_id }
+  metadata = metadata, host_id = status and status.host_id, local_host_id = local_host_id,
+  sessions_only = args.sessions_only or nil }

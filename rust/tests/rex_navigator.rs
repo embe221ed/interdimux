@@ -83,6 +83,10 @@ esac
     }
 
     fn run_with_files(&self, subcommand: &str, mode: &str, hosted: bool) -> Output {
+        self.command(subcommand, mode, hosted).output().unwrap()
+    }
+
+    fn command(&self, subcommand: &str, mode: &str, hosted: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_imux"));
         command
             .args([
@@ -130,7 +134,7 @@ esac
                 .arg("--result")
                 .arg(self.root.join("result.json"));
         }
-        command.output().unwrap()
+        command
     }
 
     fn calls(&self) -> Vec<String> {
@@ -196,6 +200,92 @@ fn snapshot() -> Value {
             }]}
         }, "errors":{}
     })
+}
+
+#[test]
+fn direct_session_jumps_collect_only_the_catalog_and_preserve_ordering() {
+    for (number, order, hidden, expected) in [
+        ("1", "normal", "", "session:three"),
+        ("2", "normal", "", "session:two"),
+        ("3", "normal", "", "session:one"),
+        ("1", "index", "", "session:two"),
+        ("1", "normal", "third", "session:two"),
+        ("1", "normal", "*", "session:one"),
+    ] {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.root.join("snapshot.json"),
+            json!({
+                "version":1, "sessions_only":true,
+                "sessions":[{"session_id":"session:two","label":"second"},
+                    {"session_id":"session:one","label":"origin"},
+                    {"session_id":"session:three","label":"third"}],
+                "views":{}, "metadata":{},
+                "mru":{"session:one":100,"session:two":20,"session:three":30}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let output = fixture
+            .command("jump", "unused", false)
+            .arg(number)
+            .env_remove("REX_BLOCK")
+            .env("INTERDIMUX_ORDER", order)
+            .env("INTERDIMUX_HIDE", hidden)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (_, selected) = fixture.activation();
+        assert_eq!(selected["session_id"], expected);
+        assert!(selected.get("window_id").is_none() && selected.get("block_id").is_none());
+        let calls = fixture.calls();
+        let args: Value = calls[0]
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("ARG={")
+                    .map(|rest| serde_json::from_str(&format!("{{{rest}")).unwrap())
+            })
+            .unwrap();
+        assert_eq!(args["sessions_only"], true);
+        assert!(!fixture.root.join("fzf-args").exists());
+    }
+}
+
+#[test]
+fn no_waiting_agent_leaves_direct_focus_alone_but_completes_hosted_picker() {
+    let fixture = Fixture::new();
+    let output = fixture
+        .command("agent-next", "unused", false)
+        .env_remove("REX_BLOCK")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fixture.calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "no-op direct shortcut must not start an activation transport"
+    );
+    assert!(calls[0].contains("SCRIPT=SNAPSHOT"));
+
+    let output = fixture.run_with_files("agent-next", "unused", true);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value =
+        serde_json::from_slice(&fs::read(fixture.root.join("result.json")).unwrap()).unwrap();
+    assert_eq!(result["outcome"], "cancel");
+    assert_eq!(fixture.calls().len(), 1);
 }
 
 #[test]

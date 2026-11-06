@@ -51,7 +51,10 @@ dofile = function(path)
     snapshots = snapshots + 1
     cache_inputs[#cache_inputs + 1] = { previous = rex.args.live_previous_snapshot,
       blocks = rex.args.live_dirty_blocks, sessions = rex.args.live_dirty_sessions }
-    return { version = 1, sessions = {}, views = { s = { revision = snapshots } }, metadata = {}, errors = {} }
+    return { version = 1, sessions = {}, views = { s = { revision = snapshots,
+      windows = { { window_id = "w", layers = { { blocks = {
+        { block_id = "worker" }, { block_id = "other-worker" },
+      } } } } } } }, metadata = {}, errors = {} }
   end
   if path == root .. "/rust/src/rex_activate.lua" then return function() end end
   if path == root .. "/integrations/rex_geometry.lua" then
@@ -61,7 +64,7 @@ dofile = function(path)
     return function(request)
       operations[#operations + 1] = request.operation
       assert(not files["/private-picker/request.json"], "consume request before running its operation")
-      return { operation = request.operation }
+      return { operation = request.operation, target = request.args.created }
     end
   end
   return real_dofile(path)
@@ -71,23 +74,60 @@ assert(timer and snapshots == 1, "opening collects one initial snapshot")
 assert(encoded[files["/private-picker/live.json"]].version == 1 and rex.args.live_refresh == true,
   "publish the live protocol marker before Rust starts, preserving full native event subscription")
 for id, operation in ipairs({ "preview", "health", "schedule-target", "snapshot", "rename" }) do
-  files["/private-picker/request.json"] = encode { version = 1, id = id, operation = operation, args = {} }
+  if operation == "rename" then
+    handlers["terminal.title_changed"]({}, { session_id = "other", block_id = "unrelated-worker" })
+  end
+  files["/private-picker/request.json"] = encode { version = 1, id = id, operation = operation,
+    target = { session_id = "s" }, args = {} }
   timer()
   local response = encoded[files["/private-picker/response.json"]]
   assert(response.id == id and response.ok and response.data.operation == operation)
   assert(#operations == id, "requests execute exactly once")
   assert(snapshots == (id <= 3 and 1 or id - 2), "read-only queries must not recollect every pane")
+  if operation == "snapshot" then
+    assert(not cache_inputs[#cache_inputs].previous, "explicit refresh must fetch fresh data")
+  elseif operation == "rename" then
+    local scoped = cache_inputs[#cache_inputs]
+    assert(scoped.previous and scoped.sessions.s and not scoped.sessions.other,
+      "rename refreshes only its session layout")
+    assert(scoped.blocks["unrelated-worker"] and delayed[#delayed].cancelled,
+      "scoped operations must preserve unrelated pending terminal changes")
+  end
   timer()
   assert(#operations == id, "an idle tick must not repeat the last operation")
 end
-print("passed: read-only mailbox queries skip full snapshots, refresh and mutations still collect once")
+print("passed: read-only queries skip collection, explicit refresh is fresh, mutations merge scoped and pending changes")
+
+for _, request in ipairs({
+  { operation = "swap", target = { session_id = "s" }, args = { other = { session_id = "t" } } },
+  { operation = "create", args = { created = { session_id = "new" } } },
+  { operation = "send", target = { session_id = "s", window_id = "w", block_id = "worker" }, args = {} },
+  { operation = "send", target = { session_id = "s", window_id = "w" }, args = {} },
+}) do
+  request.version, request.id = 1, #operations + 1
+  files["/private-picker/request.json"] = encode(request)
+  timer()
+  assert(encoded[files["/private-picker/response.json"]].ok)
+  local scoped = cache_inputs[#cache_inputs]
+  assert(scoped.previous)
+  if request.operation == "swap" then
+    assert(scoped.sessions.s and scoped.sessions.t, "cross-session swaps refresh both layouts")
+  elseif request.operation == "create" then
+    assert(scoped.sessions.new, "new session IDs from the operation must be collected")
+  else
+    assert(scoped.blocks.worker)
+    assert(not not scoped.blocks["other-worker"] == (request.target.block_id == nil),
+      "send refreshes exactly the target pane or window's processes")
+  end
+end
 
 local before_events = snapshots
+local before_delayed = #delayed
 for _ = 1, 100 do
   handlers["terminal.program_status_changed"]({}, { session_id = "s", block_id = "worker" })
 end
-assert(#delayed == 1 and snapshots == before_events)
-delayed[1].callback()
+assert(#delayed == before_delayed + 1 and snapshots == before_events)
+delayed[#delayed].callback()
 assert(snapshots == before_events + 1 and cache_inputs[#cache_inputs].previous
   and cache_inputs[#cache_inputs].blocks.worker, "native bursts publish one incremental snapshot")
 assert(rex.args.live_previous_snapshot == nil and rex.args.live_dirty_blocks == nil
@@ -95,7 +135,7 @@ assert(rex.args.live_previous_snapshot == nil and rex.args.live_dirty_blocks == 
 assert(encoded[files["/private-picker/snapshot.json"]].views.s.revision == snapshots)
 handlers["session_view_changed"]({}, { session_id = "s", revision = 0 })
 handlers["terminal.title_changed"]({}, { block_id = "block:picker" })
-assert(#delayed == 1, "stale topology and picker rendering must not feed back into more snapshots")
+assert(#delayed == before_delayed + 1, "stale topology and picker rendering must not feed back into more snapshots")
 handlers["terminal.pwd_changed"]({}, { block_id = "worker" })
 local waiting = delayed[#delayed]
 rex.stop = function() end
