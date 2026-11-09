@@ -2,8 +2,10 @@
 //! Mirrors bash `load_recent_dirs` + `detect_project_type`.
 
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 fn recent_file() -> String {
     let base = std::env::var("XDG_DATA_HOME").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
@@ -54,35 +56,206 @@ fn zoxide_query(all: bool) -> Command {
     c
 }
 
-/// zoxide's query, STARTED, for `candidates` to collect.  gather calls this
-/// before it renders the first row, so the query -- 7-20 ms, the largest single
-/// cost of a list with directory rows on -- runs while the tmux rows are drawn
-/// instead of after them; the rows still all go out in one write at the end.
-/// None when zoxide is off, or not installed (then there is nothing to wait
-/// for: the plain query could not start either).
-pub fn start_zoxide() -> Option<Child> {
-    let use_zoxide = std::env::var("INTERDIMUX_USE_ZOXIDE").map(|v| v == "on").unwrap_or(true);
+// Optional history enrichment must not hold up a picker or a successful switch.
+// The same deadline covers --all and the compatibility fallback. A pipe is
+// drained without blocking, so a full pipe or an inherited writer cannot make
+// waiting/cleanup exceed the deadline or retain an unbounded reader thread.
+const ZOXIDE_TIMEOUT: Duration = Duration::from_millis(250);
+const ZOXIDE_OUTPUT_LIMIT: usize = 1_048_576;
+
+pub(crate) struct Zoxide {
+    child: Child,
+    stdout: ChildStdout,
+    deadline: Instant,
+    limit: usize,
+    finished: bool,
+}
+
+impl Zoxide {
+    fn start(mut command: Command, deadline: Instant, limit: usize) -> Option<Self> {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().ok()?;
+        let stdout = child.stdout.take()?;
+        let mut result = Self {
+            child,
+            stdout,
+            deadline,
+            limit,
+            finished: false,
+        };
+        if nonblocking(&result.stdout).is_err() {
+            result.stop();
+            return None;
+        }
+        Some(result)
+    }
+
+    fn stop(&mut self) {
+        if self.finished {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            extern "C" {
+                fn kill(pid: i32, signal: i32) -> i32;
+            }
+            // The child has its own process group; also stop descendants that
+            // inherited stdout, rather than leaving their pipe open forever.
+            unsafe {
+                kill(-(self.child.id() as i32), 9);
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.finished = true;
+    }
+
+    fn output(mut self) -> Option<Output> {
+        let mut bytes = Vec::new();
+        let mut status = None;
+        let mut eof = false;
+        let mut chunk = [0; 8192];
+        loop {
+            loop {
+                if Instant::now() >= self.deadline {
+                    return None;
+                }
+                match self.stdout.read(&mut chunk) {
+                    Ok(0) => {
+                        eof = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        if n > self.limit.saturating_sub(bytes.len()) {
+                            return None;
+                        }
+                        bytes.extend_from_slice(&chunk[..n]);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => return None,
+                }
+            }
+            if status.is_none() {
+                status = self.child.try_wait().ok()?;
+            }
+            if let Some(status) = status.filter(|_| eof) {
+                self.finished = true;
+                return Some(Output {
+                    status,
+                    stdout: bytes,
+                    stderr: Vec::new(),
+                });
+            }
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(5)));
+        }
+    }
+}
+
+impl Drop for Zoxide {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(unix)]
+fn nonblocking(stdout: &ChildStdout) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    extern "C" {
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+    }
+    #[cfg(target_os = "linux")]
+    const NONBLOCK: i32 = 0x800;
+    #[cfg(not(target_os = "linux"))]
+    const NONBLOCK: i32 = 0x4;
+    let fd = stdout.as_raw_fd();
+    let flags = unsafe { fcntl(fd, 3) };
+    if flags < 0 || unsafe { fcntl(fd, 4, flags | NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn nonblocking(_: &ChildStdout) -> io::Result<()> {
+    // zoxide is optional. Do not use an unbounded pipe on an unsupported host.
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "nonblocking pipe unavailable",
+    ))
+}
+
+pub(crate) fn zoxide(args: &[&str]) -> Option<Output> {
+    let mut command = Command::new("zoxide");
+    command.args(args);
+    Zoxide::start(
+        command,
+        Instant::now() + ZOXIDE_TIMEOUT,
+        ZOXIDE_OUTPUT_LIMIT,
+    )?
+    .output()
+}
+
+/// Start enrichment before rendering. The timeout begins at spawn, not when
+/// the caller eventually collects the output. Drop always kills and reaps it.
+pub fn start_zoxide() -> Option<Zoxide> {
+    let use_zoxide = std::env::var("INTERDIMUX_USE_ZOXIDE")
+        .map(|v| v == "on")
+        .unwrap_or(true);
     if !use_zoxide {
         return None;
     }
-    zoxide_query(true).spawn().ok()
+    Zoxide::start(
+        zoxide_query(true),
+        Instant::now() + ZOXIDE_TIMEOUT,
+        ZOXIDE_OUTPUT_LIMIT,
+    )
 }
 
-/// The recent list first, then zoxide's frecency, deduped, existing dirs only.
-/// `zoxide` is start_zoxide's child: collected here, not re-run.  Never cached
-/// across lists -- the recent file changes on every switch.
-pub fn candidates(zoxide: Option<Child>) -> Vec<String> {
+fn listed_zoxide(child: Zoxide) -> Option<Output> {
+    let deadline = child.deadline;
+    let output = child.output()?;
+    if output.status.success() {
+        return Some(output);
+    }
+    // Only a completed rejection gets an old-zoxide compatibility retry. A
+    // stalled or oversized response does not consume a second timeout budget.
+    Zoxide::start(zoxide_query(false), deadline, ZOXIDE_OUTPUT_LIMIT)?
+        .output()
+        .filter(|output| output.status.success())
+}
+
+/// The legacy gatherer's small recent/zoxide suggestion list.
+pub fn candidates(zoxide: Option<Zoxide>) -> Vec<String> {
+    candidates_with_limit(zoxide, recent_limit())
+}
+
+/// Explicit project discovery must consider history before presentation caps.
+/// Output and history-file byte caps still bound the amount of enrichment.
+pub(crate) fn retained_candidates(zoxide: Option<Zoxide>) -> Vec<String> {
+    candidates_with_limit(zoxide, usize::MAX)
+}
+
+fn candidates_with_limit(zoxide: Option<Zoxide>, limit: usize) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = Default::default();
     let mut out = Vec::new();
-    let limit = recent_limit();
-
-    // Read BYTES, not a String.  read_to_string() errors on the first invalid
-    // UTF-8 byte and the `if let Ok` swallowed it, so ONE non-UTF-8 directory
-    // name silently deleted the entire recent list — and interdimux writes this
-    // file itself, so visiting such a directory once killed the feature
-    // permanently.  Now only that one line is skipped (see utf8_lines).
-    if let Ok(bytes) = fs::read(recent_file()) {
-        for d in utf8_lines(&bytes) {
+    if let Some(text) = crate::projects::recent_text(Path::new(&recent_file())) {
+        for d in utf8_lines(text.as_bytes()) {
             if out.len() >= limit {
                 break;
             }
@@ -93,27 +266,18 @@ pub fn candidates(zoxide: Option<Child>) -> Vec<String> {
             out.push(d.to_string());
         }
     }
-
-    if let Some(child) = zoxide {
-        let ok = |o: std::process::Output| if o.status.success() { Some(o) } else { None };
-        let listed = child
-            .wait_with_output()
-            .ok()
-            .and_then(ok)
-            .or_else(|| zoxide_query(false).output().ok().and_then(ok));
-        if let Some(o) = listed {
-            let mut n = 0;
-            for d in utf8_lines(&o.stdout) {
-                if n >= limit {
-                    break;
-                }
-                if d.is_empty() || seen.contains(d) || !offerable(d) {
-                    continue;
-                }
-                seen.insert(d.to_string());
-                out.push(d.to_string());
-                n += 1;
+    if let Some(output) = zoxide.and_then(listed_zoxide) {
+        let mut n = 0;
+        for d in utf8_lines(&output.stdout) {
+            if n >= limit {
+                break;
             }
+            if d.is_empty() || seen.contains(d) || !offerable(d) {
+                continue;
+            }
+            seen.insert(d.to_string());
+            out.push(d.to_string());
+            n += 1;
         }
     }
     out
@@ -315,5 +479,59 @@ mod tests {
         assert_eq!(c.canon_dir("rel//x/"), "rel/x");
         assert_eq!(c.canon_dir("//"), "/");
         fs::remove_dir_all(&d).ok();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn bounded_zoxide_drains_pipes_and_cleans_up_timeout_overflow_and_drop() {
+        fn command(script: &str) -> Command {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            command
+        }
+        fn alive(pid: u32) -> bool {
+            extern "C" {
+                fn kill(pid: i32, signal: i32) -> i32;
+            }
+            unsafe { kill(pid as i32, 0) == 0 }
+        }
+        let output = Zoxide::start(
+            command("printf 'valid output'"),
+            Instant::now() + Duration::from_secs(1),
+            32,
+        )
+        .unwrap()
+        .output()
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"valid output");
+        for (script, limit) in [
+            ("exec sleep 30", 32),
+            ("exec yes oversized-output", 32),
+            ("sleep 30 & exit 0", 32),
+        ] {
+            let child = Zoxide::start(
+                command(script),
+                Instant::now() + Duration::from_millis(40),
+                limit,
+            )
+            .unwrap();
+            let pid = child.child.id();
+            let started = Instant::now();
+            assert!(child.output().is_none());
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(!alive(pid), "timed out/oversized child was not reaped");
+        }
+        let child = Zoxide::start(
+            command("exec sleep 30"),
+            Instant::now() + Duration::from_secs(10),
+            32,
+        )
+        .unwrap();
+        let pid = child.child.id();
+        drop(child);
+        assert!(
+            !alive(pid),
+            "dropping uncollected enrichment did not kill/reap it"
+        );
     }
 }

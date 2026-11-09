@@ -127,7 +127,10 @@ pub(crate) struct PreparedRows {
 
 impl PreparedRows {
     pub(crate) fn new(snapshot: &Snapshot) -> Self {
-        let directories = crate::projects::cached_directories(snapshot);
+        Self::with_directories(snapshot, crate::projects::cached_directories(snapshot))
+    }
+
+    pub(crate) fn with_directories(snapshot: &Snapshot, directories: Vec<crate::projects::Directory>) -> Self {
         let home = crate::env_text("HOME");
         let mut directory_widths = (0, 0);
         for directory in directories.iter().filter(|d| d.existing_session.is_none()) {
@@ -154,8 +157,26 @@ impl PreparedRows {
         mode: Mode,
         states: &[String],
     ) -> Vec<Row> {
-        let (mut rows, budgets) = self.presentation.rows_and_widths(width, self.directory_widths);
-        append_directories(&mut rows, &self.directories, &self.home, budgets);
+        self.rows_for_query(snapshot, width, mode, states, false)
+    }
+
+    pub(crate) fn rows_for_query(
+        &mut self,
+        snapshot: &Snapshot,
+        width: usize,
+        mode: Mode,
+        states: &[String],
+        searching: bool,
+    ) -> Vec<Row> {
+        let (mut rows, budgets) = self
+            .presentation
+            .rows_and_widths(width, self.directory_widths);
+        let limit = if searching {
+            self.directories.len()
+        } else {
+            crate::projects::suggestion_limit().min(self.directories.len())
+        };
+        append_directories(&mut rows, &self.directories[..limit], &self.home, budgets);
         if mode == Mode::Agents {
             let agents = self
                 .agents

@@ -103,7 +103,16 @@ and direct modes' `--states` can explicitly select other states. The unfiltered
 `agents` listing still includes all known agent states.
 Contextual hints follow the current target and width. Directory suggestions in
 the main list come only from bounded recent history; scans and zoxide queries
-remain explicit actions.
+remain explicit actions. Blank queries show a small suggestion list, while
+searching considers all retained cached projects before limiting the displayed
+matches. Ordinary typing does not probe their paths or collect fresh metadata.
+Explicit Projects discovery also searches lower-ranked recent/zoxide entries
+outside configured scan roots.
+
+Optional zoxide queries and updates have a 250 ms deadline and a 1 MiB output
+cap. The old-version `--all` fallback shares that deadline. Timeout or excess
+output stops and reaps the helper; available recents and roots remain usable,
+and a failed optional history update does not undo a successful action.
 
 ```sh
 imux agents --backend rex [ORIGIN_OPTIONS] --count --states approve,input

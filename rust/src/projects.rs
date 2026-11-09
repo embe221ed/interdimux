@@ -143,12 +143,7 @@ pub(crate) fn normalize_query(query: &str) -> Result<(String, String), String> {
         if crate::env_text("INTERDIMUX_USE_ZOXIDE") == "off" {
             return None;
         }
-        let output = Command::new("zoxide")
-            .args(["query", "--", query])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
+        let output = crate::dirs::zoxide(&["query", "--", query])?;
         if !output.status.success() {
             return None;
         }
@@ -287,7 +282,7 @@ fn recent_file() -> PathBuf {
 
 // This is our own small history file. Reading it starts no finder, zoxide or
 // mount process and probes no candidate directory, so it is safe on first paint.
-fn recent_text(path: &Path) -> Option<String> {
+pub(crate) fn recent_text(path: &Path) -> Option<String> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -362,12 +357,7 @@ pub(crate) fn record_use(path: &str) {
     }
     remember(path, &home, &recent_file());
     if crate::env_text("INTERDIMUX_USE_ZOXIDE") != "off" && !excluded_network(path) {
-        let _ = Command::new("zoxide")
-            .args(["add", "--", path])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = crate::dirs::zoxide(&["add", "--", path]);
     }
 }
 
@@ -377,20 +367,31 @@ pub(crate) fn cached_directories(snapshot: &Snapshot) -> Vec<Directory> {
     if crate::env_text("INTERDIMUX_SHOW_DIRS") == "off" {
         return Vec::new();
     }
-    let limit = crate::env_text("INTERDIMUX_DIRS_LIMIT")
-        .parse::<usize>()
-        .unwrap_or(15)
-        .min(1000);
     cached_with(
         snapshot,
         &recent_text(&recent_file()).unwrap_or_default(),
-        limit,
+        usize::MAX,
     )
+}
+
+/// This limits blank-query suggestions, never the retained search inventory.
+pub(crate) fn suggestion_limit() -> usize {
+    crate::env_text("INTERDIMUX_DIRS_LIMIT")
+        .parse::<usize>()
+        .unwrap_or(15)
+        .min(1000)
 }
 
 fn cached_with(snapshot: &Snapshot, text: &str, limit: usize) -> Vec<Directory> {
     let mut seen = HashSet::new();
     text.split('\n')
+        .map(|path| {
+            if path == "/" {
+                path
+            } else {
+                path.trim_end_matches('/')
+            }
+        })
         .filter(|path| {
             Path::new(path).is_absolute()
                 && !path.chars().any(char::is_control)
@@ -401,10 +402,11 @@ fn cached_with(snapshot: &Snapshot, text: &str, limit: usize) -> Vec<Directory> 
             let existing_session = snapshot
                 .sessions
                 .iter()
-                .find(|s| {
+                .filter(|s| {
                     s.path.trim_end_matches('/') == path.trim_end_matches('/')
                         && local_session(snapshot, s)
                 })
+                .min_by_key(|s| (s.name != directory_name(path), s.name.as_str()))
                 .map(|s| s.target.clone());
             Directory {
                 path: path.into(),
@@ -678,7 +680,6 @@ fn discover(
             paths.retain(|path| path.to_lowercase().contains(&query));
         }
     } else {
-        paths.extend(recent);
         let deep = query.is_some();
         let query = query.unwrap_or("");
         let expanded = expand_home(query, &config.home);
@@ -712,18 +713,43 @@ fn discover(
             });
         }
     }
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
+    // Retained history is a lexical cache, separate from bounded filesystem
+    // discovery. Neither the scan limit nor metadata budget may discard a late
+    // history/zoxide name before the frontend's own fuzzy matcher sees it.
+    let mut result = if base.is_none() {
+        cached_with(snapshot, &recent.join("\n"), usize::MAX)
+    } else {
+        Vec::new()
+    };
+    let mut seen: std::collections::HashMap<String, usize> = result
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.path.clone(), index))
+        .collect();
     let started = Instant::now();
-    for path in paths {
-        if result.len() >= config.limit || started.elapsed() >= config.budget {
+    for (scanned, path) in paths.into_iter().enumerate() {
+        if scanned >= config.limit || started.elapsed() >= config.budget {
             break;
         }
         if path.chars().any(|c| c.is_control()) {
             continue;
         }
+        let retained_index = seen.get(path.trim_end_matches('/')).copied();
         let path = canonical(&path);
-        if path.is_empty() || !seen.insert(path.clone()) {
+        if path.is_empty() {
+            continue;
+        }
+        let project = if excluded_network(&path) {
+            None
+        } else {
+            project_type(&path, &config.markers)
+        };
+        let existing_session = directory_identity(snapshot, &path).1;
+        if let Some(index) = retained_index.or_else(|| seen.get(&path).copied()) {
+            result[index].project = project;
+            result[index].path = path.clone();
+            seen.insert(path.clone(), index);
+            result[index].existing_session = existing_session;
             continue;
         }
         let label = Path::new(&path)
@@ -731,13 +757,9 @@ fn discover(
             .and_then(|s| s.to_str())
             .unwrap_or(&path)
             .to_owned();
-        let project = if excluded_network(&path) {
-            None
-        } else {
-            project_type(&path, &config.markers)
-        };
+        seen.insert(path.clone(), result.len());
         result.push(Directory {
-            existing_session: directory_identity(snapshot, &path).1,
+            existing_session,
             path,
             label,
             project,
@@ -760,7 +782,7 @@ pub(crate) fn directories(
 ) -> Vec<Directory> {
     let config = ScanConfig::from_env();
     let recent = if base.is_none() {
-        crate::dirs::candidates(crate::dirs::start_zoxide())
+        crate::dirs::retained_candidates(crate::dirs::start_zoxide())
     } else {
         Vec::new()
     };
@@ -1167,5 +1189,160 @@ mod tests {
         assert!(!mount_is_remote(&mounts, "/Volumes/NAS Data/local/repo"));
         assert!(!mount_is_remote(&mounts, "/Volumes/NAS Data2/repo"));
         assert!(!mount_is_remote(&mounts, "/Volumes/External/repo"));
+    }
+    #[test]
+    fn retained_history_survives_scan_limits_and_deep_fuzzy_queries() {
+        let f = Fixture::new();
+        let recent: Vec<_> = (0..25)
+            .map(|i| f.dir(&format!("outside/older-project-{i:02}")))
+            .collect();
+        let mut config = f.config();
+        config.roots = vec![PathBuf::from(f.dir("empty-root"))];
+        config.limit = 3;
+        config.budget = Duration::ZERO;
+        let result = discover(
+            &Snapshot::default(),
+            &config,
+            None,
+            Some("oldprj24"),
+            recent.clone(),
+        );
+        assert_eq!(
+            result.len(),
+            25,
+            "scan bounds must not truncate retained history before matching"
+        );
+        assert!(result.iter().any(|entry| entry.path == recent[24]));
+        assert!(result.iter().all(|entry| entry.project.is_none()));
+    }
+
+    // Each case runs in its own process so PATH and history changes cannot
+    // race other tests or touch the caller's environment or real zoxide data.
+    #[cfg(unix)]
+    #[test]
+    fn optional_zoxide_and_retained_history_are_bounded_and_isolated() {
+        const CASE: &str = "IMUX_DISCOVERY_CHILD_CASE";
+        if let Ok(case) = std::env::var(CASE) {
+            let root = PathBuf::from(std::env::var("IMUX_DISCOVERY_ROOT").unwrap());
+            let old = root
+                .join("older/old-project-24")
+                .to_string_lossy()
+                .into_owned();
+            let started = Instant::now();
+            match case.as_str() {
+                "history" => {
+                    let cached = cached_directories(&Snapshot::default());
+                    assert_eq!(cached.len(), 25);
+                    assert_eq!(cached.last().unwrap().path, old);
+                    // Removing the source after collection must not affect
+                    // ordinary lexical matching of these retained entries.
+                    fs::remove_file(recent_file()).unwrap();
+                    assert!(cached.iter().any(|entry| entry.label == "old-project-24"));
+                }
+                "resolve-stall" => {
+                    assert_eq!(normalize_query("unmatched-project-name").unwrap().1, home());
+                }
+                "add-stall" => {
+                    record_use(&old);
+                    assert!(recent_text(&recent_file()).unwrap().starts_with(&old));
+                }
+                _ => {
+                    let entries = directories(&Snapshot::default(), None, Some("oldprj24"));
+                    assert!(
+                        entries.iter().any(|entry| entry.path == old),
+                        "stalled optional enrichment dropped own history"
+                    );
+                    if case == "old-success" {
+                        assert!(
+                            entries
+                                .iter()
+                                .any(|entry| entry.label == "zoxide-project-24"),
+                            "lower-ranked zoxide entry was truncated before matching"
+                        );
+                    }
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "optional zoxide stalled {case}: {:?}",
+                started.elapsed()
+            );
+            if let Ok(pids) = fs::read_to_string(root.join("pids")) {
+                extern "C" {
+                    fn kill(pid: i32, signal: i32) -> i32;
+                }
+                for pid in pids.lines().map(|pid| pid.parse::<i32>().unwrap()) {
+                    assert_ne!(
+                        unsafe { kill(pid, 0) },
+                        0,
+                        "zoxide child {pid} was not killed/reaped"
+                    );
+                }
+            }
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let root = fs::canonicalize(&f.0).unwrap();
+        let data = root.join("data/interdimux");
+        fs::create_dir_all(&data).unwrap();
+        let recents: Vec<_> = (0..25)
+            .map(|i| {
+                fs::canonicalize(f.dir(&format!("older/old-project-{i:02}")))
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let zoxide: Vec<_> = (0..25)
+            .map(|i| {
+                fs::canonicalize(f.dir(&format!("zoxide-projects/zoxide-project-{i:02}")))
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let zoxide_file = root.join("zoxide-output");
+        fs::write(&zoxide_file, zoxide.join("\n") + "\n").unwrap();
+        let executable = root.join("zoxide");
+        fs::write(&executable, r##"#!/bin/sh
+printf '%s\n' "$$" >> "$IMUX_DISCOVERY_ROOT/pids"
+case "$IMUX_DISCOVERY_CHILD_CASE" in
+  old-success|fallback-stall)
+    if [ "$3" = --all ]; then exit 2; fi
+    if [ "$IMUX_DISCOVERY_CHILD_CASE" = old-success ]; then cat "$IMUX_DISCOVERY_ROOT/zoxide-output"; exit; fi
+    ;;
+  oversized) exec yes /not/a/real/directory ;;
+esac
+exec sleep 30
+"##).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        for case in [
+            "history",
+            "resolve-stall",
+            "add-stall",
+            "list-stall",
+            "fallback-stall",
+            "oversized",
+            "old-success",
+        ] {
+            fs::write(data.join("recent_dirs"), recents.join("\n") + "\n").unwrap();
+            let _ = fs::remove_file(root.join("pids"));
+            let result = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "projects::tests::optional_zoxide_and_retained_history_are_bounded_and_isolated", "--nocapture"])
+                .env(CASE, case).env("IMUX_DISCOVERY_ROOT", &root)
+                .env("HOME", &root).env("XDG_DATA_HOME", root.join("data"))
+                .env("INTERDIMUX_SHOW_DIRS", "on").env("INTERDIMUX_USE_ZOXIDE", "on")
+                .env("INTERDIMUX_DIRS_LIMIT", "3").env("INTERDIMUX_RECENT_LIMIT", "3")
+                .env("INTERDIMUX_PROJECT_DIRS", f.dir("empty-root"))
+                .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
+                .output().unwrap();
+            assert!(
+                result.status.success(),
+                "{case}: {}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
     }
 }

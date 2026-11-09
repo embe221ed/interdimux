@@ -30,7 +30,7 @@ def respond(fd, pending, data):
     return pending[end:][-128:]
 
 class Picker:
-    def __init__(self, raw=True, mode=None, live=False, theme=None, direct=False, snapshot_setup=None, agent_states=None):
+    def __init__(self, raw=True, mode=None, live=False, theme=None, direct=False, snapshot_setup=None, agent_states=None, history=False, prefill=False):
         self.temp = tempfile.TemporaryDirectory(prefix='imux-actions-')
         self.root = Path(self.temp.name)
         self.snapshot_path = self.root / 'snapshot.json'
@@ -77,6 +77,9 @@ import json, os, shlex, sys
 with open(os.environ['IMUX_FZF_LOG'], 'a') as out:
     out.write(json.dumps({'pid': os.getpid(), 'args': sys.argv[1:], 'query': os.environ.get('FZF_QUERY'), 'current_item': os.environ.get('FZF_CURRENT_ITEM'), 'theme': os.environ.get('INTERDIMUX_THEME')}) + '\\n')
 arguments = sys.argv[1:]
+if '--no-hscroll' in arguments and not any(arg.startswith('--listen=') for arg in arguments):
+    arguments += ['--listen=' + os.environ['IMUX_TEST_FZF_SOCKET']]
+    os.environ.pop('FZF_API_KEY', None)
 command = shlex.quote(sys.executable) + ' ' + shlex.quote(os.environ['IMUX_DASHBOARD_PROBE'])
 if any(argument.startswith('--prompt=Dashboard ') for argument in arguments):
     arguments += ['--bind=result:execute-silent(' + command + ')']
@@ -118,9 +121,18 @@ raise SystemExit(91)
             'IMUX_INITIAL_MODE': mode or '',
             'FZF_API_KEY': 'inherited-unrelated-key',
             'IMUX_LIVE_STARTUP': str(self.snapshot_path) if live == 'startup' else '',
+            'IMUX_TEST_FZF_SOCKET': str(self.root / 'ui' / 'f.sock'),
         })
         if theme is not None: environment['INTERDIMUX_THEME'] = theme
         self.environment = environment
+        if history:
+            retained = self.root / 'data' / 'interdimux' / 'recent_dirs'
+            retained.parent.mkdir(parents=True)
+            self.history_paths = [self.root / 'retained' / ('old-project-%02d' % i) for i in range(25)]
+            for path in self.history_paths: path.mkdir(parents=True)
+            retained.write_text('\n'.join(map(str, self.history_paths)) + '\n')
+            environment['INTERDIMUX_DIRS_LIMIT'] = '3'
+            if prefill: environment['INTERDIMUX_FZF_OPTS'] = '--query=old-project-24'
         (self.root / 'projects' / 'example').mkdir(parents=True)
         command = [binary, mode if direct else 'pick', '--backend', 'rex', '--client', 'client:origin', '--session', 'session:origin',
                    '--window', 'window:origin', '--block', 'block:origin', '--picker-block', 'block:picker',
@@ -144,7 +156,8 @@ raise SystemExit(91)
                 self.until(lambda: any(any(arg.startswith('--prompt='+prompt+' ') for arg in launch['args']) for launch in self.launches()), 'startup '+prompt)
                 self.until(lambda: (prompt+' ❯').encode() in self.output, 'startup '+prompt+' frame')
             else:
-                self.until(lambda: (b'selected-before-start' if live == 'startup' else b'selected-pane') in self.output, 'initial finder')
+                initial = b'old-project-24' if prefill else (b'selected-before-start' if live == 'startup' else b'selected-pane')
+                self.until(lambda: initial in self.output, 'initial finder')
         except BaseException:
             self.close()
             raise
@@ -187,7 +200,17 @@ raise SystemExit(91)
 
     def top_launches(self): return [entry for entry in self.launches() if '--style=minimal' in entry['args']]
     def calls(self, operation): return [request for request in self.requests if request['operation'] == operation]
-    def send(self, keys): os.write(self.master, keys)
+    def send(self, keys):
+        os.write(self.master, keys)
+        # Escape restoration is asynchronous. Wait for the owned nested finder
+        # to exit before sending keys intended for the resumed main finder.
+        if keys == b'\x1b' and hasattr(self, 'main_pid') and self.launches():
+            nested = self.launches()[-1]['pid']
+            def exited():
+                try: os.kill(nested, 0); return False
+                except ProcessLookupError: return True
+            if nested != self.main_pid:
+                self.until(exited, 'nested finder exit')
 
     def pump(self, duration=.08):
         until = time.monotonic() + duration
@@ -212,12 +235,20 @@ raise SystemExit(91)
 
     def query(self, query='selected-pane'):
         self.send(b'\x1b[F\x15' + query.encode())
+        def complete():
+            state = finder_state(self)
+            return state['query'] == query and not state['reading'] and state['progress'] == 100
+        self.until(complete, 'complete query ' + repr(query))
         self.pump(.15)
 
     def dialog(self, key, prompt, initial=None):
         before = len(self.launches())
+        previous_state = finder_state(self)
         self.send(key)
-        self.until(lambda: len(self.launches()) > before, prompt + ' launch')
+        try:
+            self.until(lambda: len(self.launches()) > before, prompt + ' launch')
+        except AssertionError as error:
+            raise AssertionError(str(error) + '; finder before=' + repr(previous_state) + '; after=' + repr(finder_state(self))) from error
         launch = self.launches()[-1]
         assert any(arg.startswith('--prompt=' + prompt) for arg in launch['args']), launch
         if initial is not None: assert '--query=' + initial in launch['args'], launch
@@ -801,6 +832,10 @@ for mode, configured, profile in [('dashboard', None, 'terminal'), ('dashboard',
 "###;
 
 fn run_pty_probe(code: &str) {
+    // These real terminal exercises include deliberate 90ms typing cadence.
+    // Competing PTY renderers can starve each other on small CI machines.
+    static PTY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = PTY_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let Ok(python) = Command::new("python3").arg("--version").output() else {
         eprintln!("Python 3 unavailable; skipping action PTY coverage");
         return;
@@ -857,4 +892,47 @@ fn native_themes_follow_the_backend_through_helpers_and_direct_modes() {
 fn native_attention_states_match_real_fzf_for_collapsed_and_split_rows() {
     let definitions = PROBE.split("scenario('live-typing-raw'").next().unwrap();
     run_pty_probe(&format!("{definitions}\n{AGENTS_PROBE}"));
+}
+
+const HISTORY_PROBE: &str = r###"
+import statistics, subprocess
+for prefill in (False, True):
+    p = Picker(raw=False, live=True, history=True, prefill=prefill)
+    try:
+        if not prefill:
+            blank_count = finder_state(p)['matchCount']
+            assert blank_count < 25, 'blank query exposed all retained history'
+            p.query('oldprj24')
+        p.until(lambda: finder_state(p)['matchCount'] == 1, 'older retained exact/fuzzy match')
+        first = finder_state(p)
+        assert 'old-project-24' in first['current']['text'], first
+        token = first['current']['text'].split('\t')[-1]
+        for query in ('oldprj2', 'old-project-24', "'old-project-24"):
+            p.query(query)
+        p.until(lambda: finder_state(p)['matchCount'] == 1, 'refined old history query')
+        assert finder_state(p)['current']['text'].split('\t')[-1] == token
+        p.send(b'\x1d'); p.pump(.1)  # name
+        p.send(b'\x1d'); p.pump(.1)  # path
+        p.query('old-project-24')
+        p.until(lambda: finder_state(p)['matchCount'] == 1, 'path scope older history')
+        samples = []
+        callback_env = dict(p.environment, FZF_QUERY='old-project-24')
+        for _ in range(12):
+            started = time.monotonic()
+            result = subprocess.run([binary, 'ui', str(p.root / 'ui' / 'c'), 'query', 'unused-reload'], env=callback_env, capture_output=True, check=True)
+            samples.append((time.monotonic() - started) * 1000)
+            assert result.stdout == b'', result.stdout
+        print('Cached helper no-op median ms: %.3f' % statistics.median(samples), flush=True)
+        p.query('')
+        p.until(lambda: finder_state(p)['matchCount'] < 25, 'cleared query restores small suggestions')
+        assert not p.requests, 'history typing/scope change recollected backend: ' + repr(p.requests)
+        p.stable(); p.finish()
+        print('History cache PTY passed; prefilled=' + str(prefill), flush=True)
+    finally: p.close()
+"###;
+
+#[test]
+fn retained_history_expands_for_typed_and_prefilled_fzf_queries_without_probes() {
+    let definitions = PROBE.split("scenario('live-typing-raw'").next().unwrap();
+    run_pty_probe(&format!("{definitions}\n{HISTORY_PROBE}"));
 }

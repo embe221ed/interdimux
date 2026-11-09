@@ -1,7 +1,5 @@
 //! Shared data-to-row pipeline for every navigator backend.
 
-use std::process::Child;
-
 use crate::git::GitCache;
 use crate::model::{Pane, Row, Snapshot, Target, Window};
 use crate::palette::{Palette, RST};
@@ -79,7 +77,7 @@ pub(crate) fn render_snapshot(snapshot: &Snapshot, options: &RenderOptions, emit
 pub(crate) fn render_snapshot_with_zoxide(
     snapshot: &Snapshot,
     options: &RenderOptions,
-    zoxide: Option<Child>,
+    zoxide: Option<dirs::Zoxide>,
     mut emit: impl FnMut(Row),
 ) {
     let mut sessions: Vec<_> = snapshot.sessions.iter().collect();

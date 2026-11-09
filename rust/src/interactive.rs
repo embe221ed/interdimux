@@ -176,15 +176,18 @@ struct Runtime<'a, A: Adapter> {
     startup_abort: bool,
     live_pending: Arc<LiveUpdate>,
     live_rows_dirty: bool,
+    history_search: bool,
+    history_rows_dirty: bool,
 }
 
 impl<A: Adapter> Runtime<'_, A> {
-    fn update_rows(&mut self) {
-        let rows = self.prepared.rows(
+    fn update_rows(&mut self) -> bool {
+        let rows = self.prepared.rows_for_query(
             &self.snapshot,
             self.cols.saturating_sub(3),
             self.mode,
             &self.agent_states,
+            self.history_search,
         );
         let mut output = String::new();
         for row in rows {
@@ -201,8 +204,10 @@ impl<A: Adapter> Runtime<'_, A> {
                 row.identity, row.context, row.command
             ));
         }
-        self.live_rows_dirty |= self.rows != output;
+        let changed = self.rows != output;
+        self.live_rows_dirty |= changed;
         self.rows = output;
+        changed
     }
     fn target(&self, request: &Value) -> Result<Target, String> {
         let token = request["token"].as_str().unwrap_or("");
@@ -309,6 +314,29 @@ impl<A: Adapter> Runtime<'_, A> {
     fn handle(&mut self, request: &Value) -> Result<Value, String> {
         let event = request["event"].as_str().unwrap_or("");
         match event {
+            "query" => {
+                let searching = !request["query"].as_str().unwrap_or("").trim().is_empty();
+                if searching != self.history_search {
+                    self.history_search = searching;
+                    let metadata_dirty = self.live_rows_dirty;
+                    self.history_rows_dirty |= self.update_rows();
+                    self.live_rows_dirty = metadata_dirty;
+                }
+                // fzf can cancel an obsolete transform after this controller
+                // handled it but before consuming its returned reload action.
+                // Retry the pending publication until the rows helper reads it.
+                if self.history_rows_dirty {
+                    Ok(json!({"text":format!("reload({})", request["reload"].as_str().unwrap_or("true"))}))
+                } else {
+                    Ok(json!({"text":""}))
+                }
+            }
+            "history-rows" => {
+                // History expansion uses only the already prepared cache.
+                // Leave live publications queued for their normal idle guard.
+                self.history_rows_dirty = false;
+                Ok(json!({"text":self.rows}))
+            }
             "rows" => {
                 // Acknowledge when the reload helper consumes its rows, not when
                 // it accepts an HTTP command that a modal can later discard.
@@ -319,6 +347,7 @@ impl<A: Adapter> Runtime<'_, A> {
                 }
                 self.live_pending.acknowledge(generation);
                 self.live_rows_dirty = false;
+                self.history_rows_dirty = false;
                 Ok(json!({"text":self.rows}))
             }
             "live" => {
@@ -794,6 +823,7 @@ pub(crate) fn run<A: Adapter>(
         quote(&socket.to_string_lossy())
     );
     let reload = format!("{base} rows");
+    let history_reload = format!("{base} history-rows");
     let after = format!("{base} after {}", quote(&reload));
     let live_path = adapter.live_snapshot();
     let fzf_socket = directory.0.join("f.sock");
@@ -810,7 +840,7 @@ pub(crate) fn run<A: Adapter>(
     } else {
         "Enter creates a session from the query · Alt+Enter creates even when matches exist"
     };
-    command.arg(format!("--bind=change:change-header()+rebind(result),result:best+unbind(result),zero:change-header({empty}),ctrl-n:down-match,ctrl-p:up-match"));
+    command.arg(format!("--bind=change:change-header()+rebind(result)+transform({base} query {}),start:transform({base} query {}),result:best+unbind(result),zero:change-header({empty}),ctrl-n:down-match,ctrl-p:up-match", quote(&history_reload), quote(&history_reload)));
     let preview_open = crate::navigator::preview_enabled();
     let list_cols = if preview_open {
         cols.saturating_sub(1) / 2
@@ -876,7 +906,8 @@ pub(crate) fn run<A: Adapter>(
         // Startup transforms run while the outer finder can still initialize
         // its TTY. execute explicitly hands the terminal to nested fzf dialogs.
         command.arg(format!(
-            "--bind=start:wait+execute({base} startup {})+transform({after})",
+            "--bind=start:transform({base} query {})+wait+execute({base} startup {})+transform({after})",
+            quote(&history_reload),
             match mode {
                 Mode::Directories => "create",
                 Mode::Jobs => "jobs",
@@ -912,7 +943,8 @@ pub(crate) fn run<A: Adapter>(
         ));
     }
     // Rebuild from the same snapshot and assign stable opaque tokens. There
-    // are no collection calls, shell callbacks or RPCs on query changes.
+    // Query callbacks only toggle blank/full cached history at the boundary;
+    // subsequent edits perform no rendering, collection or filesystem probes.
     let final_done = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
     let live_pending = Arc::new(LiveUpdate::default());
@@ -952,6 +984,8 @@ pub(crate) fn run<A: Adapter>(
         startup_abort: false,
         live_pending: Arc::clone(&live_pending),
         live_rows_dirty: false,
+        history_search: false,
+        history_rows_dirty: false,
     };
     let input_rows = runtime.rows.clone();
     let result = std::thread::scope(|scope| {
@@ -1583,7 +1617,7 @@ pub(crate) fn helper(args: &[String]) -> Result<(), String> {
         );
         return Ok(());
     }
-    let token = if matches!(event, "after" | "resize" | "layout" | "live") {
+    let token = if matches!(event, "query" | "after" | "resize" | "layout" | "live") {
         None
     } else if event == "action" {
         args.get(3)
@@ -1593,7 +1627,7 @@ pub(crate) fn helper(args: &[String]) -> Result<(), String> {
     .map(String::as_str)
     .unwrap_or("");
     let mut req = request(event, token);
-    if matches!(event, "after" | "resize" | "layout" | "live") {
+    if matches!(event, "query" | "after" | "resize" | "layout" | "live") {
         req["reload"] = json!(args.get(2).map(String::as_str).unwrap_or("true"));
     }
     if event == "action" {
@@ -2244,8 +2278,81 @@ mod tests {
             startup_abort: false,
             live_pending: Arc::new(LiveUpdate::default()),
             live_rows_dirty: false,
+            history_search: false,
+            history_rows_dirty: false,
         }
     }
+    #[test]
+    fn query_history_only_rerenders_at_blank_boundaries() {
+        let adapter = Fake {
+            activations: Default::default(),
+        };
+        let mut r = runtime(&adapter, Mode::Switch);
+        r.prepared = crate::navigator::PreparedRows::with_directories(&r.snapshot, Vec::new());
+        r.update_rows();
+        r.handle(&json!({"event":"rows"})).unwrap();
+        let expanded = r
+            .handle(&json!({"event":"query", "query":"o", "reload":"cached-rows"}))
+            .unwrap();
+        assert_eq!(expanded["text"], "");
+        assert!(r.history_search);
+        let rows = r.rows.clone();
+        let targets = r.targets.clone();
+        let started = std::time::Instant::now();
+        for _ in 0..1000 {
+            for query in ["ol", "old", "older", "older-project-24"] {
+                assert_eq!(
+                    r.handle(&json!({"event":"query", "query":query, "reload":"cached-rows"}))
+                        .unwrap()["text"],
+                    ""
+                );
+            }
+        }
+        assert_eq!(r.rows, rows);
+        assert_eq!(r.targets, targets);
+        assert!(adapter.activations.lock().unwrap().is_empty());
+        eprintln!("4000 cached query notifications: {:?}", started.elapsed());
+        assert_eq!(
+            r.handle(&json!({"event":"query", "query":"", "reload":"cached-rows"}))
+                .unwrap()["text"],
+            ""
+        );
+        assert!(!r.history_search);
+    }
+
+    #[test]
+    fn cancelled_history_transform_retries_until_rows_are_consumed() {
+        let adapter = Fake { activations: Default::default() };
+        let mut r = runtime(&adapter, Mode::Switch);
+        let count = crate::projects::suggestion_limit() + 1;
+        let directories = (0..count).map(|i| crate::projects::Directory {
+            path: format!("/Network/no-probe/older-project-{i}"), label: format!("older-project-{i}"),
+            project: None, existing_session: None,
+        }).collect();
+        r.prepared = crate::navigator::PreparedRows::with_directories(&r.snapshot, directories);
+        r.update_rows();
+        r.handle(&json!({"event":"rows"})).unwrap();
+        let changed = r.handle(&json!({"event":"query", "query":"o", "reload":"cached-rows"})).unwrap();
+        assert_eq!(changed["text"], "reload(cached-rows)");
+        assert!(!r.live_rows_dirty, "history-only rows dirtied metadata publication");
+        // Ignore the first transform response, as fzf does when typing cancels
+        // it. The controller must not mistake handled for actually published.
+        let retry = r.handle(&json!({"event":"query", "query":"old", "reload":"cached-rows"})).unwrap();
+        assert_eq!(retry["text"], "reload(cached-rows)");
+        r.live_rows_dirty = true;
+        r.live_pending.requested.fetch_add(1, Ordering::AcqRel);
+        let consumed = r.handle(&json!({"event":"history-rows"})).unwrap();
+        assert!(r.live_pending.pending(), "history acknowledgement consumed a deferred live publication");
+        assert!(r.live_rows_dirty, "history acknowledgement cleared metadata publication state");
+        assert!(consumed["text"].as_str().unwrap().contains(&format!("older-project-{}", count - 1)));
+        assert_eq!(r.handle(&json!({"event":"query", "query":"older", "reload":"cached-rows"})).unwrap()["text"], "");
+        assert_eq!(r.handle(&json!({"event":"query", "query":"", "reload":"cached-rows"})).unwrap()["text"], "reload(cached-rows)");
+        assert_eq!(r.handle(&json!({"event":"query", "query":" ", "reload":"cached-rows"})).unwrap()["text"], "reload(cached-rows)");
+        r.handle(&json!({"event":"history-rows"})).unwrap();
+        assert!(!r.history_rows_dirty);
+        assert!(r.live_pending.pending());
+    }
+
     #[test]
     fn action_modes_never_switch_or_create_on_enter() {
         let adapter = Fake {

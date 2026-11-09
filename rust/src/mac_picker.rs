@@ -516,8 +516,17 @@ impl Picker {
                 return Err("Matching timed out; shorten the query".into());
             }
         }
+        let empty_query = self.matcher.snapshot().pattern().is_empty();
+        let suggestions: std::collections::HashSet<_> = self
+            .rows
+            .iter()
+            .filter(|row| row.main_recent)
+            .take(crate::projects::suggestion_limit())
+            .map(|row| row.id.as_str())
+            .collect();
         let in_scope = |row: &&Candidate| {
-            row.in_scope(&self.scope)
+            (!empty_query || !row.main_recent || suggestions.contains(row.id.as_str()))
+                && row.in_scope(&self.scope)
                 && (self.action_filter.is_empty()
                     || row.operations.contains(&self.action_filter.as_str()))
         };
@@ -540,7 +549,6 @@ impl Picker {
         let matched = ranked.len();
         // An empty query preserves MRU sessions and original tab/pane order,
         // even when the source lists all tabs before listing any panes.
-        let empty_query = self.matcher.snapshot().pattern().is_empty();
         let order = if empty_query {
             &self.hierarchy.preorder
         } else {
@@ -2230,6 +2238,54 @@ mod tests {
             .unwrap()
             .iter()
             .all(|r| r["parent_id"].is_null()));
+    }
+
+    #[test]
+    fn retained_project_names_search_beyond_blank_suggestions_after_scope_changes() {
+        let mut picker = Picker::new(None, empty_context());
+        let mut rows: Vec<_> = (0..30)
+            .map(|i| Candidate {
+                id: format!("history:{i}"),
+                kind: "directory".into(),
+                title: format!("older-project-{i:02}"),
+                name: format!("older-project-{i:02}"),
+                name_search: format!("older-project-{i:02}"),
+                search: format!("older-project-{i:02} /Network/do-not-probe/{i}"),
+                path: format!("/Network/do-not-probe/{i}"),
+                main_recent: true,
+                directory_visible: true,
+                ..Candidate::default()
+            })
+            .collect();
+        rows.push(Candidate {
+            id: "live".into(),
+            kind: "session".into(),
+            title: "Live".into(),
+            search: "Live".into(),
+            ..Candidate::default()
+        });
+        picker.replace(rows).unwrap();
+        picker.search_field = SearchField::Name;
+        for scope in ["all", "directory", "all"] {
+            picker.scope = scope.into();
+            picker.query.clear();
+            let blank = picker.results(1, Instant::now()).unwrap();
+            assert_eq!(
+                blank["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|row| row["kind"] == "directory")
+                    .count(),
+                crate::projects::suggestion_limit().min(30)
+            );
+            for query in ["oldprj29", "^older-project-29$"] {
+                picker.query = query.into();
+                let found = picker.results(2, Instant::now()).unwrap();
+                assert_eq!(found["preferred_id"], "history:29", "{scope}/{query}");
+                assert_eq!(found["rows"][0]["path"], "/Network/do-not-probe/29");
+            }
+        }
     }
 
     #[test]
