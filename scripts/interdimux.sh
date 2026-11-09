@@ -4326,6 +4326,14 @@ sched_resolve() {
 # submitting environment, so an inherited $TMUX would be a STALE pointer to a
 # possibly-dead server — the socket is passed explicitly and the inherited value
 # ignored.
+# Metadata is displayed as a single line with US separators. Keep its framing
+# safe without changing the actual command or quoted label in the job body.
+sched_metadata() {
+  REPLY="${1//$'\n'/ }"
+  REPLY="${REPLY//$'\r'/\\r}"
+  REPLY="${REPLY//$US/\\x1f}"
+}
+
 sched_job_body() {
   local pane="$1" sock="$2" srvpid="$3" label="$4" keys="$5"
   # POSIX quoting, not %q: atd replays this body under /bin/sh.  See shq().
@@ -4348,12 +4356,13 @@ sched_job_body() {
   # a session name contains a space or the literal "desc=" — and tmux allows
   # both.  The marker line keeps its trailing text so `grep '^# imux:v1 '` still
   # identifies one of our jobs.
-  local q_desc
-  q_desc=$(printf '%s' "$keys" | tr '\n' ' ')
+  local q_target q_desc
+  sched_metadata "$label"; q_target="$REPLY"
+  sched_metadata "$keys"; q_desc="$REPLY"
   printf '%s\n' \
     "# imux:v1 interdimux scheduled keys" \
     "# imux-pane: ${pane}" \
-    "# imux-target: ${label}" \
+    "# imux-target: ${q_target}" \
     "# imux-desc: ${q_desc}" \
     "# atd tries to MAIL a job's output.  With no MTA installed that output is" \
     "# destroyed and leaves only 'Exec failed for mail command' in the journal --" \
@@ -4394,8 +4403,45 @@ sched_job_body() {
 #     carrying a day name and seconds.
 #   * the header fields are read positionally from their own lines, so a session
 #     name containing a space or "desc=" cannot shift them.
+# Read a job only after both its producer marker and complete, ordered metadata
+# have been verified. Queue i is public to the user; membership alone does not
+# make an unrelated at job ours. Never evaluate the body returned by at -c.
+sched_read_job() {
+  local id="$1" body ln field=0
+  [[ "$id" =~ ^[0-9]+$ ]] || return 1
+  body=$(at -c "$id" 2>/dev/null) || return 1
+  SCHED_ROW_PANE="" SCHED_ROW_TARGET="" SCHED_ROW_DESC=""
+  while IFS= read -r ln; do
+    case "$field" in
+      0)
+        [ "$ln" != '# imux:v1 interdimux scheduled keys' ] || field=1
+        ;;
+      1)
+        case "$ln" in '# imux-pane: '*) SCHED_ROW_PANE="${ln#\# imux-pane: }" ;; *) return 1 ;; esac
+        [[ "$SCHED_ROW_PANE" =~ ^%[0-9]+$ ]] || return 1
+        field=2
+        ;;
+      2)
+        case "$ln" in '# imux-target: '*) SCHED_ROW_TARGET="${ln#\# imux-target: }" ;; *) return 1 ;; esac
+        [ -n "$SCHED_ROW_TARGET" ] || return 1
+        # Older generated jobs used literal CR/US in metadata. Keep them
+        # manageable after an upgrade while protecting the displayed rows.
+        sched_metadata "$SCHED_ROW_TARGET"; SCHED_ROW_TARGET="$REPLY"
+        field=3
+        ;;
+      3)
+        case "$ln" in '# imux-desc: '*) SCHED_ROW_DESC="${ln#\# imux-desc: }" ;; *) return 1 ;; esac
+        [ -n "$SCHED_ROW_DESC" ] || return 1
+        sched_metadata "$SCHED_ROW_DESC"; SCHED_ROW_DESC="$REPLY"
+        return 0
+        ;;
+    esac
+  done <<< "$body"
+  return 1
+}
+
 sched_rows() {
-  local rows id when ln pane target desc seen
+  local rows id when
   if rows=$(atq -q "$SCHED_QUEUE" -o '%Y-%m-%d %H:%M' 2>/dev/null); then
     # (no row or one needs no sort, nor its fork and exec: what --sched-list
     # costs most often, and the Jobs picker with one job)
@@ -4412,23 +4458,8 @@ sched_rows() {
   while IFS=$'\t' read -r id when; do
     [ -n "$id" ] || continue
     when="${when%" $SCHED_QUEUE "*}"     # drop the trailing "<queue> <user>"
-    pane="" target="" desc="" seen=0
-    while IFS= read -r ln; do
-      # at -c replays the whole submitting environment first, and one of those
-      # values could contain a line that looks like a header field.  Only trust
-      # what follows our own marker, and stop at the first line that is not one.
-      if [ "$seen" = 0 ]; then
-        case "$ln" in '# imux:v1 '*) seen=1 ;; esac
-        continue
-      fi
-      case "$ln" in
-        '# imux-pane: '*)   pane="${ln#\# imux-pane: }" ;;
-        '# imux-target: '*) target="${ln#\# imux-target: }" ;;
-        '# imux-desc: '*)   desc="${ln#\# imux-desc: }" ;;
-        *) break ;;
-      esac
-    done < <(at -c "$id" 2>/dev/null)
-    printf '%s\n' "$id$US$when$US${target:-?}$US${pane:-?}$US${desc:-?}"
+    sched_read_job "$id" || continue
+    printf '%s\n' "$id$US$when$US$SCHED_ROW_TARGET$US$SCHED_ROW_PANE$US$SCHED_ROW_DESC"
   done < <(printf '%s\n' "$rows")
 }
 
@@ -4534,15 +4565,30 @@ fi
 if [ "${1:-}" = "--sched-cancel" ]; then
   set +e
   _id="${2:-}"
-  [ -n "$_id" ] || { echo "interdimux: usage: --sched-cancel <id>" >&2; exit 2; }
-  # Only ever cancel jobs from our own queue, so a mistyped id cannot delete
-  # one of the user's unrelated at jobs.
-  if ! atq -q "$SCHED_QUEUE" 2>/dev/null | awk '{print $1}' | grep -qx "$_id"; then
+  [[ "$_id" =~ ^[0-9]+$ ]] || { echo "interdimux: usage: --sched-cancel <numeric id>" >&2; exit 2; }
+  # Require queue membership AND the same verified record used by listing.
+  # A failed/partial queue read cannot authorize deleting a job.
+  if ! _queued=$(atq -q "$SCHED_QUEUE" 2>/dev/null); then
+    echo "interdimux: could not read scheduled jobs; job $_id was not cancelled" >&2
+    exit 1
+  fi
+  _found=0
+  while read -r _queued_id _rest; do
+    [ "$_queued_id" != "$_id" ] || { _found=1; break; }
+  done <<< "$_queued"
+  if [ "$_found" != 1 ] || ! sched_read_job "$_id"; then
     echo "interdimux: no scheduled job $_id (see --sched-list)" >&2
     exit 1
   fi
-  atrm "$_id" 2>/dev/null && echo "interdimux: cancelled job $_id"
-  exit 0
+  if _out=$(atrm "$_id" 2>&1); then
+    echo "interdimux: cancelled job $_id"
+    exit 0
+  else
+    _status=$?
+    echo "interdimux: could not cancel job $_id" >&2
+    [ -z "$_out" ] || printf '%s\n' "$_out" >&2
+    exit "$_status"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
