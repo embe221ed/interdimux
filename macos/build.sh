@@ -28,14 +28,29 @@ trap cleanup EXIT
 bundle="$stage/Interdimux Picker.app"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Helpers" "$bundle/Contents/Resources"
 
-# Build for this Mac even if the caller normally cross-compiles Rust projects.
-env -u CARGO_BUILD_TARGET cargo build --release --locked --features macos-picker \
+# An explicit host target overrides both environment and Cargo config targets.
+# With --target Cargo writes under target/<host>, never target/release.
+host=$(cargo --version --verbose | sed -n 's/^host: //p')
+case "$host" in
+  ''|*[!a-zA-Z0-9_-]*) echo "Cannot determine Cargo's host target." >&2; exit 1 ;;
+esac
+cargo build --release --locked --features macos-picker --target "$host" \
   --manifest-path "$root/rust/Cargo.toml" --target-dir "$root/rust/target"
+helper="$root/rust/target/$host/release/imux"
+[ -x "$helper" ] || { echo 'Cargo did not produce the host helper.' >&2; exit 1; }
+# Preserve the ordinary frontend's canonical path too. Copy to a sibling first
+# so an existing helper is replaced only after the new copy is complete.
+mkdir -p "$root/rust/target/release"
+published=$(mktemp "$root/rust/target/release/.imux.XXXXXX")
+if ! cp -p "$helper" "$published" || ! mv -f "$published" "$root/rust/target/release/imux"; then
+  rm -f "$published"
+  exit 1
+fi
 MACOSX_DEPLOYMENT_TARGET=13.0 xcrun swiftc -O \
   -target "$(uname -m)-apple-macosx13.0" \
   "$macos_dir"/Sources/*.swift -framework AppKit \
   -o "$bundle/Contents/MacOS/InterdimuxPicker"
-cp "$root/rust/target/release/imux" "$bundle/Contents/Helpers/imux"
+cp "$helper" "$bundle/Contents/Helpers/imux"
 cp "$macos_dir/Info.plist" "$bundle/Contents/Info.plist"
 plutil -lint "$bundle/Contents/Info.plist" >/dev/null
 touch "$bundle/Contents/Resources/build-stamp"

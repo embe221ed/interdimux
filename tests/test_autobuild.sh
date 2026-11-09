@@ -89,7 +89,11 @@ make_cargo() { # $1 = the path to install it at
   mkdir -p "${1%/*}"
   cat > "$1" <<EOF
 #!/bin/sh
-if [ "\$1" = --version ]; then cat '$CTL/version' 2>/dev/null || echo 'cargo 1.99.0 (stub)'; exit 0; fi
+if [ "\$1" = --version ]; then
+  cat '$CTL/version' 2>/dev/null || echo 'cargo 1.99.0 (stub)'
+  [ "\${2:-}" != --verbose ] || echo 'host: stub-host-triple'
+  exit 0
+fi
 printf '%s|%s|%s|%s|%s\n' "\$0" "\$PWD" "\$*" "\${CARGO_TARGET_DIR:-}" "\$(nice)" >> '$CTL/cargo.log'
 echo "stub cargo: compiling imux"
 if [ -e '$CTL/hold' ]; then
@@ -100,7 +104,12 @@ fi
 [ -e '$CTL/edit' ] && touch src/main.rs
 if [ -e '$CTL/fail' ]; then echo "error[E0999]: the stub was told to fail" >&2; exit 101; fi
 [ -e '$CTL/noop' ] && exit 0
-t="\${CARGO_TARGET_DIR:-\$PWD/target}"
+target=""
+while [ "\$#" -gt 0 ]; do
+  if [ "\$1" = --target ]; then shift; target="\$1"; fi
+  shift
+done
+t="\${CARGO_TARGET_DIR:-\$PWD/target}\${target:+/\$target}"
 mkdir -p "\$t/release"
 printf '#!/bin/sh\necho "imux 0.0.0-stub"\n' > "\$t/release/imux"
 chmod +x "\$t/release/imux"
@@ -236,7 +245,8 @@ check "the job finishes, with a verdict in the log" wait_done
 check "cargo ran once (ran $(runs))" '[ "$(runs)" = 1 ]'
 check "...the stand-in on the server's PATH" '[ "$(field 1)" = "$STUB/cargo" ]'
 check "...in the plugin's rust/ (got $(field 2))" '[ "$(field 2)" = "$PLUG/rust" ]'
-check "...as 'build --release --locked' (got '$(field 3)')" '[ "$(field 3)" = "build --release --locked" ]'
+check "...builds the explicit host target (got '$(field 3)')" \
+  '[ "$(field 3)" = "build --release --locked --target stub-host-triple" ]'
 check "...with its target dir pinned to rust/target (got '$(field 4)')" \
   '[ "$(field 4)" = "$PLUG/rust/target" ]'
 srv_nice=$(ps -o ni= -p "$("$REAL_TMUX" -L "$SOCK" display-message -p '#{pid}')" | tr -d ' ')

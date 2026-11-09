@@ -152,8 +152,25 @@ if [ "${1:-}" = --autobuild ]; then
   # somewhere the script never looks, and every load would build it again.
   {
     printf '== building %s with %s, %s\n' "$RUST_DIR" "$cargo" "$(date 2>/dev/null)"
-    ( cd "$RUST_DIR" && CARGO_TARGET_DIR="$RUST_DIR/target" \
-        nice -n 10 "$cargo" build --release --locked ) </dev/null 2>&1
+    (
+      cd "$RUST_DIR" || exit 1
+      # --target wins over CARGO_BUILD_TARGET and .cargo/config.toml. Read the
+      # host from this Cargo/toolchain rather than assuming its output location.
+      host=$("$cargo" --version --verbose | sed -n 's/^host: //p')
+      case "$host" in
+        ''|*[!a-zA-Z0-9_-]*) echo "Cannot determine Cargo's host target"; exit 1 ;;
+      esac
+      CARGO_TARGET_DIR="$RUST_DIR/target" \
+        nice -n 10 "$cargo" build --release --locked --target "$host" || exit
+      artifact="$RUST_DIR/target/$host/release/imux"
+      [ -x "$artifact" ] || { echo 'Cargo did not produce the host helper'; exit 1; }
+      mkdir -p "${IMUX%/*}" || exit
+      published=$(mktemp "${IMUX%/*}/.imux.XXXXXX") || exit
+      if ! cp -p "$artifact" "$published" || ! mv -f "$published" "$IMUX"; then
+        rm -f "$published"
+        exit 1
+      fi
+    ) </dev/null 2>&1
   } > "$log" 2>&1
   rc=$?
 

@@ -126,6 +126,12 @@ legacy `--agents`, `--agent-next`, `--jump`, `--connect-dir`, `--send-in`,
 `--send-at`, `--sched-list` and `--sched-cancel` spellings. `jobs --backend ...`
 opens the job manager; `jobs list` prints JSON records.
 
+Rex sends exclude verified picker processes and require a live receiving
+process, including at schedule submission and due-time delivery. Retained output
+from an exited terminal remains available for capture and close. If the receiver
+exits or changes during delivery, the action reports an uncertain outcome and
+never automatically replays input.
+
 Native scheduling is a shared one-shot Rust worker and private versioned store
 under `${XDG_STATE_HOME:-~/.local/state}/interdimux/jobs/`. Workers detach from the
 picker's terminal. Resolved times support relative shorthand, clocks, tomorrow
@@ -356,7 +362,9 @@ in `$CARGO_HOME/bin`, `~/.cargo/bin` by default) and the binary is missing or
 older than `src/` or `Cargo.toml`, `interdimux.tmux` starts it as a tmux job
 (`run-shell -b`), so loading the plugin never waits for it. It is niced,
 `--locked` so the checkout's `Cargo.lock` is never rewritten, and has
-`CARGO_TARGET_DIR` pinned to `rust/target`. One build at a time (a lock in
+`CARGO_TARGET_DIR` pinned to `rust/target`. An explicit host target overrides
+environment/configured cross-compilation targets; the actual host artifact is
+published atomically to `rust/target/release/imux`. One build at a time (a lock in
 `target/`), output in `$XDG_STATE_HOME/interdimux/build.log`, and a status-line
 message at the end. A failed build is remembered in `target/` with the cargo it
 failed on (path and `--version`) and not repeated on every load: it runs again
@@ -375,6 +383,12 @@ than trusted: the list falls back to the bash renderer, and the status line and
 which binary it was and how to rebuild it. One built from older sources that
 speak the same protocol is used, and renders as those sources did: only the
 build in `rust/target` is compared with `src/`.
+
+The shared tmux navigator encodes user-controlled fields before snapshot
+framing and constructs targets from native IDs independently of display text.
+Control-character paths cannot introduce records or change target identities;
+malformed or conflicting records are rejected. The legacy renderer protocol
+below retains its existing framing.
 
 ## Legacy gather3 boundary
 

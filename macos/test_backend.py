@@ -7,7 +7,7 @@ import tempfile
 
 
 HELPER = r'''
-import json, os, sys, time
+import json, os, signal, sys, time
 for line in sys.stdin:
     request = json.loads(line)
     kind = request['type']
@@ -19,6 +19,14 @@ for line in sys.stdin:
         print(json.dumps({'id': request['id'], 'type': 'preview', 'text': 'captured'}), flush=True)
     elif kind == 'close-output':
         os.close(1)
+        time.sleep(10)
+    elif kind == 'close-input':
+        os.close(0)
+        print(json.dumps({'id': request['id'], 'type': 'closed-input'}), flush=True)
+        time.sleep(10)
+    elif kind == 'hold-input':
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        print(json.dumps({'id': request['id'], 'type': 'held-input', 'pid': os.getpid()}), flush=True)
         time.sleep(10)
     elif kind == 'large-fragment':
         result = json.dumps({'id': request['id'], 'type': 'results', 'query': '東京 🧑🏽‍💻' * 20000}, ensure_ascii=False).encode() + b'\n'
@@ -136,6 +144,71 @@ func run() throws {
     try require((messages[0]["id"] as? Int) == afterEOF && failures.isEmpty,
                 "Closed stdout left a stale helper or failure callback")
 
+    // Reject values before serialization and escaped frames before writing.
+    // Validation uses UTF-8 bytes, reports the assigned ID asynchronously,
+    // and leaves the helper healthy for the user's next shorter search.
+    func checkRequest(_ fields: [String: Any], error expected: String?) throws {
+        messages.removeAll()
+        let request = backend.send("query", fields: fields)
+        try require(messages.isEmpty, "Validation callback preceded request assignment")
+        try wait("request validation") { !messages.isEmpty }
+        try require((messages[0]["id"] as? Int) == request, "Validation lost request ID")
+        if let expected {
+            try require(messages[0]["type"] as? String == "error" &&
+                        (messages[0]["message"] as? String)?.contains(expected) == true,
+                        "Wrong validation error: \(messages[0])")
+        } else {
+            try require(messages[0]["type"] as? String == "results", "Valid request was rejected")
+        }
+        try require(backend.isRunning && failures.isEmpty, "Validation disconnected the helper")
+    }
+    try checkRequest(["query": String(repeating: "x", count: 4096)], error: nil)
+    try checkRequest(["query": String(repeating: "🧑", count: 1024)], error: nil)
+    try checkRequest(["query": String(repeating: "🧑", count: 1025)], error: "4096 UTF-8 bytes")
+    try checkRequest(["query": String(repeating: "x", count: 1024 * 1024)], error: "Shorten the search")
+    try checkRequest(["value": String(repeating: "x", count: 32 * 1024)], error: nil)
+    try checkRequest(["value": String(repeating: "x", count: 32 * 1024 + 1)], error: "32 KiB")
+    try checkRequest(["value": String(repeating: "\u{01}", count: 16000)], error: "after encoding")
+    try checkRequest(["padding": String(repeating: "x", count: 64 * 1024)], error: "after encoding")
+    try checkRequest(["query": "normal search"], error: nil)
+
+    // A live helper closes only stdin, then ordinary writes fail with EPIPE.
+    // Reset SIGPIPE explicitly: inheriting SIG_IGN would hide the old crash.
+    signal(SIGPIPE, SIG_DFL)
+    messages.removeAll()
+    backend.send("close-input")
+    try wait("closed helper input") { messages.first?["type"] as? String == "closed-input" }
+    for _ in 0..<500 { backend.send("query", fields: ["query": "normal search"]) }
+    try wait("closed-pipe failure") { failures.count == 1 }
+    settle()
+    try require(failures.count == 1 && !backend.isRunning,
+                "Closed pipe produced duplicate failures or left a stale helper")
+    failures.removeAll()
+    messages.removeAll()
+    try backend.start()
+    let afterEPIPE = backend.send("query")
+    try wait("normal search after EPIPE") { !messages.isEmpty }
+    try require((messages[0]["id"] as? Int) == afterEPIPE && failures.isEmpty,
+                "Closed-pipe recovery returned an obsolete write")
+
+    // Fill a pipe while the child is not reading, then reconnect with queued
+    // writes outstanding. Cancellation must discard them without delaying or
+    // invalidating the independent replacement connection.
+    messages.removeAll()
+    backend.send("hold-input")
+    try wait("held helper input") { messages.first?["type"] as? String == "held-input" }
+    let heldPID = (messages[0]["pid"] as! NSNumber).int32Value
+    defer { kill(heldPID, SIGKILL) }
+    for _ in 0..<100 { backend.send("query", fields: ["padding": String(repeating: "x", count: 60000)]) }
+    backend.stop()
+    try backend.start()
+    messages.removeAll()
+    let afterQueue = backend.send("query")
+    try wait("normal search after obsolete queue") { !messages.isEmpty }
+    settle()
+    try require(messages.count == 1 && (messages[0]["id"] as? Int) == afterQueue && failures.isEmpty,
+                "Queued writes crossed the reconnect boundary")
+
     // A capture blocked on Rex must not block the separate query channel.
     // Release it only after the main helper has answered, avoiding timing
     // assertions that would depend on machine load.
@@ -155,7 +228,7 @@ func run() throws {
     try Data().write(to: release)
     try wait("released preview") { previewMessages.count == 1 }
     try require(previewMessages[0]["text"] as? String == "captured", "Preview channel failed after query")
-    print("Swift backend checks passed: disconnected send, stale callbacks, fragmented UTF-8, malformed reply, live-child EOF, independent preview channel")
+    print("Swift backend checks passed: size/encoding limits, closed-pipe writes, obsolete write cancellation, reconnect, fragmented UTF-8, malformed reply, live-child EOF, independent preview channel")
 }
 
 do { try run() }

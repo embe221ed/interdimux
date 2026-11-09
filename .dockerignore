@@ -1,4 +1,4 @@
-# The dev image is built from dev/ and rust/Cargo.* alone (dev/Dockerfile);
+# The dev image is built from dev/, rust/Cargo.* and rust/vendor/ (dev/Dockerfile);
 # the checkout is mounted at run time instead.  Allow-list, so nothing else --
 # rust/target, a stray socket, .claude/ -- is ever sent to the builder.
 # dev/perf/ is the A/B harness, which runs from the checkout's copy in /work:
@@ -8,3 +8,5 @@
 dev/perf/
 !rust/Cargo.toml
 !rust/Cargo.lock
+!rust/vendor/
+rust/vendor/**/target/

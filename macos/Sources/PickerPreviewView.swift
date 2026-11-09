@@ -83,7 +83,7 @@ final class PickerPreviewView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.10).cgColor
+        layer?.backgroundColor = Palette.insetBackground.cgColor
         for view in [heading, title, detail, spinner, scroll] {
             view.translatesAutoresizingMaskIntoConstraints = true
             addSubview(view)
@@ -118,6 +118,11 @@ final class PickerPreviewView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func refreshTheme() {
+        layer?.backgroundColor = Palette.insetBackground.cgColor
+        Palette.invalidate(view: self)
+    }
 
     override func layout() {
         super.layout()

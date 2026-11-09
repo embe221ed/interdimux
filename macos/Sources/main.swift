@@ -25,6 +25,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var tree: [PickerTreePosition] = []
     private var openingItems: [PickerItem] = []
     private var openingClientID: String?
+    private var openingSessionID: String?
     private var openingTotal = 0
     // The protocol caps each result at 100. Keep cells for those bounded row
     // slots across count changes, including no-match -> results transitions.
@@ -59,6 +60,9 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var openBenchmarkOutput: String?
     private var openBenchmarkSamples: [[String: Any]] = []
     private var cachedFrameMS: Double?
+    private var currentTheme: RexTheme?
+    private var themeTimer: Timer?
+    private var appearanceObservation: NSKeyValueObservation?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(openURL(_:withReplyEvent:)), forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
@@ -99,7 +103,6 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .transient]
-        panel.appearance = NSAppearance(named: .darkAqua)
         panel.isMovableByWindowBackground = true
         panel.delegate = self
         panel.onCommand = { [weak self] key in self?.command(key) ?? false }
@@ -134,6 +137,38 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.directoryDeep.target = self
         content.directoryDeep.action = #selector(searchDeeper)
         for button in content.scopes { button.target = self; button.action = #selector(changeScope(_:)) }
+        refreshTheme()
+        // Rex stores its appearance and selected themes in its own preferences.
+        // Refresh only while visible; reopening also checks before presentation.
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self, self.panel.isVisible else { return }
+            self.refreshTheme()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        themeTimer = timer
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.refreshTheme() }
+        }
+    }
+
+    private func refreshTheme() {
+        let systemIsDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        applyTheme(RexThemeReader.read(systemIsDark: systemIsDark))
+    }
+
+    private func applyTheme(_ theme: RexTheme) {
+        guard currentTheme != theme else { return }
+        currentTheme = theme
+        Palette.apply(background: theme.background, foreground: theme.foreground, accent: theme.accent)
+        panel.appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
+        panel.attachedSheet?.appearance = panel.appearance
+        content.refreshTheme()
+        dashboard?.refreshTheme()
+        if let editor = content.search.currentEditor() as? NSTextView {
+            editor.textColor = Palette.text
+            editor.insertionPointColor = Palette.accent
+            editor.needsDisplay = true
+        }
     }
 
     func setupMenu() {
@@ -170,6 +205,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func open(context supplied: [String: String], dashboard showDashboard: Bool = false) {
         guard activation == nil, actionRequest == nil, dashboardRequest == nil, !presentingDialog else { return }
+        refreshTheme()
         startedAt = ProcessInfo.processInfo.systemUptime
         loading = true
         cachedFrameMS = nil
@@ -200,7 +236,12 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.search.stringValue = ""
         content.clear.isHidden = true
         for button in content.scopes { button.chosen = button.tag == 0 }
-        items = openingClientID == supplied["client_id"] ? openingItems : []
+        // Session order is relative to the origin. Reusing another session's
+        // frame can briefly put the new current session ahead of its previous
+        // session. Unknown origins wait for fresh, authoritative ordering too.
+        let reuseOpening = supplied["client_id"].map { !$0.isEmpty && $0 == openingClientID } == true
+            && supplied["session_id"].map { !$0.isEmpty && $0 == openingSessionID } == true
+        items = reuseOpening ? openingItems : []
         tree = PickerTreeLayout.positions(for: items)
         displayedRequest = -1
         displayedSearch = nil
@@ -217,7 +258,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.status.textColor = Palette.secondary
         if showDashboard {
             let view = ensureDashboard()
-            view.updateSummary(DashboardSummary(counts: openingClientID == supplied["client_id"] ? dashboardCounts : [:]))
+            view.updateSummary(DashboardSummary(counts: reuseOpening ? dashboardCounts : [:]))
             view.resetSelection()
             view.setLoading(true)
             view.setStatus("Refreshing your workspace…")
@@ -402,6 +443,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if scope == "all", resultQuery.isEmpty, searchField == "all", resultAction.isEmpty {
             openingItems = items
             openingClientID = context["client_id"]
+            openingSessionID = context["session_id"]
             openingTotal = matched
         }
         content.scopes[4].title = "Attention \(attention)"
@@ -1078,7 +1120,12 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) { stopPreview(); backend.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        themeTimer?.invalidate()
+        appearanceObservation = nil
+        stopPreview()
+        backend.stop()
+    }
 }
 
 let app = NSApplication.shared

@@ -224,6 +224,7 @@ pub(crate) fn action(
             "client_id":context.client_id,"session_id":context.session_id,
             "window_id":context.window_id,"block_id":context.block_id,
             "picker_block_id":context.picker_block_id,"origin_zoomed_block_id":context.origin_zoomed_block_id,
+            "binary":env::current_exe().ok().map(|path| path.to_string_lossy().into_owned()),
         }}),
     )?;
     let data = serde_json::from_slice(&output)
@@ -486,7 +487,12 @@ fn process_metadata(data: &Value, block_id: &str) -> (String, String) {
         .get("cwd")
         .filter(|v| v.as_str().is_some())
         .or_else(|| process.get("child").and_then(|p| p.get("cwd")));
-    (command, cwd.map(label).unwrap_or_default())
+    // Paths are operational identities. Replacing controls here can alias a
+    // different legal directory; only presentation boundaries sanitize them.
+    (
+        command,
+        cwd.and_then(Value::as_str).unwrap_or_default().to_owned(),
+    )
 }
 
 fn is_picker_ui(data: &Value, block: &Value) -> bool {
@@ -921,7 +927,7 @@ fn parse_snapshot(bytes: &[u8], context: &RexContext) -> Result<Snapshot, String
         // association when known; otherwise describe its active pane's cwd.
         let session_path = data["session_paths"][session_id]
             .as_str()
-            .map(|s| label(&json!(s)))
+            .map(str::to_owned)
             .filter(|s| !s.is_empty())
             .or_else(|| {
                 snapshot.windows[first_window..]
@@ -1197,6 +1203,32 @@ mod tests {
         assert_eq!(result.panes[1].name, "zsh");
         assert_eq!(result.panes[1].cmd, "zsh");
         assert_eq!(result.panes[1].path, "/work/other");
+    }
+
+    #[test]
+    fn operational_paths_preserve_controls_in_foreground_child_and_associations() {
+        for control in ['\n', '\t', '\r', '\u{1f}', '\u{1e}', '\u{1b}'] {
+            for foreground in [false, true] {
+                let cwd = format!("/work/part{control}name");
+                let associated = format!("/project/part{control}name");
+                let process = json!({"name":"sh","cwd":cwd});
+                let result = parse(json!({"version":1,
+                    "sessions":[{"session_id":"session:a","label":"work"}],
+                    "views":{"session:a":{"active_window_id":"window:a","windows":[{
+                        "window_id":"window:a","focused_block_id":"block:origin",
+                        "layers":[{"blocks":[{"block_id":"block:origin"}]}]
+                    }]}},
+                    "session_paths":{"session:a":associated},
+                    "metadata":{"block:origin":{
+                        "foreground":if foreground {process.clone()} else {Value::Null},
+                        "child":process
+                    }}
+                }));
+                assert_eq!(result.panes[0].path, cwd);
+                assert_eq!(result.windows[0].path, cwd);
+                assert_eq!(result.sessions[0].path, associated);
+            }
+        }
     }
 
     #[test]

@@ -739,10 +739,10 @@ def check_list_profiles(p):
     # starting a tmux server. Each response is the collector's single batch.
     u = '\x1f'
     sections = [
-        u.join(['$1', 'theme-session', '0', '1', '', str(p.root)]),
-        u.join(['$1', '@1', 'theme-session', '0', 'theme-window', '1', 'sh', str(p.root), '1', '0', '']),
-        u.join(['$1', '@1', '%1', 'theme-session', '0', '0', '1', 'sh', str(p.root), '0', '1', '%1', 'theme-pane', '']),
-        u.join(['theme-session', '0', '0', 'fixture', 'fixture']), '',
+        u.join(['$1', 'theme-session', '0', '1', '0', str(p.root)]),
+        u.join(['$1', '@1', '0', 'theme-window', '1', 'sh', str(p.root), '1', '0', '000']),
+        u.join(['$1', '@1', '%1', '0', '0', '1', 'sh', str(p.root), '0', '1', 'theme-pane', '']),
+        u.join(['$1', '0', '0', 'fixture', 'fixture']), '',
     ]
     tmux = p.root / 'tmux'
     tmux.write_text('#!' + sys.executable + '\nimport sys\nassert sys.argv[1] == "list-sessions", sys.argv\nsys.stdout.write(' + repr('\x1e'.join(sections)) + ')\n')

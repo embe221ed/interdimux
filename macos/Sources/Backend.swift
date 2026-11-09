@@ -1,4 +1,24 @@
 import AppKit
+import Darwin
+
+/// Cancellation is shared with the writer queue; app lifecycle state stays on
+/// the main queue. Closing is queued after writes, so a recycled descriptor can
+/// never receive an old connection's bytes.
+private final class PickerInput {
+    let handle: FileHandle
+    // An unresponsive old child must never block writes to its replacement.
+    let writes = DispatchQueue(label: "dev.interdimux.picker.input")
+    private let lock = NSLock()
+    private var active = true
+
+    init(_ handle: FileHandle) { self.handle = handle }
+    func cancel() { lock.lock(); active = false; lock.unlock() }
+    var isActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+}
 
 struct PickerItem: Equatable {
     let id: String
@@ -59,8 +79,7 @@ final class PickerBackend {
     var onMessage: (([String: Any]) -> Void)?
     var onFailure: ((String) -> Void)?
     private var process: Process?
-    private var input: FileHandle?
-    private let writes = DispatchQueue(label: "dev.interdimux.picker.input")
+    private var input: PickerInput?
     private var serial = 0
     private var connection = 0
     private let executable: URL
@@ -94,6 +113,11 @@ final class PickerBackend {
         for key in ["REX_SESSION", "REX_BLOCK", "REX_CLIENT", "REX_SERVER"] { environment.removeValue(forKey: key) }
         child.environment = environment
         let stdinPipe = Pipe(), stdoutPipe = Pipe(), stderrPipe = Pipe()
+        // Darwin supports this per-descriptor flag for pipes. A closed reader
+        // then makes write throw EPIPE instead of terminating the entire app.
+        guard fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         child.standardInput = stdinPipe
         child.standardOutput = stdoutPipe
         child.standardError = stderrPipe
@@ -102,7 +126,7 @@ final class PickerBackend {
         }
         try child.run()
         process = child
-        input = stdinPipe.fileHandleForWriting
+        input = PickerInput(stdinPipe.fileHandleForWriting)
         let output = stdoutPipe.fileHandleForReading
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             defer { try? output.close() }
@@ -156,18 +180,42 @@ final class PickerBackend {
     func send(_ type: String, fields: [String: Any] = [:]) -> Int {
         serial += 1
         let id = serial
+        let connection = self.connection
+        func reject(_ reason: String) {
+            // Match helper validation responses, including request routing and
+            // asynchronous ID assignment, while leaving a healthy pipe open.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.connection == connection else { return }
+                self.onMessage?(["id": id, "type": "error", "message": reason])
+            }
+        }
+        if let query = fields["query"] as? String, query.utf8.count > 4096 {
+            reject("Query exceeds 4096 UTF-8 bytes. Shorten the search text.")
+            return id
+        }
+        if let value = fields["value"] as? String, value.utf8.count > 32 * 1024 {
+            reject("Action text exceeds 32 KiB. Shorten the text and try again.")
+            return id
+        }
         var message = fields
         message["type"] = type
         message["id"] = id
-        let connection = self.connection
-        guard var data = try? JSONSerialization.data(withJSONObject: message), let handle = input else {
+        guard var data = try? JSONSerialization.data(withJSONObject: message), let input else {
             fail("Unable to reach the search helper. Press ⌘R to reconnect.", connection: connection)
             return id
         }
         data.append(10)
-        writes.async { [weak self] in
-            do { try handle.write(contentsOf: data) }
+        // JSON escaping can expand a valid action value past the helper's
+        // frame limit. The limit includes the envelope and final newline.
+        guard data.count <= 64 * 1024 else {
+            reject("Request exceeds 64 KiB after encoding. Shorten the text and try again.")
+            return id
+        }
+        input.writes.async { [weak self] in
+            guard input.isActive else { return }
+            do { try input.handle.write(contentsOf: data) }
             catch {
+                input.cancel()
                 self?.fail("Unable to reach the search helper. Press ⌘R to reconnect.", connection: connection)
             }
         }
@@ -178,7 +226,10 @@ final class PickerBackend {
         connection += 1
         let child = process
         process = nil
-        try? input?.close()
+        if let input {
+            input.cancel()
+            input.writes.async { try? input.handle.close() }
+        }
         input = nil
         if child?.isRunning == true { child?.terminate() }
     }

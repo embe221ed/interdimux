@@ -101,10 +101,10 @@ with open(os.environ['IMUX_TEST_CALLS'], 'a') as out:
     out.write(json.dumps({'operation': 'tmux', 'args': args}) + '\\n')
 u, r = '\\x1f', '\\x1e'
 sections = [
-    u.join(['$1','target-project','1000','1','attached','/tmp']),
-    u.join(['$1','@1','target-project','0','Target window','1','shell','/tmp','1','0','000']),
-    u.join(['$1','@1','%1','target-project','0','0','1','shell','/tmp','0','1','%1','shell','']),
-    u.join(['target-project','0','0','host','host']), '',
+    u.join(['$1','target-project','1000','1','1','/tmp']),
+    u.join(['$1','@1','0','Target window','1','shell','/tmp','1','0','000']),
+    u.join(['$1','@1','%1','0','0','1','shell','/tmp','0','1','shell','']),
+    u.join(['$1','0','0','host','host']), '',
 ]
 if 'display-message' in args and 'list-windows' in args:
     print(('\\n'+r+'\\n').join(sections))

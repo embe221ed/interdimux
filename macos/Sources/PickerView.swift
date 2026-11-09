@@ -1,12 +1,37 @@
 import AppKit
 
 enum Palette {
-    static let accent = NSColor(srgbRed: 231/255, green: 138/255, blue: 78/255, alpha: 1)
-    static let text = NSColor(srgbRed: 221/255, green: 213/255, blue: 197/255, alpha: 1)
-    static let secondary = NSColor(srgbRed: 158/255, green: 151/255, blue: 138/255, alpha: 1)
-    static let faint = NSColor(srgbRed: 145/255, green: 139/255, blue: 128/255, alpha: 1)
-    static let background = NSColor(srgbRed: 36/255, green: 37/255, blue: 35/255, alpha: 1)
-    static let line = NSColor.white.withAlphaComponent(0.07)
+    private static var backgroundValue = NSColor(srgbRed: 36/255, green: 37/255, blue: 35/255, alpha: 1)
+    private static var foregroundValue = NSColor(srgbRed: 221/255, green: 213/255, blue: 197/255, alpha: 1)
+    private static var accentValue = NSColor(srgbRed: 231/255, green: 138/255, blue: 78/255, alpha: 1)
+
+    // Keep the color objects themselves stable: labels, icons and cached
+    // attributed row titles must resolve the current palette when redrawn.
+    static let accent = NSColor(name: nil) { _ in accentValue }
+    static let text = NSColor(name: nil) { _ in foregroundValue }
+    static let secondary = NSColor(name: nil) { _ in foregroundValue.blended(withFraction: 0.34, of: backgroundValue) ?? foregroundValue }
+    static let faint = NSColor(name: nil) { _ in foregroundValue.blended(withFraction: 0.42, of: backgroundValue) ?? foregroundValue }
+    static let background = NSColor(name: nil) { _ in backgroundValue }
+    static let line = NSColor(name: nil) { _ in foregroundValue.withAlphaComponent(0.10) }
+    static let border = NSColor(name: nil) { _ in foregroundValue.withAlphaComponent(0.14) }
+    static let insetBackground = NSColor(name: nil) { _ in backgroundValue.blended(withFraction: 0.035, of: foregroundValue) ?? backgroundValue }
+
+    @discardableResult
+    static func apply(background: NSColor, foreground: NSColor, accent: NSColor) -> Bool {
+        guard let background = background.usingColorSpace(.sRGB),
+              let foreground = foreground.usingColorSpace(.sRGB),
+              let accent = accent.usingColorSpace(.sRGB) else { return false }
+        guard background != backgroundValue || foreground != foregroundValue || accent != accentValue else { return false }
+        backgroundValue = background
+        foregroundValue = foreground
+        accentValue = accent
+        return true
+    }
+
+    static func invalidate(view: NSView) {
+        view.needsDisplay = true
+        for child in view.subviews { invalidate(view: child) }
+    }
 }
 
 func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = Palette.text) -> NSTextField {
@@ -134,7 +159,7 @@ final class PickerCell: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if separatesGroup {
-            NSColor.white.withAlphaComponent(0.045).setFill()
+            Palette.text.withAlphaComponent(0.045).setFill()
             NSRect(x: 24, y: 0, width: max(0, bounds.width - 48), height: 1).fill()
         }
         let lines = NSBezierPath()
@@ -206,7 +231,7 @@ final class ScopeButton: NSButton {
     var chosen = false { didSet { state = chosen ? .on : .off; needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
         if chosen {
-            NSColor.white.withAlphaComponent(0.065).setFill()
+            Palette.text.withAlphaComponent(0.065).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
         }
         let attrs: [NSAttributedString.Key: Any] = [
@@ -242,6 +267,7 @@ final class PickerView: NSView {
     private let directoryBar = NSView()
     private let resultsArea = NSView()
     private let preview = PickerPreviewView(frame: .zero)
+    private var separatorViews: [NSView] = []
     private var directoryHeight: NSLayoutConstraint!
     private(set) var previewVisible = false
 
@@ -250,11 +276,9 @@ final class PickerView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 16
         layer?.masksToBounds = true
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        layer?.borderColor = Palette.border.cgColor
         layer?.borderWidth = 1
-        // The old 95%-opaque wash hid the blur while retaining a full-window
-        // WindowServer backdrop dependency. A solid surface keeps the same
-        // Gruvbox appearance without recompositing the terminal underneath.
+        // A solid themed surface avoids a full-window backdrop dependency.
         layer?.backgroundColor = Palette.background.cgColor
 
         let brandIcon = icon("square.stack.3d.up", size: 12, color: Palette.accent)
@@ -306,6 +330,7 @@ final class PickerView: NSView {
             scopes.append(button)
         }
         let separator = NSView(), footerLine = NSView()
+        separatorViews = [separator, footerLine]
         for line in [separator, footerLine] {
             line.translatesAutoresizingMaskIntoConstraints = false
             line.wantsLayer = true
@@ -415,6 +440,16 @@ final class PickerView: NSView {
         emptyDetail.alignment = .center
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func refreshTheme() {
+        // CGColors are resolved values, unlike the dynamic NSColors retained
+        // by controls. Replace these whenever Rex's palette changes.
+        layer?.backgroundColor = Palette.background.cgColor
+        layer?.borderColor = Palette.border.cgColor
+        for line in separatorViews { line.layer?.backgroundColor = Palette.line.cgColor }
+        preview.refreshTheme()
+        Palette.invalidate(view: self)
+    }
 
     override func layout() {
         super.layout()

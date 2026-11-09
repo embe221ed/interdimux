@@ -137,8 +137,11 @@ impl Matcher {
                     (max_score, max_pos) = self.substring_match_ascii_with_prefilter(
                         haystack,
                         needle,
-                        1,
-                        memmem::find_iter(&haystack[..haystack.len() - needle.len() + len], needle),
+                        len,
+                        memmem::find_iter(
+                            &haystack[..haystack.len() - needle.len() + len],
+                            &needle[..len],
+                        ),
                     );
                     if max_score == 0 {
                         return None;

@@ -172,11 +172,12 @@ impl Atom {
                 for mut c in chars::graphemes(needle) {
                     if saw_backslash {
                         if c == ' ' {
+                            // The preceding backslash was already appended.
+                            // Match the ASCII branch's literal "\\ " replacement.
+                            needle_.pop();
                             needle_.push(' ');
                             saw_backslash = false;
                             continue;
-                        } else {
-                            needle_.push('\\');
                         }
                     }
                     saw_backslash = c == '\\';

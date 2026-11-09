@@ -14,6 +14,39 @@ return function(request, context)
       session_id = pane.session_id, block_id = pane.block_id, args = args or {},
     })
   end
+  local function picker_ui(block, process)
+    if block.label ~= "interdimux" or block.creator_name ~= "com.superlogical.terminal" then return false end
+    -- Keep the snapshot parser's executable precedence: an authoritative path
+    -- wins over a process merely named imux or an altered argv[0].
+    local child = process and process.child
+    local executable
+    for _, field in ipairs({ "path", "invoked_path", "argv0", "name" }) do
+      local value = type(child) == "table" and child[field]
+      if type(value) == "string" and value ~= "" then executable = value; break end
+    end
+    local name = executable and executable:gsub(" %(deleted%)$", ""):match("([^/]+)$")
+    if not name then return false end
+    local binary = type(context.binary) == "string" and context.binary:match("([^/]+)$")
+    local configured = (os.getenv("INTERDIMUX_BIN") or ""):match("([^/]+)$")
+    return name == "imux" or name == binary or name == configured
+  end
+  local function receiving_process(p, block, process)
+    process = process or terminal("process", p)
+    if picker_ui(block, process) then error("An Interdimux picker cannot receive terminal input", 0) end
+    local function pid(value)
+      return type(value) == "table" and type(value.pid) == "number" and value.pid > 0 and value.pid or nil
+    end
+    -- The child is the stable shell/program owning the terminal. Foreground
+    -- commands may change as a result of ordinary input while the child lives.
+    local receiver = type(process) == "table" and (pid(process.child) or pid(process.foreground))
+    if not receiver then
+      if type(process) == "table" and process.last_exit ~= nil then
+        error("The selected Rex terminal has exited; retained output cannot receive input", 0)
+      end
+      error("Cannot verify a live receiving process for the selected Rex terminal", 0)
+    end
+    return receiver
+  end
   local function locate(candidate)
     if type(candidate) ~= "table" or type(candidate.session_id) ~= "string" then
       error("Select an existing Rex target", 0)
@@ -119,6 +152,7 @@ return function(request, context)
   elseif operation == "schedule-target" then
     local p, block, view, window = pane(target)
     if block.creator_name ~= "com.superlogical.terminal" then error("Schedule requires a terminal pane", 0) end
+    receiving_process(p, block)
     local server = call("server.status", {})
     if type(server.instance_id) ~= "string" or server.instance_id == "" then error("Rex cannot guard this scheduled command's server identity", 0) end
     return { backend = "rex", target = { session_id = p.session_id, block_id = p.block_id },
@@ -210,10 +244,22 @@ return function(request, context)
     return {}
   elseif operation == "send" then
     local recipients = {}
+    local function recipient(p, block, exact)
+      local process = terminal("process", p)
+      if picker_ui(block, process) then
+        if exact then error("An Interdimux picker cannot receive terminal input", 0) end
+        return
+      end
+      -- Preflight every recipient before typing anywhere. The live check is
+      -- repeated at delivery because a process can exit during enumeration.
+      p.receiver = receiving_process(p, block, process)
+      p.block = block
+      recipients[#recipients + 1] = p
+    end
     if target and target.block_id then
       local p, block = pane(target)
       if block.creator_name ~= "com.superlogical.terminal" then error("Send requires a terminal pane", 0) end
-      recipients[1] = p
+      recipient(p, block, true)
     else
       local view = locate(target)
       for _, window in ipairs(view.windows or {}) do
@@ -221,8 +267,8 @@ return function(request, context)
           for _, layer in ipairs(window.layers or {}) do
             for _, block in ipairs(layer.blocks or {}) do
               if block.creator_name == "com.superlogical.terminal" and block.block_id ~= context.picker_block_id then
-                recipients[#recipients + 1] = { session_id = target.session_id,
-                  window_id = window.window_id, block_id = block.block_id }
+                recipient({ session_id = target.session_id,
+                  window_id = window.window_id, block_id = block.block_id }, block, false)
               end
             end
           end
@@ -230,10 +276,32 @@ return function(request, context)
       end
     end
     if #recipients == 0 then error("This target has no terminal panes to send to", 0) end
+    local input_started = false
+    local function uncertain(reason)
+      error("Delivery could not be confirmed: " .. tostring(reason)
+        .. ". Input may have been delivered; do not retry automatically", 0)
+    end
+    local function deliver(p, method, args)
+      local checked, receiver = pcall(receiving_process, p, p.block)
+      if not checked or receiver ~= p.receiver then
+        local reason = checked and "The selected Rex terminal process changed" or receiver
+        if input_started then uncertain(reason) end
+        error(reason, 0)
+      end
+      input_started = true
+      local sent, send_error = pcall(call, method, args)
+      if not sent then uncertain(send_error) end
+      local live, current = pcall(receiving_process, p, p.block)
+      if not live or current ~= p.receiver then
+        uncertain(live and "The selected Rex terminal process changed" or current)
+      end
+    end
     for _, p in ipairs(recipients) do
     if options.text ~= nil then
       if type(options.text) ~= "string" then error("Send text must be a string", 0) end
-      terminal("write", p, { data = options.text })
+      deliver(p, "com.superlogical.terminal.write", {
+        session_id = p.session_id, block_id = p.block_id, args = { data = options.text },
+      })
     end
     local function key(value)
       if type(value) ~= "string" then error("Send key must be a key name", 0) end
@@ -279,7 +347,7 @@ return function(request, context)
       if not physical then error("Unsupported key name: " .. tostring(name), 0) end
       local mods = {}
       for _, modifier in ipairs({ "shift", "ctrl", "alt", "super" }) do if modifiers[modifier] then mods[#mods + 1] = modifier end end
-      call("block.event", { session_id = p.session_id, block_id = p.block_id,
+      deliver(p, "block.event", { session_id = p.session_id, block_id = p.block_id,
         event = { type = "key", payload = { key = physical, mods = table.concat(mods, "+"),
           consumed_mods = "", text = text, unshifted_codepoint = codepoint, composing = false, action = "press" } } })
     end

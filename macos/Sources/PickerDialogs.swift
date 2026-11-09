@@ -46,7 +46,7 @@ enum PickerDialogs {
         let destructive = alert.addButton(withTitle: submit)
         destructive.keyEquivalent = ""
         destructive.hasDestructiveAction = true
-        begin(alert, on: panel, dismiss: cancel, returnDismisses: true) { response in
+        begin(alert, on: panel, dismiss: cancel, confirmation: true) { response in
             completion(response == .alertSecondButtonReturn)
         }
     }
@@ -105,19 +105,20 @@ enum PickerDialogs {
     }
 
     private static func begin(_ alert: NSAlert, on panel: NSWindow, dismiss: NSButton,
-                              returnDismisses: Bool = false,
+                              confirmation: Bool = false,
                               completion: @escaping (NSApplication.ModalResponse) -> Void) {
         let window = alert.window
-        // A button has only one key equivalent. Explicitly reserve Escape for
-        // dismissal and, for destructive confirmation, Return/keypad Enter too
-        // even if keyboard navigation moved focus to the destructive button.
+        // Cancel stays the default. In confirmations, Return/keypad Enter
+        // activates the button the user explicitly focused with Tab; Escape
+        // always cancels, regardless of focus.
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak window, weak dismiss] event in
             guard let window, event.window === window,
                   event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
-                  event.keyCode == 53 || (returnDismisses && (event.keyCode == 36 || event.keyCode == 76)) else {
+                  event.keyCode == 53 || (confirmation && (event.keyCode == 36 || event.keyCode == 76)) else {
                 return event
             }
-            dismiss?.performClick(nil)
+            let button = event.keyCode == 53 ? dismiss : (window.firstResponder as? NSButton) ?? dismiss
+            button?.performClick(nil)
             return nil
         }
         alert.beginSheetModal(for: panel) { response in

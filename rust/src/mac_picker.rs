@@ -90,6 +90,8 @@ struct Candidate {
     name: String,
     subtitle: String,
     detail: String,
+    // Keep path identity literal through actions and directory resolution.
+    // Only value()/preview output renders a safe display copy.
     path: String,
     current: bool,
     search: String,
@@ -188,7 +190,7 @@ impl Candidate {
             self.operations.as_slice()
         };
         json!({"id":self.id,"kind":self.kind,"title":self.title,"name":self.name,
-            "subtitle":self.subtitle,"path":self.path,"current":self.current,
+            "subtitle":self.subtitle,"path":display_path(&self.path),"current":self.current,
             "parent_id":self.parent_id,"context_only":context_only,
             "pane_id":self.pane_id,"combined":self.combined,"detail":self.detail,
             "agent_state":self.agent_state,"agent_name":self.agent_name,"attention":self.attention(),
@@ -480,8 +482,9 @@ impl Picker {
     fn results(&mut self, id: u64, started: Instant) -> Result<Value, String> {
         self.pending_create = None;
         // Scope-only changes and repeated queries reuse the completed match.
-        // Appended input can narrow prior results; deletions/replacements must
-        // rescore all candidates or previously excluded rows would disappear.
+        // Plain ASCII fuzzy input can narrow prior results. Syntax can change
+        // earlier atoms (foo$ -> foo$b, or a trailing escape), so byte-prefix
+        // growth alone cannot justify excluding previous nonmatches.
         if self.query != self.matcher_query || self.search_field != self.matcher_field {
             if self.search_field != self.matcher_field {
                 self.matcher.pattern.reparse(
@@ -498,7 +501,11 @@ impl Picker {
                 CaseMatching::Smart,
                 Normalization::Smart,
                 self.search_field == self.matcher_field
-                    && self.query.starts_with(&self.matcher_query),
+                    && self.query.starts_with(&self.matcher_query)
+                    && self.query.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric()
+                            || matches!(byte, b'-' | b'_' | b'.' | b'/' | b':')
+                    }),
             );
             self.matcher_query.clone_from(&self.query);
             self.matcher_field = self.search_field;
@@ -841,7 +848,7 @@ impl Picker {
                     format!(
                         "{}\n{}\n{}\n{}",
                         row.title,
-                        row.path,
+                        display_path(&row.path),
                         row.detail,
                         if self.fixture.is_some() {
                             "Fixture preview — no Rex connection or filesystem reads"
@@ -1001,6 +1008,18 @@ fn clean(text: &str) -> String {
         .collect()
 }
 
+fn display_path(path: &str) -> String {
+    let mut display = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_control() {
+            display.extend(c.escape_default());
+        } else {
+            display.push(c);
+        }
+    }
+    display
+}
+
 fn collapse_single_panes(mut rows: Vec<Candidate>, tree: &Hierarchy) -> Vec<Candidate> {
     let mut removed = vec![false; rows.len()];
     for index in 0..rows.len() {
@@ -1092,7 +1111,14 @@ fn snapshot_rows_timed(snapshot: &Snapshot, timing: &mut Value) -> Vec<Candidate
         .map(|w| (w.key.as_str(), w))
         .collect();
     let mut ordered_sessions: Vec<_> = snapshot.sessions.iter().collect();
-    ordered_sessions.sort_by_key(|session| std::cmp::Reverse(session.last));
+    // Match Last Session: the newest surviving session other than the origin
+    // comes first. Keep the current session and its complete branch last.
+    ordered_sessions.sort_by_key(|session| {
+        (
+            session.key == snapshot.current.session_key,
+            std::cmp::Reverse(session.last),
+        )
+    });
     let ranks: HashMap<_, _> = ordered_sessions
         .iter()
         .enumerate()
@@ -1222,7 +1248,6 @@ fn snapshot_rows_timed(snapshot: &Snapshot, timing: &mut Value) -> Vec<Candidate
             row.title = clean(&row.title);
             row.subtitle = clean(&row.subtitle);
             row.detail = clean(&row.detail);
-            row.path = clean(&row.path);
             row.search = clean(&row.search);
             row.name_search = clean(&row.name_search);
             row.command_search = clean(&row.command_search);
@@ -1717,6 +1742,125 @@ mod tests {
     }
 
     #[test]
+    fn mac_picker_exact_substrings_keep_digit_and_punctuation_prefixes() {
+        let fixture = Fixture::new(json!([
+            {"id":"equal","kind":"session","title":"12AB","search_name":"12AB"},
+            {"id":"suffix","kind":"session","title":"prefix12ab","search_name":"prefix12ab"},
+            {"id":"window-name","kind":"session","title":"12AB origin","search_name":"12AB origin"},
+            {"id":"punctuation","kind":"session","title":"./SomePath origin","search_name":"./SomePath origin"},
+            {"id":"single-prefix","kind":"session","title":"x1AB","search_name":"x1AB"},
+            {"id":"unicode","kind":"session","title":"東京12AB","search_name":"東京12AB"}
+        ]));
+        for (text, expected) in [
+            ("'12ab", vec!["equal", "suffix", "unicode", "window-name"]),
+            ("'./somepath", vec!["punctuation"]),
+            ("'1ab", vec!["single-prefix"]),
+            ("'12AB", vec!["equal", "unicode", "window-name"]),
+            ("!'12ab", vec!["punctuation", "single-prefix"]),
+        ] {
+            let mut picker = fixture.picker();
+            picker.request(&json!({"id":1,"type":"open"}));
+            let result =
+                picker.request(&json!({"id":2,"type":"query","query":text,"search_field":"name"}));
+            let mut ids = result_ids(&result);
+            ids.sort_unstable();
+            assert_eq!(ids, expected, "{text:?}");
+            assert_eq!(result["can_create"], false, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn mac_picker_case_sensitive_anchors_use_only_the_requested_slice() {
+        let fixture = Fixture::new(json!([
+            {"id":"prefix","kind":"session","title":"Alpha beta","search_name":"Alpha beta"},
+            {"id":"lowercase","kind":"session","title":"alpha beta","search_name":"alpha beta"},
+            {"id":"single","kind":"session","title":"AB","search_name":"AB"},
+            {"id":"suffix","kind":"session","title":"12AB","search_name":"12AB"},
+            {"id":"unicode","kind":"session","title":"東京AB","search_name":"東京AB"},
+            {"id":"whitespace","kind":"session","title":" Alpha beta ","search_name":" Alpha beta "}
+        ]));
+        for (text, expected) in [
+            ("^Alpha", vec!["prefix", "whitespace"]),
+            ("^A", vec!["prefix", "single", "whitespace"]),
+            ("AB$", vec!["single", "suffix", "unicode"]),
+            ("!^Alpha", vec!["lowercase", "single", "suffix", "unicode"]),
+        ] {
+            let mut picker = fixture.picker();
+            picker.request(&json!({"id":1,"type":"open"}));
+            let result =
+                picker.request(&json!({"id":2,"type":"query","query":text,"search_field":"name"}));
+            let mut ids = result_ids(&result);
+            ids.sort_unstable();
+            assert_eq!(ids, expected, "{text:?}");
+            assert_eq!(result["can_create"], false, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn mac_picker_unicode_escaping_selects_the_literal_name() {
+        for prefix in ["foo", "東京"] {
+            let fixture = Fixture::new(json!([
+                {"id":"space","kind":"session","title":format!("{prefix} x"),"search_name":format!("{prefix} x")},
+                {"id":"slash-space","kind":"session","title":format!("{prefix}\\ x"),"search_name":format!("{prefix}\\ x")},
+                {"id":"slash","kind":"session","title":format!("{prefix}\\foo"),"search_name":format!("{prefix}\\foo")},
+                {"id":"double-slash","kind":"session","title":format!("{prefix}\\\\foo"),"search_name":format!("{prefix}\\\\foo")},
+                {"id":"trailing","kind":"session","title":format!("{prefix}\\"),"search_name":format!("{prefix}\\")}
+            ]));
+            for (text, expected) in [
+                (format!("'{prefix}\\ x"), vec!["space"]),
+                (format!("^{prefix}\\ x$"), vec!["space"]),
+                (
+                    format!("!^{prefix}\\ x$"),
+                    vec!["double-slash", "slash", "slash-space", "trailing"],
+                ),
+                (format!("'{prefix}\\foo"), vec!["slash"]),
+                (format!("^{prefix}\\$"), vec![]),
+            ] {
+                let mut picker = fixture.picker();
+                picker.request(&json!({"id":1,"type":"open"}));
+                let result = picker.request(&json!({"id":2,"type":"query","query":text,"search_field":"name","allow_create":false}));
+                let mut ids = result_ids(&result);
+                ids.sort_unstable();
+                assert_eq!(ids, expected, "{text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn mac_picker_incremental_queries_match_fresh_submission() {
+        let fixture = Fixture::new(json!([
+            {"id":"space","kind":"session","title":"foo bar","search_name":"foo bar"},
+            {"id":"dollar","kind":"session","title":"foo$","search_name":"foo$"},
+            {"id":"dollar-word","kind":"session","title":"foo$bar","search_name":"foo$bar"},
+            {"id":"backslash","kind":"session","title":"foo\\bar","search_name":"foo\\bar"},
+            {"id":"plain","kind":"session","title":"foobar","search_name":"foobar"}
+        ]));
+        let mut incremental = fixture.picker();
+        incremental.request(&json!({"id":1,"type":"open"}));
+        for text in [
+            "foo\\", "foo\\ ", "foo$", "foo$b", "foo\\", "foo\\$", "!foo", "!foo$", "", "foo",
+            "foob", "foo", "^foo", "^foo$", "^foo$b", "missing", "",
+        ] {
+            let request = json!({"id":2,"type":"query","query":text,"search_field":"name"});
+            let mut fresh = fixture.picker();
+            fresh.request(&json!({"id":1,"type":"open"}));
+            let expected = fresh.request(&request);
+            let actual = incremental.request(&request);
+            for key in ["matched", "can_create", "preferred_id"] {
+                // Create IDs include a generation token; compare their content below.
+                if key != "preferred_id" || actual["can_create"] != true {
+                    assert_eq!(actual[key], expected[key], "{text:?}: {key}");
+                }
+            }
+            if actual["can_create"] == true {
+                assert_eq!(actual["rows"][0]["name"], expected["rows"][0]["name"]);
+            } else {
+                assert_eq!(result_ids(&actual), result_ids(&expected), "{text:?}");
+            }
+        }
+    }
+
+    #[test]
     fn mac_picker_field_switching_uses_independent_cached_columns() {
         let fixture = Fixture::new(json!([
             {"id":"name","kind":"pane","title":"needle","path":"/other","command":"other"},
@@ -2086,6 +2230,49 @@ mod tests {
             .unwrap()
             .iter()
             .all(|r| r["parent_id"].is_null()));
+    }
+
+    #[test]
+    fn mac_picker_open_prefers_the_last_other_session_and_keeps_current_last() {
+        let fixture = Fixture::new(json!([]));
+        let sessions = ["current", "old", "previous"];
+        let views: serde_json::Map<_, _> = sessions.iter().map(|name| {
+            (format!("session:{name}"), json!({"windows":[{
+                "window_id":format!("window:{name}"),"label":"tab","layers":[{
+                    "kind":"tiled","blocks":[{"block_id":format!("block:{name}"),"label":"pane"}]
+                }]
+            }]}))
+        }).collect();
+        fs::write(&fixture.0, json!({"version":1,
+            "sessions":sessions.iter().map(|name| json!({"session_id":format!("session:{name}"),"label":name})).collect::<Vec<_>>(),
+            "views":views,"metadata":{},
+            "mru":{"session:current":300,"session:previous":200,"session:old":100,"session:closed":400}
+        }).to_string()).unwrap();
+        // These are the same highest-stamped surviving non-origin targets
+        // selected by the Last Session shortcut, independent of catalog order.
+        for (origin, previous) in [
+            ("current", "previous"),
+            ("previous", "current"),
+            ("old", "current"),
+        ] {
+            let mut context = empty_context();
+            context.session_id = format!("session:{origin}");
+            context.snapshot_file = Some(fixture.0.clone());
+            let snapshot = rex::collect(&context).unwrap();
+            let mut picker = Picker::new(None, context);
+            picker.replace(snapshot_rows(&snapshot)).unwrap();
+            for scope in ["all", "session"] {
+                picker.scope = scope.into();
+                let result = picker.results(1, Instant::now()).unwrap();
+                let rows = result["rows"].as_array().unwrap();
+                assert_eq!(result["preferred_id"], format!("session:{previous}"));
+                assert_eq!(rows[0]["id"], format!("session:{previous}"));
+                let roots: Vec<_> = rows.iter().filter(|row| row["kind"] == "session").collect();
+                assert_eq!(roots.len(), 3);
+                assert_eq!(roots.last().unwrap()["id"], format!("session:{origin}"));
+                assert_eq!(roots.last().unwrap()["current"], true);
+            }
+        }
     }
 
     #[test]

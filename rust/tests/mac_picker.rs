@@ -5,6 +5,88 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+#[test]
+fn native_picker_normalization_uses_declared_letters_without_false_matches() {
+    let cases = [
+        ("extended-latin", "ḃeta", "beta", "eeta"),
+        ("vietnamese", "ỏrb", "orb", "srb"),
+        ("vietnamese-boundary", "ỷard", "yard", "aard"),
+        ("superscript", "ⁱtem", "item", "atem"),
+        ("subscript", "ₕello", "hello", "aello"),
+        ("accent-control", "écho", "echo", "acho"),
+        ("umlaut-control", "ömega", "omega", "amega"),
+    ];
+    let path = std::env::temp_dir().join(format!(
+        "imux-native-picker-normalization-{}.json",
+        std::process::id()
+    ));
+    let rows: Vec<_> = cases
+        .iter()
+        .map(|(id, name, _, _)| json!({"id":id,"kind":"session","title":name,"search_name":name}))
+        .collect();
+    fs::write(&path, json!({"rows":rows}).to_string()).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
+        .args(["macos-serve", "--fixture"])
+        .arg(&path)
+        .env("INTERDIMUX_REX_BIN", "/imux-test-do-not-connect-to-rex")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |request: Value| -> Value {
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], request["id"]);
+        response
+    };
+    exchange(json!({"id":1,"type":"open"}));
+    fs::remove_file(&path).unwrap();
+    for (id, literal, normalized, wrong) in cases {
+        for (query, expected) in [
+            (normalized.to_owned(), vec![id]),
+            (format!("'{normalized}"), vec![id]),
+            (literal.to_owned(), vec![id]),
+            (format!("'{literal}"), vec![id]),
+            (wrong.to_owned(), vec![]),
+            (format!("'{wrong}"), vec![]),
+            (
+                format!("!{normalized}"),
+                cases
+                    .iter()
+                    .map(|case| case.0)
+                    .filter(|key| *key != id)
+                    .collect(),
+            ),
+        ] {
+            let response = exchange(
+                json!({"id":2,"type":"query","query":query,"search_field":"name","allow_create":false}),
+            );
+            assert_eq!(response["type"], "results", "{query:?}");
+            let mut ids: Vec<_> = response["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect();
+            let mut expected = expected;
+            ids.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(ids, expected, "{query:?}");
+            assert_eq!(response["matched"], expected.len(), "{query:?}");
+            assert_eq!(response["can_create"], false, "{query:?}");
+        }
+    }
+    drop(exchange);
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
 /// Exercises the actual persistent process: request IDs, capped full counts,
 /// cached filtering, refresh invalidation, and fixture activation isolation.
 #[test]
@@ -178,6 +260,45 @@ fn native_picker_json_lines_process_keeps_queries_local_and_ids_stable() {
     }
     let scoped = exchange(json!({"id":202,"type":"query","query":"fluid","scope":"pane"}));
     assert_eq!(scoped["preferred_id"], "weak-live");
+    fs::write(
+        &path,
+        json!({"rows":[
+            {"id":"digits","kind":"session","title":"12AB origin","search_name":"12AB origin"},
+            {"id":"uppercase","kind":"session","title":"Alpha beta","search_name":"Alpha beta"},
+            {"id":"unicode-space","kind":"session","title":"東京 x","search_name":"東京 x"},
+            {"id":"unicode-backslash","kind":"session","title":"東京\\ x","search_name":"東京\\ x"},
+            {"id":"space","kind":"session","title":"foo bar","search_name":"foo bar"},
+            {"id":"dollar","kind":"session","title":"foo$bar","search_name":"foo$bar"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    exchange(json!({"id":203,"type":"refresh"}));
+    fs::remove_file(&path).unwrap();
+    for (query, expected) in [
+        ("'12ab", "digits"),
+        ("^Alpha", "uppercase"),
+        ("'東京\\ x", "unicode-space"),
+        ("^東京\\ x$", "unicode-space"),
+        ("foo\\", ""),
+        ("foo\\ ", "space"),
+        ("foo$", ""),
+        ("foo$b", "dollar"),
+    ] {
+        let result = exchange(
+            json!({"id":204,"type":"query","query":query,"scope":"all","search_field":"name","allow_create":false}),
+        );
+        assert_eq!(
+            result["matched"],
+            u64::from(!expected.is_empty()),
+            "{query:?}"
+        );
+        if !expected.is_empty() {
+            assert_eq!(result["preferred_id"], expected, "{query:?}");
+            assert_eq!(result["rows"][0]["id"], expected, "{query:?}");
+        }
+        assert_eq!(result["can_create"], false);
+    }
     drop(exchange);
     drop(input);
     assert!(child.wait().unwrap().success());

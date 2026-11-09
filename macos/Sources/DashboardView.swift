@@ -64,7 +64,7 @@ private final class DashboardActionButton: NSButton {
             NSBezierPath(roundedRect: NSRect(x: 1, y: (bounds.height - 18) / 2, width: 2.5, height: 18), xRadius: 1.25, yRadius: 1.25).fill()
         }
         let keyRect = NSRect(x: max(0, bounds.width - 34), y: (bounds.height - 22) / 2, width: 24, height: 22)
-        NSColor.white.withAlphaComponent(chosen ? 0.085 : 0.04).setFill()
+        Palette.text.withAlphaComponent(chosen ? 0.085 : 0.04).setFill()
         NSBezierPath(roundedRect: keyRect, xRadius: 5, yRadius: 5).fill()
         let keyStyle = NSMutableParagraphStyle(); keyStyle.alignment = .center
         (descriptor.key.uppercased() as NSString).draw(in: keyRect.offsetBy(dx: 0, dy: 3), withAttributes: [
@@ -101,7 +101,7 @@ private final class DashboardGroup: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = 11
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.018).cgColor
+        layer?.backgroundColor = Palette.text.withAlphaComponent(0.018).cgColor
         layer?.borderColor = Palette.line.cgColor
         layer?.borderWidth = 1
         heading.translatesAutoresizingMaskIntoConstraints = true
@@ -116,6 +116,10 @@ private final class DashboardGroup: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func refreshTheme() {
+        layer?.backgroundColor = Palette.text.withAlphaComponent(0.018).cgColor
+        layer?.borderColor = Palette.line.cgColor
+    }
     override func layout() {
         super.layout()
         heading.frame = NSRect(x: 15, y: 12, width: max(0, bounds.width - 30), height: 13)
@@ -155,7 +159,7 @@ final class DashboardView: NSView {
         layer?.cornerRadius = 16
         layer?.masksToBounds = true
         layer?.backgroundColor = Palette.background.cgColor
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        layer?.borderColor = Palette.border.cgColor
         layer?.borderWidth = 1
         for view in [brand, brandIcon, origin, title, subtitle, status, shortcuts, scroll] + metrics + metricLabels {
             view.translatesAutoresizingMaskIntoConstraints = true
@@ -185,6 +189,13 @@ final class DashboardView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func refreshTheme() {
+        layer?.backgroundColor = Palette.background.cgColor
+        layer?.borderColor = Palette.border.cgColor
+        for group in groups { group.refreshTheme() }
+        Palette.invalidate(view: self)
+    }
 
     override func layout() {
         super.layout()

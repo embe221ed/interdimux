@@ -42,11 +42,11 @@ make clean-volumes         # drop the work volumes of checkouts that are gone
 ```
 
 The first run builds the image (about six minutes on 4 cores; most of it is
-the six old bashes).  After that a command starts at once while `dev/` and
-`rust/Cargo.*` are as the image was built from (it carries their checksum as a
-label, so this needs neither the builder nor the network), and otherwise
-rebuilds, visibly, only the stages whose pin or recipe changed.  One run at a
-time per checkout, which has one work volume: a second timing-sensitive run
+the six old bashes).  After that a command starts at once while `dev/`,
+`rust/Cargo.*` and `rust/vendor/` are as the image was built from (it carries
+their checksum as a label, so this needs neither the builder nor the network),
+and otherwise rebuilds, visibly, only the stages whose inputs changed.  One run
+at a time per checkout, which has one work volume: a second timing-sensitive run
 (the suites, the benchmarks, builds) waits its turn; a `shell`, `run`,
 `watch` or `versions` started while another run uses the checkout's volume
 is refused, and so is any run while one of those is up.  Other checkouts --
@@ -295,8 +295,8 @@ own lists, which are the authority: `tests/test_old_fzf.sh` and
 
 ## How a run works
 
-`dev/run.sh` builds the image when `dev/` changed, then starts a fresh
-container (`--rm`):
+`dev/run.sh` builds the image when its recipes or Rust dependency inputs
+changed, then starts a fresh container (`--rm`):
 
 * **The checkout is mounted read-only at `/src`** and copied (rsync) into
   `/work`, the checkout's own volume ([below](#several-checkouts-at-once)),
@@ -348,10 +348,10 @@ ignored, which no container does by default and which found a real bug once
   names those without a label (made by an older `dev/run.sh`, with one volume
   per architecture, which a checkout not yet updated still uses).
 * **They share the image**, one tag per architecture.  A checkout whose
-  `dev/` (but `dev/perf/`, which the image does not use), `rust/Cargo.*` and
-  `.dockerignore` match the image's label runs it as it is, so worktrees of
-  one branch never rebuild it for each other.  One whose `dev/` differs
-  rebuilds it -- from the cache, in seconds -- and the next run from the
+  `dev/` (but `dev/perf/`, which the image does not use), `rust/Cargo.*`,
+  `rust/vendor/` and `.dockerignore` match the image's label runs it as it is,
+  so worktrees of one branch never rebuild it for each other.  One whose inputs
+  differ rebuilds it -- from the cache, in seconds -- and the next run from the
   other rebuilds it back.
 * **Timing-sensitive runs take turns**: `test`, `smoke`, `ci`, `ci-sigpipe`,
   `bench`, `perfbench`, `uxdiff`, `msrv`, `check-macos`, `lint` and `image`,

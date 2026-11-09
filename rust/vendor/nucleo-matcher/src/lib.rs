@@ -711,7 +711,7 @@ impl Matcher {
                             .iter()
                             .map(|c| c.normalize(&self.config)))
                 } else {
-                    haystack == needle
+                    &haystack[start..end] == needle
                 };
                 if !matched {
                     return None;

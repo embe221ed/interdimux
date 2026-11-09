@@ -15,6 +15,8 @@ const MAX_NEEDLE_LEN: usize = 2048; // 64KB
 struct MatrixLayout<C: Char> {
     haystack_len: usize,
     needle_len: usize,
+    row_len: usize,
+    matrix_len: usize,
     layout: Layout,
     haystack_off: usize,
     bonus_off: usize,
@@ -31,9 +33,10 @@ impl<C: Char> MatrixLayout<C> {
         let haystack_layout = Layout::array::<C>(haystack_len).unwrap();
         let bonus_layout = Layout::array::<u8>(haystack_len).unwrap();
         let rows_layout = Layout::array::<u16>(needle_len).unwrap();
-        let score_layout = Layout::array::<ScoreCell>(haystack_len + 1 - needle_len).unwrap();
-        let matrix_layout =
-            Layout::array::<MatrixCell>((haystack_len + 1 - needle_len) * needle_len).unwrap();
+        let row_len = haystack_len + 1 - needle_len;
+        let matrix_len = row_len * needle_len;
+        let score_layout = Layout::array::<ScoreCell>(row_len).unwrap();
+        let matrix_layout = Layout::array::<MatrixCell>(matrix_len).unwrap();
 
         let haystack_off;
         (layout, haystack_off) = layout.extend(haystack_layout).unwrap();
@@ -48,6 +51,8 @@ impl<C: Char> MatrixLayout<C> {
         MatrixLayout {
             haystack_len,
             needle_len,
+            row_len,
+            matrix_len,
             layout,
             haystack_off,
             bonus_off,
@@ -59,7 +64,8 @@ impl<C: Char> MatrixLayout<C> {
     }
     /// # Safety
     ///
-    /// `ptr` must point at an allocated with MARTIX_ALLOC_LAYOUT
+    /// `ptr` must point to an allocation with at least `self.layout`'s size
+    /// and alignment.
     #[allow(clippy::type_complexity)]
     unsafe fn fieds_from_ptr(
         &self,
@@ -79,12 +85,9 @@ impl<C: Char> MatrixLayout<C> {
         let rows = base.add(self.rows_off) as *mut u16;
         let rows = slice_from_raw_parts_mut(rows, self.needle_len);
         let cells = base.add(self.score_off) as *mut ScoreCell;
-        let cells = slice_from_raw_parts_mut(cells, self.haystack_len + 1 - self.needle_len);
+        let cells = slice_from_raw_parts_mut(cells, self.row_len);
         let matrix = base.add(self.matrix_off) as *mut MatrixCell;
-        let matrix = slice_from_raw_parts_mut(
-            matrix,
-            (self.haystack_len + 1 - self.needle_len) * self.haystack_len,
-        );
+        let matrix = slice_from_raw_parts_mut(matrix, self.matrix_len);
         (haystack, bonus, rows, cells, matrix)
     }
 }
@@ -172,7 +175,8 @@ impl MatrixSlab {
             return None;
         }
         unsafe {
-            // safely: this allocation is valid for MATRIX_ALLOC_LAYOUT
+            // Safety: the layout size check above ensures that every field
+            // fits in the slab, whose alignment is sufficient for all fields.
             let (haystack, bonus, rows, current_row, matrix_cells) =
                 matrix_layout.fieds_from_ptr(self.0);
             // copy haystack before creating references to ensure we don't create
@@ -194,5 +198,58 @@ impl MatrixSlab {
 impl Drop for MatrixSlab {
     fn drop(&mut self) {
         unsafe { dealloc(self.0.as_ptr(), Layout::new::<MatcherData>()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check_layout<C: Char>(haystack: &[C], needle_len: usize) -> bool {
+        let layout = MatrixLayout::<C>::new(haystack.len(), needle_len);
+        let expected = haystack.len() * needle_len <= MAX_MATRIX_SIZE
+            && layout.layout.size() <= size_of::<MatcherData>();
+        let mut slab = MatrixSlab::new();
+        let view = slab.alloc(haystack, needle_len);
+        assert_eq!(view.is_some(), expected);
+        if let Some(view) = view {
+            let row_len = haystack.len() + 1 - needle_len;
+            assert_eq!(view.haystack.len(), haystack.len());
+            assert_eq!(view.bonus.len(), haystack.len());
+            assert_eq!(view.row_offs.len(), needle_len);
+            assert_eq!(view.current_row.len(), row_len);
+            assert_eq!(view.matrix_cells.len(), row_len * needle_len);
+        }
+        expected
+    }
+
+    #[test]
+    fn typed_views_fit_at_slab_and_fallback_boundaries() {
+        use crate::chars::AsciiChar;
+
+        for needle_len in [2, 32, 128] {
+            // Find the last accepted length with a binary search so Miri can
+            // exercise the actual references at either side of the boundary.
+            let mut low = needle_len;
+            let mut high = u16::MAX as usize + 1;
+            while low < high {
+                let mid = low + (high - low) / 2;
+                let layout = MatrixLayout::<char>::new(mid, needle_len);
+                if mid * needle_len <= MAX_MATRIX_SIZE
+                    && layout.layout.size() <= size_of::<MatcherData>()
+                {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
+            }
+            for len in [needle_len, 502.max(needle_len), low - 1, low] {
+                check_layout(&vec!['界'; len], needle_len);
+                check_layout(&vec![AsciiChar(b'x'); len], needle_len);
+            }
+            assert!(check_layout(&vec!['界'; low - 1], needle_len));
+            assert!(!check_layout(&vec!['界'; low], needle_len));
+        }
+        assert!(!check_layout(&vec!['界'; MAX_NEEDLE_LEN], MAX_NEEDLE_LEN));
     }
 }

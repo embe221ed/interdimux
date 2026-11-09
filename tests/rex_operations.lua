@@ -45,6 +45,11 @@ local function sent_ids()
   table.sort(ids)
   return table.concat(ids, ",")
 end
+local function last_call(method)
+  for index = #call_log, 1, -1 do
+    if call_log[index].method == method then return call_log[index] end
+  end
+end
 
 local literal = "literal '$HOME' $(never-evaluate)\n"
 local result = operation("send", { session_id = "s", window_id = "w1" }, { text = literal, enter = true })
@@ -61,14 +66,14 @@ assert(operation("send", { session_id = "s" }, { text = "all" }).sent == 3)
 assert(sent_ids() == "b1,b2,b3", "skip picker and nonterminal panes")
 assert(operation("send", { session_id = "s", window_id = "w2", block_id = "b3" }, { text = "one", key = "ctrl+c" }).sent == 1)
 assert(sent_ids() == "b3")
-local key = call_log[#call_log]
+local key = assert(last_call("block.event"))
 assert(key.method == "block.event" and key.args.block_id == "b3")
 assert(key.args.event.payload.key == "key_c" and key.args.event.payload.mods == "ctrl")
 print("passed: exact pane/window/session send routing and modified keys")
 
 local function key_payload(name)
   operation("send", { session_id = "s", block_id = "b1" }, { key = name })
-  local event = call_log[#call_log]
+  local event = assert(last_call("block.event"))
   assert(event.method == "block.event" and event.args.block_id == "b1")
   return event.args.event.payload
 end

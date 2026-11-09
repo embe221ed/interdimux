@@ -83,6 +83,7 @@ ARG RUST_VERSION RUSTUP_INIT_VERSION
 COPY dev/install/lib.sh dev/install/rust.sh /dev-src/install/
 COPY dev/checksums/rustup.sha256 /dev-src/checksums/
 COPY rust/Cargo.toml rust/Cargo.lock /crate/
+COPY rust/vendor/ /crate/vendor/
 RUN mkdir -p /crate/src && echo 'fn main() {}' > /crate/src/main.rs \
  && bash /dev-src/install/rust.sh /crate/Cargo.toml
 

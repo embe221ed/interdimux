@@ -1,5 +1,3 @@
-use std::mem::transmute;
-
 const DATA1: [(char, char); 277] = [
     ('\u{00C0}', 'A'), //  WITH GRAVE, LATIN CAPITAL LETTER
     ('\u{00C1}', 'A'), //  WITH ACUTE, LATIN CAPITAL LETTER
@@ -462,36 +460,55 @@ const DATA3: [(char, char); 9] = [
     ('\u{2184}', 'c'), // , LATIN SMALL LETTER REVERSED
 ];
 
-const DATA1_START: u32 = DATA1[0].0 as u32;
-const DATA1_END: u32 = DATA1[DATA1.len() - 1].0 as u32 + 1;
+const DATA1_START: u32 = table_bounds(&DATA1).0;
+const DATA1_END: u32 = table_bounds(&DATA1).1;
 const LEN1: usize = (DATA1_END - DATA1_START) as usize;
 static TABLE1: [char; LEN1] = generate_table(&DATA1);
 
+const fn table_bounds(sparse_data: &[(char, char)]) -> (u32, u32) {
+    let start = sparse_data[0].0 as u32;
+    let mut min = start;
+    let mut max = start;
+    let mut j = 0;
+    while j < sparse_data.len() {
+        let key = sparse_data[j].0 as u32;
+        if key < min {
+            min = key;
+        }
+        if key > max {
+            max = key;
+        }
+        j += 1;
+    }
+    (min, max + 1)
+}
+
 const fn generate_table<const LEN: usize>(sparse_data: &[(char, char)]) -> [char; LEN] {
     let mut table: [char; LEN] = ['\0'; LEN];
-    let start = sparse_data[0].0 as u32;
-    let mut i = 0u32;
-    let mut j = 0;
-    while i < table.len() as u32 {
-        let key = unsafe { transmute(start + i) };
-        if sparse_data[j].0 == key {
-            table[i as usize] = DATA1[j].1;
-            j += 1;
-        } else {
-            //identity
-            table[i as usize] = key;
-        }
+    let start = table_bounds(sparse_data).0;
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = match char::from_u32(start + i as u32) {
+            Some(c) => c,
+            None => panic!("normalization table range contains a non-scalar value"),
+        };
         i += 1;
+    }
+    // Sparse mappings need not be sorted; DATA2 contains interleaved blocks.
+    let mut j = 0;
+    while j < sparse_data.len() {
+        table[(sparse_data[j].0 as u32 - start) as usize] = sparse_data[j].1;
+        j += 1;
     }
     table
 }
-const DATA2_START: u32 = DATA2[0].0 as u32;
-const DATA2_END: u32 = DATA2[DATA2.len() - 1].0 as u32 + 1;
+const DATA2_START: u32 = table_bounds(&DATA2).0;
+const DATA2_END: u32 = table_bounds(&DATA2).1;
 const LEN2: usize = (DATA2_END - DATA2_START) as usize;
 static TABLE2: [char; LEN2] = generate_table(&DATA2);
 
-const DATA3_START: u32 = DATA3[0].0 as u32;
-const DATA3_END: u32 = DATA3[DATA3.len() - 1].0 as u32 + 1;
+const DATA3_START: u32 = table_bounds(&DATA3).0;
+const DATA3_END: u32 = table_bounds(&DATA3).1;
 const LEN3: usize = (DATA3_END - DATA3_START) as usize;
 static TABLE3: [char; LEN3] = generate_table(&DATA3);
 
@@ -523,4 +540,47 @@ pub fn normalize(c: char) -> char {
         return c;
     }
     TABLE3[(i - DATA3_START) as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_tables_follow_their_own_sparse_mappings() {
+        for (sparse, table) in [
+            (DATA1.as_slice(), TABLE1.as_slice()),
+            (DATA2.as_slice(), TABLE2.as_slice()),
+            (DATA3.as_slice(), TABLE3.as_slice()),
+        ] {
+            let start = sparse
+                .iter()
+                .map(|mapping| mapping.0 as usize)
+                .min()
+                .unwrap();
+            for &(key, expected) in sparse {
+                assert_eq!(table[key as usize - start], expected, "{key:?}");
+                assert_eq!(normalize(key), expected, "{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_unmapped_unicode_scalar_keeps_its_identity() {
+        let mut declared: Vec<_> = DATA1.iter().chain(&DATA2).chain(&DATA3).collect();
+        declared.sort_unstable_by_key(|mapping| mapping.0);
+        assert!(declared.windows(2).all(|pair| pair[0].0 != pair[1].0));
+        let mut mappings = declared.into_iter().peekable();
+        for scalar in 0..=char::MAX as u32 {
+            let Some(c) = char::from_u32(scalar) else {
+                continue;
+            };
+            if mappings.peek().is_some_and(|mapping| mapping.0 == c) {
+                mappings.next();
+            } else {
+                assert_eq!(normalize(c), c, "U+{scalar:04X}");
+            }
+        }
+        assert!(mappings.next().is_none());
+    }
 }

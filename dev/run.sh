@@ -2,12 +2,12 @@
 #
 #   dev/run.sh COMMAND [ARGS...]        (make COMMAND, see `make help`)
 #
-# The host side of the dev image: builds it when dev/ changed, and runs
+# The host side of the dev image: rebuilds changed image inputs, and runs
 # dev/cmd.sh COMMAND in a fresh container.  POSIX sh and nothing but docker, so
 # it runs alike on the VPS (dash) and on a Mac (/bin/sh, bash 3.2).
 #
-#   image          build the image now (other commands build it when dev/ or
-#                  rust/Cargo.* changed since it was built)
+#   image          build the image now (other commands build it when dev/,
+#                  rust/Cargo.* or rust/vendor/ changed since it was built)
 #   pin            dev/pin.sh: record checksums after editing dev/versions.env
 #   clean          remove the dev images (both architectures) and this
 #                  checkout's work volumes
@@ -131,9 +131,11 @@ esac
 # current starts without asking the builder -- or the registry, which a build
 # would ask about the base image even when every layer is cached.
 # (dev/perf/ is not in it: the image does not use the harness, which runs from
-# /work, so editing it rebuilds nothing.)
+# /work, so editing it rebuilds nothing. Vendored crates' target/ directories
+# are build output and stay out of both the context and this checksum.)
 src_sum() {
-  (cd "$ROOT" && find dev rust/Cargo.toml rust/Cargo.lock .dockerignore -path dev/perf -prune -o -type f -print |
+  (cd "$ROOT" && find dev rust/Cargo.toml rust/Cargo.lock rust/vendor .dockerignore \
+     \( -path dev/perf -o -path 'rust/vendor/*/target' \) -prune -o -type f -print |
      LC_ALL=C sort | while IFS= read -r f; do printf '%s\n' "$f"; cat "$f"; done) | cksum | tr ' ' -
 }
 sum=$(src_sum)
@@ -218,7 +220,7 @@ if [ "$have" != "$sum" ]; then
   # go of the lock once the image is built
   if [ "$turn" = 0 ]; then take_lock "$@"; wait_turns; fi
   if [ -n "$have" ]; then
-    echo "dev/run.sh: dev/ changed since $IMAGE was built: rebuilding (only the stages that changed)" >&2
+    echo "dev/run.sh: image inputs changed since $IMAGE was built: rebuilding (only the stages that changed)" >&2
   else
     echo "dev/run.sh: building $IMAGE (the first build takes about six minutes on 4 cores)" >&2
   fi

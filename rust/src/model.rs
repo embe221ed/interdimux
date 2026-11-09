@@ -81,6 +81,7 @@ pub(crate) struct Session {
     pub window_count: String,
     pub attached: bool,
     pub last: i64,
+    /// Literal operational path; renderers sanitize their own display strings.
     pub path: String,
     pub target: Target,
 }
@@ -93,6 +94,7 @@ pub(crate) struct Window {
     pub name: String,
     pub active: bool,
     pub cmd: String,
+    /// Literal operational path; renderers sanitize their own display strings.
     pub path: String,
     pub pane_count: usize,
     pub pid: u32,
@@ -112,6 +114,7 @@ pub(crate) struct Pane {
     pub name: String,
     pub active: bool,
     pub cmd: String,
+    /// Literal operational path; renderers sanitize their own display strings.
     pub path: String,
     pub pid: u32,
     pub agent_id: String,

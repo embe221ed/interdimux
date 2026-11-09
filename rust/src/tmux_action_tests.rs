@@ -598,7 +598,8 @@ fn closing_the_source_last_window_or_pane_hops_its_attached_client_first() {
         );
         let snapshot = tmux_backend::collect(&source).unwrap();
         assert_eq!(snapshot.sessions.len(), 1);
-        assert_eq!(snapshot.current.session_key, "kept");
+        assert_eq!(snapshot.sessions[0].name, "kept");
+        assert_eq!(snapshot.current.session_key, snapshot.sessions[0].key);
     }
 }
 

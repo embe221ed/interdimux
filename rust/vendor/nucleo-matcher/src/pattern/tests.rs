@@ -112,3 +112,25 @@ fn escape() {
     assert_eq!(pat.needle.to_string(), "^foo$");
     assert_eq!(pat.kind, AtomKind::Substring);
 }
+
+#[test]
+fn unicode_whitespace_escapes_match_ascii_rules() {
+    for prefix in ["foo", "東京"] {
+        for (suffix, expected) in [
+            ("\\ bar", " bar"),
+            ("\\\\ bar", "\\ bar"),
+            ("\\tail", "\\tail"),
+            ("\\\\tail", "\\\\tail"),
+            ("\\", "\\"),
+        ] {
+            let atom = Atom::parse(
+                &format!("'{prefix}{suffix}"),
+                CaseMatching::Smart,
+                Normalization::Smart,
+            );
+            assert_eq!(atom.needle.to_string(), format!("{prefix}{expected}"));
+            assert_eq!(atom.kind, AtomKind::Substring);
+            assert!(!atom.negative);
+        }
+    }
+}
