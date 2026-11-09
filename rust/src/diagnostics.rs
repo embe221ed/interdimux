@@ -432,6 +432,28 @@ mod tests {
 
     #[test]
     fn writes_keep_newest_entries_under_size_and_count_limits() {
+        // Logging deliberately skips a busy file. Run these serial write
+        // assertions without other tests forking while a log lock is held:
+        // a forked child can retain that descriptor briefly until exec.
+        const CHILD: &str = "IMUX_DIAGNOSTICS_TRUNCATION_CHILD";
+        if std::env::var(CHILD).as_deref() != Ok("1") {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "diagnostics::tests::writes_keep_newest_entries_under_size_and_count_limits",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let f = Fixture::new();
         directory(&f.history.root).unwrap();
         let old = (0..100)

@@ -253,7 +253,9 @@ fn common_picker_switches_native_targets_and_rejects_reused_indices() {
             "-P",
             "-F",
             "#{pane_id}",
-            "sleep 99999",
+            // Some /bin/sh implementations retain the command wrapper.
+            // The row selected below deliberately names the sleep process.
+            "exec sleep 99999",
         ])
         .trim()
         .to_owned();
