@@ -27,7 +27,7 @@ struct PickerItem: Equatable {
     let name: String
     let subtitle: String
     let path: String
-    let current: Bool
+    var current: Bool
     let parentID: String?
     let contextOnly: Bool
     let combined: Bool

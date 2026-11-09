@@ -23,8 +23,15 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var panel: PickerPanel!
     private var items: [PickerItem] = []
     private var tree: [PickerTreePosition] = []
+    private var openingItems: [PickerItem] = []
+    private var openingTree: [PickerTreePosition] = []
+    private var openingPreferredID: String?
+    private var openingTotal = 0
     private var openingClientID: String?
     private var openingSessionID: String?
+    private var openingRefresh = false
+    private var openingSelectionID: String?
+    private var acceptOpeningWhenReady = false
     // The protocol caps each result at 100. Keep cells for those bounded row
     // slots across count changes, including no-match -> results transitions.
     private var cells: [Int: PickerCell] = [:]
@@ -58,6 +65,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var openBenchmarkOutput: String?
     private var openBenchmarkSamples: [[String: Any]] = []
     private var openingFrameMS: Double?
+    private var openingFrameHadRows = false
     private var currentTheme: RexTheme?
     private var themeTimer: Timer?
     private var appearanceObservation: NSKeyValueObservation?
@@ -206,6 +214,9 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         refreshTheme()
         startedAt = ProcessInfo.processInfo.systemUptime
         loading = true
+        openingRefresh = false
+        openingSelectionID = nil
+        acceptOpeningWhenReady = false
         openingFrameMS = nil
         hasOpened = true
         queryDeferred = false
@@ -241,31 +252,51 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.search.stringValue = ""
         content.clear.isHidden = true
         for button in content.scopes { button.chosen = button.tag == 0 }
-        // Even the same origin can have a different previous session now.
-        // Present search immediately, but paint rows only after their order
-        // is known so opening never flashes an obsolete list first.
-        let reuseSummary = supplied["client_id"].map { !$0.isEmpty && $0 == openingClientID } == true
-            && supplied["session_id"].map { !$0.isEmpty && $0 == openingSessionID } == true
-        items = []
-        tree = []
+        // The catalog order does not depend on the origin or MRU. Reuse its
+        // rows and tree immediately; only the preferred selection changes.
+        let reuseOpening = supplied["client_id"].map { !$0.isEmpty && $0 == openingClientID } == true
+            && supplied["session_id"].map { !$0.isEmpty } == true
+        items = reuseOpening ? openingItems.map { item in
+            var item = item
+            switch item.kind {
+            case "session": item.current = item.id == supplied["session_id"]
+            case "window": item.current = item.id == supplied["window_id"]
+            case "pane": item.current = item.id == supplied["block_id"]
+            default: break
+            }
+            return item
+        } : []
+        tree = reuseOpening ? openingTree : []
+        openingFrameHadRows = !showDashboard && !items.isEmpty
         displayedRequest = -1
         displayedSearch = nil
         if !showDashboard {
             updateTable()
-            content.table.deselectAll(nil)
+            let preferred = supplied["session_id"] != openingSessionID ? openingSessionID : openingPreferredID
+            let selected = items.firstIndex { $0.id == preferred && $0.kind == "session" && !$0.current && !$0.contextOnly }
+                ?? items.firstIndex { $0.id == openingPreferredID && $0.kind == "session" && !$0.current && !$0.contextOnly }
+                ?? items.firstIndex { $0.kind == "session" && !$0.current && !$0.contextOnly }
+                ?? items.firstIndex { !$0.contextOnly }
+            if let selected {
+                content.table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
+                content.table.scrollRowToVisible(selected)
+            } else {
+                content.table.deselectAll(nil)
+                content.scroll.contentView.scroll(to: .zero)
+                content.scroll.reflectScrolledClipView(content.scroll.contentView)
+            }
         }
-        content.scroll.contentView.scroll(to: .zero)
-        content.scroll.reflectScrolledClipView(content.scroll.contentView)
-        content.count.stringValue = ""
-        content.empty.isHidden = false
+        openingRefresh = true
+        content.count.stringValue = items.isEmpty ? "" : "\(openingTotal) places"
+        content.empty.isHidden = !items.isEmpty
         content.emptyTitle.stringValue = "Loading your workspace"
         content.emptyDetail.stringValue = "Sessions, tabs and panes, together."
         if content.previewVisible { content.showPreview(title: "Preview", detail: "", text: "Choose a terminal or project to inspect.") }
-        content.status.stringValue = "Connecting to Rex…"
+        content.status.stringValue = items.isEmpty ? "Connecting to Rex…" : "Refreshing…"
         content.status.textColor = Palette.secondary
         if showDashboard {
             let view = ensureDashboard()
-            view.updateSummary(DashboardSummary(counts: reuseSummary ? dashboardCounts : [:]))
+            view.updateSummary(DashboardSummary(counts: reuseOpening ? dashboardCounts : [:]))
             view.resetSelection()
             view.setLoading(true)
             view.setStatus("Refreshing your workspace…")
@@ -409,6 +440,12 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if type == "error" { showError(message["message"] as? String ?? "Unable to load Rex sessions."); return }
         guard type == "results" else { return }
         let wasLoading = loading
+        let wasOpening = openingRefresh
+        let openingSelection = openingSelectionID
+        let acceptOpening = acceptOpeningWhenReady
+        openingRefresh = false
+        openingSelectionID = nil
+        acceptOpeningWhenReady = false
         loading = false
         // A query typed during collection must run against the new snapshot.
         let resultQuery = message["query"] as? String ?? ""
@@ -433,8 +470,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let search = PickerSearchIdentity(query: resultQuery, scope: resultScope, field: resultField, actionFilter: resultAction,
             directoryBase: scope == "directory" ? directoryBase : nil, directoryDeep: scope == "directory" && directoryDeep)
         if !dashboardVisible {
-            if let selected = PickerSelection.index(in: items, previousID: previous, preferredID: message["preferred_id"] as? String,
-                    previousSearch: displayedSearch, search: search) {
+            if let selected = PickerSelection.index(in: items, previousID: openingSelection ?? previous, preferredID: message["preferred_id"] as? String,
+                    previousSearch: wasOpening && openingSelection != nil ? search : displayedSearch, search: search) {
                 content.table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
                 content.table.scrollRowToVisible(selected)
             } else { content.table.deselectAll(nil) }
@@ -445,6 +482,10 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let shown = (message["shown_matches"] as? NSNumber)?.intValue ?? items.count
         let attention = (message["attention_count"] as? NSNumber)?.intValue ?? 0
         if scope == "all", resultQuery.isEmpty, searchField == "all", resultAction.isEmpty {
+            openingItems = items
+            openingTree = tree
+            openingPreferredID = message["preferred_id"] as? String
+            openingTotal = matched
             openingClientID = context["client_id"]
             openingSessionID = context["session_id"]
         }
@@ -481,6 +522,10 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if measureDisplay { panel.displayIfNeeded() }
         let displayedAt = ProcessInfo.processInfo.systemUptime
         updatePreviewSelection()
+        if acceptOpening && !dashboardVisible,
+           openingSelection == nil || items.contains(where: { $0.id == openingSelection && !$0.contextOnly }) {
+            accept()
+        }
         if wasLoading {
             let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
             FileHandle.standardError.write(Data(String(format: "picker snapshot + native update: %.2f ms\n", elapsed).utf8))
@@ -488,7 +533,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if let output = openBenchmarkOutput, wasLoading {
             var sample: [String: Any] = ["ready_ms": (displayedAt - startedAt) * 1000,
                                        "surface": dashboardVisible ? "dashboard" : "picker",
-                                       "cached_rows": false]
+                                       "cached_rows": wasOpening && openingFrameHadRows]
             if let openingFrameMS { sample[dashboardVisible ? "dashboard_frame_ms" : "picker_frame_ms"] = openingFrameMS }
             if let timings = message["open_timing_ms"] { sample["helper_stages"] = timings }
             openBenchmarkSamples.append(sample)
@@ -544,6 +589,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func query() {
+        acceptOpeningWhenReady = false
+        openingSelectionID = nil
         let search = PickerSearchIdentity(query: content.search.stringValue, scope: scope, field: searchField,
             actionFilter: targetRoute?.operation ?? "", directoryBase: scope == "directory" ? directoryBase : nil,
             directoryDeep: scope == "directory" && directoryDeep)
@@ -564,6 +611,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func controlTextDidChange(_ notification: Notification) {
+        acceptOpeningWhenReady = false
+        openingSelectionID = nil
         displayedSearch = nil
         content.clear.isHidden = content.search.stringValue.isEmpty
         previewGate.noteInput(at: ProcessInfo.processInfo.systemUptime)
@@ -586,7 +635,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func move(_ delta: Int) {
-        guard !items.isEmpty, !loading, actionRequest == nil, activation == nil else { return }
+        guard !items.isEmpty, !loading || openingRefresh, actionRequest == nil, activation == nil else { return }
         guard let next = PickerNavigation.nextIndex(current: content.table.selectedRow,
                 count: items.count, direction: delta, isSelectable: { !self.items[$0].contextOnly }) else { return }
         content.table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
@@ -603,6 +652,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     @objc func changeScope(_ sender: NSButton) {
         guard actionRequest == nil, activation == nil, !presentingDialog else { return }
+        acceptOpeningWhenReady = false
+        openingSelectionID = nil
         if targetRoute?.operation != nil && sender.tag == 5 {
             content.status.stringValue = "Choose a live target, or press Escape to return to the dashboard."
             return
@@ -909,9 +960,17 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     @objc func accept() {
         let row = content.table.selectedRow
-        guard activation == nil, actionRequest == nil, !presentingDialog, !loading, row >= 0, row < items.count else { return }
-        guard !items[row].contextOnly else { return }
+        guard activation == nil, actionRequest == nil, !presentingDialog else { return }
         guard (content.search.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+        if loading {
+            if openingRefresh, !dashboardVisible, content.search.stringValue.isEmpty,
+               scope == "all", searchField == "all", targetRoute == nil, swapSource == nil {
+                acceptOpeningWhenReady = true
+            }
+            return
+        }
+        guard row >= 0, row < items.count else { return }
+        guard !items[row].contextOnly else { return }
         // Never activate the previous query's selection while a result is pending.
         guard pending == displayedRequest else { return }
         if let source = swapSource {
@@ -1031,7 +1090,14 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         }
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) { updatePreviewSelection() }
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if loading && openingRefresh {
+            acceptOpeningWhenReady = false
+            let row = content.table.selectedRow
+            openingSelectionID = items.indices.contains(row) && !items[row].contextOnly ? items[row].id : nil
+        }
+        updatePreviewSelection()
+    }
 
     func numberOfRows(in tableView: NSTableView) -> Int { items.count }
 
@@ -1045,7 +1111,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        !loading && actionRequest == nil && activation == nil && items.indices.contains(row) && !items[row].contextOnly
+        (!loading || openingRefresh) && actionRequest == nil && activation == nil && items.indices.contains(row) && !items[row].contextOnly
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -1067,6 +1133,9 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if activation != nil || actionRequest != nil || dashboardRequest != nil || presentingDialog { return }
         if swapSource != nil { cancelSwap(); return }
         if returnToDashboard && dashboardOrigin { self.returnToDashboard(); return }
+        acceptOpeningWhenReady = false
+        openingRefresh = false
+        openingSelectionID = nil
         deferredDashboardAction = nil
         stopPreview()
         panel.orderOut(nil)
@@ -1094,12 +1163,18 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     func windowDidResignKey(_ notification: Notification) {
         // Clicking another app dismisses without stealing focus back from it.
         if !benchmarking && openBenchmarkOutput == nil && activation == nil && actionRequest == nil && dashboardRequest == nil && !presentingDialog {
+            acceptOpeningWhenReady = false
+            openingRefresh = false
+            openingSelectionID = nil
             deferredDashboardAction = nil
             stopPreview(); panel.orderOut(nil)
         }
     }
 
     func showError(_ message: String) {
+        acceptOpeningWhenReady = false
+        openingRefresh = false
+        openingSelectionID = nil
         loading = false
         activation = nil
         actionRequest = nil

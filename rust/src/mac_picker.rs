@@ -270,6 +270,7 @@ struct Picker {
     defaults: RexContext,
     context: Option<RexContext>,
     snapshot: Option<Snapshot>,
+    preferred_session_id: Option<String>,
     rows: Vec<Candidate>,
     by_id: HashMap<String, usize>,
     hierarchy: Hierarchy,
@@ -312,6 +313,7 @@ impl Picker {
             defaults,
             context: None,
             snapshot: None,
+            preferred_session_id: None,
             rows: Vec::new(),
             by_id: HashMap::new(),
             hierarchy: Hierarchy::default(),
@@ -384,6 +386,7 @@ impl Picker {
         self.opened = false;
         self.context = None;
         self.snapshot = None;
+        self.preferred_session_id = None;
         self.query.clear();
         self.scope = "all".into();
         self.search_field = SearchField::All;
@@ -436,6 +439,7 @@ impl Picker {
             let index_started = Instant::now();
             self.replace(rows)?;
             self.open_timing_ms["index"] = json!(millis(index_started));
+            self.preferred_session_id = previous_session(&snapshot);
             self.snapshot = Some(snapshot);
             self.context = Some(context);
             self.update_terminal_tools();
@@ -465,6 +469,7 @@ impl Picker {
                     .cloned(),
             );
             self.replace(rows)?;
+            self.preferred_session_id = previous_session(&snapshot);
             self.snapshot = Some(snapshot);
             self.update_terminal_tools();
         }
@@ -547,7 +552,7 @@ impl Picker {
             ranks[index] = rank;
         }
         let matched = ranked.len();
-        // An empty query preserves MRU sessions and original tab/pane order,
+        // An empty query preserves catalog sessions and original tab/pane order,
         // even when the source lists all tabs before listing any panes.
         let order = if empty_query {
             &self.hierarchy.preorder
@@ -556,6 +561,20 @@ impl Picker {
         };
         let mut included = vec![false; self.rows.len()];
         let mut remaining = MAX_ROWS;
+        let preferred_session = (empty_query
+            && matches!(self.scope.as_str(), "all" | "session")
+            && self.action_filter.is_empty())
+            .then(|| self.preferred_session_id.as_ref())
+            .flatten()
+            .and_then(|id| self.by_id.get(id))
+            .copied()
+            .filter(|&index| ranks[index] != usize::MAX);
+        // Keep the previous session selectable even when its catalog position
+        // falls beyond the response limit. Inclusion never changes row order.
+        if let Some(index) = preferred_session {
+            included[index] = true;
+            remaining -= 1;
+        }
         let mut chain = Vec::with_capacity(3);
         for &index in order {
             if ranks[index] == usize::MAX {
@@ -580,10 +599,11 @@ impl Picker {
                 break;
             }
         }
-        let mut preferred_id = order
-            .iter()
-            .copied()
-            .find(|&index| included[index] && ranks[index] != usize::MAX)
+        let mut preferred_id = preferred_session
+            .or_else(|| order
+                .iter()
+                .copied()
+                .find(|&index| included[index] && ranks[index] != usize::MAX))
             .map(|index| self.rows[index].id.clone());
         // Rank a group by its best descendant match. Sorting only the included
         // siblings keeps response work bounded while preserving contiguous trees.
@@ -1100,6 +1120,22 @@ fn snapshot_rows(snapshot: &Snapshot) -> Vec<Candidate> {
     snapshot_rows_timed(snapshot, &mut json!({}))
 }
 
+fn previous_session(snapshot: &Snapshot) -> Option<String> {
+    if snapshot.current.session_key.is_empty() {
+        return None;
+    }
+    // Last Session breaks equal/unknown MRU stamps by catalog order.
+    let mut previous = None;
+    for session in &snapshot.sessions {
+        if session.key != snapshot.current.session_key
+            && previous.map_or(true, |selected: &crate::model::Session| session.last > selected.last)
+        {
+            previous = Some(session);
+        }
+    }
+    previous.map(|session| session.key.clone())
+}
+
 fn snapshot_rows_timed(snapshot: &Snapshot, timing: &mut Value) -> Vec<Candidate> {
     let agents_started = Instant::now();
     let agents: HashMap<_, _> = crate::native_agents::collect(snapshot, &[])
@@ -1118,23 +1154,16 @@ fn snapshot_rows_timed(snapshot: &Snapshot, timing: &mut Value) -> Vec<Candidate
         .iter()
         .map(|w| (w.key.as_str(), w))
         .collect();
-    let mut ordered_sessions: Vec<_> = snapshot.sessions.iter().collect();
-    // Match Last Session: the newest surviving session other than the origin
-    // comes first. Keep the current session and its complete branch last.
-    ordered_sessions.sort_by_key(|session| {
-        (
-            session.key == snapshot.current.session_key,
-            std::cmp::Reverse(session.last),
-        )
-    });
-    let ranks: HashMap<_, _> = ordered_sessions
+    // Session history affects initial selection only. Keep catalog order so
+    // cached lists do not move when the origin or its previous session changes.
+    let ranks: HashMap<_, _> = snapshot.sessions
         .iter()
         .enumerate()
         .map(|(i, s)| (s.key.as_str(), i))
         .collect();
     let mut rows =
         Vec::with_capacity(snapshot.sessions.len() + snapshot.windows.len() + snapshot.panes.len());
-    for session in ordered_sessions {
+    for session in &snapshot.sessions {
         rows.push((
             ranks[session.key.as_str()],
             Candidate {
@@ -2289,7 +2318,7 @@ mod tests {
     }
 
     #[test]
-    fn mac_picker_open_prefers_the_last_other_session_and_keeps_current_last() {
+    fn mac_picker_open_selects_the_last_other_session_without_reordering() {
         let fixture = Fixture::new(json!([]));
         let sessions = ["current", "old", "previous"];
         let views: serde_json::Map<_, _> = sessions.iter().map(|name| {
@@ -2317,22 +2346,62 @@ mod tests {
             let snapshot = rex::collect(&context).unwrap();
             let mut picker = Picker::new(None, context);
             picker.replace(snapshot_rows(&snapshot)).unwrap();
+            picker.preferred_session_id = previous_session(&snapshot);
             for scope in ["all", "session"] {
                 picker.scope = scope.into();
                 let result = picker.results(1, Instant::now()).unwrap();
                 let rows = result["rows"].as_array().unwrap();
                 assert_eq!(result["preferred_id"], format!("session:{previous}"));
-                assert_eq!(rows[0]["id"], format!("session:{previous}"));
                 let roots: Vec<_> = rows.iter().filter(|row| row["kind"] == "session").collect();
                 assert_eq!(roots.len(), 3);
-                assert_eq!(roots.last().unwrap()["id"], format!("session:{origin}"));
-                assert_eq!(roots.last().unwrap()["current"], true);
+                assert_eq!(roots.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>(),
+                    ["session:current", "session:old", "session:previous"]);
+                let current = roots.iter().find(|row| row["id"] == format!("session:{origin}")).unwrap();
+                assert_eq!(current["current"], true);
             }
+            picker.query = "old".into();
+            picker.scope = "all".into();
+            let searched = picker.results(2, Instant::now()).unwrap();
+            assert_eq!(searched["preferred_id"], "session:old");
         }
     }
 
     #[test]
-    fn mac_picker_real_snapshot_preserves_mru_then_tab_pane_preorder() {
+    fn mac_picker_previous_session_survives_the_result_limit_without_reordering() {
+        let mut snapshot = Snapshot::default();
+        snapshot.current.session_key = "session:0".into();
+        snapshot.sessions = (0..125).map(|i| crate::model::Session {
+            key: format!("session:{i}"), name: format!("Session {i}"),
+            window_count: "0".into(), attached: false, last: i,
+            path: String::new(),
+            target: Target::Rex { session_id: format!("session:{i}"), window_id: None, block_id: None },
+        }).collect();
+        let mut picker = Picker::new(None, empty_context());
+        picker.replace(snapshot_rows(&snapshot)).unwrap();
+        picker.preferred_session_id = previous_session(&snapshot);
+        for scope in ["all", "session"] {
+            picker.scope = scope.into();
+            let result = picker.results(1, Instant::now()).unwrap();
+            assert_eq!(result["preferred_id"], "session:124");
+            assert_eq!(result["rows"].as_array().unwrap().len(), MAX_ROWS);
+            let mut expected: Vec<_> = (0..99).map(|i| format!("session:{i}")).collect();
+            expected.push("session:124".into());
+            assert_eq!(result_ids(&result), expected);
+        }
+        picker.action_filter = "rename".into();
+        let action = picker.results(2, Instant::now()).unwrap();
+        assert_eq!(action["preferred_id"], "session:0");
+
+        // Equal or missing history uses the same first surviving catalog
+        // session as prefix+L rather than reversing the tie.
+        for session in &mut snapshot.sessions { session.last = 0; }
+        assert_eq!(previous_session(&snapshot).as_deref(), Some("session:1"));
+        snapshot.current.session_key.clear();
+        assert_eq!(previous_session(&snapshot), None);
+    }
+
+    #[test]
+    fn mac_picker_real_snapshot_preserves_catalog_then_tab_pane_preorder() {
         let fixture = Fixture::new(json!([]));
         let window = |id: &str, pane: &str| {
             json!({"window_id":id,"label":"tab","layers":[
@@ -2359,18 +2428,18 @@ mod tests {
         assert_eq!(
             result_ids(&result),
             [
-                "session:new",
-                "window:c",
                 "session:old",
                 "window:a",
                 "block:a",
                 "block:a2",
                 "window:b",
+                "session:new",
+                "window:c",
             ]
         );
-        assert_eq!(result["rows"][1]["pane_id"], "block:c");
-        assert_eq!(result["rows"][1]["combined"], true);
-        assert_eq!(result["rows"][4]["parent_id"], "window:a");
+        assert_eq!(result["rows"][6]["pane_id"], "block:c");
+        assert_eq!(result["rows"][6]["combined"], true);
+        assert_eq!(result["rows"][2]["parent_id"], "window:a");
         assert!(result["rows"]
             .as_array()
             .unwrap()

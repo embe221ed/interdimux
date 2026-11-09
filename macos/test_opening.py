@@ -11,9 +11,11 @@ final class PickerBackend {
     var onMessage: (([String: Any]) -> Void)?
     var onFailure: ((String) -> Void)?
     var serial = 0
+    var requests: [(type: String, fields: [String: Any])] = []
     var isRunning = true
     func start() throws {}
     @discardableResult func send(_ type: String, fields: [String: Any] = [:]) -> Int {
+        requests.append((type: type, fields: fields))
         serial += 1
         return serial
     }

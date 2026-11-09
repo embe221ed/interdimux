@@ -28,54 +28,152 @@ struct OpeningTests {
         let originA = ["client_id": "client:one", "session_id": "session:a"]
         let originB = ["client_id": "client:one", "session_id": "session:b"]
 
-        func deliver(previous: String, current: String, extraRows: Int = 0) {
-            let rows: [[String: Any]] = [
-                ["id": previous, "kind": "session", "title": "Previous"],
-                ["id": previous + "/tab", "kind": "window", "title": "Previous tab", "parent_id": previous],
-                ["id": current, "kind": "session", "title": "Current", "current": true]
-            ] + (0..<extraRows).map { ["id": "session:extra-\($0)", "kind": "session", "title": "Extra \($0)"] }
+        let catalogIDs = ["session:a", "session:a/tab", "session:b", "session:b/tab", "session:c", "session:c/tab"]
+        func deliver(previous: String, current: String, extraRows: Int = 0,
+                     omit: String? = nil, query: String = "", scope: String = "all") {
+            let rows: [[String: Any]] = ["a", "b", "c"].flatMap { name -> [[String: Any]] in
+                let id = "session:\(name)"
+                return [
+                    ["id": id, "kind": "session", "title": name.uppercased(), "current": id == current],
+                    ["id": id + "/tab", "kind": "window", "title": "\(name.uppercased()) tab", "parent_id": id]
+                ]
+            } + (0..<extraRows).map { ["id": "session:extra-\($0)", "kind": "session", "title": "Extra \($0)"] }
+            let included = rows.filter { ($0["id"] as? String) != omit }
             picker.receive([
-                "id": picker.pending, "type": "results", "query": "", "scope": "all",
+                "id": picker.pending, "type": "results", "query": query, "scope": scope,
                 "search_field": "all", "action_filter": "", "preferred_id": previous,
-                "matched": rows.count, "total": rows.count, "shown_matches": rows.count,
-                "rows": rows
+                "matched": included.count, "total": included.count, "shown_matches": included.count,
+                "rows": included
             ])
+        }
+        func selectedID() -> String? {
+            let index = picker.content.table.selectedRow
+            return picker.items.indices.contains(index) ? picker.items[index].id : nil
         }
         func checkLoadingEmpty(_ label: String) throws {
             try check(picker.items.isEmpty && picker.content.table.numberOfRows == 0,
-                      "\(label): painted unverified cached session order")
+                      "\(label): reused a cache without a known matching client and origin")
             try check(picker.content.table.selectedRow == -1 && picker.displayedRequest == -1,
                       "\(label): retained an actionable stale selection")
             try check(picker.loading && !picker.content.empty.isHidden,
                       "\(label): missing loading state while awaiting fresh results")
             try check(!picker.panel.isVisible, "Offscreen test unexpectedly presented a window")
         }
+        func checkCached(previous: String, current: String, _ label: String) throws {
+            try check(picker.items.map(\.id) == catalogIDs && picker.content.table.numberOfRows == catalogIDs.count,
+                      "\(label): cached catalog was cleared or reordered before the response")
+            try check(selectedID() == previous,
+                      "\(label): previous session was not selected in the immediate cached frame")
+            try check(picker.items.filter { $0.kind == "session" && $0.current }.map(\.id) == [current],
+                      "\(label): cached current-session markers did not follow the new origin")
+            try check(picker.loading && picker.content.empty.isHidden,
+                      "\(label): cached list was hidden by the loading placeholder")
+            try check(!picker.panel.isVisible, "Offscreen test unexpectedly presented a window")
+        }
+        func activatedTargets() -> [String] {
+            picker.backend.requests.compactMap { request in
+                request.type == "activate" ? request.fields["target_id"] as? String : nil
+            }
+        }
+        func clearActivation() {
+            // Do not deliver an activated response: dismiss() deliberately
+            // returns focus to live Rex, which is outside this offscreen test.
+            picker.activation = nil
+        }
 
         picker.open(context: originA)
         try checkLoadingEmpty("first open")
         deliver(previous: "session:b", current: "session:a")
-        try check(picker.items.first?.id == "session:b" && picker.content.table.selectedRow == 0,
-                  "Fresh opening did not select the backend's previous session")
+        try check(picker.items.map(\.id) == catalogIDs && selectedID() == "session:b",
+                  "Fresh opening reordered the catalog instead of selecting the previous session")
+        let retainedCell = picker.content.table.view(atColumn: 0, row: 2, makeIfNecessary: true)
 
-        // Returning to the same session does not prove that its previous
-        // session is unchanged: Rex can have visited C and returned to A while
-        // this picker was closed. Never paint the old B-first frame or a stale
-        // selection before the authoritative response arrives.
-        picker.content.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        // A cached frame is visible and selected immediately. If history
+        // changes while refresh is pending, an early Enter uses the fresh
+        // preferred target rather than silently dropping the keypress.
+        picker.content.table.selectRowIndexes(IndexSet(integer: 5), byExtendingSelection: false)
         picker.open(context: originA)
-        try checkLoadingEmpty("same origin with changed history")
+        try checkCached(previous: "session:b", current: "session:a", "same-origin cached opening")
+        try check(picker.content.table.view(atColumn: 0, row: 2, makeIfNecessary: true) === retainedCell,
+                  "Cached opening replaced the retained row view")
+        picker.accept()
+        try check(activatedTargets().isEmpty, "Early Enter activated an unvalidated cached target")
         deliver(previous: "session:c", current: "session:a")
-        try check(picker.items.first?.id == "session:c" && picker.content.table.selectedRow == 0,
-                  "Same-origin reopening did not display/select the new previous session first")
+        try check(activatedTargets() == ["session:c"] && selectedID() == "session:c"
+                  && picker.items.map(\.id) == catalogIDs,
+                  "Early Enter did not activate the fresh previous session without reordering")
+        clearActivation()
         picker.open(context: originA)
-        try checkLoadingEmpty("same origin with unchanged history")
+        try checkCached(previous: "session:c", current: "session:a", "same-origin preferred cache")
         deliver(previous: "session:c", current: "session:a")
-        try check(picker.items.first?.id == "session:c" && picker.content.table.selectedRow == 0,
-                  "Repeated opening did not retain the authoritative order/selection")
+        try check(activatedTargets().count == 1, "A prior Enter leaked into another opening")
 
-        // A prior invocation can leave the table scrolled far below row zero.
-        // Its first fresh frame must already show the previous session at the
-        // top, rather than visibly scrolling into place after presentation.
+        // Session changes within the same client reuse the same row order.
+        // The former origin is the likely previous session until refreshed.
+        picker.open(context: originB)
+        try checkCached(previous: "session:a", current: "session:b", "A to B cached opening")
+        deliver(previous: "session:a", current: "session:b")
+        try check(picker.items.map(\.id) == catalogIDs && selectedID() == "session:a",
+                  "Fresh B response changed catalog order or selected the wrong previous session")
+        picker.open(context: originA)
+        try checkCached(previous: "session:b", current: "session:a", "B to A cached opening")
+        deliver(previous: "session:b", current: "session:a")
+
+        // Deliberate navigation among cached rows wins over the default.
+        // The selected identity survives the refresh even when preferred
+        // history changes, and early Enter activates exactly that identity.
+        picker.open(context: originA)
+        picker.move(1)
+        try check(selectedID() == "session:b/tab", "Cached rows could not be navigated while opening")
+        picker.accept()
+        deliver(previous: "session:c", current: "session:a")
+        try check(activatedTargets() == ["session:c", "session:b/tab"] && selectedID() == "session:b/tab",
+                  "Fresh preferred selection overwrote deliberate cached navigation")
+        clearActivation()
+
+        picker.open(context: originA)
+        picker.move(1)
+        try check(selectedID() == "session:c/tab", "Removal fixture selected the wrong cached row")
+        picker.accept()
+        deliver(previous: "session:b", current: "session:a", omit: "session:c/tab")
+        try check(activatedTargets().count == 2,
+                  "Removed cached selection silently activated another target")
+
+        // Editing a search cancels the queued opening Enter. The eventual
+        // response may start a query but must never switch sessions itself.
+        picker.open(context: originA)
+        picker.accept()
+        picker.content.search.stringValue = "tab"
+        picker.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: picker.content.search))
+        deliver(previous: "session:c", current: "session:a")
+        deliver(previous: "session:c", current: "session:a", query: "tab")
+        try check(activatedTargets().count == 2 && picker.activation == nil,
+                  "Typing did not cancel the queued opening Enter")
+
+        picker.open(context: originA)
+        picker.accept()
+        picker.changeScope(picker.content.scopes[1])
+        deliver(previous: "session:c", current: "session:a")
+        deliver(previous: "session:c", current: "session:a", scope: "session")
+        try check(activatedTargets().count == 2 && picker.activation == nil,
+                  "Changing scope did not cancel the queued opening Enter")
+
+        picker.open(context: originA)
+        picker.accept()
+        picker.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: picker.panel))
+        deliver(previous: "session:c", current: "session:a")
+        try check(activatedTargets().count == 2 && picker.activation == nil,
+                  "Hiding the picker after changing apps did not cancel the queued Enter")
+
+        picker.open(context: originA)
+        picker.accept()
+        picker.showError("Synthetic collection failure")
+        deliver(previous: "session:c", current: "session:a")
+        try check(activatedTargets().count == 2 && picker.activation == nil,
+                  "A collection error did not cancel the queued opening Enter")
+
+        // Cached selection is made visible before presentation, instead of
+        // retaining a lower viewport and scrolling only after refresh.
         picker.open(context: originA)
         deliver(previous: "session:c", current: "session:a", extraRows: 40)
         picker.content.layoutSubtreeIfNeeded()
@@ -83,29 +181,13 @@ struct OpeningTests {
         try check(picker.content.scroll.contentView.bounds.minY > 0,
                   "Scrolling fixture did not leave the prior invocation below the first row")
         picker.open(context: originA)
-        try checkLoadingEmpty("same origin after scrolling")
-        try check(picker.content.scroll.contentView.bounds.minY == 0,
-                  "Opening retained the prior invocation's scroll offset")
-        deliver(previous: "session:b", current: "session:a", extraRows: 40)
-        try check(picker.items.first?.id == "session:b" && picker.content.table.selectedRow == 0
-                  && picker.content.scroll.contentView.bounds.minY == 0,
-                  "First authoritative frame did not show/select the previous session at the top")
+        let selected = picker.content.table.selectedRow
+        try check(selectedID() == "session:c" && picker.content.table.visibleRect.intersects(picker.content.table.rect(ofRow: selected)),
+                  "Cached selected session was not visible in the immediate opening frame")
+        deliver(previous: "session:c", current: "session:a", extraRows: 40)
 
-        // The session that was previously first is now current. Its old cached
-        // position must never appear as this invocation's first session.
-        picker.open(context: originB)
-        try checkLoadingEmpty("A to B reopen")
-        deliver(previous: "session:a", current: "session:b")
-        try check(picker.items.first?.id == "session:a" && picker.content.table.selectedRow == 0,
-                  "Fresh B results did not show/select previous A first")
-        picker.open(context: originA)
-        try checkLoadingEmpty("B to A reopen")
-        deliver(previous: "session:b", current: "session:a")
         picker.open(context: ["client_id": "client:two", "session_id": "session:a"])
         try checkLoadingEmpty("different client")
-
-        // Anonymous/partial contexts may receive valid results, but two missing
-        // IDs are not evidence that subsequent invocations share an origin.
         for context in [[:], ["client_id": "client:one"], ["session_id": "session:a"],
                         ["client_id": "", "session_id": "session:a"],
                         ["client_id": "client:one", "session_id": ""]] {
@@ -114,6 +196,17 @@ struct OpeningTests {
             picker.open(context: context)
             try checkLoadingEmpty("unknown origin \(context)")
         }
+        // Enter is also remembered on the first invocation, before there is
+        // any cached selection to display.
+        picker.open(context: ["client_id": "client:cold", "session_id": "session:a"])
+        try checkLoadingEmpty("cold Enter fixture")
+        let beforeColdEnter = activatedTargets().count
+        picker.accept()
+        deliver(previous: "session:c", current: "session:a")
+        try check(activatedTargets().count == beforeColdEnter + 1 && activatedTargets().last == "session:c"
+                  && selectedID() == "session:c", "Cold opening dropped the first Enter")
+        clearActivation()
+
         // Change the theme on the same controller and retained view instances.
         // Palette refresh must not reopen the picker or disturb the work in it.
         picker.open(context: originA)
@@ -195,6 +288,6 @@ struct OpeningTests {
                       && content.table.selectedRow == 1,
                       "\(theme.name): confirmation theme refresh disturbed picker state")
         }
-        print("Opening checks passed: authoritative previous-session first frame, changed-history reopening and controller/sheet themes preserving query/selection/scope/preview")
+        print("Opening checks passed: immediate cached catalog, previous-session selection, deferred Enter, navigation/typing and controller/sheet themes")
     }
 }
