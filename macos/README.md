@@ -87,6 +87,8 @@ The transport is `interdimux-picker://open?client_id=…&session_id=…&window_i
 
 ## Validation and performance
 
+CI runs locked Rust tests with `macos-picker` on Linux and both Mac architectures. The macOS jobs also build the AppKit bundle and run all offscreen checks with `bash macos/test.sh`. Live Rex tests and visible benchmarks remain opt-in. The individual checks are:
+
 ```sh
 cargo test --manifest-path rust/Cargo.toml --locked --features macos-picker
 python3 macos/test_backend.py

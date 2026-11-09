@@ -74,7 +74,7 @@ echo "==> the plugin"
 #   SC2154  a variable defined by the `eval` on the line above
 echo "==> the tests"
 "$SC" -S warning -e SC2155,SC2034,SC2164,SC2010,SC2154 \
-  tests/*.sh || rc=1
+  tests/*.sh macos/test.sh || rc=1
 
 # dev/ -- the dev image's and CI's install recipes, the host-side dev/run.sh
 # (POSIX sh, for macOS's /bin/sh), and the A/B harness in dev/perf/ -- is held

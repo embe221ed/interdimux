@@ -117,7 +117,7 @@ versions() {
 # Linux; the std targets are enough to type-check it, tests included.
 check_macos() {
   say "cargo check for macOS, x86_64 and arm64 (ci.yml: The Rust core type-checks for macOS)"
-  cargo check --locked --all-targets --manifest-path rust/Cargo.toml \
+  cargo check --locked --all-targets --features macos-picker --manifest-path rust/Cargo.toml \
     --target x86_64-apple-darwin --target aarch64-apple-darwin
 }
 
@@ -135,7 +135,7 @@ ci_leg() {
   local leg=$1 rc=0
   if [ "$leg" = rust ]; then
     say "rust tests (ci.yml: Rust tests)"
-    cargo test --release --locked --manifest-path rust/Cargo.toml || rc=1
+    cargo test --release --locked --features macos-picker --manifest-path rust/Cargo.toml || rc=1
     check_macos || rc=1
     msrv_test || rc=1
   fi

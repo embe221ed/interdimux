@@ -31,7 +31,7 @@ make ci R=rust             # one leg
 make ci-sigpipe            # the same with SIGPIPE ignored, as GitHub runs it
 make versions              # every pinned tool, present and at its pin
 make lint                  # tests/lint.sh, then actionlint, hadolint, lychee
-make check-macos           # type-check the Rust core for x86_64 and arm64 macOS
+make check-macos           # type-check the core/native helper for x86_64 and arm64 macOS
 make msrv                  # build and test the core on its rust-version (1.74)
 make bench ARGS='HEAD~1'   # tests/bench.sh, this tree against a ref
 make perfbench             # dev/perf/bench.sh: is this checkout slower than main?

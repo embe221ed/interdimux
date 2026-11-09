@@ -460,7 +460,11 @@ macOS's `/bin/sh` running every fzf bind and tmux timer -- was written
 against one Mac, and checked since only through seams on Linux.
 
 **Fix:** the `macos` job, on `macos-26` (Apple Silicon) and `macos-26-intel`.
-It runs the Rust tests natively and `tests/smoke.sh`, an end-to-end check
+It runs locked Rust tests with `macos-picker`, builds the native AppKit bundle,
+and runs all offscreen Swift/Python checks through `bash macos/test.sh` on
+both architectures. Live Rex actions and visible benchmarks remain opt-in.
+The Linux Rust leg also tests the native helper feature. The Mac jobs also run
+`tests/smoke.sh`, an end-to-end check
 written to what BSD and GNU userlands share (the suites are not: GNU sed
 escapes, `timeout`, `/proc`, `strace`).  The smoke runs in the Linux rust leg
 too, so a failure on a Mac alone is the Mac's.  Two things it needed:

@@ -265,16 +265,16 @@ jobs:
       # Renderer-independent, so once is enough.
       - name: Rust tests
         if: matrix.renderer == 'rust'
-        run: cargo test --release --manifest-path rust/Cargo.toml
+        run: cargo test --release --locked --features macos-picker --manifest-path rust/Cargo.toml
 
       # The macOS process backend (rust/src/macproc.rs) is not even compiled
-      # on Linux.  The crate has no build.rs and only std FFI, so the std
-      # targets are enough to type-check it, tests included, for both Macs.
+      # on Linux. The std targets type-check the core and native helper for
+      # both Macs; the macos job also compiles the AppKit frontend natively.
       - name: The Rust core type-checks for macOS
         if: matrix.renderer == 'rust'
         run: |
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          cargo check --locked --all-targets --manifest-path rust/Cargo.toml \
+          cargo check --locked --all-targets --features macos-picker --manifest-path rust/Cargo.toml \
             --target x86_64-apple-darwin --target aarch64-apple-darwin
 
       # rust/Cargo.toml promises a rust-version: an autobuild with an older
@@ -335,8 +335,9 @@ jobs:
   # The plugin on real Macs, which nothing else runs it on: an Apple Silicon
   # runner and an Intel one (GitHub supports its x86_64 images until August
   # 2027).  Not the suites, which lean on GNU tools, /proc and strace.  The
-  # Rust tests, natively, which is the only place rust/src/macproc.rs's
-  # libproc backend runs; and tests/smoke.sh, which drives the plugin's main
+  # Rust/native-picker tests and the AppKit bundle, natively, which is the
+  # only place rust/src/macproc.rs's libproc backend runs; and tests/smoke.sh,
+  # which drives the plugin's main
   # paths against a private tmux server on the macOS userland: BSD ps, sed,
   # awk, date, find and at, macOS's /bin/sh, and its /bin/bash 3.2, refused.
   #
@@ -407,6 +408,8 @@ jobs:
           tmux -V
           fzf --version
           cargo --version
+          python3 --version
+          xcrun swiftc --version
           awk --version 2>&1 | head -1
           for g in sed date find; do
             if "$g" --version >/dev/null 2>&1; then echo "a GNU $g is on PATH: the smoke would not meet the BSD one"; exit 1; fi
@@ -415,17 +418,30 @@ jobs:
 
       - name: Rust tests (natively, the libproc backend included)
         id: rust-tests
-        run: cargo test --release --locked --manifest-path rust/Cargo.toml
+        run: cargo test --release --locked --features macos-picker --manifest-path rust/Cargo.toml
 
-      # The smoke needs the built core, not passing Rust tests: a red Rust
-      # test still lets it run, so one push shows both.  (The job stays red.)
+      # These use temporary helpers and offscreen AppKit views. They never
+      # launch the picker or mutate a live Rex session. Run all suites even
+      # after a Rust failure, while retaining each step's failure status.
+      - name: Native macOS picker checks
+        id: native-tests
+        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
+        run: bash macos/test.sh
+
+      # Keep the terminal smoke independent of Swift failures: a broken
+      # native frontend must not prevent the ordinary core from being checked.
       - name: Build the Rust core
         id: core
-        if: success() || steps.rust-tests.outcome == 'failure'
+        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
         run: cargo build --release --locked --manifest-path rust/Cargo.toml
 
+      # Build the actual host AppKit bundle on both Mac architectures.
+      - name: Build the native macOS picker
+        if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}
+        run: bash macos/build.sh
+
       - name: Smoke test
-        if: steps.core.outcome == 'success' && (success() || steps.rust-tests.outcome == 'failure')
+        if: ${{ !cancelled() && steps.core.outcome == 'success' }}
         env:
           SMOKE_STRICT: "1"
         run: bash tests/smoke.sh
