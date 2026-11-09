@@ -1038,8 +1038,13 @@ if [ "${1:-}" = "--action" ]; then
             ;;
         esac
 
+        # A window can have several links in one session. list-panes -s then
+        # repeats its physical pane IDs; deliver and count each pane once.
+        declare -A send_seen=()
         sent=0 failed=0
         for t in "${send_targets[@]}"; do
+          [[ ${send_seen[$t]+x} ]] && continue
+          send_seen[$t]=1
           # send_input: a lone key name pressed, any other text typed
           # literally with a trailing ';' intact, and a pane in copy-mode
           # taken out of it first so the command actually runs
