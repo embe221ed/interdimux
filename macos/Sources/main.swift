@@ -30,6 +30,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var openingClientID: String?
     private var openingSessionID: String?
     private var openingRefresh = false
+    private var openingRequest: Int?
     private var openingSelectionID: String?
     private var acceptOpeningWhenReady = false
     // The protocol caps each result at 100. Keep cells for those bounded row
@@ -215,6 +216,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         startedAt = ProcessInfo.processInfo.systemUptime
         loading = true
         openingRefresh = false
+        openingRequest = nil
         openingSelectionID = nil
         acceptOpeningWhenReady = false
         openingFrameMS = nil
@@ -241,6 +243,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         do {
             try backend.start()
             pending = backend.send("open", fields: ["context": context])
+            openingRequest = pending
         } catch { startupError = "Could not start the search helper: \(error.localizedDescription)" }
         scope = "all"
         directoriesLoaded = false
@@ -441,6 +444,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         guard type == "results" else { return }
         let wasLoading = loading
         let wasOpening = openingRefresh
+        let openingReply = openingRequest == id
+        if openingReply { openingRequest = nil }
         let openingSelection = openingSelectionID
         let acceptOpening = acceptOpeningWhenReady
         openingRefresh = false
@@ -463,18 +468,40 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if scope == "directory" && !directoriesLoaded { loadDirectories(); return }
         if resultQuery != content.search.stringValue || resultScope != scope || resultField != searchField || resultAction != (targetRoute?.operation ?? "") { query(); return }
         let previous = content.table.selectedRow >= 0 && content.table.selectedRow < items.count ? items[content.table.selectedRow].id : nil
-        items = (message["rows"] as? [[String: Any]] ?? []).compactMap(PickerItem.init)
-        tree = PickerTreeLayout.positions(for: items)
+        let preserveOpening = openingReply && openingFrameHadRows && !dashboardVisible
+            && resultQuery.isEmpty && resultScope == "all" && resultField == "all" && resultAction.isEmpty
+        let openingViewport = content.scroll.contentView.bounds.origin
+        let fresh = (message["rows"] as? [[String: Any]] ?? []).compactMap(PickerItem.init)
+        let updated = preserveOpening ? PickerTreeLayout.preservingOrder(of: items, in: fresh) : fresh
+        if updated != items {
+            let structureChanged = updated.count != items.count || zip(updated, items).contains {
+                $0.id != $1.id || $0.parentID != $1.parentID
+            }
+            items = updated
+            if structureChanged { tree = PickerTreeLayout.positions(for: items) }
+            if !dashboardVisible { updateTable() }
+        }
         displayedRequest = id
-        if !dashboardVisible { updateTable() }
         let search = PickerSearchIdentity(query: resultQuery, scope: resultScope, field: resultField, actionFilter: resultAction,
             directoryBase: scope == "directory" ? directoryBase : nil, directoryDeep: scope == "directory" && directoryDeep)
         if !dashboardVisible {
             if let selected = PickerSelection.index(in: items, previousID: openingSelection ?? previous, preferredID: message["preferred_id"] as? String,
                     previousSearch: wasOpening && openingSelection != nil ? search : displayedSearch, search: search) {
-                content.table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
-                content.table.scrollRowToVisible(selected)
+                if content.table.selectedRow != selected {
+                    content.table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
+                }
+                if !preserveOpening { content.table.scrollRowToVisible(selected) }
             } else { content.table.deselectAll(nil) }
+            if preserveOpening {
+                let clip = content.scroll.contentView
+                var bounds = clip.bounds
+                bounds.origin = openingViewport
+                let origin = clip.constrainBoundsRect(bounds).origin
+                if clip.bounds.origin != origin {
+                    clip.scroll(to: origin)
+                    content.scroll.reflectScrolledClipView(clip)
+                }
+            }
         }
         displayedSearch = search
         let matched = (message["matched"] as? NSNumber)?.intValue ?? items.count
@@ -533,7 +560,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if let output = openBenchmarkOutput, wasLoading {
             var sample: [String: Any] = ["ready_ms": (displayedAt - startedAt) * 1000,
                                        "surface": dashboardVisible ? "dashboard" : "picker",
-                                       "cached_rows": wasOpening && openingFrameHadRows]
+                                       "cached_rows": openingReply && openingFrameHadRows]
             if let openingFrameMS { sample[dashboardVisible ? "dashboard_frame_ms" : "picker_frame_ms"] = openingFrameMS }
             if let timings = message["open_timing_ms"] { sample["helper_stages"] = timings }
             openBenchmarkSamples.append(sample)
@@ -1174,6 +1201,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     func showError(_ message: String) {
         acceptOpeningWhenReady = false
         openingRefresh = false
+        openingRequest = nil
         openingSelectionID = nil
         loading = false
         activation = nil

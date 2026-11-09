@@ -30,15 +30,16 @@ struct OpeningTests {
 
         let catalogIDs = ["session:a", "session:a/tab", "session:b", "session:b/tab", "session:c", "session:c/tab"]
         func deliver(previous: String, current: String, extraRows: Int = 0,
-                     omit: String? = nil, query: String = "", scope: String = "all") {
-            let rows: [[String: Any]] = ["a", "b", "c"].flatMap { name -> [[String: Any]] in
+                     omit: String? = nil, query: String = "", scope: String = "all",
+                     sessionOrder: [String] = ["a", "b", "c"], customRows: [[String: Any]]? = nil) {
+            let rows: [[String: Any]] = sessionOrder.flatMap { name -> [[String: Any]] in
                 let id = "session:\(name)"
                 return [
                     ["id": id, "kind": "session", "title": name.uppercased(), "current": id == current],
                     ["id": id + "/tab", "kind": "window", "title": "\(name.uppercased()) tab", "parent_id": id]
                 ]
             } + (0..<extraRows).map { ["id": "session:extra-\($0)", "kind": "session", "title": "Extra \($0)"] }
-            let included = rows.filter { ($0["id"] as? String) != omit }
+            let included = (customRows ?? rows).filter { ($0["id"] as? String) != omit }
             picker.receive([
                 "id": picker.pending, "type": "results", "query": query, "scope": scope,
                 "search_field": "all", "action_filter": "", "preferred_id": previous,
@@ -119,6 +120,85 @@ struct OpeningTests {
         try checkCached(previous: "session:b", current: "session:a", "B to A cached opening")
         deliver(previous: "session:b", current: "session:a")
 
+        // Rex can return the same catalog in a different order after changing
+        // sessions. A warm opening must keep the exact frame already shown,
+        // including its viewport, even when the newly preferred root is far
+        // below that viewport. Only selection should change on this reply.
+        picker.open(context: originA)
+        deliver(previous: "session:b", current: "session:a", extraRows: 40)
+        picker.open(context: originA)
+        picker.content.layoutSubtreeIfNeeded()
+        let cachedOrder = picker.items.map(\.id)
+        let cachedTree = picker.tree
+        let cachedRows = picker.content.table.numberOfRows
+        let cachedViewport = picker.content.scroll.contentView.bounds.origin
+        let cachedCell = picker.content.table.view(atColumn: 0, row: 2, makeIfNecessary: true)
+        let cachedRowView = picker.content.table.rowView(atRow: 2, makeIfNecessary: true)
+        deliver(previous: "session:extra-39", current: "session:a", extraRows: 40,
+                sessionOrder: ["c", "a", "b"])
+        try check(picker.items.map(\.id) == cachedOrder && picker.tree == cachedTree
+                  && picker.content.table.numberOfRows == cachedRows,
+                  "Warm opening refresh replaced the cached row order/tree with a shuffled catalog")
+        try check(selectedID() == "session:extra-39",
+                  "Keeping the cached frame prevented selection of the fresh previous session")
+        try check(picker.content.scroll.contentView.bounds.origin == cachedViewport,
+                  "Warm opening refresh visibly scrolled the cached frame to its new selection")
+        try check(picker.content.table.view(atColumn: 0, row: 2, makeIfNecessary: true) === cachedCell
+                  && picker.content.table.rowView(atRow: 2, makeIfNecessary: true) === cachedRowView,
+                  "Warm opening refresh replaced an unchanged native row/cell")
+        picker.open(context: originA)
+        try check(picker.items.map(\.id) == cachedOrder && selectedID() == "session:extra-39",
+                  "Reopening forgot the retained catalog order or previous-session selection")
+        deliver(previous: "session:b", current: "session:a", extraRows: 40,
+                sessionOrder: ["b", "c", "a"])
+        try check(picker.items.map(\.id) == cachedOrder,
+                  "A second shuffled opening response changed the retained catalog order")
+
+        // Membership changes still appear, without disturbing surviving root
+        // groups. New children stay beside their parent, reparented children
+        // follow their fresh parent, and new root groups go after old ones.
+        picker.open(context: originA)
+        deliver(previous: "session:b", current: "session:a", customRows: [
+            ["id": "session:c", "kind": "session", "title": "C"],
+            ["id": "session:c/tab", "kind": "window", "title": "C tab", "parent_id": "session:c"],
+            ["id": "session:d", "kind": "session", "title": "New D"],
+            ["id": "session:a", "kind": "session", "title": "A", "current": true],
+            ["id": "session:a/new", "kind": "window", "title": "New A tab", "parent_id": "session:a"],
+            ["id": "session:b", "kind": "session", "title": "B"],
+            ["id": "session:a/tab", "kind": "window", "title": "Reparented A tab", "parent_id": "session:b"]
+        ])
+        try check(picker.items.map(\.id) == ["session:a", "session:a/new", "session:b", "session:a/tab", "session:c", "session:c/tab", "session:d"],
+                  "Opening reconciliation lost stable groups, appended a child outside its parent, or retained removed rows")
+        try check(picker.tree.map(\.depth) == [0, 1, 0, 1, 0, 1, 0]
+                  && picker.items[3].parentID == "session:b" && selectedID() == "session:b",
+                  "Opening reconciliation broke fresh parentage or previous-session selection")
+
+        // Explicit refresh remains a way to request a new catalog layout.
+        // Restore the small A/B/C fixture for the navigation checks below.
+        picker.refresh()
+        deliver(previous: "session:b", current: "session:a", sessionOrder: ["b", "c", "a"])
+        try check(picker.items.map(\.id) == ["session:b", "session:b/tab", "session:c", "session:c/tab", "session:a", "session:a/tab"],
+                  "Explicit refresh unexpectedly froze the prior cached catalog order")
+        picker.refresh()
+        deliver(previous: "session:b", current: "session:a")
+
+        // Query relevance and mutation-triggered refreshes still use the
+        // helper's new layout; the frozen frame applies only to reopening.
+        picker.content.search.stringValue = "tab"
+        picker.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: picker.content.search))
+        deliver(previous: "session:c", current: "session:a", query: "tab", sessionOrder: ["c", "b", "a"])
+        try check(picker.items.map(\.id) == ["session:c", "session:c/tab", "session:b", "session:b/tab", "session:a", "session:a/tab"],
+                  "Cached opening order overrode a newly ranked search")
+        picker.clearSearch()
+        deliver(previous: "session:b", current: "session:a")
+        picker.sendAction("rename", target: picker.items[0], extra: ["value": "Renamed fixture"])
+        picker.receive(["id": picker.actionRequest!, "type": "action_done", "operation": "rename", "close_picker": false])
+        deliver(previous: "session:b", current: "session:a", sessionOrder: ["b", "a", "c"])
+        try check(picker.items.map(\.id) == ["session:b", "session:b/tab", "session:a", "session:a/tab", "session:c", "session:c/tab"],
+                  "Mutation refresh unexpectedly retained the opening's old layout")
+        picker.refresh()
+        deliver(previous: "session:b", current: "session:a")
+
         // Deliberate navigation among cached rows wins over the default.
         // The selected identity survives the refresh even when preferred
         // history changes, and early Enter activates exactly that identity.
@@ -158,12 +238,18 @@ struct OpeningTests {
         try check(activatedTargets().count == 2 && picker.activation == nil,
                   "Changing scope did not cancel the queued opening Enter")
 
+        picker.changeScope(picker.content.scopes[0])
+        deliver(previous: "session:c", current: "session:a")
+
         picker.open(context: originA)
         picker.accept()
+        let hiddenOpeningOrder = picker.items.map(\.id)
         picker.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: picker.panel))
-        deliver(previous: "session:c", current: "session:a")
+        deliver(previous: "session:c", current: "session:a", sessionOrder: ["c", "b", "a"])
         try check(activatedTargets().count == 2 && picker.activation == nil,
                   "Hiding the picker after changing apps did not cancel the queued Enter")
+        try check(picker.openingItems.map(\.id) == hiddenOpeningOrder,
+                  "A hidden opening reply reordered the cache for the next invocation")
 
         picker.open(context: originA)
         picker.accept()
@@ -288,6 +374,6 @@ struct OpeningTests {
                       && content.table.selectedRow == 1,
                       "\(theme.name): confirmation theme refresh disturbed picker state")
         }
-        print("Opening checks passed: immediate cached catalog, previous-session selection, deferred Enter, navigation/typing and controller/sheet themes")
+        print("Opening checks passed: unchanged cached frame across shuffled catalogs, previous-session selection, deferred Enter, navigation/typing and controller/sheet themes")
     }
 }
