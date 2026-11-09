@@ -23,10 +23,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var panel: PickerPanel!
     private var items: [PickerItem] = []
     private var tree: [PickerTreePosition] = []
-    private var openingItems: [PickerItem] = []
     private var openingClientID: String?
     private var openingSessionID: String?
-    private var openingTotal = 0
     // The protocol caps each result at 100. Keep cells for those bounded row
     // slots across count changes, including no-match -> results transitions.
     private var cells: [Int: PickerCell] = [:]
@@ -59,7 +57,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var capturePath: String?
     private var openBenchmarkOutput: String?
     private var openBenchmarkSamples: [[String: Any]] = []
-    private var cachedFrameMS: Double?
+    private var openingFrameMS: Double?
     private var currentTheme: RexTheme?
     private var themeTimer: Timer?
     private var appearanceObservation: NSKeyValueObservation?
@@ -208,7 +206,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         refreshTheme()
         startedAt = ProcessInfo.processInfo.systemUptime
         loading = true
-        cachedFrameMS = nil
+        openingFrameMS = nil
         hasOpened = true
         queryDeferred = false
         dashboardVisible = showDashboard
@@ -226,6 +224,13 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         } else if !panel.isVisible {
             originApplication = nil
         }
+        // Collect while AppKit prepares the opening frame, rather than
+        // starting the request only after layout and presentation finish.
+        var startupError: String?
+        do {
+            try backend.start()
+            pending = backend.send("open", fields: ["context": context])
+        } catch { startupError = "Could not start the search helper: \(error.localizedDescription)" }
         scope = "all"
         directoriesLoaded = false
         directoryBase = nil
@@ -236,29 +241,31 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.search.stringValue = ""
         content.clear.isHidden = true
         for button in content.scopes { button.chosen = button.tag == 0 }
-        // Session order is relative to the origin. Reusing another session's
-        // frame can briefly put the new current session ahead of its previous
-        // session. Unknown origins wait for fresh, authoritative ordering too.
-        let reuseOpening = supplied["client_id"].map { !$0.isEmpty && $0 == openingClientID } == true
+        // Even the same origin can have a different previous session now.
+        // Present search immediately, but paint rows only after their order
+        // is known so opening never flashes an obsolete list first.
+        let reuseSummary = supplied["client_id"].map { !$0.isEmpty && $0 == openingClientID } == true
             && supplied["session_id"].map { !$0.isEmpty && $0 == openingSessionID } == true
-        items = reuseOpening ? openingItems : []
-        tree = PickerTreeLayout.positions(for: items)
+        items = []
+        tree = []
         displayedRequest = -1
         displayedSearch = nil
         if !showDashboard {
             updateTable()
             content.table.deselectAll(nil)
         }
-        content.count.stringValue = items.isEmpty ? "" : "\(openingTotal) places"
-        content.empty.isHidden = !items.isEmpty
+        content.scroll.contentView.scroll(to: .zero)
+        content.scroll.reflectScrolledClipView(content.scroll.contentView)
+        content.count.stringValue = ""
+        content.empty.isHidden = false
         content.emptyTitle.stringValue = "Loading your workspace"
         content.emptyDetail.stringValue = "Sessions, tabs and panes, together."
         if content.previewVisible { content.showPreview(title: "Preview", detail: "", text: "Choose a terminal or project to inspect.") }
-        content.status.stringValue = items.isEmpty ? "Connecting to Rex…" : "Refreshing…"
+        content.status.stringValue = "Connecting to Rex…"
         content.status.textColor = Palette.secondary
         if showDashboard {
             let view = ensureDashboard()
-            view.updateSummary(DashboardSummary(counts: reuseOpening ? dashboardCounts : [:]))
+            view.updateSummary(DashboardSummary(counts: reuseSummary ? dashboardCounts : [:]))
             view.resetSelection()
             view.setLoading(true)
             view.setStatus("Refreshing your workspace…")
@@ -267,15 +274,12 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         panel.makeKeyAndOrderFront(nil)
         if showDashboard { panel.makeFirstResponder(ensureDashboard()) }
         else { focusSearch() }
-        if openBenchmarkOutput != nil && (!items.isEmpty || showDashboard) {
+        if openBenchmarkOutput != nil {
             panel.contentView?.layoutSubtreeIfNeeded()
             panel.displayIfNeeded()
-            cachedFrameMS = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+            openingFrameMS = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
         }
-        do {
-            try backend.start()
-            pending = backend.send("open", fields: ["context": context])
-        } catch { showError("Could not start the search helper: \(error.localizedDescription)") }
+        if let startupError { showError(startupError) }
     }
 
     private func focusSearch() {
@@ -441,10 +445,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let shown = (message["shown_matches"] as? NSNumber)?.intValue ?? items.count
         let attention = (message["attention_count"] as? NSNumber)?.intValue ?? 0
         if scope == "all", resultQuery.isEmpty, searchField == "all", resultAction.isEmpty {
-            openingItems = items
             openingClientID = context["client_id"]
             openingSessionID = context["session_id"]
-            openingTotal = matched
         }
         content.scopes[4].title = "Attention \(attention)"
         content.scopes[4].setAccessibilityLabel("Attention, \(attention) agents, Command 5")
@@ -486,13 +488,13 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if let output = openBenchmarkOutput, wasLoading {
             var sample: [String: Any] = ["ready_ms": (displayedAt - startedAt) * 1000,
                                        "surface": dashboardVisible ? "dashboard" : "picker",
-                                       "cached_rows": !dashboardVisible && cachedFrameMS != nil]
-            if let cachedFrameMS { sample[dashboardVisible ? "dashboard_frame_ms" : "cached_frame_ms"] = cachedFrameMS }
+                                       "cached_rows": false]
+            if let openingFrameMS { sample[dashboardVisible ? "dashboard_frame_ms" : "picker_frame_ms"] = openingFrameMS }
             if let timings = message["open_timing_ms"] { sample["helper_stages"] = timings }
             openBenchmarkSamples.append(sample)
             if openBenchmarkSamples.count == 12 {
                 let report: [String: Any] = ["samples": openBenchmarkSamples,
-                    "measurement": "native open handler through cached/fresh display submission; excludes hotkey/Launch Services and compositor/GPU presentation"]
+                    "measurement": "native open handler through loading/ordered-results display submission; excludes hotkey/Launch Services and compositor/GPU presentation"]
                 if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: URL(fileURLWithPath: output)) }
                 NSApp.terminate(nil)
             } else {

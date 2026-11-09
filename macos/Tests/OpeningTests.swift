@@ -28,21 +28,22 @@ struct OpeningTests {
         let originA = ["client_id": "client:one", "session_id": "session:a"]
         let originB = ["client_id": "client:one", "session_id": "session:b"]
 
-        func deliver(previous: String, current: String) {
+        func deliver(previous: String, current: String, extraRows: Int = 0) {
+            let rows: [[String: Any]] = [
+                ["id": previous, "kind": "session", "title": "Previous"],
+                ["id": previous + "/tab", "kind": "window", "title": "Previous tab", "parent_id": previous],
+                ["id": current, "kind": "session", "title": "Current", "current": true]
+            ] + (0..<extraRows).map { ["id": "session:extra-\($0)", "kind": "session", "title": "Extra \($0)"] }
             picker.receive([
                 "id": picker.pending, "type": "results", "query": "", "scope": "all",
                 "search_field": "all", "action_filter": "", "preferred_id": previous,
-                "matched": 3, "total": 3, "shown_matches": 3,
-                "rows": [
-                    ["id": previous, "kind": "session", "title": "Previous"],
-                    ["id": previous + "/tab", "kind": "window", "title": "Previous tab", "parent_id": previous],
-                    ["id": current, "kind": "session", "title": "Current", "current": true]
-                ]
+                "matched": rows.count, "total": rows.count, "shown_matches": rows.count,
+                "rows": rows
             ])
         }
         func checkLoadingEmpty(_ label: String) throws {
             try check(picker.items.isEmpty && picker.content.table.numberOfRows == 0,
-                      "\(label): painted another origin's cached session order")
+                      "\(label): painted unverified cached session order")
             try check(picker.content.table.selectedRow == -1 && picker.displayedRequest == -1,
                       "\(label): retained an actionable stale selection")
             try check(picker.loading && !picker.content.empty.isHidden,
@@ -56,16 +57,39 @@ struct OpeningTests {
         try check(picker.items.first?.id == "session:b" && picker.content.table.selectedRow == 0,
                   "Fresh opening did not select the backend's previous session")
 
-        // A same-origin reopen retains a fast frame but must not preserve a
-        // deliberate selection from the prior invocation as an activation.
+        // Returning to the same session does not prove that its previous
+        // session is unchanged: Rex can have visited C and returned to A while
+        // this picker was closed. Never paint the old B-first frame or a stale
+        // selection before the authoritative response arrives.
         picker.content.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
         picker.open(context: originA)
-        try check(picker.items.map(\.id) == ["session:b", "session:b/tab", "session:a"],
-                  "Same-origin reopening unnecessarily lost its cached frame")
-        try check(picker.content.table.selectedRow == -1 && picker.displayedRequest == -1,
-                  "Cached rows became actionable before a fresh response")
-        deliver(previous: "session:b", current: "session:a")
-        try check(picker.content.table.selectedRow == 0, "Fresh results did not restore preferred previous session")
+        try checkLoadingEmpty("same origin with changed history")
+        deliver(previous: "session:c", current: "session:a")
+        try check(picker.items.first?.id == "session:c" && picker.content.table.selectedRow == 0,
+                  "Same-origin reopening did not display/select the new previous session first")
+        picker.open(context: originA)
+        try checkLoadingEmpty("same origin with unchanged history")
+        deliver(previous: "session:c", current: "session:a")
+        try check(picker.items.first?.id == "session:c" && picker.content.table.selectedRow == 0,
+                  "Repeated opening did not retain the authoritative order/selection")
+
+        // A prior invocation can leave the table scrolled far below row zero.
+        // Its first fresh frame must already show the previous session at the
+        // top, rather than visibly scrolling into place after presentation.
+        picker.open(context: originA)
+        deliver(previous: "session:c", current: "session:a", extraRows: 40)
+        picker.content.layoutSubtreeIfNeeded()
+        picker.content.table.scrollRowToVisible(picker.items.count - 1)
+        try check(picker.content.scroll.contentView.bounds.minY > 0,
+                  "Scrolling fixture did not leave the prior invocation below the first row")
+        picker.open(context: originA)
+        try checkLoadingEmpty("same origin after scrolling")
+        try check(picker.content.scroll.contentView.bounds.minY == 0,
+                  "Opening retained the prior invocation's scroll offset")
+        deliver(previous: "session:b", current: "session:a", extraRows: 40)
+        try check(picker.items.first?.id == "session:b" && picker.content.table.selectedRow == 0
+                  && picker.content.scroll.contentView.bounds.minY == 0,
+                  "First authoritative frame did not show/select the previous session at the top")
 
         // The session that was previously first is now current. Its old cached
         // position must never appear as this invocation's first session.
@@ -171,6 +195,6 @@ struct OpeningTests {
                       && content.table.selectedRow == 1,
                       "\(theme.name): confirmation theme refresh disturbed picker state")
         }
-        print("Opening checks passed: previous-session selection, origin-safe cache, inactive cached rows and controller/sheet themes preserving query/selection/scope/preview")
+        print("Opening checks passed: authoritative previous-session first frame, changed-history reopening and controller/sheet themes preserving query/selection/scope/preview")
     }
 }
