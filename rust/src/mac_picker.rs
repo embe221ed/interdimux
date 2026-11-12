@@ -3,6 +3,8 @@
 //! Only open/refresh collect Rex state. Queries use one persistent, two-thread
 //! matcher and full metadata, independent of terminal rendering or fzf. Fixture
 //! mode is deliberately incapable of activating anything on a real server.
+//! A typed miss may request one bounded background zoxide inventory; queries
+//! only poll its channel and match cached paths, never wait on that process.
 
 use crate::model::{Snapshot, Target};
 use crate::rex::{self, RexContext};
@@ -13,6 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread::JoinHandle;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -265,11 +269,62 @@ impl Hierarchy {
     }
 }
 
+#[derive(Default)]
+struct LazyProjects {
+    paths: Option<Vec<String>>,
+    receiver: Option<Receiver<Vec<String>>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl LazyProjects {
+    fn start(&mut self) {
+        if self.paths.is_some() || self.receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("imux-zoxide-inventory".into())
+            .spawn(move || { let _ = sender.send(crate::projects::zoxide_inventory()); })
+        {
+            Ok(worker) => {
+                self.receiver = Some(receiver);
+                self.worker = Some(worker);
+            }
+            Err(_) => self.paths = Some(Vec::new()),
+        }
+    }
+
+    fn poll(&mut self) -> bool {
+        let completed = self.receiver.as_ref().and_then(|receiver| match receiver.try_recv() {
+            Ok(paths) => Some(paths),
+            Err(TryRecvError::Disconnected) => Some(Vec::new()),
+            Err(TryRecvError::Empty) => None,
+        });
+        if let Some(paths) = completed {
+            self.paths = Some(paths);
+            self.receiver = None;
+            if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+            return true;
+        }
+        false
+    }
+}
+
+impl Drop for LazyProjects {
+    fn drop(&mut self) {
+        // The optional worker has its own bounded child deadline. Join on
+        // normal shutdown so its process group is killed/reaped before exit.
+        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+    }
+}
+
 struct Picker {
     fixture: Option<PathBuf>,
     defaults: RexContext,
     context: Option<RexContext>,
     snapshot: Option<Snapshot>,
+    lazy_projects: LazyProjects,
+    projects_indexed: bool,
     preferred_session_id: Option<String>,
     rows: Vec<Candidate>,
     by_id: HashMap<String, usize>,
@@ -313,6 +368,8 @@ impl Picker {
             defaults,
             context: None,
             snapshot: None,
+            lazy_projects: LazyProjects::default(),
+            projects_indexed: false,
             preferred_session_id: None,
             rows: Vec::new(),
             by_id: HashMap::new(),
@@ -386,6 +443,7 @@ impl Picker {
         self.opened = false;
         self.context = None;
         self.snapshot = None;
+        self.projects_indexed = false;
         self.preferred_session_id = None;
         self.query.clear();
         self.scope = "all".into();
@@ -484,7 +542,40 @@ impl Picker {
             .is_some_and(|(context, snapshot)| dashboard::origin(context, snapshot).is_ok());
     }
 
+    fn update_lazy_projects(&mut self) -> Result<(), String> {
+        if self.lazy_projects.poll() { self.projects_indexed = false; }
+        if self.projects_indexed { return Ok(()); }
+        let (Some(paths), Some(snapshot)) = (&self.lazy_projects.paths, &self.snapshot) else {
+            return Ok(());
+        };
+        if paths.is_empty() {
+            self.projects_indexed = true;
+            return Ok(());
+        }
+        let mut rows = self.rows.clone();
+        let mut changed = false;
+        let mut by_id: HashMap<_, _> = rows.iter().enumerate()
+            .map(|(index, row)| (row.id.clone(), index)).collect();
+        let visible = self.directories.base.is_none() && !self.directories.deep;
+        for mut row in directories::candidates(crate::projects::cached_paths(snapshot, paths)) {
+            if let Some(&index) = by_id.get(&row.id) {
+                changed |= !rows[index].main_recent;
+                rows[index].main_recent = true;
+            } else {
+                changed = true;
+                row.main_recent = true;
+                row.directory_visible = visible;
+                by_id.insert(row.id.clone(), rows.len());
+                rows.push(row);
+            }
+        }
+        if changed { self.replace(rows)?; }
+        self.projects_indexed = true;
+        Ok(())
+    }
+
     fn results(&mut self, id: u64, started: Instant) -> Result<Value, String> {
+        self.update_lazy_projects()?;
         self.pending_create = None;
         // Scope-only changes and repeated queries reuse the completed match.
         // Plain ASCII fuzzy input can narrow prior results. Syntax can change
@@ -552,6 +643,18 @@ impl Picker {
             ranks[index] = rank;
         }
         let matched = ranked.len();
+        // Only a typed miss asks the frontend to start optional enrichment.
+        // Opening and cached hits never spawn zoxide, probe paths, or scan roots.
+        let project_miss = self.fixture.is_none() && self.snapshot.is_some()
+            && matched == 0 && !empty_query && self.scope == "all"
+            && self.action_filter.is_empty()
+            && matches!(self.search_field, SearchField::All | SearchField::Name | SearchField::Path)
+            && creation_label(&self.query).is_some()
+            && crate::env_text("INTERDIMUX_USE_ZOXIDE") != "off"
+            && crate::env_text("INTERDIMUX_SHOW_DIRS") != "off";
+        let projects_needed = project_miss && self.lazy_projects.paths.is_none()
+            && self.lazy_projects.receiver.is_none();
+        let projects_loading = project_miss && self.lazy_projects.receiver.is_some();
         // An empty query preserves catalog sessions and original tab/pane order,
         // even when the source lists all tabs before listing any panes.
         let order = if empty_query {
@@ -634,6 +737,7 @@ impl Picker {
             stack.extend(siblings(&self.hierarchy.children[index]));
         }
         if matched == 0
+            && !projects_needed && !projects_loading
             && self.allow_create
             && self.scope == "all"
             && self.action_filter.is_empty()
@@ -669,6 +773,7 @@ impl Picker {
             "action_filter":self.action_filter,
             "directories_base":self.directories.base,"directories_loaded":self.directories.loaded,
             "directories_deep":self.directories.deep,
+            "projects_needed":projects_needed,"projects_loading":projects_loading,
             "can_create":self.pending_create.is_some(),"open_timing_ms":self.open_timing_ms,
             "dashboard":dashboard,
             "elapsed_ms":started.elapsed().as_secs_f64()*1000.0}))
@@ -712,7 +817,7 @@ impl Picker {
         }
         if matches!(
             operation,
-            "query" | "refresh" | "directories" | "action" | "dashboard_action"
+            "query" | "load_projects" | "refresh" | "directories" | "action" | "dashboard_action"
         ) {
             // Even a rejected new query invalidates the prior create choice.
             self.pending_create = None;
@@ -738,7 +843,7 @@ impl Picker {
                 response_object.insert("operation".into(), json!(operation));
                 Ok(response)
             }
-            "query" => {
+            "query" | "load_projects" => {
                 let query = request["query"].as_str().ok_or("query must be a string")?;
                 if query.len() > MAX_QUERY {
                     return Err("Query exceeds 4096 bytes".into());
@@ -779,7 +884,11 @@ impl Picker {
                 self.search_field = field;
                 self.allow_create = allow_create;
                 self.action_filter = action_filter.into();
-                self.results(id, started)
+                let response = self.results(id, started)?;
+                if operation == "load_projects" && response["projects_needed"] == true {
+                    self.lazy_projects.start();
+                    self.results(id, started)
+                } else { Ok(response) }
             }
             "refresh" => {
                 self.refresh()?;

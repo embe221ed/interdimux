@@ -21,6 +21,7 @@ struct OpeningTests {
     private static func run() throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
         NSApp.finishLaunching()
+        try lazyProjectSearch()
         let picker = PickerApplication()
         picker.setupPanel()
         picker.panel.isReleasedWhenClosed = false
@@ -374,6 +375,150 @@ struct OpeningTests {
                       && content.table.selectedRow == 1,
                       "\(theme.name): confirmation theme refresh disturbed picker state")
         }
-        print("Opening checks passed: unchanged cached frame across shuffled catalogs, previous-session selection, deferred Enter, navigation/typing and controller/sheet themes")
+        print("Opening checks passed: lazy project search, unchanged cached frame across shuffled catalogs, previous-session selection, deferred Enter, navigation/typing and controller/sheet themes")
+    }
+
+    private static func lazyProjectSearch() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.cancelProjectSearch(); picker.panel.close() }
+        let origin = ["client_id": "client:lazy", "session_id": "session:current"]
+        func deliver(needed: Bool = false, searching: Bool = false, rows: [[String: Any]] = [], id: Int? = nil) {
+            picker.receive([
+                "id": id ?? picker.pending, "type": "results", "query": picker.content.search.stringValue,
+                "scope": picker.scope, "search_field": picker.searchField, "action_filter": "",
+                "projects_needed": needed, "projects_loading": searching,
+                "rows": rows, "matched": rows.count, "total": rows.count, "shown_matches": rows.count,
+                "preferred_id": rows.first?["id"] ?? NSNull()
+            ])
+        }
+        func beginMiss(_ query: String = "older-project") {
+            picker.open(context: origin)
+            deliver()
+            picker.content.search.stringValue = query
+            picker.query()
+            deliver(needed: true)
+        }
+        func loads() -> Int { picker.backend.requests.filter { $0.type == "load_projects" }.count }
+
+        picker.open(context: origin)
+        deliver(needed: true)
+        try check(picker.projectSearchWork == nil && loads() == 0,
+                  "Blank opening started optional project work")
+        picker.content.search.stringValue = "live"
+        picker.query()
+        deliver(needed: true, rows: [["id": "session:live", "kind": "session", "title": "Live"]])
+        try check(picker.projectSearchWork == nil && loads() == 0,
+                  "A cached hit started optional project work")
+
+        beginMiss()
+        try check(picker.projectSearchWork != nil && loads() == 0 && !picker.loading && picker.content.search.isEnabled,
+                  "Missing project blocked typing or loaded before the idle callback")
+        let missingRequest = picker.pending
+        picker.projectSearchWork!.perform()
+        try check(loads() == 1 && picker.backend.requests.last?.type == "load_projects"
+                  && picker.backend.requests.last?.fields["query"] as? String == "older-project"
+                  && picker.backend.requests.last?.fields["scope"] as? String == "all",
+                  "Idle callback did not request the current project search")
+        let loadRequest = picker.pending
+        deliver(needed: true, id: missingRequest)
+        try check(picker.pending == loadRequest && picker.projectSearchWork == nil,
+                  "A stale miss rescheduled loading over the current request")
+        deliver(searching: true)
+        try check(picker.projectSearchWork != nil && !picker.loading,
+                  "Pending inventory did not schedule a nonblocking follow-up")
+        let stalePoll = picker.projectSearchWork!
+        stalePoll.perform()
+        try check(picker.backend.requests.last?.type == "query" && loads() == 1,
+                  "Pending inventory spawned another load instead of checking its result")
+        let directoryID = "directory:older-project"
+        deliver(rows: [["id": directoryID, "kind": "directory", "title": "Older project", "path": "/fixture/older-project"]])
+        try check(picker.items.first?.id == directoryID && picker.content.table.selectedRow == 0
+                  && picker.projectSearchWork == nil,
+                  "Stopped typing never received the lazily loaded project")
+        let completeCount = picker.backend.requests.count
+        stalePoll.perform()
+        try check(picker.backend.requests.count == completeCount, "Completed project work kept polling")
+        picker.accept()
+        try check(picker.backend.requests.last?.type == "activate"
+                  && picker.backend.requests.last?.fields["target_id"] as? String == directoryID,
+                  "Loaded project was not selectable with Enter")
+        picker.activation = nil // Never deliver an activation that focuses live Rex.
+
+        beginMiss("before-edit")
+        let editedWork = picker.projectSearchWork!
+        let beforeEditLoads = loads()
+        picker.content.search.stringValue = "after-edit"
+        picker.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: picker.content.search))
+        editedWork.perform()
+        try check(loads() == beforeEditLoads && picker.projectSearchWork == nil,
+                  "Typing did not cancel the scheduled project request")
+
+        beginMiss()
+        let scopedWork = picker.projectSearchWork!
+        picker.changeScope(picker.content.scopes[1])
+        let scopedCount = picker.backend.requests.count
+        scopedWork.perform()
+        deliver(needed: true)
+        try check(picker.backend.requests.count == scopedCount && picker.projectSearchWork == nil,
+                  "Changing scope allowed a delayed All search to run")
+
+        beginMiss()
+        let fieldWork = picker.projectSearchWork!
+        picker.content.searchField.selectItem(at: 3)
+        picker.changeSearchField()
+        let fieldCount = picker.backend.requests.count
+        fieldWork.perform()
+        deliver(needed: true)
+        try check(picker.backend.requests.count == fieldCount && picker.projectSearchWork == nil,
+                  "Changing search field allowed a delayed project search to run")
+
+        beginMiss()
+        let actionWork = picker.projectSearchWork!
+        let oldQuery = picker.pending
+        picker.sendAction("new-window")
+        let ownedAction = picker.actionRequest
+        let actionCount = picker.backend.requests.count
+        actionWork.perform()
+        deliver(needed: true, id: oldQuery)
+        try check(picker.backend.requests.count == actionCount && picker.projectSearchWork == nil
+                  && picker.actionRequest == ownedAction,
+                  "Delayed project work replaced an action-owned request")
+        picker.actionRequest = nil
+        picker.setActionBusy(false)
+
+        beginMiss()
+        let dialogWork = picker.projectSearchWork!
+        picker.presentingDialog = true
+        let dialogCount = picker.backend.requests.count
+        dialogWork.perform()
+        try check(picker.backend.requests.count == dialogCount,
+                  "A project timer dispatched while a dialog was active")
+        picker.presentingDialog = false
+
+        beginMiss()
+        let hiddenWork = picker.projectSearchWork!
+        picker.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: picker.panel))
+        let hiddenCount = picker.backend.requests.count
+        hiddenWork.perform()
+        deliver(needed: true)
+        try check(picker.backend.requests.count == hiddenCount && picker.projectSearchWork == nil,
+                  "Hidden picker dispatched or rescheduled optional project work")
+
+        beginMiss()
+        let errorWork = picker.projectSearchWork!
+        picker.showError("Synthetic project failure")
+        let errorCount = picker.backend.requests.count
+        errorWork.perform()
+        try check(picker.backend.requests.count == errorCount && picker.projectSearchWork == nil,
+                  "A failed connection retained its delayed project request")
+        beginMiss()
+        let reopenWork = picker.projectSearchWork!
+        picker.open(context: origin)
+        let reopenCount = picker.backend.requests.count
+        reopenWork.perform()
+        try check(picker.backend.requests.count == reopenCount && picker.projectSearchWork == nil,
+                  "Reopening retained another invocation's delayed project request")
     }
 }

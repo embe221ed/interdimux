@@ -101,9 +101,13 @@ error-only and unreported states are excluded. The dashboard count, Agents
 picker and next-agent shortcut use the same definition. `pick --agent-states`
 and direct modes' `--states` can explicitly select other states. The unfiltered
 `agents` listing still includes all known agent states.
-Contextual hints follow the current target and width. Directory suggestions in
-the main list come only from bounded recent history; scans and zoxide queries
-remain explicit actions. Blank queries show a small suggestion list, while
+Contextual hints follow the current target and width. Initial directory suggestions
+come from bounded recent history; directory scans remain explicit actions.
+The native macOS picker lazily loads the full zoxide inventory on a nonblank
+All-search miss after 100 ms of idle time. Its bounded worker never probes
+candidate paths or blocks typing, and completed inventory is cached for the
+helper's lifetime, including across reopenings. Cached hits and opening never
+start the worker. Blank queries show a small suggestion list, while
 searching considers all retained cached projects before limiting the displayed
 matches. Ordinary typing does not probe their paths or collect fresh metadata.
 Explicit Projects discovery also searches lower-ranked recent/zoxide entries
@@ -113,6 +117,8 @@ Optional zoxide queries and updates have a 250 ms deadline and a 1 MiB output
 cap. The old-version `--all` fallback shares that deadline. Timeout or excess
 output stops and reaps the helper; available recents and roots remain usable,
 and a failed optional history update does not undo a successful action.
+`INTERDIMUX_ZOXIDE_BIN` selects an explicit executable; otherwise PATH and the
+usual Cargo/Homebrew locations are checked so GUI launches can find zoxide.
 
 ```sh
 imux agents --backend rex [ORIGIN_OPTIONS] --count --states approve,input

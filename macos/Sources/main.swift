@@ -49,6 +49,9 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var actionRequest: Int?
     private var presentingDialog = false
     private var queryDeferred = false
+    private var projectSearchWork: DispatchWorkItem?
+    private var projectSearchGeneration: UInt64 = 0
+    private var projectSearchVisible = false
     private var menuChoice: String?
     private var swapSource: PickerItem?
     private var loading = false
@@ -212,6 +215,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func open(context supplied: [String: String], dashboard showDashboard: Bool = false) {
         guard activation == nil, actionRequest == nil, dashboardRequest == nil, !presentingDialog else { return }
+        cancelProjectSearch()
+        projectSearchVisible = true
         refreshTheme()
         startedAt = ProcessInfo.processInfo.systemUptime
         loading = true
@@ -373,6 +378,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     private func runDashboardAction(_ route: DashboardRoute) {
         guard !loading, dashboardRequest == nil else { return }
+        cancelProjectSearch()
         deferredDashboardAction = nil
         dashboard?.setLoading(true)
         dashboard?.setStatus(route == .nextAgent ? "Finding the next agent…" : "Opening \(route.title)…")
@@ -553,6 +559,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
            openingSelection == nil || items.contains(where: { $0.id == openingSelection && !$0.contextOnly }) {
             accept()
         }
+        scheduleProjectSearch(message, search: search, requestID: id)
         if wasLoading {
             let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
             FileHandle.standardError.write(Data(String(format: "picker snapshot + native update: %.2f ms\n", elapsed).utf8))
@@ -600,6 +607,51 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         }
     }
 
+    private func cancelProjectSearch() {
+        projectSearchGeneration &+= 1
+        projectSearchWork?.cancel()
+        projectSearchWork = nil
+    }
+
+    private func scheduleProjectSearch(_ message: [String: Any], search: PickerSearchIdentity, requestID: Int) {
+        cancelProjectSearch()
+        let needed = message["projects_needed"] as? Bool == true
+        let searching = message["projects_loading"] as? Bool == true
+        guard needed || searching,
+              projectSearchVisible, !dashboardVisible, !loading,
+              activation == nil, actionRequest == nil, dashboardRequest == nil, !presentingDialog,
+              swapSource == nil, targetRoute == nil,
+              search.scope == "all", search.actionFilter.isEmpty,
+              ["all", "name", "path"].contains(search.field),
+              !search.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (message["matched"] as? NSNumber)?.intValue == 0 else { return }
+        content.status.stringValue = "Searching saved projects…"
+        content.emptyTitle.stringValue = "Searching saved projects"
+        content.emptyDetail.stringValue = "Keep typing to narrow your search."
+        let generation = projectSearchGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.projectSearchGeneration == generation,
+                  self.projectSearchVisible, !self.dashboardVisible, !self.loading,
+                  self.activation == nil, self.actionRequest == nil, self.dashboardRequest == nil,
+                  !self.presentingDialog, self.swapSource == nil, self.targetRoute == nil,
+                  self.pending == requestID, self.displayedRequest == requestID else { return }
+            let current = PickerSearchIdentity(query: self.content.search.stringValue, scope: self.scope, field: self.searchField,
+                actionFilter: self.targetRoute?.operation ?? "", directoryBase: self.scope == "directory" ? self.directoryBase : nil,
+                directoryDeep: self.scope == "directory" && self.directoryDeep)
+            guard current == search else { return }
+            self.projectSearchWork = nil
+            self.requestedAt = ProcessInfo.processInfo.systemUptime
+            self.pending = self.backend.send(needed ? "load_projects" : "query", fields: [
+                "query": search.query, "scope": search.scope, "search_field": search.field,
+                "action_filter": search.actionFilter, "allow_create": true
+            ])
+        }
+        projectSearchWork = work
+        // Loading is optional and off the typing path. Poll only while the
+        // bounded worker reports a pending result, including after typing stops.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (needed ? 0.1 : 0.05), execute: work)
+    }
+
     func nextBenchmarkQuery() {
         guard let output = benchmarkOutput else { return }
         guard benchmarkIndex < benchmarkQueries.count else {
@@ -616,6 +668,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func query() {
+        cancelProjectSearch()
         acceptOpeningWhenReady = false
         openingSelectionID = nil
         let search = PickerSearchIdentity(query: content.search.stringValue, scope: scope, field: searchField,
@@ -638,6 +691,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func controlTextDidChange(_ notification: Notification) {
+        cancelProjectSearch()
         acceptOpeningWhenReady = false
         openingSelectionID = nil
         displayedSearch = nil
@@ -679,6 +733,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     @objc func changeScope(_ sender: NSButton) {
         guard actionRequest == nil, activation == nil, !presentingDialog else { return }
+        cancelProjectSearch()
         acceptOpeningWhenReady = false
         openingSelectionID = nil
         if targetRoute?.operation != nil && sender.tag == 5 {
@@ -698,12 +753,14 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     @objc func changeSearchField() {
+        cancelProjectSearch()
         panel.makeFirstResponder(content.search)
         query()
     }
 
     func loadDirectories(_ extra: [String: Any] = [:], clearQuery: Bool = false) {
         guard !loading, actionRequest == nil, activation == nil, !presentingDialog, swapSource == nil, targetRoute?.operation == nil else { return }
+        cancelProjectSearch()
         stopPreview()
         if clearQuery || extra["reload"] as? Bool != true { displayedSearch = nil }
         if clearQuery { content.search.stringValue = ""; content.clear.isHidden = true }
@@ -788,6 +845,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     @objc func showActions() {
         guard !presentingDialog, actionRequest == nil, activation == nil else { return }
+        if projectSearchWork != nil { queryDeferred = true }
+        cancelProjectSearch()
         let selected = selectedItem
         let menu = NSMenu()
         menu.autoenablesItems = false
@@ -833,7 +892,11 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: content.actions.bounds.height), in: content.actions)
         presentingDialog = false
         if let choice = menuChoice { performAction(choice) }
-        else if !panel.isKeyWindow { stopPreview(); panel.orderOut(nil) }
+        else if !panel.isKeyWindow {
+            projectSearchVisible = false
+            cancelProjectSearch()
+            stopPreview(); panel.orderOut(nil)
+        }
         else { updatePreviewSelection() }
         if queryDeferred && panel.isVisible { query() }
     }
@@ -842,6 +905,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func performAction(_ operation: String) {
         guard !presentingDialog, actionRequest == nil, activation == nil else { return }
+        if projectSearchWork != nil { queryDeferred = true }
+        cancelProjectSearch()
         if operation == "cancel-swap" { cancelSwap(); return }
         guard swapSource == nil else { showError("Choose a swap destination, or press Escape to cancel the swap."); return }
         if operation == "refresh" { refresh(); return }
@@ -953,6 +1018,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func sendAction(_ operation: String, target: PickerItem? = nil, extra: [String: Any] = [:]) {
         guard actionRequest == nil, activation == nil, !presentingDialog, !loading else { return }
+        cancelProjectSearch()
         stopPreview()
         var fields = extra
         fields["operation"] = operation
@@ -965,6 +1031,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func refresh() {
         guard activation == nil, actionRequest == nil, dashboardRequest == nil, !presentingDialog, !loading else { return }
+        cancelProjectSearch()
         stopPreview()
         if scope == "directory", backend.isRunning { loadDirectories(["reload": true]); return }
         loading = true
@@ -1000,6 +1067,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         guard !items[row].contextOnly else { return }
         // Never activate the previous query's selection while a result is pending.
         guard pending == displayedRequest else { return }
+        cancelProjectSearch()
         if let source = swapSource {
             let destination = items[row]
             guard destination.id != source.id, destination.kind == source.kind else {
@@ -1160,6 +1228,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if activation != nil || actionRequest != nil || dashboardRequest != nil || presentingDialog { return }
         if swapSource != nil { cancelSwap(); return }
         if returnToDashboard && dashboardOrigin { self.returnToDashboard(); return }
+        projectSearchVisible = false
+        cancelProjectSearch()
         acceptOpeningWhenReady = false
         openingRefresh = false
         openingSelectionID = nil
@@ -1190,6 +1260,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     func windowDidResignKey(_ notification: Notification) {
         // Clicking another app dismisses without stealing focus back from it.
         if !benchmarking && openBenchmarkOutput == nil && activation == nil && actionRequest == nil && dashboardRequest == nil && !presentingDialog {
+            projectSearchVisible = false
+            cancelProjectSearch()
             acceptOpeningWhenReady = false
             openingRefresh = false
             openingSelectionID = nil
@@ -1199,6 +1271,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func showError(_ message: String) {
+        cancelProjectSearch()
         acceptOpeningWhenReady = false
         openingRefresh = false
         openingRequest = nil
@@ -1226,6 +1299,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        projectSearchVisible = false
+        cancelProjectSearch()
         themeTimer?.invalidate()
         appearanceObservation = nil
         stopPreview()

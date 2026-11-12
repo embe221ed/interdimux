@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -42,12 +42,46 @@ fn offerable(d: &str) -> bool {
     crate::mounts::is_remote(d) || Path::new(d).is_dir()
 }
 
+fn zoxide_program() -> std::ffi::OsString {
+    if let Some(path) = std::env::var_os("INTERDIMUX_ZOXIDE_BIN").filter(|path| !path.is_empty()) {
+        return path;
+    }
+    fn executable(path: &Path) -> bool {
+        fs::metadata(path).map_or(false, |metadata| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                metadata.is_file()
+            }
+        })
+    }
+    // Launch Services does not inherit an interactive shell's expanded PATH.
+    // Prefer its PATH when present, then the usual local installation paths.
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("zoxide");
+            if executable(&candidate) { return candidate.into_os_string(); }
+        }
+    }
+    let mut fallback = Vec::with_capacity(3);
+    if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        fallback.push(PathBuf::from(home).join(".cargo/bin/zoxide"));
+    }
+    fallback.extend([PathBuf::from("/opt/homebrew/bin/zoxide"), PathBuf::from("/usr/local/bin/zoxide")]);
+    fallback.into_iter().find(|path| executable(path))
+        .map(PathBuf::into_os_string).unwrap_or_else(|| "zoxide".into())
+}
+
 /// `zoxide query --list`, with `--all` or without.  `--all`: without it zoxide
 /// stats EVERY entry in its database to hide the missing ones, so one entry on
 /// a stalled mount hangs zoxide itself.  The existence check is ours now
 /// (offerable), and a zoxide too old to know the flag gets the plain query.
 fn zoxide_query(all: bool) -> Command {
-    let mut c = Command::new("zoxide");
+    let mut c = Command::new(zoxide_program());
     c.args(["query", "--list"]);
     if all {
         c.arg("--all");
@@ -201,7 +235,7 @@ fn nonblocking(_: &ChildStdout) -> io::Result<()> {
 }
 
 pub(crate) fn zoxide(args: &[&str]) -> Option<Output> {
-    let mut command = Command::new("zoxide");
+    let mut command = Command::new(zoxide_program());
     command.args(args);
     Zoxide::start(
         command,
@@ -238,6 +272,23 @@ fn listed_zoxide(child: Zoxide) -> Option<Output> {
     Zoxide::start(zoxide_query(false), deadline, ZOXIDE_OUTPUT_LIMIT)?
         .output()
         .filter(|output| output.status.success())
+}
+
+/// Full lexical inventory for lazy background enrichment. Unlike discovery's
+/// candidates(), this never stats individual database entries or applies a
+/// suggestion count limit. Existence is checked only on explicit activation.
+pub(crate) fn zoxide_inventory() -> Vec<String> {
+    let Some(output) = start_zoxide().and_then(listed_zoxide) else { return Vec::new(); };
+    lexical_paths(&output.stdout)
+}
+
+fn lexical_paths(bytes: &[u8]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    utf8_lines(bytes).filter_map(|path| {
+        let path = if path == "/" { path } else { path.trim_end_matches('/') };
+        (Path::new(path).is_absolute() && !path.chars().any(char::is_control)
+            && seen.insert(path.to_owned())).then(|| path.to_owned())
+    }).collect()
 }
 
 /// The legacy gatherer's small recent/zoxide suggestion list.
@@ -480,6 +531,19 @@ mod tests {
         assert_eq!(c.canon_dir("//"), "/");
         fs::remove_dir_all(&d).ok();
     }
+    #[cfg(unix)]
+    #[test]
+    fn lexical_inventory_keeps_late_and_missing_paths_without_probing() {
+        let mut bytes = (0..40).map(|i| format!("/not-created/zoxide-project-{i:02}\n"))
+            .collect::<String>().into_bytes();
+        bytes.extend_from_slice(b"/not-created/zoxide-project-39/\nrelative/path\n/control\tpath\n/invalid-\xff\n/\n");
+        bytes.extend_from_slice("/not-created/café-東京\n".as_bytes());
+        let paths = lexical_paths(&bytes);
+        assert_eq!(paths.len(), 42);
+        assert_eq!(paths[39], "/not-created/zoxide-project-39");
+        assert_eq!(&paths[40..], ["/", "/not-created/café-東京"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn bounded_zoxide_drains_pipes_and_cleans_up_timeout_overflow_and_drop() {

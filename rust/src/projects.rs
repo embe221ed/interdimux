@@ -1,5 +1,5 @@
 //! Shared directory discovery and safe find-or-create query normalization.
-//! Discovery only runs on an explicit directory-picker action, never a query
+//! Filesystem discovery only runs on an explicit directory-picker action, never a query
 //! keystroke. The ordinary list is shallow; Ctrl-f opts into a bounded walk.
 
 use std::collections::{HashSet, VecDeque};
@@ -372,6 +372,23 @@ pub(crate) fn cached_directories(snapshot: &Snapshot) -> Vec<Directory> {
         &recent_text(&recent_file()).unwrap_or_default(),
         usize::MAX,
     )
+}
+
+/// Optional lazy inventory: only the worker calls this bounded process path.
+/// Candidate paths remain lexical, including entries that have disappeared.
+pub(crate) fn zoxide_inventory() -> Vec<String> {
+    if crate::env_text("INTERDIMUX_SHOW_DIRS") == "off" {
+        return Vec::new();
+    }
+    crate::dirs::zoxide_inventory()
+}
+
+/// Turn an already loaded inventory into matcher rows without filesystem work.
+pub(crate) fn cached_paths(snapshot: &Snapshot, paths: &[String]) -> Vec<Directory> {
+    if crate::env_text("INTERDIMUX_SHOW_DIRS") == "off" {
+        return Vec::new();
+    }
+    cached_with(snapshot, &paths.join("\n"), usize::MAX)
 }
 
 /// This limits blank-query suggestions, never the retained search inventory.
@@ -1246,6 +1263,23 @@ mod tests {
                     record_use(&old);
                     assert!(recent_text(&recent_file()).unwrap().starts_with(&old));
                 }
+                "inventory-success" | "resolver-fallback" | "resolver-override" => {
+                    let paths = zoxide_inventory();
+                    assert_eq!(paths.len(), 25, "inventory command: {:?}",
+                        fs::read_to_string(root.join("executable-used")));
+                    assert!(paths[24].ends_with("zoxide-project-24"));
+                    let entries = cached_paths(&Snapshot::default(), &paths);
+                    assert_eq!(entries.len(), 25);
+                    assert_eq!(entries[24].path, paths[24]);
+                    if case == "resolver-override" {
+                        assert_eq!(fs::read_to_string(root.join("executable-used")).unwrap().trim(),
+                            root.join("explicit-zoxide").to_str().unwrap());
+                    }
+                }
+                "inventory-off" => {
+                    assert!(zoxide_inventory().is_empty());
+                    assert!(!root.join("pids").exists());
+                }
                 _ => {
                     let entries = directories(&Snapshot::default(), None, Some("oldprj24"));
                     assert!(
@@ -1307,7 +1341,10 @@ mod tests {
         let executable = root.join("zoxide");
         fs::write(&executable, r##"#!/bin/sh
 printf '%s\n' "$$" >> "$IMUX_DISCOVERY_ROOT/pids"
+printf '%s\n' "$0" >> "$IMUX_DISCOVERY_ROOT/executable-used"
 case "$IMUX_DISCOVERY_CHILD_CASE" in
+  inventory-success|resolver-fallback|resolver-override)
+    cat "$IMUX_DISCOVERY_ROOT/zoxide-output"; exit ;;
   old-success|fallback-stall)
     if [ "$3" = --all ]; then exit 2; fi
     if [ "$IMUX_DISCOVERY_CHILD_CASE" = old-success ]; then cat "$IMUX_DISCOVERY_ROOT/zoxide-output"; exit; fi
@@ -1317,6 +1354,9 @@ esac
 exec sleep 30
 "##).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir_all(root.join(".cargo/bin")).unwrap();
+        std::os::unix::fs::symlink(&executable, root.join(".cargo/bin/zoxide")).unwrap();
+        std::os::unix::fs::symlink(&executable, root.join("explicit-zoxide")).unwrap();
         for case in [
             "history",
             "resolve-stall",
@@ -1325,18 +1365,29 @@ exec sleep 30
             "fallback-stall",
             "oversized",
             "old-success",
+            "inventory-success",
+            "inventory-off",
+            "resolver-fallback",
+            "resolver-override",
         ] {
             fs::write(data.join("recent_dirs"), recents.join("\n") + "\n").unwrap();
             let _ = fs::remove_file(root.join("pids"));
-            let result = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "projects::tests::optional_zoxide_and_retained_history_are_bounded_and_isolated", "--nocapture"])
+            let _ = fs::remove_file(root.join("executable-used"));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "projects::tests::optional_zoxide_and_retained_history_are_bounded_and_isolated", "--nocapture"])
                 .env(CASE, case).env("IMUX_DISCOVERY_ROOT", &root)
                 .env("HOME", &root).env("XDG_DATA_HOME", root.join("data"))
-                .env("INTERDIMUX_SHOW_DIRS", "on").env("INTERDIMUX_USE_ZOXIDE", "on")
+                .env("INTERDIMUX_SHOW_DIRS", "on")
+                .env("INTERDIMUX_USE_ZOXIDE", if case == "inventory-off" { "off" } else { "on" })
                 .env("INTERDIMUX_DIRS_LIMIT", "3").env("INTERDIMUX_RECENT_LIMIT", "3")
                 .env("INTERDIMUX_PROJECT_DIRS", f.dir("empty-root"))
-                .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
-                .output().unwrap();
+                .env_remove("INTERDIMUX_ZOXIDE_BIN")
+                .env("PATH", if case.starts_with("resolver-") { "/usr/bin:/bin".to_owned() }
+                    else { format!("{}:/usr/bin:/bin", root.display()) });
+            if case == "resolver-override" {
+                command.env("INTERDIMUX_ZOXIDE_BIN", root.join("explicit-zoxide"));
+            }
+            let result = command.output().unwrap();
             assert!(
                 result.status.success(),
                 "{case}: {}{}",
