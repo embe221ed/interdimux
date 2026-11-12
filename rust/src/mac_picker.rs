@@ -520,13 +520,33 @@ impl Picker {
         } else {
             let snapshot = rex::collect(self.context.as_ref().ok_or("Open the picker first")?)?;
             let mut rows = snapshot_rows(&snapshot);
+            let old_inventory: HashSet<_> = self.lazy_projects.paths.as_ref()
+                .map(|paths| directories::candidates(crate::projects::cached_paths(&snapshot, paths))
+                    .into_iter().map(|row| row.id).collect())
+                .unwrap_or_default();
+            let mut recents = directories::candidates(crate::projects::cached_directories(&snapshot));
+            for row in &mut recents {
+                row.main_recent = true;
+                row.directory_visible = self.by_id.get(&row.id)
+                    .map(|&index| self.rows[index].directory_visible)
+                    .unwrap_or(self.directories.base.is_none() && !self.directories.deep);
+            }
+            let recent_ids: HashSet<_> = recents.iter().map(|row| row.id.clone()).collect();
             rows.extend(
                 self.rows
                     .iter()
-                    .filter(|row| row.kind == "directory")
+                    .filter(|row| row.kind == "directory"
+                        && !old_inventory.contains(&row.id) && !recent_ids.contains(&row.id))
                     .cloned(),
             );
+            rows.extend(recents);
             self.replace(rows)?;
+            // A deliberate refresh retries unavailable zoxide and discovers
+            // database changes on the next miss. Keep a running load shared;
+            // never wait for it or launch a second worker while refreshing.
+            self.lazy_projects.paths = None;
+            self.projects_indexed = false;
+            self.directories.loaded = false;
             self.preferred_session_id = previous_session(&snapshot);
             self.snapshot = Some(snapshot);
             self.update_terminal_tools();

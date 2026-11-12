@@ -497,6 +497,24 @@ struct OpeningTests {
                   "A project timer dispatched while a dialog was active")
         picker.presentingDialog = false
 
+        // A sheet can open after the lazy request was already dispatched.
+        // Its pending reply must defer the next check until the sheet closes,
+        // otherwise stopped typing would leave the eventual result unseen.
+        beginMiss()
+        picker.projectSearchWork!.perform()
+        picker.presentingDialog = true
+        deliver(searching: true)
+        try check(picker.projectSearchWork == nil && picker.queryDeferred,
+                  "An in-flight project reply was lost while a dialog was active")
+        let resumeCount = picker.backend.requests.count
+        picker.endDialog()
+        try check(picker.backend.requests.count == resumeCount + 1
+                  && picker.backend.requests.last?.type == "query" && !picker.queryDeferred,
+                  "Closing the dialog did not resume the deferred project check")
+        deliver(rows: [["id": directoryID, "kind": "directory", "title": "Older project", "path": "/fixture/older-project"]])
+        try check(picker.items.first?.id == directoryID && picker.projectSearchWork == nil,
+                  "Deferred project check did not display the completed inventory result")
+
         beginMiss()
         let hiddenWork = picker.projectSearchWork!
         picker.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: picker.panel))

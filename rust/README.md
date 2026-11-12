@@ -106,8 +106,10 @@ come from bounded recent history; directory scans remain explicit actions.
 The native macOS picker lazily loads the full zoxide inventory on a nonblank
 All-search miss after 100 ms of idle time. Its bounded worker never probes
 candidate paths or blocks typing, and completed inventory is cached for the
-helper's lifetime, including across reopenings. Cached hits and opening never
-start the worker. Blank queries show a small suggestion list, while
+helper's lifetime, including across reopenings. A successful explicit refresh
+clears the completed inventory so the next miss can retry a failed lookup or
+load database changes; an already running worker remains shared. Cached hits
+and opening never start the worker. Blank queries show a small suggestion list, while
 searching considers all retained cached projects before limiting the displayed
 matches. Ordinary typing does not probe their paths or collect fresh metadata.
 Explicit Projects discovery also searches lower-ranked recent/zoxide entries

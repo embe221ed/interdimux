@@ -7,9 +7,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
 struct Helper {
     root: PathBuf,
@@ -30,8 +33,9 @@ impl Helper {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "imux-project-history-protocol-{}-{nonce}",
-            std::process::id()
+            "imux-project-history-protocol-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
         let root = fs::canonicalize(root).unwrap();
@@ -77,7 +81,10 @@ if [ "$#" -ne 3 ] || [ "$1" != query ] || [ "$2" != --list ] || [ "$3" != --all 
     echo 'Only bounded full read-only listing is allowed' >&2
     exit 1
 fi
-if [ "$IMUX_ZOXIDE_TEST_MODE" = stall ]; then exec /bin/sleep 30; fi
+mode=$IMUX_ZOXIDE_TEST_MODE
+if [ -f "$IMUX_HISTORY_TEST_ROOT/zoxide-mode" ]; then mode=$(/bin/cat "$IMUX_HISTORY_TEST_ROOT/zoxide-mode"); fi
+if [ "$mode" = stall ]; then exec /bin/sleep 30; fi
+if [ "$mode" = delay ]; then /bin/sleep 0.05; fi
 exec /bin/cat "$IMUX_HISTORY_TEST_ROOT/zoxide-output"
 "#,
         )
@@ -96,6 +103,7 @@ exec /bin/cat "$IMUX_HISTORY_TEST_ROOT/zoxide-output"
             .success());
         fs::remove_file(root.join("zoxide-calls")).unwrap();
         fs::remove_file(root.join("zoxide-pids")).unwrap();
+        fs::write(root.join("zoxide-mode"), mode).unwrap();
         fs::write(root.join("snapshot.json"), json!({
             "version":1,"host_id":"local","local_host_id":"local",
             "sessions":[{"session_id":"session:origin","label":"Origin"}],
@@ -111,17 +119,24 @@ import json, os, sys
 from pathlib import Path
 root = Path(os.environ['IMUX_HISTORY_TEST_ROOT'])
 source = sys.stdin.read()
-if 'local snapshot=' not in source or 'local clients=' not in source:
-    raise SystemExit('Only the initial read-only snapshot is allowed')
+if 'local snapshot=' not in source:
+    raise SystemExit('Only read-only snapshots are allowed')
 with (root / 'calls').open('a') as out:
     out.write('snapshot\n')
-print(json.dumps({'clients': {'clients': [{'client_id': 'client:test', 'info': {'kind': 'app', 'platform': 'macos'}, 'principal': {'kind': 'peer', 'transport': 'unix'}}]}, 'snapshot': json.loads((root / 'snapshot.json').read_text())}))
+snapshot = json.loads((root / 'snapshot.json').read_text())
+if 'local clients=' in source:
+    print(json.dumps({'clients': {'clients': [{'client_id': 'client:test', 'info': {'kind': 'app', 'platform': 'macos'}, 'principal': {'kind': 'peer', 'transport': 'unix'}}]}, 'snapshot': snapshot}))
+else:
+    print(json.dumps(snapshot))
 "#).unwrap();
         fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
-        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-        let path = std::env::join_paths(
-            std::iter::once(root.clone()).chain(std::env::split_paths(&inherited_path)),
-        )
+        // The shims need only the system Python and POSIX tools. Avoid the
+        // caller's version-manager startup and any unrelated zoxide install.
+        let path = std::env::join_paths([
+            root.clone(),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+        ])
         .unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
             .arg("macos-serve")
@@ -180,7 +195,12 @@ print(json.dumps({'clients': {'clients': [{'client_id': 'client:test', 'info': {
         let line = self
             .output
             .recv_timeout(Duration::from_secs(5))
-            .expect("Helper closed or blocked before replying")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "Helper closed or blocked handling {request}: {error}; stderr: {}",
+                    fs::read_to_string(self.root.join("helper.stderr")).unwrap_or_default()
+                )
+            })
             .expect("Cannot read helper reply");
         let response: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(response["id"], request["id"]);
@@ -238,6 +258,22 @@ fn open_request(id: u64) -> Value {
 fn project_query(id: u64, operation: &str, query: &str) -> Value {
     json!({"id":id,"type":operation,"scope":"all",
         "search_field":"name","query":query,"allow_create":true})
+}
+
+fn await_project_loading(helper: &mut Helper, id: &mut u64, query: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "Lazy project inventory never completed"
+        );
+        *id += 1;
+        let result = helper.exchange(project_query(*id, "query", query));
+        if result["projects_loading"] != true {
+            return result;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -350,6 +386,210 @@ fn native_zoxide_search_loads_the_full_inventory_only_after_a_cached_miss() {
         fs::read_to_string(helper.root.join("calls")).unwrap(),
         "snapshot\nsnapshot\n"
     );
+}
+
+#[test]
+fn native_lazy_inventory_survives_scope_reopen_and_project_browsing() {
+    let (mut helper, paths) = Helper::with_zoxide("delay");
+    let child = paths[24].join("browsed-child");
+    fs::create_dir(&child).unwrap();
+    helper.exchange(open_request(1));
+    let loading = helper.exchange(project_query(2, "load_projects", "^zoxide-project-39$"));
+    assert_eq!(loading["projects_loading"], true);
+
+    // A pending project worker belongs to the helper, not to the particular
+    // query, scope, or opening which caused it to start.
+    let window = helper.exchange(json!({"id":3,"type":"query","query":"Terminal",
+        "scope":"window","search_field":"name","allow_create":false}));
+    assert_eq!(window["matched"], 1);
+    assert_eq!(window["projects_loading"], false);
+    let session = helper.exchange(json!({"id":4,"type":"query","query":"Origin",
+        "scope":"session","search_field":"name","allow_create":false}));
+    assert_eq!(session["matched"], 1);
+    helper.exchange(open_request(5));
+    let mut id = 6;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let low_id = loop {
+        assert!(
+            Instant::now() < deadline,
+            "Reopening lost the pending project worker"
+        );
+        let result = helper.exchange(project_query(id, "query", "^zoxide-project-39$"));
+        id += 1;
+        if result["projects_loading"] != true {
+            assert_eq!(
+                result["matched"], 1,
+                "Completed inventory was not indexed for the current opening"
+            );
+            break result["preferred_id"].clone();
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        helper.zoxide_calls(),
+        1,
+        "Reopening duplicated optional loading"
+    );
+
+    let own = helper.exchange(project_query(id, "query", "^old-project-24$"));
+    id += 1;
+    let own_id = own["preferred_id"].clone();
+    helper.exchange(
+        json!({"id":id,"type":"directories","cached":true,"reset":true,
+        "query":"","search_field":"name"}),
+    );
+    id += 1;
+    let browse = helper.exchange(json!({"id":id,"type":"directories","base_id":own_id,
+        "query":"","search_field":"name"}));
+    id += 1;
+    assert_eq!(browse["directories_base"], paths[24].to_str().unwrap());
+    assert!(directory_rows(&browse)
+        .iter()
+        .any(|row| row["path"] == child.to_str().unwrap()));
+    let from_all = helper.exchange(project_query(id, "query", "^zoxide-project-39$"));
+    id += 1;
+    assert_eq!(
+        from_all["preferred_id"], low_id,
+        "Browsing removed the lazy main-list inventory"
+    );
+    let scanned = helper.exchange(project_query(id, "query", "browsed-child"));
+    id += 1;
+    assert!(
+        directory_rows(&scanned).is_empty(),
+        "Browsing flooded the main list with scanned descendants"
+    );
+
+    let deep = helper.exchange(json!({"id":id,"type":"directories","deep":true,
+        "query":"browsed-child","search_field":"name"}));
+    id += 1;
+    assert_eq!(deep["directories_deep"], true);
+    assert_eq!(directory_rows(&deep)[0]["path"], child.to_str().unwrap());
+    helper.exchange(
+        json!({"id":id,"type":"directories","cached":true,"reset":true,
+        "query":"","search_field":"name"}),
+    );
+    id += 1;
+    let restored = helper.exchange(project_query(id, "query", "^zoxide-project-39$"));
+    assert_eq!(
+        restored["preferred_id"], low_id,
+        "Project reset discarded the lazy main-list cache"
+    );
+    assert_eq!(
+        helper.zoxide_calls(),
+        1,
+        "Browsing or cached reset repeated optional loading"
+    );
+}
+
+#[test]
+fn native_explicit_refresh_retries_failed_lazy_loading_without_eager_work() {
+    let (mut helper, _) = Helper::with_zoxide("stall");
+    helper.exchange(open_request(1));
+    helper.exchange(project_query(2, "load_projects", "^zoxide-project-39$"));
+    let mut id = 2;
+    let failed = await_project_loading(&mut helper, &mut id, "^zoxide-project-39$");
+    assert_eq!(failed["matched"], 0);
+    assert_eq!(failed["can_create"], true);
+    assert_eq!(helper.zoxide_calls(), 1);
+
+    fs::write(helper.root.join("zoxide-mode"), "success").unwrap();
+    id += 1;
+    helper.exchange(project_query(id, "query", ""));
+    id += 1;
+    let refreshed = helper.exchange(json!({"id":id,"type":"refresh"}));
+    assert_eq!(refreshed["projects_needed"], false);
+    assert_eq!(
+        helper.zoxide_calls(),
+        1,
+        "Refreshing a blank query eagerly retried zoxide"
+    );
+    id += 1;
+    let missed = helper.exchange(project_query(id, "query", "^zoxide-project-39$"));
+    assert_eq!(
+        missed["projects_needed"], true,
+        "Explicit refresh did not permit retry after an optional timeout"
+    );
+    id += 1;
+    helper.exchange(project_query(id, "load_projects", "^zoxide-project-39$"));
+    let retried = await_project_loading(&mut helper, &mut id, "^zoxide-project-39$");
+    assert_eq!(
+        retried["matched"], 1,
+        "The recovered optional helper remained permanently unavailable"
+    );
+    assert_eq!(helper.zoxide_calls(), 2);
+    assert_eq!(
+        fs::read_to_string(helper.root.join("calls")).unwrap(),
+        "snapshot\nsnapshot\n"
+    );
+}
+
+#[test]
+fn native_explicit_refresh_reloads_changed_zoxide_inventory_on_the_next_miss() {
+    let (mut helper, _) = Helper::with_zoxide("success");
+    helper.exchange(open_request(1));
+    helper.exchange(project_query(2, "load_projects", "^zoxide-project-39$"));
+    let mut id = 2;
+    let loaded = await_project_loading(&mut helper, &mut id, "^zoxide-project-39$");
+    assert_eq!(loaded["matched"], 1);
+    let old_id = loaded["preferred_id"].clone();
+    let new_path = helper
+        .root
+        .join("zoxide-projects/new-project-after-refresh");
+    fs::create_dir(&new_path).unwrap();
+    fs::write(
+        helper.root.join("zoxide-output"),
+        format!("{}\n", new_path.display()),
+    )
+    .unwrap();
+
+    id += 1;
+    helper.exchange(project_query(id, "query", ""));
+    id += 1;
+    let refreshed = helper.exchange(json!({"id":id,"type":"refresh"}));
+    assert!(!refreshed["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == old_id));
+    assert_eq!(
+        helper.zoxide_calls(),
+        1,
+        "Explicit refresh eagerly queried zoxide"
+    );
+    id += 1;
+    let removed = helper.exchange(project_query(id, "query", "^zoxide-project-39$"));
+    assert_eq!(
+        removed["matched"], 0,
+        "Refresh retained a removed database-only candidate"
+    );
+    assert_eq!(removed["projects_needed"], true);
+    id += 1;
+    helper.exchange(project_query(
+        id,
+        "load_projects",
+        "^new-project-after-refresh$",
+    ));
+    let updated = await_project_loading(&mut helper, &mut id, "^new-project-after-refresh$");
+    assert_eq!(updated["matched"], 1);
+    assert_eq!(
+        directory_rows(&updated)[0]["path"],
+        new_path.to_str().unwrap()
+    );
+    assert_eq!(helper.zoxide_calls(), 2);
+    id += 1;
+    let removed = helper.exchange(project_query(id, "query", "^zoxide-project-39$"));
+    assert_eq!(
+        removed["matched"], 0,
+        "Reloaded inventory still included a removed candidate"
+    );
+    assert_eq!(removed["projects_needed"], false);
+    id += 1;
+    let own = helper.exchange(project_query(id, "query", "^old-project-24$"));
+    assert_eq!(
+        own["matched"], 1,
+        "Refreshing optional inventory dropped retained own history"
+    );
+    assert_eq!(helper.zoxide_calls(), 2);
 }
 
 #[test]

@@ -619,12 +619,15 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let searching = message["projects_loading"] as? Bool == true
         guard needed || searching,
               projectSearchVisible, !dashboardVisible, !loading,
-              activation == nil, actionRequest == nil, dashboardRequest == nil, !presentingDialog,
+              activation == nil, actionRequest == nil, dashboardRequest == nil,
               swapSource == nil, targetRoute == nil,
               search.scope == "all", search.actionFilter.isEmpty,
               ["all", "name", "path"].contains(search.field),
               !search.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               (message["matched"] as? NSNumber)?.intValue == 0 else { return }
+        // A menu or sheet can begin after the request was sent. Resume its
+        // pending inventory check on close even though no timer was queued.
+        if presentingDialog { queryDeferred = true; return }
         content.status.stringValue = "Searching saved projects…"
         content.emptyTitle.stringValue = "Searching saved projects"
         content.emptyDetail.stringValue = "Keep typing to narrow your search."

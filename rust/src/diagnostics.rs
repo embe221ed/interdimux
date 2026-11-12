@@ -360,6 +360,32 @@ pub(crate) fn ack() -> Result<usize, String> {
 mod tests {
     use super::*;
 
+    fn isolate_serial_writes(test: &str) -> bool {
+        // Logging deliberately skips a busy file. Strict serial assertions
+        // need a process without other tests forking while a lock is held:
+        // a forked child can retain that descriptor briefly until exec.
+        const CHILD: &str = "IMUX_DIAGNOSTICS_TEST_CHILD";
+        if std::env::var(CHILD).as_deref() == Ok(test) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("diagnostics::tests::{test}"),
+                "--nocapture",
+            ])
+            .env(CHILD, test)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{test}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
     struct Fixture {
         root: PathBuf,
         history: History,
@@ -387,6 +413,9 @@ mod tests {
 
     #[test]
     fn empty_history_does_not_create_state_and_ack_keeps_history() {
+        if isolate_serial_writes("empty_history_does_not_create_state_and_ack_keeps_history") {
+            return;
+        }
         let f = Fixture::new();
         assert_eq!(f.history.report(), ["OK no navigator errors logged"]);
         assert_eq!(f.history.ack().unwrap(), 0);
@@ -432,26 +461,7 @@ mod tests {
 
     #[test]
     fn writes_keep_newest_entries_under_size_and_count_limits() {
-        // Logging deliberately skips a busy file. Run these serial write
-        // assertions without other tests forking while a log lock is held:
-        // a forked child can retain that descriptor briefly until exec.
-        const CHILD: &str = "IMUX_DIAGNOSTICS_TRUNCATION_CHILD";
-        if std::env::var(CHILD).as_deref() != Ok("1") {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "diagnostics::tests::writes_keep_newest_entries_under_size_and_count_limits",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+        if isolate_serial_writes("writes_keep_newest_entries_under_size_and_count_limits") {
             return;
         }
         let f = Fixture::new();
@@ -474,6 +484,11 @@ mod tests {
 
     #[test]
     fn headers_are_unique_body_headers_cannot_forge_entries_and_files_are_private() {
+        if isolate_serial_writes(
+            "headers_are_unique_body_headers_cannot_forge_entries_and_files_are_private",
+        ) {
+            return;
+        }
         let f = Fixture::new();
         f.history
             .record("context\nnew line", "first\n== fake header\nbody")
