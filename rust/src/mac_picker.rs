@@ -8,7 +8,7 @@
 
 use crate::model::{Snapshot, Target};
 use crate::rex::{self, RexContext};
-use nucleo::pattern::{CaseMatching, Normalization};
+use nucleo::pattern::{AtomKind, CaseMatching, Normalization};
 use nucleo::{Config, Nucleo};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -69,6 +69,9 @@ impl SearchField {
 const MAX_ROWS: usize = 100;
 const MAX_REQUEST: usize = 64 * 1024;
 const MAX_QUERY: usize = 4096;
+// Enough to bridge a prefix vs word-boundary match (6 points for `hu` in
+// `hudi` vs `sui-hunt`), without overwhelming a substantially better match.
+const SESSION_NAME_BONUS: u32 = 8;
 const DISCOVER_CLIENTS: &str = r#"
 local identity, identity_error = rex.call('server.whoami', {})
 if not identity then error(identity_error, 0) end
@@ -332,6 +335,7 @@ struct Picker {
     attention_count: usize,
     directories: directories::Browser,
     matcher: Nucleo<usize>,
+    ranking_matcher: nucleo::Matcher,
     matcher_query: String,
     matcher_field: SearchField,
     search_field: SearchField,
@@ -377,6 +381,7 @@ impl Picker {
             attention_count: 0,
             directories: directories::Browser::default(),
             matcher: Nucleo::new(Config::DEFAULT, Arc::new(|| {}), Some(2), 4),
+            ranking_matcher: nucleo::Matcher::new(Config::DEFAULT),
             matcher_query: String::new(),
             matcher_field: SearchField::All,
             search_field: SearchField::All,
@@ -656,9 +661,58 @@ impl Picker {
                 ranked.push(index);
             }
         }
-        // Preserve matcher relevance across kinds: a contiguous project name
-        // must outrank a weak fuzzy hit in a live target's metadata. Identical
-        // matches retain Nucleo's stable source-order tie break.
+        // Favor a strong existing session name over a similarly scored project
+        // suggestion. Requiring contiguous name atoms keeps weak metadata hits
+        // (e.g. `hd` spanning `sui-hunt` and its path) at their original score.
+        // Keep Nucleo's syntax, case and normalization rules for this check.
+        if !empty_query
+            && self.scope == "all"
+            && matches!(self.search_field, SearchField::All | SearchField::Name)
+            && ranked.iter().any(|&index| self.rows[index].kind == "directory")
+        {
+            let snapshot = self.matcher.snapshot();
+            let mut name_pattern = snapshot
+                .pattern()
+                .column_pattern(self.search_field.column())
+                .clone();
+            for atom in &mut name_pattern.atoms {
+                if atom.kind == AtomKind::Fuzzy {
+                    atom.kind = AtomKind::Substring;
+                }
+            }
+            let bonuses: HashSet<_> = snapshot
+                .matched_items(..)
+                .filter(|item| {
+                    self.rows[*item.data].kind == "session" && in_scope(&&self.rows[*item.data])
+                })
+                .filter(|item| {
+                    name_pattern
+                        .score(item.matcher_columns[1].slice(..), &mut self.ranking_matcher)
+                        .is_some_and(|score| score > 0)
+                })
+                .map(|item| *item.data)
+                .collect();
+            if !bonuses.is_empty() {
+                // Snapshot does not expose scores. Rescore only cached matches,
+                // and only when a session bonus can affect the mixed result.
+                let mut scores = vec![0; self.rows.len()];
+                for item in snapshot.matched_items(..) {
+                    let index = *item.data;
+                    if in_scope(&&self.rows[index]) {
+                        scores[index] = snapshot
+                            .pattern()
+                            .score(item.matcher_columns, &mut self.ranking_matcher)
+                            .expect("snapshot items still match the completed pattern")
+                            + if bonuses.contains(&index) { SESSION_NAME_BONUS } else { 0 };
+                    }
+                }
+                // Stable sorting preserves Nucleo's tie breaks within kinds.
+                // On equal adjusted scores, prefer the existing session.
+                ranked.sort_by_key(|index| {
+                    (std::cmp::Reverse(scores[*index]), !bonuses.contains(index))
+                });
+            }
+        }
         for (rank, &index) in ranked.iter().enumerate() {
             ranks[index] = rank;
         }
@@ -2596,6 +2650,63 @@ mod tests {
         let action = combined.action_selection().unwrap();
         assert_eq!(Some(action.target), combined.target);
         assert_eq!(action.pane_target.as_ref(), combined.activation_target());
+    }
+
+    #[test]
+    fn mac_picker_strong_session_names_beat_close_project_suggestions() {
+        let fixture = Fixture::new(json!([
+            {"id":"hunt","kind":"session","title":"sui-hunt","path":"/Users/dev/projects/sui-hunt",
+             "search":"sui-hunt /Users/dev/projects/sui-hunt","search_name":"sui-hunt"},
+            {"id":"hudi","kind":"directory","title":"hudi","path":"/opt/hudi","search_name":"hudi"},
+            {"id":"sui","kind":"directory","title":"sui","path":"/opt/sui","search_name":"sui"}
+        ]));
+        let mut picker = fixture.picker();
+        let opened = picker.request(&json!({"id":1,"type":"open"}));
+        assert_eq!(result_ids(&opened), ["hunt", "hudi", "sui"]);
+        fs::remove_file(&fixture.0).unwrap();
+        for field in ["all", "name"] {
+            // Include narrowing, backspacing, and explicit exact/prefix syntax.
+            for text in ["hu", "sui", "hd", "hu", "'hu", "^sui", "'sui", "hd"] {
+                let result = picker.request(&json!({"id":2,"type":"query",
+                    "query":text,"scope":"all","search_field":field}));
+                let expected = if text == "hd" { "hudi" } else { "hunt" };
+                assert_eq!(result["preferred_id"], expected, "{field}: {text}");
+                assert_eq!(result_ids(&result)[0], expected, "{field}: {text}");
+                assert_eq!(result["can_create"], false);
+                if text == "hd" && field == "all" {
+                    // Both match: the session's weak path hit must not get a bonus.
+                    assert!(result_ids(&result).contains(&"hunt"));
+                }
+            }
+        }
+        let projects = query(&mut picker, "hu", "directory");
+        assert_eq!(projects["preferred_id"], "hudi");
+        let cleared = query(&mut picker, "", "all");
+        assert_eq!(result_ids(&cleared), result_ids(&opened));
+    }
+
+    #[test]
+    fn mac_picker_session_preference_preserves_stronger_projects_and_query_rules() {
+        let fixture = Fixture::new(json!([
+            {"id":"weak","kind":"session","title":"c a f e · 開 notes 発","search_name":"c a f e · 開 notes 発"},
+            {"id":"unicode","kind":"directory","title":"café-開発","path":"/opt/café-開発","search_name":"café-開発"},
+            {"id":"inside","kind":"session","title":"xxneedle","search_name":"xxneedle"},
+            {"id":"needle","kind":"directory","title":"needle","path":"/opt/needle","search_name":"needle"},
+            {"id":"case","kind":"session","title":"HUNT","search_name":"HUNT"},
+            {"id":"lower","kind":"directory","title":"hunt","path":"/opt/hunt","search_name":"hunt"}
+        ]));
+        let mut picker = fixture.picker();
+        picker.request(&json!({"id":1,"type":"open"}));
+        for (text, expected) in [
+            ("cafe", "unicode"), ("開発", "unicode"), ("needle", "needle"),
+            ("^hunt$", "case"), ("^HUNT$", "case"),
+            ("^hunt$ !HUNT", "lower"), ("hunt !HUNT", "lower"),
+        ] {
+            let result = picker.request(&json!({"id":2,"type":"query",
+                "query":text,"scope":"all","search_field":"name"}));
+            assert_eq!(result["preferred_id"], expected, "{text}");
+            assert_eq!(result_ids(&result)[0], expected, "{text}");
+        }
     }
 
     #[test]
