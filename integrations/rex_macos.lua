@@ -53,34 +53,51 @@ function M.setup(options)
     return rex.json.decode(result.stdout)
   end
 
-  local function launch(ctx, arguments, host)
-    if not ctx.session_id or not ctx.block_id then error("Open the native picker from a focused Rex pane", 0) end
-    local client_id = arguments and arguments.client_id or ctx.client_id
+  -- Rex supplies the calling connection's ID. A later key or palette action
+  -- from that connection proves it is still live; a new ID is checked afresh.
+  local last_app_caller
+  local function local_app_id(ctx, arguments)
+    local override = arguments and arguments.client_id
+    local client_id = override or ctx.client_id
+    local interactive = not override and (ctx.origin == "key" or ctx.origin == "palette")
+    if interactive and client_id and client_id == last_app_caller then return client_id end
     local listed, list_error = app_clients(ctx.server)
     if not listed then error(list_error, 0) end
-    local local_app = false
     for _, client in ipairs(listed.clients or {}) do
       if client.client_id == client_id and client.connection_state ~= "lost" then
         local principal, info = client.principal or {}, client.info or {}
-        local_app = info.platform == "macos" and principal.kind == "peer" and principal.transport == "unix"
-          and (principal.path == nil or (type(principal.path) == "table" and next(principal.path) == nil))
+        if info.platform == "macos" and principal.kind == "peer" and principal.transport == "unix"
+            and (principal.path == nil or (type(principal.path) == "table" and next(principal.path) == nil)) then
+          if interactive then last_app_caller = client_id end
+          return client_id
+        end
       end
     end
-    if not local_app then
-      error("The native picker requires a local macOS Rex app. CLI callers must pass client_id=<local app ID> (-C is not action context).", 0)
+    if last_app_caller == client_id then last_app_caller = nil end
+    error("The native picker requires a local macOS Rex app. CLI callers must pass client_id=<local app ID> (-C is not action context).", 0)
+  end
+
+  local function launch(ctx, arguments, host)
+    if not ctx.session_id or (not ctx.server and not ctx.block_id) then
+      error("Open the native picker from a focused Rex pane", 0)
     end
+    local client_id = local_app_id(ctx, arguments)
     local url = "interdimux-picker://" .. host .. "?client_id=" .. encode(client_id)
     if ctx.server then
       url = url .. "&origin_server=" .. encode(ctx.server) .. "&origin_session_id=" .. encode(ctx.session_id)
+      -- Rex may supply only the session when invoked from a remote palette.
+      if ctx.block_id then url = url .. "&origin_block_id=" .. encode(ctx.block_id) end
+      if type(ctx.window_id) == "string" and ctx.window_id ~= "" then
+        url = url .. "&origin_window_id=" .. encode(ctx.window_id)
+      end
     else
-      local view, view_error = rex.session.view { session_id = ctx.session_id }
-      if not view then error(view_error, 0) end
+      local placed, list_error = rex.call("session.list_blocks", { session_id = ctx.session_id })
+      if not placed then error(list_error, 0) end
       local window_id
-      for _, window in ipairs(view.windows or {}) do
-        for _, layer in ipairs(window.layers or {}) do
-          for _, block in ipairs(layer.blocks or {}) do
-            if block.block_id == ctx.block_id then window_id = window.window_id end
-          end
+      for _, block in ipairs(placed.blocks or {}) do
+        if block.block_id == ctx.block_id and block.placement == "placed" then
+          window_id = block.window_id
+          break
         end
       end
       if not window_id then error("The originating Rex pane no longer exists", 0) end

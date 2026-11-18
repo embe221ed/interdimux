@@ -1,16 +1,24 @@
-// Rex exposes a host-scoped scripting ID for each session. Address the object
-// by its complete ID even if a similarly named host or session exists.
+// Rex exposes a host-scoped scripting ID for each session. Read each object's
+// properties in one Apple Event; each individual property access crosses into Rex.
 function showSession(app, hostName, sessionID) {
     const hosts = app.hosts.whose({name: hostName})();
-    if (hosts.length !== 1 || !hosts[0].connected()) {
+    const host = hosts.length === 1 ? hosts[0].properties() : null;
+    if (!host || !host.connected || host.name !== hostName || !host.id) {
         throw Error("Connect this Rex app to the selected host, then refresh the picker.");
     }
-    const hostID = hosts[0].id();
-    const session = app.sessions.byId(hostID + "/" + sessionID);
-    if (!session.exists() || !session.remote() || session.hostName() !== hostName) {
-        throw Error("The session is no longer available in this Rex app. Refresh the picker.");
+    const id = host.id + "/" + sessionID;
+    const session = app.sessions.byId(id);
+    const missing = "The session is no longer available in this Rex app. Refresh the picker.";
+    try {
+        const details = session.properties();
+        if (details.id !== id || !details.remote || details.hostName !== hostName) {
+            throw Error(missing);
+        }
+        app.show(session);
+    } catch (error) {
+        if (error.errorNumber === -1728) throw Error(missing);
+        throw error;
     }
-    app.show(session);
 }
 
 function run(args) {

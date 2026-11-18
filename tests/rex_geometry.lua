@@ -7,7 +7,7 @@ local bounds = { .11, .17, .78, .66 }
 local function fixture()
   local source = { owner = "app", columns = 100, rows = 40, cell_width_px = 21, cell_height_px = 66,
     desired = { { client_id = "other", columns = 20, rows = 10 }, { client_id = "app", columns = 105, rows = 41 } } }
-  local view = { windows = { { window_id = "window", layers = { {
+  local view = { session_id = "session", windows = { { window_id = "window", layers = { {
     bounds = { 0, 0, 1, 1 }, layout = { rect = { 0, 0, 1, 1 }, split = {
       before = { block_id = "source", rect = { 0, 0, .5, 1 } },
       after = { block_id = "other", rect = { .5, 0, .5, 1 } },
@@ -32,6 +32,15 @@ assert(hint.columns == 163 and hint.rows == 27, "seed from initiating app grid a
 assert(not hint.cell_width_px and not hint.cell_height_px, "never impose the source pane's zoomed font")
 assert(type(fingerprint) == "string" and #calls == 2, "initial performs only view+source-size reads")
 print("passed: immediate seed, split rect, two read-only calls, no font inheritance")
+local attached_hint, attached_fingerprint = geometry.initial(rx, args, bounds, nil, view)
+assert(#calls == 3 and calls[3] == "size", "the exact attached view needs only a size read")
+assert(attached_hint.columns == hint.columns and attached_fingerprint == fingerprint)
+for _, unusable in ipairs({ {session_id="another", windows={}}, {session_id="session"}, false }) do
+  local before = #calls
+  local _, recovered = geometry.initial(rx, args, bounds, nil, unusable)
+  assert(recovered == fingerprint and #calls == before + 2 and calls[before + 1] == "view",
+    "missing or mismatched attached views must read the origin")
+end
 local cache = { cells = { width = 17, height = 55 }, windows = {} }
 hint = geometry.initial(rx, args, bounds, cache)
 assert(hint.columns == 202 and hint.rows == 32, "known popup cells recover viewport pixels from source grid")

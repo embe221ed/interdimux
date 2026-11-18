@@ -45,18 +45,21 @@ local function desired_for(size, client)
     if desired.client_id == client and positive(desired.columns) and positive(desired.rows) then return desired end
   end
 end
-function M.initial(rx, args, bounds, cache)
+function M.initial(rx, args, bounds, cache, view)
   args = args or {}
   cache = type(cache) == "table" and cache or {}
   bounds = rect(bounds) or { .11, .17, .78, .66 }
-  local viewed, view = pcall(function() return rx.session.view { session_id = args.session_id } end)
+  if type(view) ~= "table" or view.session_id ~= args.session_id or type(view.windows) ~= "table" then
+    local ok, fetched = pcall(rx.session.view, { session_id = args.session_id })
+    view = ok and fetched or nil
+  end
   local sampled, size = pcall(function()
     return rx.call("com.superlogical.terminal.size", {
       session_id = args.session_id, block_id = args.block_id, args = {},
     })
   end)
   if not sampled or type(size) ~= "table" then size = {} end
-  local source = viewed and source_rect(view, args)
+  local source = source_rect(view, args)
   local desired = desired_for(size, args.client_id)
   local columns = grid(desired and desired.columns or size.columns, 80)
   local rows = grid(desired and desired.rows or size.rows, 24)

@@ -925,10 +925,7 @@ pub(crate) fn run_mode(verb: &str, args: &[String]) -> Result<(), String> {
             }
             "connect-dir" | "session-name-for" => {
                 let query = words.first().ok_or("This mode requires a directory")?;
-                if crate::projects::query_directory(query).is_none() {
-                    return Err(format!("The directory does not exist: {query:?}"));
-                }
-                let resolved = crate::projects::resolve(&snapshot, query)?;
+                let resolved = crate::projects::resolve_directory_query(&snapshot, query)?;
                 if verb == "session-name-for" {
                     println!("{}", resolved.name);
                     return Ok(());

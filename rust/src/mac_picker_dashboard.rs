@@ -37,12 +37,13 @@ return { started = true }
 pub(super) fn counts(rows: &[Candidate], attention: usize) -> Value {
     let panes = rows
         .iter()
+        .filter(|row| row.remote_session.is_none())
         .filter_map(|row| row.pane_id.as_deref())
         .collect::<HashSet<_>>()
         .len();
     json!({
         "sessions":rows.iter().filter(|row| row.kind == "session" && row.remote_session.is_none()).count(),
-        "tabs":rows.iter().filter(|row| row.kind == "window").count(),
+        "tabs":rows.iter().filter(|row| row.kind == "window" && row.remote_session.is_none()).count(),
         // Combined tab rows still retain the exact underlying pane ID.
         "panes":panes,"attention":attention,
         "projects":rows.iter().filter(|row| row.kind == "directory").count(),

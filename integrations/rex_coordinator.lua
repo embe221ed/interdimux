@@ -306,6 +306,28 @@ local function wait_notice_or_stop(status)
   end
 end
 
+local function target_after_close(closed)
+  local function target(session_id)
+    local view = rex.session.view { session_id = session_id }
+    if view and view.windows and #view.windows > 0 then
+      return { session_id = session_id, window_id = view.active_window_id }
+    end
+  end
+  -- The origin is already attached. A closed window or pane can leave it
+  -- usable; a successful destroy of the origin session cannot.
+  if closed.session_id ~= args.session_id or closed.window_id or closed.block_id then
+    local origin = target(args.session_id)
+    if origin then return origin end
+  end
+  local listed = rex.call("session.list", {})
+  for _, session in ipairs(listed and listed.sessions or {}) do
+    if session.session_id ~= args.session_id then
+      local fallback = target(session.session_id)
+      if fallback then return fallback end
+    end
+  end
+end
+
 local function complete(kind, event)
   if finished then return end
   finished = true
@@ -335,15 +357,7 @@ local function complete(kind, event)
       context.finished = true
       operate({ operation = result.operation, target = result.target, args = result.args or {} }, context)
       if result.operation == "close" then
-        local listed = rex.call("session.attach_all", { event_scope = "session" })
-        local fallback
-        for _, session in ipairs(listed and listed.sessions or {}) do
-          local view = rex.session.view { session_id = session.session_id }
-          if view and view.windows and #view.windows > 0 then
-            local candidate = { session_id = session.session_id, window_id = view.active_window_id }
-            if not fallback or session.session_id == args.session_id then fallback = candidate end
-          end
-        end
+        local fallback = target_after_close(result.target)
         if fallback then
           local selected, selection_error = rex.call("client.perform", {
             client_id = args.client_id, action = "session.select", args = fallback,
@@ -399,7 +413,7 @@ local function prepare()
   if not observed then error(observe_error, 0) end
   grid_cache = load_grid()
   local size
-  size, grid_fingerprint = geometry.initial(rex, args, bounds, grid_cache)
+  size, grid_fingerprint = geometry.initial(rex, args, bounds, grid_cache, observed.view)
   -- Snapshot publication alone gates the child. GUI ownership and font changes
   -- must never delay the first frame; seed the expected grid before spawning.
   atomic_json(ready_path, { version = 1, ready = false })

@@ -93,11 +93,17 @@ Set `last_session_key="ctrl+b>shift+l"` to toggle to the most recent other
 session recorded by Interdimux. This shortcut always uses MRU order, even with
 `INTERDIMUX_ORDER=index`; sidebar clicks and other native Rex switches aren't
 tracked. The same action is available as `Interdimux: Last Session` in the
-palette. It reads the session list and shared history in Lua and switches
-through Rex's native action. Until there is recorded history, it uses
+palette. On the home host it reads the session list and shared history in Lua
+and switches through Rex's native action. Until there is recorded history, it uses
 Interdimux's session order.
 
-Picker actions start one detached Rex coordinator, which supplies the snapshot
+On a remote host, the terminal shortcuts run the standalone navigator in a
+floating terminal on that host. The remote shell needs Rex and fzf on PATH.
+It finds imux through `INTERDIMUX_BIN` or `rust/target/release/imux` under
+`INTERDIMUX_ROOT`, defaulting to the checkout path passed to setup. Agent
+shortcuts and last-session use that host’s agent state and session history.
+
+On the home host, picker actions start one detached Rex coordinator, which supplies the snapshot
 and opens a centered floating terminal. The terminal starts the shared Rust
 navigator directly with login disabled and explicit initiating-client/origin
 IDs. The navigator publishes a small result record; the coordinator applies

@@ -1,6 +1,8 @@
 struct PickerPreviewRequest: Equatable {
     let generation: UInt64
     let targetID: String
+    let parentID: String?
+    let paneID: String?
 }
 
 /// Pure scheduling state. The controller owns its timer and independent preview
@@ -9,6 +11,8 @@ struct PickerPreviewGate {
     private let debounce: Double
     private var generation: UInt64 = 0
     private var selectedID: String?
+    private var parentID: String?
+    private var paneID: String?
     private var queued = false
     private var lastActivity = -Double.infinity
     private var inFlight: PickerPreviewRequest?
@@ -20,13 +24,19 @@ struct PickerPreviewGate {
 
     /// Empty/nil means no eligible selection. Repeated selection notifications
     /// for the same target do not recapture it or postpone its existing deadline.
-    mutating func select(_ targetID: String?, at now: Double) {
+    @discardableResult
+    mutating func select(_ targetID: String?, parent: String? = nil, pane: String? = nil, settled: Bool = false, at now: Double) -> Bool {
         let targetID = targetID.flatMap { $0.isEmpty ? nil : $0 }
-        guard targetID != selectedID else { return }
+        guard (targetID, parent, pane) != (selectedID, parentID, paneID) else { return false }
         selectedID = targetID
+        parentID = parent
+        paneID = pane
         generation += 1
         queued = targetID != nil
-        lastActivity = max(lastActivity, now)
+        // An explicit preview toggle can use an already settled selection.
+        // Recent typing and subsequent selection changes still get a full debounce.
+        lastActivity = max(lastActivity, settled ? now - debounce : now)
+        return true
     }
 
     /// Call on search edits, including IME composition, even before new results
@@ -51,7 +61,8 @@ struct PickerPreviewGate {
     /// cannot enqueue more requests, regardless of how often selection changes.
     mutating func begin(at now: Double) -> PickerPreviewRequest? {
         guard let deadline = nextDeadline, now >= deadline, let targetID = selectedID else { return nil }
-        let request = PickerPreviewRequest(generation: generation, targetID: targetID)
+        let request = PickerPreviewRequest(generation: generation, targetID: targetID,
+                                           parentID: parentID, paneID: paneID)
         inFlight = request
         queued = false
         return request
@@ -62,8 +73,13 @@ struct PickerPreviewGate {
     /// selection. A stale response frees its slot but cannot consume newer work.
     mutating func finish(_ request: PickerPreviewRequest) -> Bool {
         guard inFlight == request else { return false }
+        let current = isCurrent(request)
         inFlight = nil
-        return selectedID == request.targetID && generation == request.generation
+        return current
+    }
+
+    func isCurrent(_ request: PickerPreviewRequest) -> Bool {
+        inFlight == request && selectedID == request.targetID && generation == request.generation
     }
 
     /// Hide, mutation, context change, or preview disable makes old content
@@ -72,6 +88,8 @@ struct PickerPreviewGate {
     mutating func invalidate(cancelInFlight: Bool = false) {
         generation += 1
         selectedID = nil
+        parentID = nil
+        paneID = nil
         queued = false
         if cancelInFlight { inFlight = nil }
     }

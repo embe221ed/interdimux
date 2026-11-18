@@ -28,7 +28,10 @@ struct PickerItem: Equatable {
     let subtitle: String
     let path: String
     let host: String?
+    let hostID: String?
     let sessionID: String?
+    let windowID: String?
+    let blockID: String?
     let stale: Bool
     var current: Bool
     let parentID: String?
@@ -51,7 +54,10 @@ struct PickerItem: Equatable {
         subtitle = value["subtitle"] as? String ?? ""
         path = value["path"] as? String ?? ""
         host = value["host"] as? String
+        hostID = value["host_id"] as? String
         sessionID = value["session_id"] as? String
+        windowID = value["window_id"] as? String
+        blockID = value["block_id"] as? String
         stale = value["stale"] as? Bool ?? false
         current = value["current"] as? Bool ?? false
         parentID = value["parent_id"] as? String
@@ -102,7 +108,7 @@ final class PickerBackend {
     private var process: Process?
     private var input: PickerInput?
     private var serial = 0
-    private var connection = 0
+    private(set) var connection = 0
     private let executable: URL
     var isRunning: Bool { process?.isRunning == true }
 

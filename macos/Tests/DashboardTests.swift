@@ -66,16 +66,18 @@ struct DashboardTests {
             view.keyDown(with: event)
         }
         view.resetSelection()
-        // Quartz supplies .numericPad and .function on real arrow events.
-        func hardwareKey(_ code: CGKeyCode) {
+        // Model Quartz's intrinsic flags without inheriting keys held by the user.
+        func hardwareKey(_ code: CGKeyCode, flags: CGEventFlags) {
             let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!
+            event.flags = flags
             view.keyDown(with: NSEvent(cgEvent: event)!)
         }
-        hardwareKey(125)
+        let arrowFlags: CGEventFlags = [.maskNumericPad, .maskSecondaryFn]
+        hardwareKey(125, flags: arrowFlags)
         try check(view.selectedActionID == "attention", "Hardware Down must select the next dashboard card")
-        hardwareKey(76)
+        hardwareKey(76, flags: .maskNumericPad)
         try check(choices.last == "attention", "Keypad Enter must open the selected dashboard card")
-        hardwareKey(126)
+        hardwareKey(126, flags: arrowFlags)
         try check(view.selectedActionID == "switch", "Hardware Up must select the previous dashboard card")
         key("n", code: 45, modifiers: .control)
         try check(view.selectedActionID == "attention", "Control-N must navigate without opening New session")
@@ -101,12 +103,12 @@ struct DashboardTests {
                   "Every external handoff must be grouped under Rex terminal")
         view.layoutSubtreeIfNeeded()
         view.resetSelection()
-        hardwareKey(124)
+        hardwareKey(124, flags: arrowFlags)
         try check(view.selectedActionID == "rename", "Right should move across to the command in the same row")
-        hardwareKey(123)
+        hardwareKey(123, flags: arrowFlags)
         try check(view.selectedActionID == "switch", "Left should return to the same row in Navigate")
         _ = view.choose(key: "a")
-        hardwareKey(124)
+        hardwareKey(124, flags: arrowFlags)
         try check(view.selectedActionID == "jobs", "Right must move to the next terminal tool")
         view.updateSummary(DashboardSummary(counts: ["terminal_tools_available": 0]))
         try check(view.selectedActionID == "switch", "Losing access should restore the first enabled item")

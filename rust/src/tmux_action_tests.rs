@@ -301,6 +301,65 @@ fn native_send_resolves_grouping_keys_and_preserves_literal_text() {
 }
 
 #[test]
+fn preview_preserves_the_displayed_pane_after_a_split_or_move() {
+    if !supported() {
+        eprintln!("tmux >=3.6 unavailable; private preview test skipped");
+        return;
+    }
+    let fixture = Fixture::new();
+    let rendered = fixture.snapshot();
+    let exact = crate::preview::capture_target(&rendered, &fixture.second_window).unwrap();
+    let pane_id = native(&exact).2.unwrap();
+    fixture.action(
+        "send",
+        Some(&exact),
+        json!({"text":"ORIGINAL-PANE","enter":true}),
+    );
+    fixture.await_text(&exact, "ORIGINAL-PANE");
+    let split = fixture.tmux(&[
+        "split-window",
+        "-h",
+        "-t",
+        pane_id,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "exec /bin/cat",
+    ]);
+    let active = fixture.tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        native(&fixture.second_window).1.unwrap(),
+        "#{pane_id}",
+    ]);
+    assert_eq!(active.trim(), split.trim());
+    assert!(fixture.action("preview", Some(&exact), json!({}))["text"]
+        .as_str()
+        .unwrap()
+        .contains("ORIGINAL-PANE"));
+    fixture.tmux(&[
+        "join-pane",
+        "-d",
+        "-s",
+        pane_id,
+        "-t",
+        native(&fixture.first_window).1.unwrap(),
+    ]);
+    let preview =
+        || crate::tmux_actions::action(&fixture.context, "preview", Some(&exact), &json!({}));
+    assert!(
+        preview().is_err(),
+        "a moved pane cannot be replaced by the active pane"
+    );
+    fixture.tmux(&["kill-pane", "-t", pane_id]);
+    assert!(
+        preview().is_err(),
+        "a closed pane cannot be replaced by the active pane"
+    );
+}
+
+#[test]
 fn linked_window_send_uses_the_selected_sessions_grouping_key() {
     if !supported() {
         eprintln!("tmux >=3.6 unavailable; private action test skipped");

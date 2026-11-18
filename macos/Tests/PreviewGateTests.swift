@@ -26,6 +26,20 @@ struct PreviewGateTests {
     }
 
     private static func run() throws {
+        var toggled = PickerPreviewGate(debounce: 0.2)
+        toggled.select("tab", parent: "s", pane: "a", settled: true, at: 1)
+        let immediate = try take(&toggled, at: 1, target: "tab")
+        toggled.select("tab", parent: "s", pane: "b", at: 2)
+        try check(immediate.parentID == "s" && immediate.paneID == "a",
+                  "An issued capture must retain the pane shown when it started")
+        try check(!toggled.finish(immediate) && toggled.begin(at: 2.1) == nil,
+                  "A different physical pane on the same tab must wait for navigation to settle")
+        toggled.invalidate(cancelInFlight: true)
+        toggled.noteInput(at: 3)
+        toggled.select("tab", parent: "s", pane: "b", settled: true, at: 3.1)
+        try check(toggled.begin(at: 3.1) == nil && toggled.begin(at: 3.21) != nil,
+                  "An explicit toggle must still respect a recent search edit")
+
         var gate = PickerPreviewGate(debounce: 0.2)
         try check(gate.nextDeadline == nil && gate.begin(at: 0) == nil, "No selection must produce no work")
         gate.select("pane:a", at: 1)

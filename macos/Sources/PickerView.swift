@@ -88,6 +88,7 @@ final class PickerTable: NSTableView {
     var onAccept: (() -> Void)?
     var onCancel: (() -> Void)?
     var onType: ((NSEvent) -> Void)?
+    var onRowPress: ((Int) -> Void)?
     var onRowMenu: ((Int, NSEvent) -> Void)?
     var onBranch: ((Bool) -> Void)?
     var onFocusChange: ((Bool) -> Void)?
@@ -107,7 +108,11 @@ final class PickerTable: NSTableView {
     }
     override func mouseDown(with event: NSEvent) {
         if event.modifierFlags.contains(.control) { rightMouseDown(with: event) }
-        else { super.mouseDown(with: event) }
+        else {
+            let index = row(at: convert(event.locationInWindow, from: nil))
+            if index >= 0 { onRowPress?(index) }
+            super.mouseDown(with: event)
+        }
     }
     override func keyDown(with event: NSEvent) {
         if (123...124).contains(event.keyCode), event.pickerModifiers.isEmpty, let onBranch {
@@ -272,7 +277,13 @@ final class PickerCell: NSTableCellView, NSViewToolTipOwner {
         }
         let identity = item.rowTitle
         let host = item.hostLabel
-        let detail = host ?? (item.combined ? item.detail : identity != item.title ? item.title : "")
+        let detail: String
+        if let host {
+            let extra = remoteDetail(item, identity: identity)
+            detail = extra.isEmpty ? host : "\(host)  ·  \(extra)"
+        } else {
+            detail = item.combined ? item.detail : identity != item.title ? item.title : ""
+        }
         if !detail.isEmpty && (host != nil || detail != identity) {
             let identityFont = item.kind == "session" ? Self.sessionFont : Self.titleFont
             let title = NSMutableAttributedString(string: identity, attributes: [.font: identityFont, .paragraphStyle: Self.truncatedTitleStyle, .foregroundColor: item.contextOnly ? Palette.secondary : Palette.text])
@@ -295,6 +306,11 @@ final class PickerCell: NSTableCellView, NSViewToolTipOwner {
         return true
     }
 
+    private func remoteDetail(_ item: PickerItem, identity: String) -> String {
+        let detail = item.kind == "pane" && identity != item.title ? item.title : item.detail
+        return detail == identity ? "" : detail
+    }
+
     // Native hover and accessibility callbacks can read the current reused
     // cell directly instead of building two descriptions on every keystroke.
     override func accessibilityLabel() -> String? {
@@ -302,7 +318,8 @@ final class PickerCell: NSTableCellView, NSViewToolTipOwner {
         let identity = item.rowTitle
         let host = item.hostLabel
         let subtitle = host == nil ? item.subtitle : ""
-        return "\(identity)\(identity != item.title ? ", " + item.title : ""), \(item.kindLabel)\(item.combined ? ", single pane: " + item.detail : "")\(host.map { ", host " + $0 } ?? ""), level \(tree.depth + 1), \(subtitle), \(item.path)\(item.current ? ", current" : "")\(item.contextOnly ? ", parent context" : "")\(item.attention ? ", needs " + (item.agentState == "approve" ? "approval" : "input") : "")"
+        let titleDetail = identity != item.title ? item.title : host != nil && !item.combined ? remoteDetail(item, identity: identity) : ""
+        return "\(identity)\(titleDetail.isEmpty ? "" : ", " + titleDetail), \(item.kindLabel)\(item.combined ? ", single pane: " + item.detail : "")\(host.map { ", host " + $0 } ?? ""), level \(tree.depth + 1), \(subtitle), \(item.path)\(item.current ? ", current" : "")\(item.contextOnly ? ", parent context" : "")\(item.attention ? ", needs " + (item.agentState == "approve" ? "approval" : "input") : "")"
     }
 
     func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {

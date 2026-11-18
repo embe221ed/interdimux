@@ -16,6 +16,9 @@ const SNAPSHOT_SCRIPT: &str = include_str!("rex_snapshot.lua");
 const HISTORY_SCRIPT: &str = include_str!("rex_history.lua");
 const ACTIVATE_SCRIPT: &str = include_str!("rex_activate.lua");
 const OPERATIONS_SCRIPT: &str = include_str!("../../integrations/rex_operations.lua");
+const PREVIEW_CALL: &str = r#"local attached, err = rex.call("session.attach", {session_id=request.target.session_id})
+if not attached then error(err, 0) end
+return operation(request, rex.args.context, attached.view)"#;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
@@ -49,7 +52,7 @@ pub(crate) fn collect_native(
     discovery: &str,
 ) -> Result<(Value, Snapshot, Option<String>), String> {
     let source = format!(
-        "local clients=(function()\n{discovery}\nend)()\n\
+        "local clients, imux_collector_identity=(function()\n{discovery}\nend)()\n\
          local snapshot=(function()\n{SNAPSHOT_SCRIPT}\nend)()\n\
          local history=(function()\n{HISTORY_SCRIPT}\nend)()\n\
          return {{clients=clients,snapshot=history.enrich(snapshot)}}\n"
@@ -214,7 +217,28 @@ pub(crate) fn action(
         }
         return Err("Native Rex operation timed out; reload before retrying".into());
     }
-    let source = format!("local listed,err=rex.call('session.attach_all',{{event_scope='session'}})\nif not listed then error(err,0) end\nlocal operation=(function()\n{OPERATIONS_SCRIPT}\nend)()\nlocal result=operation(rex.args.request,rex.args.context)\nif rex.args.request.operation=='create' and (not rex.args.request.args.kind or rex.args.request.args.kind=='session') and result.target then\nlocal history=(function()\n{HISTORY_SCRIPT}\nend)()\nhistory.remember(result.target.session_id,rex.args.request.args.cwd)\nend\nreturn result\n");
+    let dispatch = if operation == "preview" {
+        if target.is_none() {
+            return Err("Select an existing Rex target".into());
+        }
+        // Attaching the one selected session already returns its current view.
+        // Its window and block membership are rechecked before reading output.
+        PREVIEW_CALL.to_owned()
+    } else {
+        format!(
+            r#"local listed, err = rex.call("session.attach_all", {{event_scope='session'}})
+if not listed then error(err, 0) end
+local result = operation(request, rex.args.context)
+if request.operation == 'create' and (not request.args.kind or request.args.kind == 'session') and result.target then
+  local history = (function()
+{HISTORY_SCRIPT}
+  end)()
+  history.remember(result.target.session_id, request.args.cwd)
+end
+return result"#
+        )
+    };
+    let source = format!("local request = rex.args.request\nlocal operation = (function()\n{OPERATIONS_SCRIPT}\nend)()\n{dispatch}\n");
     let output = run_script(
         context,
         &source,
@@ -350,14 +374,9 @@ fn activation_args(context: &RexContext, target: &Target) -> Result<Value, Strin
     }
 }
 
-pub(crate) fn run_script(
-    context: &RexContext,
-    script: &str,
-    session: Option<&str>,
-    args: &Value,
-) -> Result<Vec<u8>, String> {
+fn script_command(context: &RexContext) -> Result<Command, String> {
     let binary = resolve_binary()?;
-    let mut command = Command::new(&binary);
+    let mut command = Command::new(binary);
     // The picker terminal has its own Rex identity. Do not let it redirect
     // collection or conflict with activation's explicit target session.
     command
@@ -368,6 +387,112 @@ pub(crate) fn run_script(
     if let Some(server) = &context.server {
         command.args(["--server", server]);
     }
+    Ok(command)
+}
+
+#[cfg(feature = "macos-picker")]
+#[derive(Default)]
+pub(crate) enum PreviewConnection {
+    #[default]
+    Closed,
+    OneShot,
+    Stream(crate::dirs::BoundedCommand),
+}
+
+#[cfg(feature = "macos-picker")]
+impl PreviewConnection {
+    pub(crate) fn open(context: &RexContext, discovery: &str) -> Result<(Value, Self), String> {
+        let mut cmd = script_command(context)?;
+        let script = format!(
+            "local function discover(imux_collector_pid, imux_collector_uid)\n{discovery}\nend\n\
+            local operation=(function()\n{OPERATIONS_SCRIPT}\nend)()\n{}",
+            include_str!("rex_preview_connection.lua")
+        );
+        let args = json!({"context":{"block_id":context.block_id,"picker_block_id":context.picker_block_id}});
+        cmd.args(["do", "-e", &script, "--args", &args.to_string()]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut process = crate::dirs::BoundedCommand::interactive(cmd, deadline, 512 * 1024)
+            .map_err(|e| format!("Cannot start Rex preview connection: {e}"))?;
+        let handshake = format!("{} {}\n", process.id(), collector_uid());
+        // A legacy CLI can return its fallback marker and exit before our first write.
+        let reply = process
+            .exchange_line(handshake.as_bytes(), deadline, || false)
+            .unwrap_or_else(|| process.first_line(|| false))
+            .map_err(|e| format!("Cannot open Rex preview connection: {e}"))?;
+        let ready: Value = serde_json::from_slice(&reply)
+            .map_err(|e| format!("Invalid Rex preview handshake: {e}"))?;
+        if ready == "imux-preview-oneshot" {
+            // Older Rex CLIs can report their result but cannot stream JSON.
+            drop(process);
+            let clients = run_script(context, discovery, None, &json!({}))?;
+            let clients = serde_json::from_slice(&clients)
+                .map_err(|e| format!("Cannot decode Rex clients: {e}"))?;
+            return Ok((clients, Self::OneShot));
+        }
+        Ok((ready, Self::Stream(process)))
+    }
+
+    pub(crate) fn capture(
+        &mut self,
+        context: &RexContext,
+        target: &Target,
+        lines: u64,
+    ) -> Result<Value, String> {
+        if let Self::OneShot = self {
+            return action(context, "preview", Some(target), &json!({"lines":lines}));
+        }
+        let input = format!(
+            "{}\n",
+            json!({"target":crate::interactive::target_json(target),"args":{"lines":lines}})
+        );
+        // If a read times out or a reply is malformed, discard the entire pipe.
+        // No later selection may consume an earlier capture's delayed response.
+        let Self::Stream(mut process) = std::mem::take(self) else {
+            return Err("The Rex preview connection closed. Toggle preview to reconnect.".into());
+        };
+        let reply = process
+            .exchange_line(
+                input.as_bytes(),
+                Instant::now() + Duration::from_secs(10),
+                || false,
+            )
+            .ok_or("The Rex preview connection closed. Toggle preview to reconnect.")?
+            .map_err(|e| {
+                format!("Rex preview connection failed: {e}. Toggle preview to reconnect.")
+            })?;
+        let result: Value = serde_json::from_slice(&reply)
+            .map_err(|e| format!("Invalid Rex preview response: {e}"))?;
+        if result["error"].is_string() || result["text"].is_string() {
+            *self = Self::Stream(process);
+        }
+        if let Some(error) = result["error"].as_str() {
+            return Err(error.to_owned());
+        }
+        Ok(result)
+    }
+}
+
+fn collector_uid() -> u32 {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn getuid() -> u32;
+        }
+        unsafe { getuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+pub(crate) fn run_script(
+    context: &RexContext,
+    script: &str,
+    session: Option<&str>,
+    args: &Value,
+) -> Result<Vec<u8>, String> {
+    let mut command = script_command(context)?;
     command.args(["do", "-"]);
     if let Some(id) = session {
         command.args(["--session", id]);
@@ -379,16 +504,13 @@ pub(crate) fn run_script(
         .stderr(Stdio::piped());
     let mut child = command
         .spawn()
-        .map_err(|e| format!("Cannot start Rex CLI {}: {e}", binary.display()))?;
+        .map_err(|e| format!("Cannot start Rex CLI {:?}: {e}", command.get_program()))?;
     #[cfg(unix)]
     let local_identity = {
-        extern "C" {
-            fn getuid() -> u32;
-        }
         format!(
             "local imux_collector_pid, imux_collector_uid = {}, {}\n",
             child.id(),
-            unsafe { getuid() }
+            collector_uid()
         )
     };
     #[cfg(not(unix))]
@@ -457,7 +579,10 @@ fn label(value: &Value) -> String {
 }
 
 fn process_metadata(data: &Value, block_id: &str) -> (String, String) {
-    let process = &data["metadata"][block_id];
+    terminal_process_metadata(&data["metadata"][block_id])
+}
+
+pub(crate) fn terminal_process_metadata(process: &Value) -> (String, String) {
     let foreground = process
         .get("foreground")
         .filter(|p| p.is_object())
@@ -525,7 +650,7 @@ fn is_picker_ui(data: &Value, block: &Value) -> bool {
             == Some(name)
 }
 
-fn title_owned_by_foreground(metadata: &Value) -> bool {
+pub(crate) fn title_owned_by_foreground(metadata: &Value) -> bool {
     let Some(foreground) = metadata.get("foreground").filter(|v| v.is_object()) else {
         return false;
     };
@@ -671,7 +796,7 @@ fn short_id(id: &str) -> &str {
     }
 }
 
-fn default_window_name(name: &str) -> bool {
+pub(crate) fn default_window_name(name: &str) -> bool {
     name.strip_prefix("Window ")
         .map(|suffix| suffix.len() == 8 && suffix.bytes().all(|c| c.is_ascii_hexdigit()))
         .unwrap_or(false)
@@ -1396,19 +1521,26 @@ mod tests {
     fn collector_proves_only_the_exact_local_unix_peer() {
         let setup = r#"
 local imux_collector_pid, imux_collector_uid = 123, 501
+local imux_collector_identity
+local identity_calls = 0
 local principal = { kind = "peer", transport = "unix", pid = 123, uid = 501 }
 rex = {
   call = function(method)
     if method == "session.attach_all" then return { sessions = {} } end
     if method == "server.status" then return { host_id = "host:local" } end
-    if method == "server.whoami" then return { principal = principal } end
+    if method == "server.whoami" then
+      identity_calls = identity_calls + 1
+      return { principal = principal }
+    end
     error("Unexpected method: " .. tostring(method))
   end,
 }
 "#;
         let code = format!(
             "{setup}\nlocal function snapshot()\n{SNAPSHOT_SCRIPT}\nend\n\
-             assert(snapshot().local_host_id == 'host:local')\n\
+             assert(snapshot().local_host_id == 'host:local' and identity_calls == 1)\n\
+             imux_collector_identity = rex.call('server.whoami', {{}})\n\
+             assert(snapshot().local_host_id == 'host:local' and identity_calls == 2)\n\
              principal.pid = 124; assert(snapshot().local_host_id == nil)\n\
              principal.pid = 123; principal.uid = 502; assert(snapshot().local_host_id == nil)\n\
              principal.uid = 501; principal.transport = 'tcp'; assert(snapshot().local_host_id == nil)\n\
@@ -1417,7 +1549,8 @@ rex = {
              principal.path = {{hop = 'login-server'}}; assert(snapshot().local_host_id == nil)\n\
              principal.path = ''; assert(snapshot().local_host_id == nil)\n\
              principal.path = false; assert(snapshot().local_host_id == nil)\n\
-             principal.path = {{}}; assert(snapshot().local_host_id == 'host:local')"
+             principal.path = {{}}; assert(snapshot().local_host_id == 'host:local')\n\
+             assert(identity_calls == 2, 'reuse native discovery on this connection')"
         );
         let mut child = match Command::new("lua")
             .arg("-")

@@ -89,7 +89,7 @@ impl Browser {
         } else {
             let snapshot = snapshot.ok_or("Open the picker first")?;
             if let Some(base) = &next.base {
-                next.base = Some(exact_path(base)?);
+                next.base = Some(projects::exact_path(base)?);
             }
             candidates(if cached {
                 projects::cached_directories(snapshot)
@@ -101,26 +101,6 @@ impl Browser {
         next.deep = deep;
         Ok((next, entries))
     }
-}
-
-/// Recheck the exact cached path; never reinterpret a missing path as a session
-/// name, invoke zoxide, or fall back to HOME. Called only on explicit actions.
-pub(super) fn exact_path(path: &str) -> Result<String, String> {
-    if !Path::new(path).is_absolute()
-        || path.chars().any(char::is_control)
-        || projects::excluded_network(path)
-    {
-        return Err("Choose an existing local directory".into());
-    }
-    let physical = std::fs::canonicalize(path)
-        .map_err(|_| "This directory no longer exists; reload projects")?;
-    let text = physical
-        .to_str()
-        .ok_or("The directory path is not valid Unicode")?;
-    if projects::excluded_network(text) || !physical.is_dir() {
-        return Err("Choose an existing local directory".into());
-    }
-    Ok(text.into())
 }
 
 pub(super) fn candidates(entries: Vec<Directory>) -> Vec<Candidate> {

@@ -109,8 +109,7 @@ def probe(explicit_columns=None, gated=False, preview=False):
                 if cursor.anchors and not cursor.synchronized and not resized:
                     assert released, 'finder painted before readiness was published'
                     first_frame = bytes(output)
-                    assert cursor.anchors[0]['row'] == 28, cursor.anchors
-                    assert cursor.anchors[0]['tty_rows'] == 28, cursor.anchors
+                    assert all(a['row'] == a['tty_rows'] == 28 for a in cursor.anchors), cursor.anchors
                     if preview:
                         assert b'^e rename' not in first_frame, 'initial footer ignored the preview pane width'
                     elif explicit_columns is None:
@@ -134,7 +133,12 @@ def probe(explicit_columns=None, gated=False, preview=False):
             else: raise AssertionError('picker did not exit')
             assert os.waitstatus_to_exitcode(status) == 0, repr(bytes(output[-1800:]))
             assert resized and cancelled, 'footer never anchored at first/final grid: '+repr(cursor.anchors)+'; tail='+repr(bytes(output[-1800:]))
-            assert all(anchor['row'] == anchor['tty_rows'] for anchor in cursor.anchors), cursor.anchors
+            # tty_rows records the PTY size at read time. One footer painted at
+            # the old height can already be in the pipe when TIOCSWINSZ runs.
+            resized_rows = [a['row'] for a in cursor.anchors if a['tty_rows'] == 36]
+            if resized_rows[:1] == [28]:
+                resized_rows = resized_rows[1:]
+            assert resized_rows and all(row == 36 for row in resized_rows), cursor.anchors
             assert json.loads((root/'result.json').read_text())['outcome'] == 'cancel'
             return {'explicit_columns': explicit_columns, 'hosted_ready_gate': gated, 'preview': preview, 'anchors': cursor.anchors}
         finally:

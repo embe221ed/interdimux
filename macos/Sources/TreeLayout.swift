@@ -11,11 +11,17 @@ enum PickerTreeLayout {
     /// Refresh metadata in the cached slots. Catalog permutations must not
     /// move an already visible list; new siblings follow surviving siblings.
     static func preservingOrder(of cached: [PickerItem], in fresh: [PickerItem]) -> [PickerItem] {
-        var byID: [String: PickerItem] = [:]
-        for item in fresh { byID[item.id] = item }
-        if cached.count == fresh.count,
-           cached.allSatisfy({ byID[$0.id]?.parentID == $0.parentID && byID[$0.id] != nil }) {
-            return cached.compactMap { byID[$0.id] }
+        if cached.count == fresh.count {
+            // Stable catalog order is the common refresh. Reuse the fresh
+            // array directly, including any changed titles or current markers.
+            if zip(cached, fresh).allSatisfy({ $0.id == $1.id && $0.parentID == $1.parentID }) {
+                return fresh
+            }
+            var byID: [String: PickerItem] = [:]
+            for item in fresh { byID[item.id] = item }
+            if cached.allSatisfy({ item in byID[item.id].map { $0.parentID == item.parentID } == true }) {
+                return cached.compactMap { byID[$0.id] }
+            }
         }
         var ranks: [String: Int] = [:]
         for (index, item) in cached.enumerated() { ranks[item.id] = index }

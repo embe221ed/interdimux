@@ -10,7 +10,9 @@ private func dashboardBenchmark(window: NSWindow, frame: NSRect) -> [String: Any
     let initial = (ProcessInfo.processInfo.systemUptime - started) * 1_000
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     view.cacheDisplay(in: view.bounds, to: bitmap)
-    let down = NSEvent(cgEvent: CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: true)!)!
+    let arrow = CGEvent(keyboardEventSource: nil, virtualKey: 125, keyDown: true)!
+    arrow.flags = [.maskNumericPad, .maskSecondaryFn]
+    let down = NSEvent(cgEvent: arrow)!
     var navigation: [Double] = [], counts: [Double] = [], paint: [Double] = []
     var visited = Set<String>()
     for iteration in 0..<36 {

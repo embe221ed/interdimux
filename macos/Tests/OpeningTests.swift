@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 
 private struct TestFailure: Error, CustomStringConvertible {
     let description: String
@@ -18,11 +19,156 @@ struct OpeningTests {
         }
     }
 
+    private static func remoteAutomation() throws {
+        typealias Automation = RemoteSessionAutomation
+        typealias Descriptor = NSAppleEventDescriptor
+        let exactID = "app-host/session:same"
+        func host(_ name: String = "build", connected: Bool = true, id: String = "app-host") -> Descriptor {
+            let row = Descriptor.record()
+            row.setDescriptor(Descriptor(string: name), forKeyword: AEKeyword(pName))
+            row.setDescriptor(Descriptor(string: id), forKeyword: AEKeyword(pID))
+            row.setDescriptor(Descriptor(boolean: connected), forKeyword: Automation.connected)
+            return row
+        }
+        func verify(_ hosts: [Descriptor], id: String = "app-host/session:same",
+                    name: String = "build", remote: Bool = true, shown: Bool,
+                    verifyIdentity: ((String) throws -> Void)? = nil) throws {
+            var events: [AEEventID] = []
+            var reveals: [String] = []
+            do {
+                try Automation.show(host: "build", sessionID: "session:same", verifyIdentity: verifyIdentity) { suite, command, direct in
+                    events.append(command)
+                    if suite == Automation.suite && command == Automation.showCommand {
+                        reveals.append(direct.forKeyword(AEKeyword(keyAEKeyData))?.stringValue ?? "")
+                        return nil
+                    }
+                    try check(suite == AEEventClass(kAECoreSuite) && command == AEEventID(kAEGetData),
+                              "Unexpected automation event")
+                    let target = direct.forKeyword(AEKeyword(keyAEContainer))
+                    if target?.forKeyword(AEKeyword(keyAEDesiredClass))?.typeCodeValue == Automation.hostClass {
+                        let list = Descriptor.list()
+                        for row in hosts { list.insert(row, at: 0) }
+                        return list
+                    }
+                    try check(target?.forKeyword(AEKeyword(keyAEKeyData))?.stringValue == exactID,
+                              "Session lookup lost its app-scoped host ID")
+                    let row = Descriptor.record()
+                    row.setDescriptor(Descriptor(string: id), forKeyword: AEKeyword(pID))
+                    row.setDescriptor(Descriptor(string: name), forKeyword: Automation.hostName)
+                    row.setDescriptor(Descriptor(boolean: remote), forKeyword: Automation.remote)
+                    return row
+                }
+            } catch is Automation.Failure {
+                try check(!shown, "Valid remote reveal failed")
+            } catch is Automation.NeedsRemoteCheck {
+                try check(!shown, "Show ran before physical identity was established")
+            }
+            try check(reveals == (shown ? [exactID] : []), "Revealed an incorrect target")
+            if shown { try check(events.count == 3, "Repeated Apple Event validation") }
+        }
+        try verify([host("local"), host()], shown: true)
+        try verify([host(), host()], shown: false)
+        try verify([host(), host("BUILD")], shown: false)
+        try verify([host(connected: false)], shown: false)
+        try verify([host("BUILD")], shown: false)
+        try verify([host()], id: "other/session:same", shown: false)
+        try verify([host()], name: "other", shown: false)
+        try verify([host()], remote: false, shown: false)
+        try verify([host()], shown: false) { _ in throw Automation.NeedsRemoteCheck() }
+        try verify([host()], shown: false) { _ in throw Automation.Failure("Replaced host") }
+        var verifiedIDs: [String] = []
+        try verify([host()], shown: true) { verifiedIDs.append($0) }
+        try check(verifiedIDs == ["app-host"], "Physical validation did not receive the live scripting ID")
+
+        let appID = "C941D699-5C09-4366-AE75-D88B6DFC9F1F"
+        let serverID = "ed48deee-aaf0-41be-a159-a322110c8df6"
+        let otherID = "c518f08b-3358-42b3-9447-03c10c98b7fc"
+        func record(_ name: String = "build", _ scripting: String = appID,
+                    _ server: String = serverID) -> [String: String] {
+            ["name": name, "id": scripting, "lastHostID": server, "lastInstanceID": otherID]
+        }
+        func registry(_ rows: [[String: String]], version: Int = 1) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["formatVersion": version, "records": rows])
+        }
+        enum Outcome { case verified, fallback, rejected }
+        func expect(_ data: Data?, _ wanted: Outcome) throws {
+            let outcome: Outcome
+            do {
+                try Automation.verifyHost("build", scriptingID: appID, physicalID: serverID, registry: data)
+                outcome = .verified
+            } catch is Automation.NeedsRemoteCheck { outcome = .fallback }
+            catch is Automation.Failure { outcome = .rejected }
+            try check(outcome == wanted, "Unexpected result from Rex host registry: \(outcome)")
+        }
+        try expect(registry([record(), record("alias", otherID)]), .verified)
+        try expect(registry([record("build", appID.lowercased(), serverID.uppercased())]), .verified)
+        try expect(registry([record("build", appID, otherID)]), .rejected)
+        try expect(registry([record("renamed")]), .rejected)
+        try expect(registry([record("build", otherID)]), .rejected)
+        try expect(registry([record(), record("BUILD", otherID)]), .rejected)
+        try expect(registry([record(), record("alias")]), .rejected)
+        try expect(registry([["name": "build", "id": appID, "lastInstanceID": serverID]]), .fallback)
+        try expect(registry([record("unrelated", otherID)]), .fallback)
+        try expect(registry([record()], version: 2), .fallback)
+        try expect(nil, .fallback)
+        try expect(Data("{".utf8), .fallback)
+        try expect(Data(count: 1024 * 1024 + 1), .fallback)
+        let sid = "session:00112233-4455-6677-8899-aabbccddeeff"
+        func session(_ id: String, _ name: String, _ isRemote: Bool) -> Descriptor {
+            let row = Descriptor.record()
+            row.setDescriptor(Descriptor(string: id), forKeyword: AEKeyword(pID))
+            row.setDescriptor(Descriptor(string: "Workspace"), forKeyword: AEKeyword(pName))
+            row.setDescriptor(Descriptor(string: name), forKeyword: Automation.hostName)
+            row.setDescriptor(Descriptor(boolean: isRemote), forKeyword: Automation.remote)
+            return row
+        }
+        func inventory(_ hosts: [Descriptor], _ sessions: [Descriptor], permitted: Bool = true,
+                       expectedReads: [DescType]) throws -> [[String: Any]] {
+            let saved = try registry([record()])
+            var reads: [DescType] = []
+            let result = try Automation.catalog(permitted: permitted, registry: saved) { suite, event, object in
+                try check(suite == AEEventClass(kAECoreSuite) && event == AEEventID(kAEGetData),
+                          "Cold discovery attempted a non-read Apple Event")
+                let kind = object.forKeyword(AEKeyword(keyAEContainer))?.forKeyword(AEKeyword(keyAEDesiredClass))?.typeCodeValue ?? 0
+                reads.append(kind)
+                let list = Descriptor.list()
+                for row in kind == Automation.hostClass ? hosts : sessions { list.insert(row, at: 0) }
+                return list
+            }
+            try check(reads == expectedReads, "Unexpected bulk event reads during cold discovery")
+            return result
+        }
+        let known = host(id: appID)
+        let valid = session(appID + "/" + sid, "build", true)
+        let reads = [Automation.hostClass, Automation.sessionClass]
+        let entries = try inventory([known, host("unknown", id: otherID)], [valid,
+            session(otherID + "/" + sid, "build", true), session(appID + "/" + sid, "wrong", true),
+            session(appID + "/" + sid, "build", false), session(appID + "/session:malformed", "build", true)],
+            expectedReads: reads)
+        try check(entries.count == 1 && entries[0]["host_id"] as? String == serverID
+                  && entries[0]["sessions"] as? [[String: String]] == [["session_id": sid, "label": "Workspace"]],
+                  "Cold discovery leaked local, mismatched or malformed sessions")
+        let ambiguous = try inventory([known, host("BUILD", id: otherID)], [valid], expectedReads: [Automation.hostClass])
+        let disconnected = try inventory([host(connected: false, id: appID)], [valid], expectedReads: [Automation.hostClass])
+        let duplicates = try inventory([known], [valid, valid], expectedReads: reads)
+        let denied = try inventory([known], [valid], permitted: false, expectedReads: [])
+        try check([ambiguous, disconnected, duplicates, denied].allSatisfy { $0.isEmpty },
+                  "Cold discovery used an unverified or unauthorized host")
+        for (code, hint) in [(-1743, "Automation"), (-1728, "Refresh"), (-1708, "Update Rex"),
+                             (-600, "closed"), (-609, "closed"), (-1712, "timed out")] {
+            try check(Automation.eventFailure(code, detail: nil).message.contains(hint),
+                      "Missing recovery instructions for Apple Event error \(code)")
+        }
+    }
+
     private static func run() throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
         NSApp.finishLaunching()
+        try previewHandoff()
         try lazyProjectSearch()
         try remoteSessions()
+        try residentRemoteCatalog()
+        try remoteAutomation()
         try keyboardShortcuts()
         try treeKeyboardFocus()
         try visibleResultMetadata()
@@ -460,6 +606,31 @@ struct OpeningTests {
         try check(menus.count == 2 && table.selectedRow == 2, "An in-flight action allowed another row menu")
     }
 
+    private static func previewHandoff() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        let exact = ["session_id": "s", "window_id": "w", "block_id": "a"]
+        picker.previewGate.select("w", parent: "s", pane: "a", at: 0)
+        let original = picker.previewGate.begin(at: 1)!
+        picker.previewPreparation = (1, original)
+        picker.receive(["id": 1, "type": "preview_target", "target_id": "w", "target": exact])
+        try check(picker.previewBackend.requests.count == 1
+                  && picker.previewBackend.requests[0].type == "capture_preview"
+                  && picker.previewBackend.requests[0].fields["target"] as? [String: String] == exact
+                  && picker.backend.requests.isEmpty, "Only the independent worker may capture the exact rendered pane")
+        picker.previewGate.select("w", parent: "s", pane: "b", at: 2)
+        picker.receivePreview(["id": picker.previewRequest!.id, "type": "error", "message": "Old capture"])
+        try check(picker.previewRequest == nil && picker.previewGate.nextDeadline != nil,
+                  "An old capture error exhausted the replacement request for the same tab")
+        picker.previewPreparation = (2, picker.previewGate.begin(at: 3)!)
+        picker.previewGate.select("other", parent: "s", at: 4)
+        picker.receive(["id": 2, "type": "preview_target", "target_id": "w", "target": exact])
+        try check(picker.previewBackend.requests.count == 1 && picker.previewGate.begin(at: 5)?.targetID == "other",
+                  "Selection changed while the target was resolving; stale work must never reach Rex")
+    }
+
     private static func dashboardHandoffs() throws {
         let picker = PickerApplication()
         picker.setupPanel()
@@ -496,7 +667,7 @@ struct OpeningTests {
         picker.receive(["id": picker.pending, "type": "results", "rows": [directory]])
         func press(_ code: CGKeyCode, _ flags: CGEventFlags) -> Bool {
             let key = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!
-            key.flags.formUnion(flags)
+            key.flags = (123...126).contains(code) ? flags.union([.maskSecondaryFn, .maskNumericPad]) : flags
             return picker.panel.performKeyEquivalent(with: NSEvent(cgEvent: key)!)
         }
         try check(press(124, .maskCommand) && picker.backend.requests.last?.fields["base_id"] as? String == "directory:example",
@@ -558,7 +729,7 @@ struct OpeningTests {
         let editor = NSTextView()
         func arrow(_ code: CGKeyCode) {
             let key = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!
-            key.flags.formUnion([.maskNumericPad, .maskSecondaryFn])
+            key.flags = [.maskNumericPad, .maskSecondaryFn]
             content.table.keyDown(with: NSEvent(cgEvent: key)!)
         }
         let requestCount = picker.backend.requests.count
@@ -587,6 +758,105 @@ struct OpeningTests {
         try check(content.count.stringValue == "1 tab", "Tab scope must name its single match")
     }
 
+    private static func residentRemoteCatalog() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        let context = ["client_id": "client:home", "session_id": "session:a"]
+        let local = [["id": "session:a", "kind": "session", "title": "A"],
+                     ["id": "session:b", "kind": "session", "title": "B"]]
+        let remote = ["id": "remote:build:session:a", "kind": "session", "host": "build",
+                      "session_id": "session:a", "title": "Remote A"]
+        typealias Completion = ([[String: Any]]) -> Void
+        var reads: [UInt64] = []
+        var finish: Completion?
+        picker.readNativeCatalog = { request, completion in
+            reads.append(request["token"] as! UInt64)
+            finish = completion
+        }
+        func grant(_ token: UInt64) -> [String: Any] {
+            ["token": token, "pid": NSNumber(value: 123), "birth": "macos:123:456"]
+        }
+        func opening(_ token: UInt64, grantOnOpen: Bool = true) {
+            picker.open(context: context)
+            var result: [String: Any] = ["id": picker.pending, "type": "results", "rows": local, "preferred_id": "session:b",
+                                         "previous_session_pending": true, "remote_pending": true]
+            if grantOnOpen { result["native_catalog"] = grant(token) }
+            picker.receive(result)
+        }
+        let catalog = [["label": "build", "sessions": [["session_id": "session:a", "label": "Remote A"]]]] as [[String: Any]]
+        for manual in [false, true] {
+            opening(10, grantOnOpen: !manual)
+            if manual {
+                let priorReads = reads.count
+                picker.remotePollWork?.perform()
+                guard let poll = picker.remotePollRequest else { throw TestFailure(description: "Missing post-open catalog poll") }
+                picker.receive(["id": poll, "type": "remote_update", "pending": true, "changed": false, "native_catalog": grant(10)])
+                try check(reads.count == priorReads + 1, "An owned remote-update grant was ignored after the opening")
+            }
+            let origin = picker.pending
+            try check(picker.backend.requests[origin - 1].fields["native_catalog"] as? Bool == true
+                      && !picker.loading && picker.selectedItem?.id == "session:b",
+                      "Waiting for the resident Rex inventory held up the local opening")
+            if manual { picker.move(-1) }
+            let selected = picker.selectedItem?.id
+            guard let finish else { throw TestFailure(description: "The solicited native catalog read did not start") }
+            finish(catalog)
+            guard let callback = picker.nativeCatalogReply else { throw TestFailure(description: "The resident catalog was discarded") }
+            // Direct discovery can finish while this hint is being accepted.
+            picker.remotePollWork?.perform()
+            guard let poll = picker.remotePollRequest else { throw TestFailure(description: "The direct host poll did not run") }
+            let sent = picker.backend.requests[callback - 1]
+            try check(picker.pending == origin && sent.type == "native_catalog" && sent.fields["token"] as? UInt64 == 10,
+                      "The inventory response replaced the active foreground request")
+            picker.receive(["id": callback, "type": "native_catalog", "pending": true, "changed": true])
+            picker.receive(["id": poll, "type": "remote_update", "pending": false, "changed": false])
+            guard let rows = picker.remoteResultsRequest else { throw TestFailure(description: "Accepted catalog did not refresh remote results") }
+            picker.receive(["id": rows, "type": "results", "rows": local + [remote],
+                            "remote_pending": false, "previous_session_id": remote["id"]!,
+                            "preferred_id": remote["id"]!])
+            try check(picker.selectedItem?.id == (manual ? selected : remote["id"]),
+                      "A late resident result lost the previous session or overrode deliberate navigation")
+        }
+
+        opening(20)
+        picker.receive(["id": picker.pending, "type": "results", "rows": local, "native_catalog": grant(99)])
+        try check(reads.last == 20, "A repeated opening result started an unsolicited native read")
+        let old = finish!
+        let previousOrigin = picker.pending
+        opening(21)
+        let valid = finish!
+        var count = picker.backend.requests.count
+        old(catalog)
+        picker.receive(["id": previousOrigin, "type": "results", "native_catalog": grant(99)])
+        picker.receive(["id": picker.pending + 100, "type": "remote_update", "native_catalog": grant(99)])
+        try check(count == picker.backend.requests.count && reads.last == 21, "Obsolete or unsolicited catalog was accepted")
+        picker.backend.connection += 1
+        valid(catalog)
+        try check(count == picker.backend.requests.count, "Inventory went to a replacement helper connection")
+        opening(22)
+        let dismissed = finish!
+        picker.dismiss()
+        count = picker.backend.requests.count
+        dismissed(catalog)
+        try check(count == picker.backend.requests.count, "Inventory was sent after the originating panel closed")
+
+        opening(23)
+        let accepted = finish!
+        picker.refresh()
+        count = picker.backend.requests.count
+        accepted(catalog)
+        try check(count == picker.backend.requests.count, "Explicit refresh accepted a previous inventory")
+        let large: [[String: Any]] = [["label": String(repeating: "\"", count: 32 * 1024)]]
+        try check(RemoteSessionAutomation.boundedCatalog(large, token: 1).isEmpty
+                  && RemoteSessionAutomation.boundedCatalog(catalog, token: 1).count == 1,
+                  "An oversized escaped JSON frame was truncated or sent to the helper")
+        try check(RemoteSessionAutomation.readCatalog(["pid": ProcessInfo.processInfo.processIdentifier,
+                                                       "birth": "stale"]).isEmpty,
+                  "A catalog read accepted a replaced process")
+    }
+
     private static func remoteSessions() throws {
         let picker = PickerApplication()
         picker.setupPanel()
@@ -597,12 +867,28 @@ struct OpeningTests {
         let a = ["id": "session:a", "kind": "session", "title": "A"]
         let b = ["id": "session:b", "kind": "session", "title": "B"]
         let remoteID = "remote:server:session:a"
-        let hostSession = ["id": remoteID, "kind": "session", "title": "Remote A", "host": "devbox", "session_id": "session:a"]
-        func results(_ rows: [[String: Any]], id: Int? = nil, text: String = "", more: Bool = true) {
-            picker.receive(["id": id ?? picker.pending, "type": "results", "query": text, "scope": "all",
-                            "remote_pending": more, "preferred_id": "session:b", "rows": rows])
+        let hostSession = ["id": remoteID, "kind": "session", "title": "Remote A", "host": "devbox",
+                           "host_id": "host:devbox", "session_id": "session:a"]
+        let tabID = "remote:server:window:work"
+        let paneID = "remote:server:block:one"
+        let combinedID = "remote:server:window:solo"
+        let hostTab: [String: Any] = ["id": tabID, "kind": "window", "title": "Remote tab", "host": "devbox",
+                                      "session_id": "session:a", "window_id": "window:work", "parent_id": remoteID]
+        let hostPane: [String: Any] = ["id": paneID, "kind": "pane", "title": "Remote pane", "host": "devbox",
+                                       "session_id": "session:a", "window_id": "window:work", "block_id": "block:one", "parent_id": tabID]
+        let combined: [String: Any] = ["id": combinedID, "kind": "window", "title": "Remote single pane", "host": "devbox",
+                                       "session_id": "session:a", "window_id": "window:solo", "block_id": "block:solo",
+                                       "parent_id": remoteID, "combined": true]
+        func results(_ rows: [[String: Any]], id: Int? = nil, text: String = "", scope: String = "all", more: Bool = true,
+                     previous: String? = nil, previousPending: Bool = false) {
+            var reply: [String: Any] = ["id": id ?? picker.pending, "type": "results", "query": text, "scope": scope,
+                                        "remote_pending": more, "preferred_id": previous ?? "session:b",
+                                        "previous_session_pending": previousPending, "rows": rows]
+            reply["previous_session_id"] = previous
+            picker.receive(reply)
         }
         func poll() throws -> Int {
+            if let id = picker.remotePollRequest { return id }
             guard let work = picker.remotePollWork else { throw TestFailure(description: "Remote poll was not scheduled") }
             work.perform()
             guard let id = picker.remotePollRequest else { throw TestFailure(description: "Scheduled work did not request a remote update") }
@@ -611,6 +897,144 @@ struct OpeningTests {
         func deliverPoll(_ id: Int, more: Bool, changed: Bool) {
             picker.receive(["id": id, "type": "remote_update", "pending": more, "changed": changed])
         }
+        func changedRemoteRequest(more: Bool) throws -> Int {
+            deliverPoll(try poll(), more: more, changed: true)
+            guard let id = picker.remoteResultsRequest else { throw TestFailure(description: "Changed host did not refresh results") }
+            return id
+        }
+
+        func selectedID() -> String? {
+            let row = picker.content.table.selectedRow
+            return picker.items.indices.contains(row) ? picker.items[row].id : nil
+        }
+
+        func expectPendingPolls(_ delays: [TimeInterval]) throws {
+            for delay in delays {
+                try check(picker.remotePollDelay == delay && picker.remotePollWork != nil,
+                          "Expected pending remote poll after \(delay)s, got \(picker.remotePollDelay)s")
+                deliverPoll(try poll(), more: true, changed: false)
+            }
+        }
+        picker.open(context: local)
+        results([a, b])
+        try expectPendingPolls([0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.1, 0.2, 0.2])
+
+        picker.open(context: [:])
+        results([a, b])
+        try expectPendingPolls([0.05])
+        results([a, b, hostSession], id: try changedRemoteRequest(more: true))
+        try expectPendingPolls([0.05, 0.1, 0.2])
+
+        picker.open(context: local)
+        results([a, b, hostSession])
+        try expectPendingPolls([0.05, 0.1, 0.2])
+        picker.open(context: local)
+        results([a, b])
+        try expectPendingPolls([0.05, 0.1, 0.2])
+
+        picker.open(context: local)
+        try check(picker.openingFrameHadRows, "Expected cached local opening rows")
+        results([a, b], previousPending: true)
+        try expectPendingPolls([0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.1, 0.2])
+        results([a, b], id: try changedRemoteRequest(more: true), previousPending: true)
+        try expectPendingPolls([0.05, 0.1, 0.2])
+        picker.open(context: local)
+        results([a, b, hostSession], previous: remoteID)
+        try expectPendingPolls([0.05, 0.1, 0.2])
+        picker.open(context: local)
+        picker.move(1)
+        results([a, b], previousPending: true)
+        try expectPendingPolls([0.05, 0.1, 0.2])
+
+        // The remote and local origins intentionally share the same raw session ID.
+        // Supply each history reply independently of the controller's cached guess.
+        let localRows = [a, b] + (0..<40).map { ["id": "session:extra-\($0)", "kind": "session", "title": "Extra \($0)"] }
+        for enterAt in ["never", "cached", "provisional"] {
+            picker.open(context: remote)
+            results(localRows + [hostSession], more: false, previous: "session:b")
+            picker.open(context: local)
+            try check(selectedID() == remoteID, "Returning to local lost the previous host in the cached frame")
+            if enterAt == "cached" { picker.accept() }
+            results(localRows, previousPending: true)
+            try check(selectedID() == "session:b" && picker.activation == nil && !picker.loading,
+                      "Unresolved remote history blocked local results or activated a provisional row")
+            if enterAt == "provisional" { picker.accept() }
+            if enterAt != "never" {
+                try check(picker.remotePollRequest != nil && picker.remotePollWork == nil,
+                          "A queued Return waited for the background timer before checking for its host")
+                let requests = picker.backend.requests.count
+                picker.accept()
+                try check(picker.backend.requests.count == requests, "Repeated Return sent a duplicate host poll")
+            }
+            results(localRows, id: try changedRemoteRequest(more: true), previousPending: true)
+            try check(picker.activation == nil, "An unrelated host consumed the queued Return")
+            picker.content.table.scrollRowToVisible(0)
+            results(localRows + [hostSession], id: try changedRemoteRequest(more: false), more: false, previous: remoteID)
+            picker.content.layoutSubtreeIfNeeded()
+            let row = picker.content.table.selectedRow
+            try check(selectedID() == remoteID && picker.content.table.visibleRect.intersects(picker.content.table.rect(ofRow: row)),
+                      "The confirmed remote previous session was absent from the visible selection")
+            try check((picker.activation != nil) == (enterAt != "never")
+                      && (enterAt == "never" || picker.backend.requests.last?.fields["target_id"] as? String == remoteID),
+                      "Queued Return did not switch exactly once to the confirmed host")
+            picker.activation = nil
+        }
+
+        picker.open(context: local)
+        picker.accept()
+        results(localRows, previousPending: true)
+        picker.move(1)
+        let manual = selectedID()
+        results(localRows + [hostSession], id: try changedRemoteRequest(more: false), more: false, previous: remoteID)
+        try check(manual != nil && manual != remoteID && selectedID() == manual && picker.activation == nil,
+                  "Remote history arriving after navigation stole the user's row or activated the earlier Return")
+
+        for clickHighlighted in [true, false] {
+            picker.open(context: local)
+            results(localRows, previousPending: true)
+            if clickHighlighted { picker.content.table.onRowPress?(picker.content.table.selectedRow) }
+            else { picker.move(1) }
+            let chosen = selectedID()
+            picker.accept()
+            try check(chosen != nil && picker.backend.requests.last?.type == "activate"
+                      && picker.backend.requests.last?.fields["target_id"] as? String == chosen,
+                      "Deliberately choosing a local row waited on remote history")
+            picker.activation = nil
+        }
+
+        picker.open(context: local)
+        picker.accept()
+        results(localRows, previousPending: true)
+        deliverPoll(try poll(), more: false, changed: false)
+        try check(picker.activation == nil && picker.remoteResultsRequest == nil,
+                  "An unavailable previous session activated a fallback or started a redundant query")
+        picker.accept()
+        try check(picker.backend.requests.last?.fields["target_id"] as? String == "session:b",
+                  "A missing previous session kept the visible local row from activating")
+        picker.activation = nil
+
+        var canonicalOrigin = remote
+        canonicalOrigin["origin_server"] = "HOST:DEVBOX"
+        let otherHost = ["id": "remote:other:session:a", "kind": "session", "title": "Other A", "host": "other",
+                         "host_id": "host:other", "session_id": "session:a"]
+        picker.open(context: canonicalOrigin)
+        results([otherHost, a, b, hostSession], more: false, previous: "session:b")
+        picker.open(context: local)
+        try check(selectedID() == remoteID, "Identical remote IDs hid the exact canonical host in the warm frame")
+        picker.open(context: canonicalOrigin)
+        try check(picker.items.filter(\.current).map(\.id) == [remoteID],
+                  "An exact host ID lost to another host with the same session ID")
+        var unknownOrigin = canonicalOrigin
+        unknownOrigin["origin_server"] = "unknown-private-key"
+        picker.open(context: unknownOrigin)
+        try check(picker.items.allSatisfy { !$0.current }, "An ambiguous private key marked an unrelated remote host")
+        var otherSessionOnDevbox = hostSession
+        otherSessionOnDevbox["session_id"] = "session:another"
+        otherSessionOnDevbox["id"] = "remote:devbox:session:another"
+        results([otherHost, otherSessionOnDevbox], more: false)
+        picker.open(context: canonicalOrigin)
+        try check(picker.items.allSatisfy { !$0.current }, "A closed session on a known host matched an unrelated host")
+        results(localRows, more: false)
 
         picker.open(context: local)
         results([a, b])
@@ -659,7 +1083,27 @@ struct OpeningTests {
         picker.accept()
         try check(picker.backend.requests.last?.fields["target_id"] as? String == remoteID,
                   "A remote result did not switch using its host-scoped ID")
-        picker.activation = nil
+        try check(picker.panel.level == .normal,
+                  "The floating picker would cover Rex while remote focus was being confirmed")
+        guard let handshake = picker.activation else { throw TestFailure(description: "Missing activation request") }
+        try check(picker.backend.requests.last?.fields["native_reveal"] as? Bool == true,
+                  "Session Enter did not advertise the resident reveal")
+        let staleGrant: [String: Any] = ["id": handshake, "type": "reveal_remote",
+            "pid": ProcessInfo.processInfo.processIdentifier, "birth": "replaced",
+            "host": "devbox", "host_id": "host:devbox", "session_id": "session:b"]
+        picker.receive(staleGrant)
+        picker.receive(staleGrant)
+        let until = Date(timeIntervalSinceNow: 2)
+        while picker.activation == handshake && Date() < until {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+        let completions = picker.backend.requests.filter { $0.type == "complete_remote_reveal" }
+        try check(completions.count == 1 && completions[0].fields["activation_id"] as? Int == handshake
+                  && (completions[0].fields["result"] as? [String: Any])?["error"] != nil,
+                  "Replaced process or duplicate grant caused an incorrect native completion")
+        picker.showError("Synthetic switch failure")
+        try check(picker.panel.level == .floating && picker.content.status.stringValue == "Synthetic switch failure",
+                  "A failed switch did not restore the picker and report the error")
 
         picker.open(context: remote)
         try check(picker.openingFrameHadRows && picker.items.filter(\.current).map(\.id) == [remoteID],
@@ -669,13 +1113,48 @@ struct OpeningTests {
         picker.open(context: aliasedOrigin)
         try check(picker.items.filter(\.current).map(\.id) == [remoteID],
                   "A unique remote session did not resolve the app's private server key")
-        results([a, b, hostSession])
+        let localTab = ["id": "window:work", "kind": "window", "title": "Local tab", "parent_id": "session:a"]
+        let localPane = ["id": "block:one", "kind": "pane", "title": "Local pane", "parent_id": "window:work"]
+        let fullTree = [a, localTab, localPane, b, hostSession, hostTab, hostPane, combined]
+        results(fullTree)
+        var focusedOrigin = aliasedOrigin
+        focusedOrigin["origin_block_id"] = "block:one"
+        picker.open(context: focusedOrigin)
+        try check(picker.items.filter(\.current).map(\.id) == [remoteID, tabID, paneID],
+                  "A cached remote pane marked a same-ID local pane or lost its parent tab")
+        focusedOrigin["origin_block_id"] = "block:solo"
+        focusedOrigin["origin_window_id"] = "window:solo"
+        picker.open(context: focusedOrigin)
+        try check(picker.items.filter(\.current).map(\.id) == [remoteID, combinedID],
+                  "A cached remote singleton did not mark its combined tab")
+        results(fullTree)
         let hiddenPoll = try poll()
         picker.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: picker.panel))
         let beforeHiddenReply = picker.backend.requests.count
         deliverPoll(hiddenPoll, more: true, changed: true)
         try check(picker.backend.requests.count == beforeHiddenReply && picker.remotePollWork == nil,
                   "A dismissed picker kept polling or re-querying remote hosts")
+
+        for (index, scope, target) in [(2, "window", hostTab), (3, "pane", hostPane)] {
+            picker.open(context: local)
+            results([a, b])
+            picker.changeScope(picker.content.scopes[index])
+            results([], scope: scope)
+            try check(picker.content.emptyDetail.stringValue == picker.remoteEmptyHint,
+                      "The \(scope) scope omitted its remote loading hint")
+            deliverPoll(try poll(), more: false, changed: true)
+            guard let refreshID = picker.remoteResultsRequest else {
+                throw TestFailure(description: "The \(scope) scope stopped refreshing before remote rows arrived")
+            }
+            try check(picker.backend.requests.last?.fields["scope"] as? String == scope,
+                      "A remote refresh changed the user's active scope")
+            results([target], id: refreshID, scope: scope, more: false)
+            picker.accept()
+            try check(picker.backend.requests.last?.type == "activate"
+                      && picker.backend.requests.last?.fields["target_id"] as? String == target["id"] as? String,
+                      "The \(scope) scope did not activate the precise remote row")
+            picker.activation = nil
+        }
 
         // The final host can finish with an unchanged catalog. There is no
         // reason to re-query, but neither kind of miss should keep its hint.
@@ -696,7 +1175,7 @@ struct OpeningTests {
                       && picker.backend.requests.count == beforeFinalReply && picker.remotePollWork == nil,
                       "An unchanged final catalog left a remote-loading hint or triggered another request")
         }
-        print("Remote opening checks passed: independent local action, incremental rows, latest search, origin cache, dismissal, unchanged completion")
+        print("Remote opening checks passed: independent local action, incremental rows, tab and pane scopes, origin cache, dismissal, unchanged completion")
     }
 
     private static func lazyProjectSearch() throws {

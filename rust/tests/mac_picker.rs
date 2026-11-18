@@ -11,51 +11,74 @@ fn native_picker_publishes_fast_hosts_while_slow_hosts_are_pending() {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
-    // Keep the synthetic Darwin socket path below sun_path's 104-byte limit.
-    let temp = std::path::Path::new("/tmp").join(format!("imux-remote-picker-{}", std::process::id()));
+    let temp = std::env::temp_dir().join(format!("imux-remote-picker-{}", std::process::id()));
     fs::create_dir(&temp).unwrap();
     let rex = temp.join("rex");
     let release = temp.join("release-slow-host");
-    #[cfg(target_os = "macos")]
-    let _tunnel = {
-        use std::os::unix::net::UnixListener;
-        let directory = temp.join("Library/Application Support/rex/ssh");
-        fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("123456789abcdef0.sock");
-        let listener = UnixListener::bind(&path).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-        listener
-    };
+    let release_layout = temp.join("release-fast-layout");
+    let release_metadata = temp.join("release-fast-metadata");
+    let rejected_switch = temp.join("rejected-switch");
     fs::write(&rex, r#"#!/bin/sh
 case " $* " in
     *' hosts list --json '*)
         printf '%s\n' '{"hosts":[{"host":{"label":"slow-vps","host_id":"slow","endpoints":["ssh://slow"]}},{"host":{"label":"fast-vps","host_id":"fast"}}]}' ;;
-    *'123456789abcdef0.sock '*)
-        # The direct host needs no tunnel. It must be published before we
-        # release this probe, so it cannot be hidden behind stale sockets.
-        until [ -e "$IMUX_TEST_RELEASE_HOST" ]; do sleep 0.02; done
-        printf '%s\n' '{"host_id":"slow","sessions":[{"session_id":"session:slow","label":"Slow workspace"}]}' ;;
+    *' --server=slow-vps api call session.bootstrap '*)
+        echo 'Rex RPC code=method_not_found' >&2; exit 1 ;;
     *' --server=slow-vps '*)
-        if [ -S "$HOME/Library/Application Support/rex/ssh/123456789abcdef0.sock" ]; then
-            echo 'Tunnel timed out before the fast direct host was available' >&2
-            exit 1
-        fi
         until [ -e "$IMUX_TEST_RELEASE_HOST" ]; do sleep 0.02; done
-        printf '%s\n' '{"host_id":"slow","sessions":[{"session_id":"session:slow","label":"Slow workspace"}]}' ;;
+        printf '%s\n' '{"host_id":"slow","sessions":[{"session_id":"session:local","label":"Slow workspace"}]}' ;;
+    *' --server=fast-vps '*'com.superlogical.terminal.title'*)
+        until [ -e "$IMUX_TEST_RELEASE_METADATA" ]; do sleep 0.02; done
+        printf '%s\n' '{"host_id":"fast","metadata":{"block:fast":{"foreground":{"pid":1,"name":"nvim","cwd":"/remote/editor"},"title":"Editor project","title_owner":{"pid":1,"name":"nvim"}}}}' ;;
+    *' --server=fast-vps '*'session.attach_all'*)
+        until [ -e "$IMUX_TEST_RELEASE_LAYOUT" ]; do sleep 0.02; done
+        printf '%s\n' '{"host_id":"fast","layouts":{"session:fast":[{"window_id":"window:1234abcd","label":"Window 1234abcd","panes":[{"block_id":"block:fast","label":"shell","terminal":true,"focused":true},{"block_id":"block:log","label":"Fast log","terminal":true}]}]}}' ;;
+    *' --server=fast-vps api call session.bootstrap '*)
+        if [ -f "$IMUX_TEST_SWITCH_LOG.reply" ]; then
+            printf '%s\n' bootstrap >>"$IMUX_TEST_SWITCH_LOG"
+            cat "$IMUX_TEST_SWITCH_LOG.reply"
+        else
+            printf '%s\n' '{"server_status":{"host_id":"fast"},"attach_all":{"sessions":[{"session_id":"session:fast","label":"Fast workspace"}]}}'
+        fi ;;
     *' --server=fast-vps '*)
         printf '%s\n' '{"host_id":"fast","sessions":[{"session_id":"session:fast","label":"Fast workspace"}]}' ;;
     *)
         cat >/dev/null
-        printf '%s\n' '{"clients":{"clients":[{"client_id":"client:mac","info":{"kind":"app","platform":"macos"},"principal":{"kind":"peer","transport":"unix"}}]},"snapshot":{"version":1,"local_host_id":"local","sessions":[{"session_id":"session:local","label":"Local workspace"}],"views":{"session:local":{"windows":[]}}}}' ;;
+        printf '{"clients":{"clients":[{"client_id":"client:mac","info":{"kind":"app","platform":"macos"},"principal":{"kind":"peer","transport":"unix","pid":%s}}]},"snapshot":{"version":1,"local_host_id":"local","sessions":[{"session_id":"session:local","label":"Local workspace"}],"views":{"session:local":{"windows":[]}}}}\n' "$IMUX_TEST_APP_PID" ;;
 esac
 "#).unwrap();
     fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
+    let contents = temp.join("Test Picker.app/Contents");
+    fs::create_dir_all(contents.join("MacOS")).unwrap();
+    fs::create_dir_all(contents.join("Helpers")).unwrap();
+    let helper = contents.join("Helpers/imux");
+    fs::copy(env!("CARGO_BIN_EXE_imux"), &helper).unwrap();
+    let app = contents.join("MacOS/InterdimuxPicker");
+    fs::write(&app, r#"#!/bin/sh
+[ "$1" = --show-remote-session ] && [ "$2" = "$IMUX_TEST_APP_PID" ] &&
+  [ "$4" = fast-vps ] && [ "$5" = session:fast ] || exit 2
+case "$3" in macos:*:*|linux:*:*) ;; *) exit 2 ;; esac
+if [ "$#" -eq 5 ]; then
+    echo '{"shown":true}'
+elif [ "$6" != fast ]; then
+    exit 2
+elif [ -f "$IMUX_TEST_SWITCH_LOG.native" ]; then
+    cat "$IMUX_TEST_SWITCH_LOG.native"
+else
+    echo '{"needs_remote_check":true}'
+fi
+"#).unwrap();
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = Command::new(&helper)
         .args(["macos-serve"])
         .env("HOME", &temp)
         .env("INTERDIMUX_REX_BIN", &rex)
         .env("IMUX_TEST_RELEASE_HOST", &release)
+        .env("IMUX_TEST_RELEASE_LAYOUT", &release_layout)
+        .env("IMUX_TEST_RELEASE_METADATA", &release_metadata)
+        .env("IMUX_TEST_APP_PID", std::process::id().to_string())
+        .env("IMUX_TEST_SWITCH_LOG", &rejected_switch)
         .env("INTERDIMUX_SHOW_DIRS", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -73,15 +96,24 @@ esac
         assert!(output.read_line(&mut line).unwrap() > 0);
         let response: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(response["id"], serial);
-        if request["type"] != "activate" {
+        if request["type"] != "activate" && request["type"] != "complete_remote_reveal" {
             assert_ne!(response["type"], "error", "{response}");
         }
         response
     };
 
-    let open = exchange(json!({"type":"open"}));
+    let local_open = json!({"type":"open","context":{"client_id":"client:mac","session_id":"session:local"}});
+    let open = exchange(local_open.clone());
     assert_eq!(open["remote_pending"], true);
     assert_eq!(open["rows"][0]["id"], "session:local");
+    let from_remote = exchange(json!({"type":"open","context":{
+        "client_id":"client:mac","origin_server":"slow-vps","origin_session_id":"session:local"
+    }}));
+    assert_eq!(from_remote["previous_session_id"], "session:local");
+    assert_eq!(from_remote["preferred_id"], "session:local");
+    let back_local = exchange(local_open.clone());
+    assert_eq!(back_local["previous_session_pending"], true);
+    assert!(back_local["previous_session_id"].is_null());
     let query = exchange(json!({"type":"query","query":"Local workspace","scope":"session"}));
     assert_eq!(query["rows"][0]["id"], "session:local");
     let wait_for_update = |exchange: &mut dyn FnMut(Value) -> Value| {
@@ -95,11 +127,41 @@ esac
             std::thread::sleep(Duration::from_millis(15));
         }
     };
-    assert_eq!(wait_for_update(&mut exchange)["pending"], true);
-    let warm = exchange(json!({"type":"open"}));
+    // Fast discovery may have completed while reopening from the other host.
+    if !back_local["rows"].as_array().unwrap().iter().any(|row| row["host"] == "fast-vps") {
+        assert_eq!(wait_for_update(&mut exchange)["pending"], true);
+    }
+    let warm = exchange(local_open.clone());
+    assert_eq!(warm["previous_session_pending"], true);
     assert_eq!(warm["remote_pending"], true);
     assert!(warm["rows"].as_array().unwrap().iter().any(|row| row["host"] == "fast-vps"));
-    let miss = exchange(json!({"type":"query","query":"Slow workspace","scope":"all"}));
+    assert!(!warm["rows"].as_array().unwrap().iter().any(|row| row["kind"] == "window"));
+    fs::write(&release_layout, "").unwrap();
+    assert_eq!(wait_for_update(&mut exchange)["pending"], true);
+    let fast_layout = exchange(json!({"type":"query","query":"","scope":"window"}));
+    assert_eq!(fast_layout["matched"], 1);
+    assert_eq!(fast_layout["rows"][1]["title"], "Window 1234abcd");
+    let fast_pane = exchange(json!({"type":"query","query":"Fast log","scope":"pane"}));
+    assert_eq!(fast_pane["matched"], 1);
+    assert_eq!(fast_pane["rows"][2]["title"], "Fast log");
+    let fallback = exchange(json!({"type":"query","query":"shell","scope":"pane"}));
+    assert_eq!(fallback["matched"], 1);
+    assert_eq!(fallback["rows"][2]["name"], "shell");
+    let local = exchange(json!({"type":"query","query":"Local workspace","scope":"session"}));
+    assert_eq!(local["rows"][0]["id"], "session:local");
+    fs::write(&release_metadata, "").unwrap();
+    assert_eq!(wait_for_update(&mut exchange)["pending"], true);
+    let named_tab = exchange(json!({"type":"query","query":"nvim","scope":"window"}));
+    assert_eq!(named_tab["matched"], 1);
+    assert_eq!(named_tab["rows"][1]["id"], fast_layout["rows"][1]["id"]);
+    assert_eq!(named_tab["rows"][1]["title"], "nvim");
+    let named_pane = exchange(json!({"type":"query","query":"nvim","scope":"pane","search_field":"command"}));
+    assert_eq!(named_pane["matched"], 1);
+    assert_eq!(named_pane["rows"][2]["id"], fallback["rows"][2]["id"]);
+    assert_eq!(named_pane["rows"][2]["name"], "nvim");
+    assert_eq!(named_pane["rows"][2]["title"], "Editor project");
+    assert_eq!(named_pane["rows"][2]["path"], "/remote/editor");
+    let miss = exchange(json!({"type":"query","query":"Slow workspace","scope":"all","search_field":"all"}));
     assert_eq!(miss["can_create"], true);
     fs::write(&release, "").unwrap();
     wait_for_update(&mut exchange);
@@ -108,10 +170,195 @@ esac
     assert!(stale["message"].as_str().unwrap().contains("no longer available"));
     let combined = exchange(json!({"type":"query","query":"","scope":"session"}));
     assert_eq!(combined["matched"], 3);
+    let previous = "remote:slow:session:local";
+    assert_eq!(combined["preferred_id"], previous);
+    assert_eq!(combined["previous_session_id"], previous);
+    assert!(combined["previous_session_pending"].is_null());
+    // Check the host and session have survived discovery in a single RPC.
+    // Neither stale case should ever reach the local app's reveal command.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let reply = rejected_switch.with_extension("reply");
+        fs::write(&reply, r#"{"server_status":{"host_id":"replacement"},"attach_all":{"sessions":[{"session_id":"session:fast"}]}}"#).unwrap();
+        let rejected = exchange(json!({"type":"activate","target_id":"remote:fast:session:fast"}));
+        assert_eq!(rejected["type"], "error");
+        assert!(rejected["message"].as_str().unwrap().contains("host changed"), "{rejected}");
+        fs::write(&reply, r#"{"server_status":{"host_id":"fast"},"attach_all":{"sessions":[]}}"#).unwrap();
+        let missing = exchange(json!({"type":"activate","target_id":"remote:fast:session:fast"}));
+        assert_eq!(missing["type"], "error");
+        assert!(missing["message"].as_str().unwrap().contains("session no longer exists"), "{missing}");
+        assert_eq!(fs::read_to_string(&rejected_switch).unwrap(), "bootstrap\nbootstrap\n");
+        fs::remove_file(reply).unwrap();
+    }
+    assert_eq!(exchange(local_open.clone())["preferred_id"], previous);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let activate = json!({"type":"activate","target_id":"remote:fast:session:fast"});
+        // Reopening starts another inventory refresh. Drain it before counting
+        // remote requests caused by Enter.
+        while wait_for_update(&mut exchange)["pending"] == true {}
+        let native = rejected_switch.with_extension("native");
+        let inventory = rejected_switch.with_extension("reply");
+        fs::write(&inventory, r#"{"server_status":{"host_id":"fast"},"attach_all":{"sessions":[{"session_id":"session:fast"}]}}"#).unwrap();
+        fs::write(&rejected_switch, "").unwrap();
+        fs::write(&native, r#"{"shown":true}"#).unwrap();
+        assert_eq!(exchange(activate.clone())["type"], "activated");
+        // A replaced route or an uncertain Show result never retries through SSH.
+        for response in [r#"{"error":"replaced host"}"#, r#"{"error":"Show timed out"}"#, "broken reply"] {
+            fs::write(&native, response).unwrap();
+            assert_eq!(exchange(activate.clone())["type"], "error");
+        }
+        assert_eq!(fs::read_to_string(&rejected_switch).unwrap(), "");
+        fs::write(&native, r#"{"needs_remote_check":true}"#).unwrap();
+        assert_eq!(exchange(activate.clone())["type"], "activated");
+        assert_eq!(fs::read_to_string(&rejected_switch).unwrap(), "bootstrap\n");
+        fs::write(&rejected_switch, "").unwrap();
+        let mut resident = activate;
+        resident["native_reveal"] = true.into();
+        let grant = exchange(resident.clone());
+        assert_eq!(grant["type"], "reveal_remote");
+        assert_eq!(grant["pid"], std::process::id());
+        assert!(grant["birth"].as_str().is_some_and(|v| !v.is_empty()));
+        assert_eq!(grant["session_id"], "session:fast");
+        assert_eq!(grant["host_id"], "fast");
+        let complete = |grant: &Value, result: Value| json!({"type":"complete_remote_reveal",
+            "activation_id":grant["id"], "result":result});
+        let confirmed = complete(&grant, json!({"shown":true}));
+        let mut wrong = confirmed.clone();
+        wrong["activation_id"] = 0.into();
+        assert_eq!(exchange(wrong)["type"], "error");
+        assert_eq!(exchange(confirmed.clone())["type"], "activated");
+        assert_eq!(exchange(confirmed)["type"], "error");
+        let grant = exchange(resident.clone());
+        assert_eq!(exchange(complete(&grant, json!({"error":"Show timed out"})))["type"], "error");
+        assert_eq!(fs::read_to_string(&rejected_switch).unwrap(), "");
+        let grant = exchange(resident.clone());
+        assert_eq!(exchange(complete(&grant, json!({"needs_remote_check":true})))["type"], "activated");
+        assert_eq!(fs::read_to_string(&rejected_switch).unwrap(), "bootstrap\n");
+        let grant = exchange(resident);
+        assert_eq!(exchange(local_open)["preferred_id"], "remote:fast:session:fast");
+        assert_eq!(exchange(complete(&grant, json!({"shown":true})))["type"], "error");
+    }
     let preview = exchange(json!({"type":"open","preview_only":true}));
     assert_eq!(preview["remote_pending"], false);
     assert!(preview["rows"].as_array().unwrap().iter().all(|row| row["host"].is_null()));
 
+    drop(exchange);
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn reveal_callback_rejects_replaced_local_process_before_automation() {
+    let output = Command::new(env!("CARGO_BIN_EXE_imux"))
+        .args(["macos-serve", "--show-session", &std::process::id().to_string(),
+            "old-birth", "remote", "session:remote"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("original Rex app closed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_refresh_rediscovers_sessions_while_old_metadata_stalls() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let temp = std::env::temp_dir().join(format!("imux-remote-refresh-{}", std::process::id()));
+    fs::create_dir(&temp).unwrap();
+    let rex = temp.join("rex");
+    fs::write(&rex, r#"#!/bin/sh
+root=${0%/*}
+case " $* " in
+    *' hosts list --json '*)
+        echo '{"hosts":[{"label":"dev","host_id":"remote"}]}' ;;
+    *' --server=dev api call session.bootstrap '*)
+        echo inventory >>"$root/inventories"
+        session=old
+        if [ -f "$root/new-session" ]; then
+            touch "$root/new-inventory-started"
+            until [ -f "$root/release-inventory" ]; do sleep 0.02; done
+            session=new
+        fi
+        printf '{"server_status":{"host_id":"remote"},"attach_all":{"sessions":[{"session_id":"session:%s","label":"%s"}]}}\n' "$session" "$session" ;;
+    *' --server=dev '*'com.superlogical.terminal.title'*)
+        echo "$$" >"$root/metadata-pid"
+        exec sleep 30 ;;
+    *' --server=dev '*'session.attach_all'*)
+        case "$*" in
+            *'session:new'*) echo '{"host_id":"remote","layouts":{"session:new":[]}}' ;;
+            *) echo '{"host_id":"remote","layouts":{"session:old":[{"window_id":"window:old","panes":[{"block_id":"block:old","terminal":true}]}]}}' ;;
+        esac ;;
+    *' do - '*)
+        source=$(cat)
+        snapshot='{"version":1,"local_host_id":"local","sessions":[{"session_id":"session:local","label":"Local"}],"views":{"session:local":{"windows":[]}}}'
+        case "$source" in
+            *'return {clients=clients,snapshot='*)
+                printf '{"clients":{"clients":[{"client_id":"client:mac","info":{"kind":"app","platform":"macos"},"principal":{"kind":"peer","transport":"unix"}}]},"snapshot":%s}\n' "$snapshot" ;;
+            *) echo "$snapshot" ;;
+        esac ;;
+    *) exit 1 ;;
+esac
+"#).unwrap();
+    fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
+        .arg("macos-serve")
+        .env("HOME", &temp)
+        .env("INTERDIMUX_REX_BIN", &rex)
+        .env("INTERDIMUX_SHOW_DIRS", "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn().unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut exchange = |mut request: Value| -> Value {
+        request["id"] = json!(1);
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_ne!(response["type"], "error", "{response}");
+        response
+    };
+    let open = json!({"type":"open","context":{"client_id":"client:mac","session_id":"session:local"}});
+    let has = |response: &Value, id: &str| response["rows"].as_array().unwrap().iter().any(|r| r["id"] == id);
+    let wait = |marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while !temp.join(marker).exists() {
+            assert!(Instant::now() < deadline, "Timed out waiting for {marker}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    assert!(has(&exchange(open.clone()), "session:local"));
+    wait("metadata-pid");
+    assert!(has(&exchange(open.clone()), "remote:remote:session:old"));
+    assert_eq!(fs::read_to_string(temp.join("inventories")).unwrap().lines().count(), 1);
+    fs::write(temp.join("new-session"), "").unwrap();
+    let start = Instant::now();
+    let refreshed = exchange(json!({"type":"refresh"}));
+    assert!(has(&refreshed, "session:local"));
+    assert!(start.elapsed() < Duration::from_secs(3), "Local results waited for remote enrichment");
+    wait("new-inventory-started");
+    let pid = fs::read_to_string(temp.join("metadata-pid")).unwrap();
+    assert!(!Command::new("kill").args(["-0", pid.trim()]).stderr(Stdio::null()).status().unwrap().success());
+
+    // The old session stays visible until its replacement inventory arrives.
+    for request in [json!({"type":"refresh"}), open, json!({"type":"refresh"})] {
+        assert!(has(&exchange(request), "remote:remote:session:old"));
+    }
+    fs::write(temp.join("release-inventory"), "").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while exchange(json!({"type":"remote_update"}))["pending"] == true {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = exchange(json!({"type":"query","scope":"session","query":""}));
+    assert!(has(&result, "remote:remote:session:new"));
+    assert!(!has(&result, "remote:remote:session:old"));
+    assert_eq!(fs::read_to_string(temp.join("inventories")).unwrap().lines().count(), 2);
     drop(exchange);
     drop(input);
     assert!(child.wait().unwrap().success());
@@ -415,4 +662,98 @@ fn native_picker_json_lines_process_keeps_queries_local_and_ids_stable() {
     drop(exchange);
     drop(input);
     assert!(child.wait().unwrap().success());
+}
+
+#[cfg(unix)]
+#[test]
+fn preview_worker_opens_without_collecting_a_second_catalog() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = std::env::temp_dir().join(format!("imux-preview-worker-{}", std::process::id()));
+    fs::create_dir(&temp).unwrap();
+    let rex = temp.join("rex");
+    fs::write(&rex, r#"#!/bin/sh
+clients='{"clients":[{"client_id":"app","info":{"kind":"app","platform":"macos"},"principal":{"kind":"peer","transport":"unix"}}]}'
+case "$*" in
+    *' do -e '*)
+        IFS= read -r handshake
+        if [ "$IMUX_TEST_PREVIEW" = legacy ]; then echo '"imux-preview-oneshot"'; exit 0; fi
+        echo "$clients"
+        while IFS= read -r request; do
+            case "$request" in
+                *closed*) echo '{"error":"pane closed"}' ;;
+                *broken*) echo malformed; exit 1 ;;
+                *) echo '{"text":"exact pane output"}' ;;
+            esac
+        done
+        exit 0 ;;
+esac
+source=$(cat)
+case "$source" in
+    *"session.attach_all"*) echo 'unexpected full collection' >&2; exit 1 ;;
+    *"client.list"*) echo "$clients" ;;
+    *'rex.call("session.attach", {session_id=request.target.session_id})'*) echo '{"text":"exact pane output"}' ;;
+    *) exit 1 ;;
+esac
+"#).unwrap();
+    fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
+    for mode in ["stream", "legacy"] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
+            .arg("macos-serve")
+            .env("INTERDIMUX_REX_BIN", &rex)
+            .env("IMUX_TEST_PREVIEW", mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let capture = |pane| {
+            json!({"id":4,"type":"capture_preview","target_id":"w",
+            "target":{"session_id":"s","window_id":"w","block_id":pane},"lines":20})
+        };
+        let mut requests = vec![
+            capture("a"),
+            json!({"id":2,"type":"open_preview","context":{"client_id":"wrong"}}),
+            json!({"id":3,"type":"open_preview","context":{"client_id":"app"}}),
+            capture("a"),
+            json!({"id":5,"type":"query","query":""}),
+        ];
+        if mode == "stream" {
+            requests.extend([
+                capture("closed"),
+                capture("a"),
+                capture("broken"),
+                capture("a"),
+            ]);
+        }
+        requests.extend([
+            json!({"id":6,"type":"open_preview","context":{"client_id":"wrong"}}),
+            capture("a"),
+        ]);
+        for request in requests {
+            writeln!(input, "{request}").unwrap();
+        }
+        drop(input);
+        let responses: Vec<Value> = BufReader::new(child.stdout.take().unwrap())
+            .lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect();
+        assert!(child.wait().unwrap().success());
+        let mut expected = vec!["error", "error", "preview_ready", "preview", "error"];
+        if mode == "stream" {
+            expected.extend(["error", "preview", "error", "error"]);
+        }
+        expected.extend(["error", "error"]);
+        assert_eq!(
+            responses
+                .iter()
+                .map(|r| r["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{responses:?}"
+        );
+        assert_eq!(responses[3]["target_id"], "w");
+        assert_eq!(responses[3]["text"], "exact pane output");
+    }
+    fs::remove_dir_all(&temp).unwrap();
 }

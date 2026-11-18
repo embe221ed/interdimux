@@ -104,6 +104,17 @@ struct PickerCellTests {
         let hover: NSViewToolTipOwner = cell
         func hoverText() -> String { hover.view(cell, stringForToolTip: 0, point: .zero, userData: nil) }
         try check(hoverText().contains("devbox (cached)"), "The native hover callback should identify a cached remote host")
+        let remotePane = PickerItem(["id": "remote:devbox:project/pane", "kind": "pane", "name": "codex",
+                                     "host": "devbox", "title": "Review remote programs"])!
+        cell.configure(remotePane, tree: tree, separatesGroup: false)
+        try check(cell.primary.stringValue == "codex  ·  devbox  ·  Review remote programs"
+                  && cell.accessibilityLabel()?.contains("Review remote programs") == true,
+                  "The remote host should appear alongside the terminal title")
+        let remoteTab = PickerItem(["id": "remote:devbox:project/tab", "kind": "window", "title": "codex",
+                                    "host": "devbox", "combined": true, "detail": "Review remote programs"])!
+        cell.configure(remoteTab, tree: tree, separatesGroup: false)
+        try check(cell.primary.stringValue == "codex  ·  devbox  ·  Review remote programs",
+                  "A combined remote tab should retain the terminal title")
         let folder = PickerItem(["id": "recent/project", "kind": "directory", "title": "project",
                                  "path": "/workspace/clients/acme/project"])!
         cell.configure(folder, tree: tree, separatesGroup: false)

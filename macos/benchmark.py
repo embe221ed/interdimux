@@ -102,7 +102,8 @@ class Protocol:
         elapsed = (time.perf_counter() - started) * 1000
         if response.get("id") != self.serial:
             raise RuntimeError(f"Wrong response ID: {response!r}")
-        if operation != "activate" and response.get("type") != "results":
+        expected = "remote_update" if operation == "remote_update" else "results"
+        if operation != "activate" and response.get("type") != expected:
             raise RuntimeError(f"Helper request failed: {response!r}")
         return response, elapsed
 

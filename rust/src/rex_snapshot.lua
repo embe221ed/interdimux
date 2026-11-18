@@ -34,7 +34,8 @@ local status = rex.call("server.status", {})
 -- transports (or forwarded peers with a different process) get no proof.
 local local_host_id
 if imux_collector_pid and imux_collector_uid then
-  local identity = rex.call("server.whoami", {})
+  -- Native app discovery already queried this connection's identity.
+  local identity = imux_collector_identity or rex.call("server.whoami", {})
   local principal = identity and identity.principal
   if principal and principal.kind == "peer" and principal.transport == "unix"
       and (principal.path == nil or (type(principal.path) == "table" and next(principal.path) == nil))

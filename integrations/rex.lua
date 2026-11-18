@@ -114,7 +114,7 @@ function M.setup(options)
   end
 
   local function launch(ctx, mode)
-      if not ctx.client_id or not ctx.session_id or not ctx.block_id then
+      if not ctx.client_id or not ctx.session_id or (not ctx.server and not ctx.block_id) then
         error("Open interdimux from a focused Rex pane", 0)
       end
       if not ctx.server and not readable(binary) then
@@ -198,7 +198,9 @@ function M.setup(options)
     dashboard_ui == "native" and "client.palette.toggle" or "interdimux_dashboard")
 
   local function direct(ctx, verb, extra)
-    if not ctx.client_id or not ctx.session_id or not ctx.block_id then error("Run interdimux from a focused Rex pane", 0) end
+    if not ctx.client_id or not ctx.session_id or (not ctx.server and not ctx.block_id) then
+      error("Run interdimux from a focused Rex pane", 0)
+    end
     local window = origin_window(ctx)
     if ctx.server then return remote_command(ctx, window, verb, extra) end
     local command = { binary, verb, "--backend", "rex", "--client", ctx.client_id,

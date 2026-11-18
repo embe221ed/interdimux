@@ -61,7 +61,7 @@ if 'request' in args:
     print(json.dumps({'target': {'session_id': 'session:new'}}))
 elif 'local snapshot=' in source:
     snapshot = json.loads((root / 'snapshot.json').read_text())
-    if 'local clients=' in source:
+    if 'client.list' in source:
         print(json.dumps({'clients': {'clients': [{'client_id': 'client:test', 'info': {'kind': 'app', 'platform': 'macos'}, 'principal': {'kind': 'peer', 'transport': 'unix'}}]}, 'snapshot': snapshot}))
     else:
         print(json.dumps(snapshot))

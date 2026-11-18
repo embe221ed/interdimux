@@ -11,6 +11,7 @@ final class PickerBackend {
     var onMessage: (([String: Any]) -> Void)?
     var onFailure: ((String) -> Void)?
     var serial = 0
+    var connection = 0
     var requests: [(type: String, fields: [String: Any])] = []
     var isRunning = true
     func start() throws {}
@@ -29,7 +30,7 @@ def run(controller_source=None):
         raise SystemExit("Swift opening checks require macOS.")
     root = Path(__file__).resolve().parent
     source = controller_source if controller_source is not None else (root / "Sources/main.swift").read_text()
-    marker = "\nlet app = NSApplication.shared"
+    marker = "\n// Native process entry point."
     assert marker in source
     # Compile the actual controller's open/receive/table paths. Expose its state
     # to this test and suppress window presentation; never send system events.

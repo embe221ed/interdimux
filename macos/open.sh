@@ -46,12 +46,22 @@ def bundle(macos, parser, build_missing):
 def main():
     macos = Path(sys.argv[1])
     parser = argparse.ArgumentParser(description="Open the experimental native Interdimux picker on this Mac.")
-    for name in ("client", "session", "window", "block"):
+    for name in ("client", "session"):
         parser.add_argument("--" + name, default=os.environ.get("REX_" + name.upper()))
+    parser.add_argument("--window")
+    parser.add_argument("--block")
     parser.add_argument("--dashboard", action="store_true", help="open the native dashboard instead of the picker")
     parser.add_argument("--print-url", action="store_true", help="validate the target and print its URL without building or opening the app")
     parser.add_argument("--check-build", action="store_true", help="check that the bundle exists and is current, without contacting Rex or opening a window")
     args = parser.parse_args(sys.argv[2:])
+    # A window and pane from the invoking terminal are a pair in its session.
+    # Switching either explicitly can move the origin to a different tab.
+    if args.session == os.environ.get("REX_SESSION"):
+        inherited_window, inherited_block = os.environ.get("REX_WINDOW"), os.environ.get("REX_BLOCK")
+        if args.window is None and (args.block is None or args.block == inherited_block):
+            args.window = inherited_window
+        if args.block is None and (args.window is None or args.window == inherited_window):
+            args.block = inherited_block
     if sys.platform != "darwin":
         parser.error("the native picker requires macOS 13 or later")
     if args.check_build:
@@ -74,13 +84,16 @@ def main():
     if not rex:
         parser.error("cannot find Rex; set INTERDIMUX_REX_BIN to its CLI path")
     command = [rex, "--autostart=false", "--color=never", "--timeout=5s"]
-    local_env = os.environ.copy()
-    local_env.pop("REX_SERVER", None)
+    local_env = {k: v for k, v in os.environ.items()
+                 if k not in ("REX_SERVER", "REX_SESSION", "REX_WINDOW", "REX_BLOCK", "REX_CLIENT")}
     if inherited_server or (args.session and args.block and not args.window):
         # Local Rex panes export their socket too. Ask the default server
         # where it is rather than connecting to an inherited custom socket.
+        location_env = local_env.copy()
+        if args.session and args.block and not args.window:
+            location_env.update(REX_SESSION=args.session, REX_BLOCK=args.block)
         location = json.loads(subprocess.check_output(command + ["whoami", "--json"],
-                                                      text=True, timeout=10, env=local_env))
+                                                      text=True, timeout=10, env=location_env))
         if inherited_server and inherited_server != location.get("endpoint"):
             parser.error("custom REX_SERVER launch is unsupported; use the local default Rex server")
         if (not args.window and args.session and args.block

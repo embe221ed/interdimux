@@ -7,17 +7,19 @@ local function shell_quote(value)
   return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
-local function fixture(scenario)
+local function fixture(scenario, close_case)
   local directory = os.tmpname()
   os.remove(directory)
   local made = os.execute("mkdir " .. shell_quote(directory))
   assert(made == true or made == 0, "cannot create private test directory")
   local handlers, layers, restored, readiness = {}, {}, {}, {}
   local stopped
+  local closed, selected
+  local view_reads, catalog_reads, startup_views = {}, 0, 0
   local stop_marker = {}
   local snapshot = {
     version = 1, sessions = { { session_id = "session:origin", label = "work" } },
-    views = { ["session:origin"] = { windows = {} } }, errors = {}, metadata = {},
+    views = { ["session:origin"] = { session_id = "session:origin", windows = {} } }, errors = {}, metadata = {},
   }
 
   rex = {
@@ -35,13 +37,30 @@ local function fixture(scenario)
     stop = function(code) stopped = code or 0; error(stop_marker, 0) end,
     log = function() end,
     layout = { block = function(block) return { block = block } end },
-    call = function(method)
+    call = function(method, payload)
+      if closed and method == "session.list" then
+        catalog_reads = catalog_reads + 1
+        return { sessions = close_case.sessions }
+      end
+      if closed and method == "client.perform" then
+        assert(payload.client_id == "client:origin" and payload.action == "session.select")
+        selected = payload.args
+        return {}
+      end
       assert(method == "com.superlogical.terminal.size", "startup must not perform GUI actions")
       return { owner = "cli", columns = 80, rows = 24 }
     end,
     session = {
-      attach = function() return {} end,
-      view = function() return snapshot.views["session:origin"] end,
+      attach = function() return { view = snapshot.views["session:origin"] } end,
+      view = function(payload)
+        if not closed then
+          startup_views = startup_views + 1
+          return snapshot.views[payload.session_id]
+        end
+        local id = payload.session_id
+        view_reads[#view_reads + 1] = id
+        return close_case.views[id]
+      end,
       disown_block = function() return {} end,
       close_layer = function() return {} end,
       new_layer = function(layer)
@@ -66,6 +85,9 @@ local function fixture(scenario)
         return "snapshot"
       end,
       decode = function(text)
+        if text == "close" then
+          return { version = 1, outcome = "action", operation = "close", target = close_case.target }
+        end
         if text == "error" then return { version = 1, outcome = "error", message = "mock Rust error" } end
         if text == "stale" then
           return { version = 1, outcome = "select", target = {
@@ -78,6 +100,12 @@ local function fixture(scenario)
   }
 
   dofile = function(path)
+    if close_case and path == root .. "/integrations/rex_operations.lua" then
+      return function(request, context)
+        assert(context.finished and request.operation == "close" and request.target == close_case.target)
+        closed = true
+      end
+    end
     if path == root .. "/rust/src/rex_snapshot.lua" then
       assert(#layers == 1, "snapshot collection should overlap the new float's startup")
       assert(rex.args.picker_block_id == "block:1", "exclude the picker from its own metadata")
@@ -98,6 +126,7 @@ local function fixture(scenario)
 
   local loaded, load_error = pcall(actual_dofile, root .. "/integrations/rex_coordinator.lua")
   assert(loaded, tostring(load_error))
+  assert(startup_views == 0, "opening geometry should reuse the origin attachment")
   assert(stopped == nil, "keep the coordinator alive while its terminal is visible")
   if scenario ~= "prepare_error" then
     assert(#readiness == 2 and readiness[1] == false and readiness[2] == true,
@@ -113,7 +142,15 @@ local function fixture(scenario)
     file:write(text); file:close()
   end
 
-  if scenario == "rust_error" then
+  if close_case then
+    result("close")
+    fire("terminal.child_exited", "block:1")
+    assert(stopped == 0 and #layers == 1, "closing should complete without an error notice")
+    assert((selected and selected.session_id) == close_case.selected)
+    if selected then assert(selected.window_id == close_case.views[selected.session_id].active_window_id) end
+    assert(catalog_reads == close_case.catalog_reads and table.concat(view_reads, ",") == close_case.reads,
+      "read only enough fresh views to choose the preferred remaining session")
+  elseif scenario == "rust_error" then
     result("error")
     assert(#restored == 0 and stopped == nil, "an early error record must not dismiss the acknowledgement")
     fire("terminal.child_exited", "block:1")
@@ -137,6 +174,26 @@ local function fixture(scenario)
   os.remove(directory .. "/snapshot.json")
   os.remove(directory)
 end
+
+local origin = "session:origin"
+local origin_window = { session_id = origin, window_id = "window:origin" }
+local origin_session = { session_id = origin }
+local usable = { active_window_id = "window:remaining", windows = { {window_id = "window:remaining"} } }
+local sessions = { {session_id = "gone"}, {session_id = "empty"}, {session_id = "first"} }
+for i = 1, 96 do sessions[#sessions + 1] = {session_id = "unused:" .. i} end
+sessions[#sessions + 1] = origin_session
+for _, case in ipairs({
+  { target = origin_window, sessions = sessions, views = {[origin] = usable, first = usable},
+    selected = origin, catalog_reads = 0, reads = origin },
+  { target = origin_window, sessions = sessions, views = {empty = {windows = {}}, first = usable},
+    selected = "first", catalog_reads = 1, reads = origin .. ",gone,empty,first" },
+  { target = origin_session, sessions = sessions, views = {empty = {windows = {}}, first = usable},
+    selected = "first", catalog_reads = 1, reads = "gone,empty,first" },
+  { target = origin_session, sessions = {}, views = {}, catalog_reads = 1, reads = "" },
+}) do
+  fixture("close", case)
+end
+print("passed: bounded close selection, destroyed origin, empty and vanished alternatives")
 
 for _, scenario in ipairs({ "rust_error", "stale_target", "prepare_error" }) do
   fixture(scenario)

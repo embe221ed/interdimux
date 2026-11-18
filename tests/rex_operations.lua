@@ -33,9 +33,9 @@ layout = { block = function(options) return { block = options } end } }
 local operate = dofile(root .. "/integrations/rex_operations.lua")
 local context = { hosted = true, session_id = "s", window_id = "w1",
   block_id = "b1", picker_block_id = "picker", client_id = "app" }
-local function operation(name, target, args)
+local function operation(name, target, args, preview_view)
   call_log = {}
-  return operate({ operation = name, target = target, args = args or {} }, context)
+  return operate({ operation = name, target = target, args = args or {} }, context, preview_view)
 end
 local function sent_ids()
   local ids = {}
@@ -157,6 +157,23 @@ local no_guard = pcall(operation, "job-send", descriptor.target, { text = "ungua
 assert(not no_guard and sent_ids() == "")
 print("passed: exact scheduled target, no app focus, server-instance refusal")
 
+-- A split focused B2 after the combined row for B1 was rendered. Exact
+-- previews retain B1, while a session preview follows the current focus.
+views.s.windows[1].focused_block_id = "b2"
+local attached = operation("preview", { session_id = "s", window_id = "w1", block_id = "b1" }, {}, views.s)
+assert(attached.target.block_id == "b1" and #call_log == 1 and call_log[1].args.block_id == "b1")
+assert(operation("preview", { session_id = "s" }, {}, views.s).target.block_id == "b2" and #call_log == 1)
+for _, invalid in ipairs({
+    { session_id = "s", window_id = "w2", block_id = "b1" },
+    { session_id = "s", window_id = "w1", block_id = "gone" },
+    { session_id = "other", window_id = "w1", block_id = "b1" },
+}) do
+  local ok = pcall(operation, "preview", invalid, {}, views.s)
+  assert(not ok and #call_log == 0, "moved, closed, or mismatched pane must never capture a substitute")
+end
+views.s.windows[1].focused_block_id = "picker"
+print("passed: attached-view preview preserves the displayed physical pane without another view RPC")
+
 views.s.active_window_id = "w2"
 local exact = operation("preview", { session_id = "s", block_id = "b1" })
 assert(exact.target.window_id == "w1", "a later active window must not overwrite the exact pane's window")
@@ -185,3 +202,52 @@ assert(startup_polls == 2 and #data == 2)
 assert(data[1] == "echo '$HOME' $(literal)\r" and data[2] == "C-c\r")
 assert(operation("health", nil).lines[1]:find("OK Rex", 1, true))
 print("passed: new-shell readiness, literal startup lines, native health")
+
+-- A reader can lose its displayed pane or its entire session. Failed attaches
+-- never create subscriptions, and a failed detach for a still-live session
+-- must not allow another subscription to accumulate.
+do
+  local emitted, detached, acquired, catalogs = {}, {}, {}, 0
+  local requests = { "s", "s", "stale", "missing", "other", "final", "final" }
+  local env = setmetatable({
+    io = {
+      read = function() return "123 456" end,
+      lines = function() local i = 0; return function() i = i + 1; return requests[i] end end,
+      write = function(value) emitted[#emitted + 1] = value end, flush = function() end,
+    },
+    rex = {
+      args = { context = {} },
+      json = { encode = function(v) return v end, decode = function(line)
+        return { operation = "rename", target = { session_id = line == "stale" and "s" or line, block_id = line } }
+      end },
+      call = function(method, args)
+        if method == "session.detach" then
+          detached[#detached + 1] = args.session_id
+          if #detached <= 2 then return nil, "detach failed" end
+          return {}
+        elseif method == "session.list" then
+          catalogs = catalogs + 1
+          return { sessions = { {session_id = "other"} } }
+        end
+        assert(method == "session.attach")
+        acquired[#acquired + 1] = args.session_id
+        if args.session_id == "missing" then return nil, "session closed" end
+        return { view = { session_id = args.session_id } }
+      end,
+    },
+    discover = function(pid, uid) assert(pid == 123 and uid == 456); return { clients = {} } end,
+    operation = function(request, _, view)
+      assert(request.operation == "preview" and request.target.session_id == view.session_id)
+      if request.target.block_id == "stale" then error("pane closed") end
+      return { text = request.target.block_id }
+    end,
+  }, { __index = _G })
+  assert(loadfile(root .. "/rust/src/rex_preview_connection.lua", "t", env))()
+  assert(#emitted == 8 and emitted[1].clients and emitted[2].text == "s" and emitted[3].text == "s")
+  assert(emitted[4].error:find("pane closed", 1, true))
+  assert(emitted[5].error:find("session closed", 1, true) and emitted[6].text == "other")
+  assert(emitted[7].error:find("detach failed", 1, true) and emitted[8].text == "final")
+  assert(table.concat(acquired, ",") == "s,s,s,missing,other,final")
+  assert(table.concat(detached, ",") == "s,other,other" and catalogs == 2)
+end
+print("passed: persistent previews recover from disappeared sessions and bound subscriptions across failures")

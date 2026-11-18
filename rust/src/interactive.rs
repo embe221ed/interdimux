@@ -175,6 +175,7 @@ struct Runtime<'a, A: Adapter> {
     agent_states: Vec<String>,
     startup_abort: bool,
     live_pending: Arc<LiveUpdate>,
+    prepared_generation: u64,
     live_rows_dirty: bool,
     history_search: bool,
     history_rows_dirty: bool,
@@ -242,20 +243,25 @@ impl<A: Adapter> Runtime<'_, A> {
         Ok(())
     }
     fn refresh(&mut self) -> Result<(), String> {
-        self.snapshot = self.adapter.refresh()?;
-        crate::navigator::hide(&mut self.snapshot);
-        self.preview_cache.clear();
-        self.prepared = crate::navigator::PreparedRows::new(&self.snapshot);
-        self.update_rows();
+        let generation = self.live_pending.requested.load(Ordering::Acquire);
+        self.replace_snapshot(self.adapter.refresh()?, generation);
         Ok(())
     }
     fn cached(&mut self) -> Result<(), String> {
-        self.snapshot = self.adapter.cached()?;
+        let generation = self.live_pending.requested.load(Ordering::Acquire);
+        self.replace_snapshot(self.adapter.cached()?, generation);
+        Ok(())
+    }
+    fn replace_snapshot(&mut self, snapshot: Snapshot, generation: u64) {
+        self.snapshot = snapshot;
         crate::navigator::hide(&mut self.snapshot);
         self.preview_cache.clear();
         self.prepared = crate::navigator::PreparedRows::new(&self.snapshot);
         self.update_rows();
-        Ok(())
+        self.prepared_generation = generation;
+    }
+    fn prepare_live(&mut self, generation: u64) -> bool {
+        self.prepared_generation >= generation || self.cached().is_ok()
     }
     fn describe(&self, target: &Target) -> Value {
         if let Target::Directory { path } = target {
@@ -281,8 +287,7 @@ impl<A: Adapter> Runtime<'_, A> {
     fn action_target(&self, target: Target, operation: &str) -> Target {
         row_action_target(&self.snapshot, target, operation)
     }
-    fn create_and_activate(&self, query: &str) -> Result<(), String> {
-        let resolved = crate::projects::resolve(&self.snapshot, query)?;
+    fn create_and_activate(&self, resolved: crate::projects::CreateTarget) -> Result<(), String> {
         let cwd = resolved.cwd;
         if let Some(target) = resolved.existing_session {
             self.adapter.activate(&target)?;
@@ -342,10 +347,9 @@ impl<A: Adapter> Runtime<'_, A> {
                 // it accepts an HTTP command that a modal can later discard.
                 // Acknowledge only this generation, preserving newer events.
                 let generation = self.live_pending.requested.load(Ordering::Acquire);
-                if self.live_pending.pending() {
-                    let _ = self.cached();
+                if self.prepare_live(generation) {
+                    self.live_pending.acknowledge(generation);
                 }
-                self.live_pending.acknowledge(generation);
                 self.live_rows_dirty = false;
                 self.history_rows_dirty = false;
                 Ok(json!({"text":self.rows}))
@@ -367,9 +371,11 @@ impl<A: Adapter> Runtime<'_, A> {
                     return Ok(json!({"text":""}));
                 }
                 let generation = self.live_pending.requested.load(Ordering::Acquire);
-                let _ = self.cached();
+                let prepared = self.prepare_live(generation);
                 if !self.live_rows_dirty {
-                    self.live_pending.acknowledge(generation);
+                    if prepared {
+                        self.live_pending.acknowledge(generation);
+                    }
                     return Ok(json!({"text":"refresh-preview"}));
                 }
                 let text = format!(
@@ -593,14 +599,17 @@ impl<A: Adapter> Runtime<'_, A> {
                                 .into(),
                         );
                     }
-                    self.create_and_activate(request["query"].as_str().unwrap_or(""))?;
+                    let resolved = if let Some(path) = request["directory"].as_str() {
+                        crate::projects::resolve_directory(&self.snapshot, path)?
+                    } else {
+                        crate::projects::resolve(&self.snapshot, request["query"].as_str().unwrap_or(""))?
+                    };
+                    self.create_and_activate(resolved)?;
                 } else {
                     self.matching(request)?;
                     let target = self.target(request)?;
                     if let Target::Directory { path } = &target {
-                        let directory = crate::projects::query_directory(path)
-                            .ok_or("This recent directory no longer exists")?;
-                        self.create_and_activate(&directory)?;
+                        self.create_and_activate(crate::projects::resolve_directory(&self.snapshot, path)?)?;
                     } else {
                         self.adapter.activate(&target)?;
                     }
@@ -617,7 +626,7 @@ impl<A: Adapter> Runtime<'_, A> {
                 }
                 self.adapter.activate(&target)?;
                 if let Some(path) = request["path"].as_str() {
-                    if let Some(path) = crate::projects::query_directory(path) {
+                    if let Ok(path) = crate::projects::exact_path(path) {
                         crate::projects::record_use(&path);
                     }
                 }
@@ -990,6 +999,7 @@ pub(crate) fn run<A: Adapter>(
         agent_states,
         startup_abort: false,
         live_pending: Arc::clone(&live_pending),
+        prepared_generation: 0,
         live_rows_dirty: false,
         history_search: false,
         history_rows_dirty: false,
@@ -1855,7 +1865,9 @@ pub(crate) fn helper(args: &[String]) -> Result<(), String> {
                     return Ok(());
                 }
                 let mut q = request("create-query", "");
-                q["query"] = json!(path);
+                // An already running older controller only reads the fzf query.
+                q["query"] = json!(format!("'{}'", path.replace(' ', "\\ ")));
+                q["directory"] = json!(path);
                 q["explicit"] = json!(true);
                 let _ = rpc(socket, &q);
                 return Ok(());
@@ -1871,20 +1883,13 @@ pub(crate) fn helper(args: &[String]) -> Result<(), String> {
                 else {
                     return Ok(());
                 };
-                let (name, mut cwd) = match create_query(&value) {
-                    Ok(value) => value,
+                let (name, cwd) = match crate::projects::normalize_query(&value) {
+                    Ok(target) => target.window_in(description["cwd"].as_str().unwrap_or("")),
                     Err(error) => {
                         let _ = rpc(socket, &json!({"event":"notice","message":error}));
                         return Ok(());
                     }
                 };
-                if crate::projects::query_directory(&value).is_none()
-                    && cwd == crate::env_text("HOME")
-                {
-                    if let Some(origin) = description["cwd"].as_str().filter(|s| !s.is_empty()) {
-                        cwd = origin.into();
-                    }
-                }
                 values = json!({"name":name,"cwd":cwd,"kind":"window"});
                 op = "create".into();
             }
@@ -2106,11 +2111,6 @@ pub(crate) fn health_report(adapter: &impl Adapter, snapshot: &Snapshot) -> Vec<
     lines
 }
 
-/// Fzf operators are filters, not shell syntax. Never evaluate a creation query.
-pub(crate) fn create_query(query: &str) -> Result<(String, String), String> {
-    crate::projects::normalize_query(query)
-}
-
 pub(crate) fn send_args(text: &str) -> Value {
     crate::jobs::send_payload(text)
 }
@@ -2180,12 +2180,13 @@ mod tests {
 
     #[test]
     fn creation_queries_are_data_and_filters_are_rejected() {
-        assert_eq!(create_query("'my\\ project$").unwrap().0, "my-project");
-        assert!(create_query("one | two").is_err());
-        assert!(create_query("").is_err());
-        assert!(create_query("$(touch /tmp/no)")
+        use crate::projects::normalize_query;
+        assert_eq!(normalize_query("'my\\ project$").unwrap().name, "my-project");
+        assert!(normalize_query("one | two").is_err());
+        assert!(normalize_query("").is_err());
+        assert!(normalize_query("$(touch /tmp/no)")
             .unwrap()
-            .0
+            .name
             .starts_with("$(touch-"));
     }
     #[test]
@@ -2228,8 +2229,8 @@ mod tests {
         fn cached(&self) -> Result<Snapshot, String> {
             Ok(fixture())
         }
-        fn action(&self, _: &str, _: Option<&Target>, _: &Value) -> Result<Value, String> {
-            Err("Unexpected backend action".into())
+        fn action(&self, op: &str, _: Option<&Target>, args: &Value) -> Result<Value, String> {
+            Err(format!("Unexpected backend action {op} {args}"))
         }
         fn activate(&self, target: &Target) -> Result<(), String> {
             self.activations.lock().unwrap().push(target.clone());
@@ -2284,6 +2285,7 @@ mod tests {
             agent_states: vec!["approve".into(), "input".into()],
             startup_abort: false,
             live_pending: Arc::new(LiveUpdate::default()),
+            prepared_generation: 0,
             live_rows_dirty: false,
             history_search: false,
             history_rows_dirty: false,
@@ -2325,6 +2327,111 @@ mod tests {
             ""
         );
         assert!(!r.history_search);
+    }
+
+    #[test]
+    fn terminal_recent_and_browser_selections_preserve_literal_paths() {
+        let root = std::env::temp_dir().join(format!("imux-literal-rows-{}", std::process::id()));
+        let path = root.join("^literal | a\\ b$");
+        std::fs::create_dir_all(&path).unwrap();
+        let path = std::fs::canonicalize(&path).unwrap().to_str().unwrap().to_owned();
+        let adapter = Fake { activations: Default::default() };
+        let mut r = runtime(&adapter, Mode::Switch);
+        let index = r.targets.len();
+        r.targets.push(Target::Directory { path: path.clone() });
+        let recent = json!({"event":"accept","matches":1,"token":format!("imux:{index}")});
+        let browser = json!({"event":"create-query","query":"ignored | filter","directory":path});
+        let args = json!({"name":"^literal | a\\ b$", "cwd":path});
+        for request in [&recent, &browser] {
+            assert_eq!(r.handle(request).unwrap_err(), format!("Unexpected backend action create {args}"));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        for request in [&recent, &browser] {
+            assert!(r.handle(request).unwrap_err().contains("no longer exists"));
+        }
+    }
+
+    #[test]
+    fn live_reloads_read_each_prepared_generation_once_and_retry_failed_reads() {
+        use std::sync::Mutex;
+        struct Reader {
+            reads: AtomicU64,
+            revision: AtomicU64,
+            fail: AtomicBool,
+            publish_during_read: Mutex<Option<Arc<LiveUpdate>>>,
+        }
+        impl Adapter for Reader {
+            fn cached(&self) -> Result<Snapshot, String> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                if self.fail.swap(false, Ordering::Relaxed) {
+                    return Err("temporary snapshot failure".into());
+                }
+                let mut snapshot = fixture();
+                let label = format!("generation-{}", self.revision.load(Ordering::Relaxed));
+                snapshot.sessions[0].name = label.clone();
+                snapshot.panes[0].name = label;
+                if let Some(updates) = self.publish_during_read.lock().unwrap().take() {
+                    updates.requested.fetch_add(1, Ordering::Release);
+                    self.revision.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(snapshot)
+            }
+            fn refresh(&self) -> Result<Snapshot, String> { self.cached() }
+            fn action(&self, _: &str, _: Option<&Target>, _: &Value) -> Result<Value, String> { unreachable!() }
+            fn activate(&self, _: &Target) -> Result<(), String> { unreachable!() }
+            fn backend_name(&self) -> &'static str { "rex" }
+        }
+        let adapter = Reader { reads: 0.into(), revision: 0.into(), fail: false.into(),
+            publish_during_read: Mutex::new(None) };
+        let mut r = runtime(&adapter, Mode::Switch);
+        let updates = Arc::clone(&r.live_pending);
+        let publish = || {
+            adapter.revision.fetch_add(1, Ordering::Relaxed);
+            updates.requested.fetch_add(1, Ordering::Release);
+        };
+        let live = json!({"event":"live"});
+        let rows = json!({"event":"rows"});
+        publish();
+        let transform = r.handle(&live).unwrap();
+        assert!(transform["text"].as_str().unwrap().contains("reload"));
+        for _ in 0..3 {
+            assert_eq!(r.handle(&live).unwrap(), transform);
+        }
+        assert!(updates.pending(), "discarded transforms cannot consume a publication");
+        assert!(r.handle(&rows).unwrap()["text"].as_str().unwrap().contains("generation-1"));
+        assert_eq!(adapter.reads.load(Ordering::Relaxed), 1);
+        assert!(!updates.pending());
+
+        publish();
+        r.handle(&live).unwrap();
+        publish();
+        assert!(r.handle(&rows).unwrap()["text"].as_str().unwrap().contains("generation-3"));
+        assert_eq!(adapter.reads.load(Ordering::Relaxed), 3);
+        assert!(!updates.pending());
+
+        publish();
+        adapter.fail.store(true, Ordering::Relaxed);
+        r.handle(&live).unwrap();
+        assert!(updates.pending(), "a failed live read must remain eligible for retry");
+        adapter.fail.store(true, Ordering::Relaxed);
+        assert!(r.handle(&rows).unwrap()["text"].as_str().unwrap().contains("generation-3"));
+        assert!(updates.pending(), "delivering older rows cannot acknowledge the failed read");
+        *adapter.publish_during_read.lock().unwrap() = Some(Arc::clone(&updates));
+        assert!(r.handle(&rows).unwrap()["text"].as_str().unwrap().contains("generation-4"));
+        assert!(updates.pending(), "a publication arriving during collection needs its own read");
+        assert!(r.handle(&rows).unwrap()["text"].as_str().unwrap().contains("generation-5"));
+        assert!(!updates.pending());
+        assert_eq!(adapter.reads.load(Ordering::Relaxed), 7);
+        r.handle(&rows).unwrap();
+        assert_eq!(adapter.reads.load(Ordering::Relaxed), 7);
+
+        publish();
+        r.refresh().unwrap();
+        assert!(updates.pending(), "explicit refresh prepares rows without acknowledging consumption");
+        assert!(r.handle(&rows).unwrap()["text"].as_str().unwrap().contains("generation-6"));
+        assert_eq!(adapter.reads.load(Ordering::Relaxed), 8);
+        r.cached().unwrap();
+        assert_eq!(adapter.reads.load(Ordering::Relaxed), 9, "explicit action reads remain unconditional");
     }
 
     #[test]

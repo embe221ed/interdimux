@@ -2,14 +2,14 @@
 //! Filesystem discovery only runs on an explicit directory-picker action, never a query
 //! keystroke. The ordinary list is shallow; Ctrl-f opts into a bounded walk.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::model::{Snapshot, Target};
+use crate::model::{Session, Snapshot, Target};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Directory {
@@ -102,43 +102,57 @@ fn name(value: &str) -> Result<String, String> {
     }
 }
 
-fn physical_directory(value: &str) -> Option<String> {
-    if excluded_network(value) {
-        return None;
+#[cfg(test)]
+thread_local! { static DIRECTORY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+fn physical_directory(value: &str) -> Result<String, &'static str> {
+    if value.chars().any(char::is_control) || excluded_network(value) {
+        return Err("Choose an existing local directory");
     }
-    let path = fs::canonicalize(value).ok()?;
-    if excluded_network(&path.to_string_lossy())
-        || !path.is_dir()
-        || path.to_string_lossy().chars().any(char::is_control)
-    {
-        return None;
+    #[cfg(test)]
+    DIRECTORY_PROBES.set(DIRECTORY_PROBES.get() + 1);
+    let path = fs::canonicalize(value)
+        .map_err(|_| "This directory no longer exists; reload projects")?;
+    let text = path.to_str().ok_or("The directory path is not valid Unicode")?;
+    if text.chars().any(char::is_control) || excluded_network(text) || !path.is_dir() {
+        return Err("Choose an existing local directory");
     }
-    path.to_str().map(str::to_owned)
+    Ok(text.to_owned())
+}
+
+/// Rows carry literal absolute paths. A vanished row cannot fall back to a
+/// name, a zoxide match, or HOME.
+pub(crate) fn exact_path(path: &str) -> Result<String, String> {
+    if !Path::new(path).is_absolute() {
+        return Err("Choose an existing local directory".into());
+    }
+    physical_directory(path).map_err(str::to_owned)
 }
 
 fn normalized_with(
     query: &str,
     home: &str,
     resolve_zoxide: impl FnOnce(&str) -> Option<String>,
-) -> Result<(String, String), String> {
+) -> Result<CreateTarget, String> {
     let query = words(query)?;
     let expanded = expand_home(&query, home);
-    if let Some(path) = physical_directory(&expanded) {
-        let basename = Path::new(&path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("root");
-        return Ok((name(basename)?, path));
+    if let Ok(path) = physical_directory(&expanded) {
+        return CreateTarget::directory(path);
     }
     let cwd = resolve_zoxide(&query)
-        .and_then(|path| physical_directory(&path))
+        .and_then(|path| physical_directory(&path).ok())
         .unwrap_or_else(|| home.to_owned());
-    Ok((name(&query)?, cwd))
+    Ok(CreateTarget {
+        name: name(&query)?,
+        cwd,
+        existing_session: None,
+        path_query: false,
+    })
 }
 
 /// On explicit creation, remove fzf operators per term, resolve a real path,
 /// then zoxide, then HOME. Query text is always argv/data, never shell code.
-pub(crate) fn normalize_query(query: &str) -> Result<(String, String), String> {
+pub(crate) fn normalize_query(query: &str) -> Result<CreateTarget, String> {
     normalized_with(query, &home(), |query| {
         if crate::env_text("INTERDIMUX_USE_ZOXIDE") == "off" {
             return None;
@@ -156,14 +170,6 @@ pub(crate) fn normalize_query(query: &str) -> Result<(String, String), String> {
     })
 }
 
-/// Whether the query itself names a physical directory, after the same fzf
-/// operator/escaped-space normalization used for creation. This deliberately
-/// excludes a zoxide fallback, whose session name still comes from the query.
-pub(crate) fn query_directory(query: &str) -> Option<String> {
-    let query = words(query).ok()?;
-    physical_directory(&expand_home(&query, &home()))
-}
-
 fn directory_name(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -172,104 +178,183 @@ fn directory_name(path: &str) -> String {
         .replace(['.', ':'], "-")
 }
 
-fn local_session(snapshot: &Snapshot, session: &crate::model::Session) -> bool {
+fn local_rex_sessions(snapshot: &Snapshot) -> HashSet<&str> {
+    if snapshot.pane_metadata.is_empty() {
+        return HashSet::new();
+    }
+    snapshot
+        .panes
+        .iter()
+        .filter(|pane| {
+            snapshot
+                .pane_metadata
+                .get(&pane.key)
+                .is_some_and(|meta| meta.local)
+        })
+        .map(|pane| pane.session_key.as_str())
+        .collect()
+}
+
+fn is_local(session: &Session, local_rex: &HashSet<&str>) -> bool {
     matches!(
         session.target,
         Target::TmuxNative { .. } | Target::TmuxLegacy { .. }
-    ) || snapshot
-        .panes
-        .iter()
-        .filter(|p| p.session_key == session.key)
-        .any(|p| {
-            snapshot
-                .pane_metadata
-                .get(&p.key)
-                .map_or(false, |m| m.local)
-        })
+    ) || local_rex.contains(session.key.as_str())
 }
 
-fn session_at_directory(snapshot: &Snapshot, session: &crate::model::Session, dir: &str) -> bool {
-    if !local_session(snapshot, session) {
-        return false;
-    }
-    let start = if session.path.is_empty() {
-        String::new()
-    } else {
-        canonical(&session.path)
-    };
-    let cwd = snapshot
-        .windows
-        .iter()
-        .find(|w| w.session_key == session.key && w.active)
-        .map(|w| canonical(&w.path))
-        .unwrap_or_default();
-    if start == dir || cwd == dir {
-        return true;
-    }
-    let below = |path: &str, parent: &str| {
-        !parent.is_empty() && Path::new(path).starts_with(parent) && path != parent
-    };
-    below(&cwd, dir)
-        && !start.is_empty()
-        && (start == "/" || below(dir, &start) || below(&start, dir))
+// A renamed session still owns its start directory. Prefer the basename when
+// multiple sessions began there, then the lexicographically smallest label.
+fn preferred_start(candidate: &Session, previous: &Session, path: &str) -> bool {
+    let base = directory_name(path);
+    (candidate.name != base, &candidate.name) < (previous.name != base, &previous.name)
 }
 
-fn directory_identity(snapshot: &Snapshot, path: &str) -> (String, Option<Target>) {
-    let mut name = directory_name(path);
-    // A renamed session still belongs to the directory where it began.
-    if let Some(session) = snapshot
-        .sessions
-        .iter()
-        .filter(|s| local_session(snapshot, s) && !s.path.is_empty() && canonical(&s.path) == path)
-        .min_by_key(|s| (s.name != name, s.name.as_str()))
-    {
-        return (session.name.clone(), Some(session.target.clone()));
-    }
-    let base = name.clone();
-    let parent = Path::new(path)
-        .parent()
-        .map(|p| directory_name(&p.to_string_lossy()))
-        .unwrap_or_else(|| "root".into());
-    let mut ordinal = 1;
-    while let Some(session) = snapshot.sessions.iter().find(|s| s.name == name) {
-        if session_at_directory(snapshot, session, path) {
-            return (name, Some(session.target.clone()));
+struct NamedSession<'a> {
+    session: &'a Session,
+    // Only local sessions with an active window can match through its cwd.
+    active_cwd: Option<&'a str>,
+}
+
+// Exists only during one explicit project action. Resolve each distinct
+// session path once, and only look up an active cwd on a name collision.
+struct DirectorySessions<'a> {
+    starts: HashMap<String, &'a Session>,
+    names: HashMap<&'a str, NamedSession<'a>>,
+    physical: HashMap<&'a str, String>,
+}
+
+impl<'a> DirectorySessions<'a> {
+    fn new(snapshot: &'a Snapshot) -> Self {
+        let local = local_rex_sessions(snapshot);
+        let mut active = HashMap::new();
+        for window in snapshot.windows.iter().filter(|window| window.active) {
+            active
+                .entry(window.session_key.as_str())
+                .or_insert(window.path.as_str());
         }
-        name = if ordinal == 1 {
-            format!("{parent}-{base}")
-        } else {
-            format!("{base}-{ordinal}")
+        let mut index = Self {
+            starts: HashMap::new(),
+            names: HashMap::new(),
+            physical: HashMap::new(),
         };
-        ordinal += 1;
+        for session in &snapshot.sessions {
+            let active_cwd = if is_local(session, &local) {
+                if !session.path.is_empty() {
+                    let start = index
+                        .physical
+                        .entry(session.path.as_str())
+                        .or_insert_with(|| canonical(&session.path));
+                    index
+                        .starts
+                        .entry(start.clone())
+                        .and_modify(|previous| {
+                            if preferred_start(session, previous, start) {
+                                *previous = session;
+                            }
+                        })
+                        .or_insert(session);
+                }
+                active.get(session.key.as_str()).copied()
+            } else {
+                None
+            };
+            index.names.entry(&session.name).or_insert(NamedSession {
+                session,
+                active_cwd,
+            });
+        }
+        index
     }
-    (name, None)
+
+    fn identity(&mut self, path: &str) -> (String, Option<Target>) {
+        if let Some(session) = self.starts.get(path) {
+            return (session.name.clone(), Some(session.target.clone()));
+        }
+        let base = directory_name(path);
+        let mut name = base.clone();
+        let mut ordinal = 1;
+        while let Some(named) = self.names.get(name.as_str()) {
+            if let Some(active) = named.active_cwd.filter(|s| !s.is_empty()) {
+                self.physical
+                    .entry(active)
+                    .or_insert_with(|| canonical(active));
+                let cwd = self.physical[active].as_str();
+                let start = self
+                    .physical
+                    .get(named.session.path.as_str())
+                    .map_or("", String::as_str);
+                let below = |child: &str, parent: &str| {
+                    !parent.is_empty() && child != parent && Path::new(child).starts_with(parent)
+                };
+                let same_branch =
+                    !start.is_empty() && (start == "/" || below(path, start) || below(start, path));
+                if cwd == path || (below(cwd, path) && same_branch) {
+                    return (name, Some(named.session.target.clone()));
+                }
+            }
+            name = if ordinal == 1 {
+                let parent = Path::new(path)
+                    .parent()
+                    .map(|p| directory_name(&p.to_string_lossy()))
+                    .unwrap_or_else(|| "root".into());
+                format!("{parent}-{base}")
+            } else {
+                format!("{base}-{ordinal}")
+            };
+            ordinal += 1;
+        }
+        (name, None)
+    }
 }
 
-/// Resolve the explicit find-or-create action once, sharing identity and naming
-/// rules with project selection. No query text is evaluated as shell syntax.
-pub(crate) fn resolve(snapshot: &Snapshot, query: &str) -> Result<CreateTarget, String> {
-    let path = query_directory(query);
-    let (name, cwd) = normalize_query(query)?;
-    if let Some(path) = path {
-        let (name, existing_session) = directory_identity(snapshot, &path);
-        return Ok(CreateTarget {
-            name,
-            cwd: path,
-            existing_session,
+impl CreateTarget {
+    fn directory(cwd: String) -> Result<Self, String> {
+        let basename = Path::new(&cwd)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("root");
+        Ok(Self {
+            name: name(basename)?,
+            cwd,
+            existing_session: None,
             path_query: true,
-        });
+        })
     }
-    let existing_session = snapshot
-        .sessions
-        .iter()
-        .find(|s| s.name == name)
-        .map(|s| s.target.clone());
-    Ok(CreateTarget {
-        name,
-        cwd,
-        existing_session,
-        path_query: false,
-    })
+
+    pub(crate) fn window_in(mut self, origin: &str) -> (String, String) {
+        if !self.path_query && self.cwd == home() && !origin.is_empty() {
+            self.cwd = origin.to_owned();
+        }
+        (self.name, self.cwd)
+    }
+
+    fn with_session(mut self, snapshot: &Snapshot) -> Self {
+        if self.path_query {
+            (self.name, self.existing_session) = DirectorySessions::new(snapshot).identity(&self.cwd);
+        } else {
+            self.existing_session = snapshot.sessions.iter()
+                .find(|s| s.name == self.name)
+                .map(|s| s.target.clone());
+        }
+        self
+    }
+}
+
+pub(crate) fn resolve(snapshot: &Snapshot, query: &str) -> Result<CreateTarget, String> {
+    Ok(normalize_query(query)?.with_session(snapshot))
+}
+
+/// Directory-only commands accept typed fzf syntax but never fall back to a
+/// session name or zoxide if the directory has vanished.
+pub(crate) fn resolve_directory_query(snapshot: &Snapshot, query: &str) -> Result<CreateTarget, String> {
+    let path = words(query).ok()
+        .and_then(|query| physical_directory(&expand_home(&query, &home())).ok())
+        .ok_or_else(|| format!("The directory does not exist: {query:?}"))?;
+    Ok(CreateTarget::directory(path)?.with_session(snapshot))
+}
+
+pub(crate) fn resolve_directory(snapshot: &Snapshot, path: &str) -> Result<CreateTarget, String> {
+    Ok(CreateTarget::directory(exact_path(path)?)?.with_session(snapshot))
 }
 
 fn recent_file() -> PathBuf {
@@ -369,7 +454,7 @@ pub(crate) fn cached_directories(snapshot: &Snapshot) -> Vec<Directory> {
     }
     cached_with(
         snapshot,
-        &recent_text(&recent_file()).unwrap_or_default(),
+        recent_text(&recent_file()).unwrap_or_default().split('\n'),
         usize::MAX,
     )
 }
@@ -388,7 +473,7 @@ pub(crate) fn cached_paths(snapshot: &Snapshot, paths: &[String]) -> Vec<Directo
     if crate::env_text("INTERDIMUX_SHOW_DIRS") == "off" {
         return Vec::new();
     }
-    cached_with(snapshot, &paths.join("\n"), usize::MAX)
+    cached_with(snapshot, paths.iter().map(String::as_str), usize::MAX)
 }
 
 /// This limits blank-query suggestions, never the retained search inventory.
@@ -399,42 +484,62 @@ pub(crate) fn suggestion_limit() -> usize {
         .min(1000)
 }
 
-fn cached_with(snapshot: &Snapshot, text: &str, limit: usize) -> Vec<Directory> {
-    let mut seen = HashSet::new();
-    text.split('\n')
-        .map(|path| {
-            if path == "/" {
-                path
-            } else {
-                path.trim_end_matches('/')
+fn cached_with<'a>(
+    snapshot: &Snapshot,
+    paths: impl Iterator<Item = &'a str>,
+    limit: usize,
+) -> Vec<Directory> {
+    // Keep input order for recency, and only index identities for requested
+    // paths. This stays lexical even if the filesystem is slow or offline.
+    let mut matches: HashMap<&str, Option<&Session>> = HashMap::new();
+    let mut ordered = Vec::new();
+    for raw in paths {
+        if ordered.len() == limit {
+            break;
+        }
+        let path = if raw == "/" {
+            raw
+        } else {
+            raw.trim_end_matches('/')
+        };
+        if Path::new(path).is_absolute()
+            && !path.chars().any(char::is_control)
+            && matches.insert(path, None).is_none()
+        {
+            ordered.push(path);
+        }
+    }
+    if ordered.is_empty() {
+        return Vec::new();
+    }
+    let mut local = None;
+    for session in &snapshot.sessions {
+        if session.path.is_empty() {
+            continue;
+        }
+        let trimmed = session.path.trim_end_matches('/');
+        let path = if trimmed.is_empty() { "/" } else { trimmed };
+        if let Some(best) = matches.get_mut(path) {
+            if is_local(
+                session,
+                local.get_or_insert_with(|| local_rex_sessions(snapshot)),
+            ) && best.map_or(true, |previous| preferred_start(session, previous, path))
+            {
+                *best = Some(session);
             }
-        })
-        .filter(|path| {
-            Path::new(path).is_absolute()
-                && !path.chars().any(char::is_control)
-                && seen.insert((*path).to_owned())
-        })
-        .take(limit)
-        .map(|path| {
-            let existing_session = snapshot
-                .sessions
-                .iter()
-                .filter(|s| {
-                    s.path.trim_end_matches('/') == path.trim_end_matches('/')
-                        && local_session(snapshot, s)
-                })
-                .min_by_key(|s| (s.name != directory_name(path), s.name.as_str()))
-                .map(|s| s.target.clone());
-            Directory {
-                path: path.into(),
-                label: Path::new(path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(path)
-                    .into(),
-                project: None,
-                existing_session,
-            }
+        }
+    }
+    ordered
+        .into_iter()
+        .map(|path| Directory {
+            path: path.into(),
+            label: Path::new(path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path)
+                .into(),
+            project: None,
+            existing_session: matches[path].map(|session| session.target.clone()),
         })
         .collect()
 }
@@ -673,7 +778,7 @@ fn canonical(path: &str) -> String {
     if excluded_network(path) {
         return path.trim_end_matches('/').to_owned();
     }
-    physical_directory(path).unwrap_or_else(|| path.trim_end_matches('/').to_owned())
+    physical_directory(path).unwrap_or_else(|_| path.trim_end_matches('/').to_owned())
 }
 
 fn discover(
@@ -734,7 +839,7 @@ fn discover(
     // discovery. Neither the scan limit nor metadata budget may discard a late
     // history/zoxide name before the frontend's own fuzzy matcher sees it.
     let mut result = if base.is_none() {
-        cached_with(snapshot, &recent.join("\n"), usize::MAX)
+        cached_with(snapshot, recent.iter().map(String::as_str), usize::MAX)
     } else {
         Vec::new()
     };
@@ -744,6 +849,7 @@ fn discover(
         .map(|(index, entry)| (entry.path.clone(), index))
         .collect();
     let started = Instant::now();
+    let mut sessions = None;
     for (scanned, path) in paths.into_iter().enumerate() {
         if scanned >= config.limit || started.elapsed() >= config.budget {
             break;
@@ -761,7 +867,7 @@ fn discover(
         } else {
             project_type(&path, &config.markers)
         };
-        let existing_session = directory_identity(snapshot, &path).1;
+        let existing_session = sessions.get_or_insert_with(|| DirectorySessions::new(snapshot)).identity(&path).1;
         if let Some(index) = retained_index.or_else(|| seen.get(&path).copied()) {
             result[index].project = project;
             result[index].path = path.clone();
@@ -879,7 +985,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            result,
+            (result.name, result.cwd),
             (
                 "my-project".into(),
                 fs::canonicalize(&dir).unwrap().to_str().unwrap().into()
@@ -887,16 +993,17 @@ mod tests {
         );
         let escaped = dir.replace(' ', "\\ ");
         assert_eq!(
-            query_directory(&format!("^{escaped}$")),
-            Some(canonical(&dir))
+            resolve_directory_query(&Snapshot::default(), &format!("^{escaped}$")).unwrap().cwd,
+            canonical(&dir)
         );
         assert_eq!(
-            query_directory(&format!("'{escaped}'")),
-            Some(canonical(&dir))
+            resolve_directory_query(&Snapshot::default(), &format!("'{escaped}'")).unwrap().cwd,
+            canonical(&dir)
         );
-        let (name, cwd) = normalized_with("^api.v2$ !server:prod", "/home/test", |_| None).unwrap();
-        assert_eq!(name, "api-v2-server-prod");
-        assert_eq!(cwd, "/home/test");
+        let result = normalized_with("^api.v2$ !server:prod", "/home/test", |_| None).unwrap();
+        assert_eq!(result.name, "api-v2-server-prod");
+        assert_eq!(result.cwd, "/home/test");
+        assert!(!result.path_query);
         let marker = fixture.0.join("must-not-exist");
         let query = format!("$(touch {})", marker.display());
         assert!(normalized_with(&query, "/home/test", |_| None).is_ok());
@@ -904,16 +1011,55 @@ mod tests {
     }
 
     #[test]
+    fn project_actions_probe_each_input_once_and_recheck_the_next_selection() {
+        let fixture = Fixture::new();
+        let path = fixture.dir("my project$");
+        let snapshot = Snapshot::default();
+        let original = canonical(&path);
+        let escaped = format!("'{}'", path.replace(' ', "\\ "));
+
+        let actions = [
+            (resolve_directory as fn(&Snapshot, &str) -> _, &path),
+            (resolve_directory_query, &escaped),
+            (resolve, &escaped),
+        ];
+        for (select, query) in actions {
+            DIRECTORY_PROBES.set(0);
+            assert_eq!(select(&snapshot, query).unwrap().cwd, original);
+            assert_eq!(DIRECTORY_PROBES.get(), 1);
+        }
+        DIRECTORY_PROBES.set(0);
+        let (tab, cwd) = normalize_query(&escaped).unwrap().window_in("/origin");
+        assert_eq!((tab.as_str(), cwd.as_str()), ("my-project$", original.as_str()));
+        assert_eq!(DIRECTORY_PROBES.get(), 1);
+
+        DIRECTORY_PROBES.set(0);
+        let matched = normalized_with("short", "/home/test", |_| Some(path.clone())).unwrap();
+        assert!(!matched.path_query);
+        assert_eq!(matched.window_in("/origin"), ("short".into(), original));
+        assert_eq!(DIRECTORY_PROBES.get(), 2, "typed name and zoxide result are distinct paths");
+
+        fs::remove_dir(&path).unwrap();
+        assert!(resolve_directory(&snapshot, &path).is_err());
+        assert!(resolve_directory_query(&snapshot, &escaped).is_err());
+        assert!(resolve_directory(&snapshot, &fixture.dir(&"x".repeat(160))).is_ok());
+        let long = fixture.dir(&"x".repeat(161));
+        assert!(resolve_directory(&snapshot, &long).is_err());
+        assert!(resolve(&snapshot, &long).is_err());
+    }
+
+    #[test]
     fn zoxide_changes_cwd_but_not_a_nonpath_query_name() {
         let fixture = Fixture::new();
         let path = fixture.dir("actual-project");
-        let (name, cwd) = normalized_with("short", "/home/test", |query| {
+        let result = normalized_with("short", "/home/test", |query| {
             assert_eq!(query, "short");
             Some(path.clone())
         })
         .unwrap();
-        assert_eq!(name, "short");
-        assert_eq!(cwd, canonical(&path));
+        assert_eq!(result.name, "short");
+        assert_eq!(result.cwd, canonical(&path));
+        assert!(!result.path_query);
     }
 
     #[test]
@@ -1056,6 +1202,90 @@ mod tests {
             },
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn discovery_reuses_start_and_active_paths_only_for_this_pass() {
+        use std::os::unix::fs::symlink;
+        let f = Fixture::new();
+        let first = canonical(&f.dir("first"));
+        let second = canonical(&f.dir("second"));
+        let other = canonical(&f.dir("other"));
+        let link = f.0.join("alias");
+        symlink(&first, &link).unwrap();
+        let work = session(1, "renamed", link.to_str().unwrap());
+        let visiting = session(2, "other", &second);
+        let mut remote = session(3, "first", &first);
+        remote.target = Target::Rex {
+            session_id: "remote".into(),
+            window_id: None,
+            block_id: None,
+        };
+        let snapshot = Snapshot {
+            windows: vec![active_window(&visiting, &other)],
+            sessions: vec![remote, work.clone(), visiting.clone()],
+            ..Snapshot::default()
+        };
+        let mut index = DirectorySessions::new(&snapshot);
+        assert_eq!(index.physical.len(), 2, "probe only distinct local starts");
+        assert_eq!(index.identity(&first).1.as_ref(), Some(&work.target));
+        for _ in 0..3 {
+            assert_eq!(index.identity(&other).1.as_ref(), Some(&visiting.target));
+        }
+        assert_eq!(
+            index.physical.len(),
+            3,
+            "cache the one cwd needed to resolve collisions"
+        );
+        fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        assert_eq!(index.identity(&first).1.as_ref(), Some(&work.target));
+        let mut refreshed = DirectorySessions::new(&snapshot);
+        let (label, target) = refreshed.identity(&first);
+        assert_ne!(label, "first");
+        assert!(
+            target.is_none(),
+            "a remote session cannot claim the obsolete start path"
+        );
+        assert_eq!(
+            refreshed.identity(&other).1.as_ref(),
+            Some(&visiting.target)
+        );
+    }
+
+    #[test]
+    fn cached_root_and_missing_start_are_distinct_and_recents_keep_their_order() {
+        let snapshot = Snapshot {
+            sessions: vec![
+                session(1, "root", ""),
+                session(2, "at-root", "/"),
+                session(3, "renamed", "/absent/repo/"),
+                session(4, "repo", "/absent/repo"),
+            ],
+            ..Snapshot::default()
+        };
+        let entries = cached_with(
+            &snapshot,
+            ["/absent/repo/", "/", "/absent/repo", "/missing"].into_iter(),
+            5,
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/absent/repo", "/", "/missing"]
+        );
+        assert_eq!(
+            entries[0].existing_session.as_ref(),
+            Some(&snapshot.sessions[3].target)
+        );
+        assert_eq!(
+            entries[1].existing_session.as_ref(),
+            Some(&snapshot.sessions[1].target)
+        );
+        assert!(entries[2].existing_session.is_none());
+    }
+
     #[test]
     fn directory_identity_reuses_renamed_start_paths_and_prefers_the_basename_session() {
         let f = Fixture::new();
@@ -1189,11 +1419,11 @@ mod tests {
     #[test]
     fn cached_suggestions_never_probe_remote_missing_or_fifo_candidate_directories() {
         let text = "/Network/offline/repo\n/not-present/project\n/Network/offline/repo\nrelative\nbad\tpath\n";
-        let entries = cached_with(&Snapshot::default(), text, 15);
+        let entries = cached_with(&Snapshot::default(), text.split('\n'), 15);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].path, "/Network/offline/repo");
         assert!(entries.iter().all(|d| d.project.is_none()));
-        assert_eq!(cached_with(&Snapshot::default(), text, 1).len(), 1);
+        assert_eq!(cached_with(&Snapshot::default(), text.split('\n'), 1).len(), 1);
         let f = Fixture::new();
         let file = f.0.join("history");
         fs::write(&file, b"/first\n/bad\xff\n/last\n").unwrap();
@@ -1257,7 +1487,7 @@ mod tests {
                     assert!(cached.iter().any(|entry| entry.label == "old-project-24"));
                 }
                 "resolve-stall" => {
-                    assert_eq!(normalize_query("unmatched-project-name").unwrap().1, home());
+                    assert_eq!(normalize_query("unmatched-project-name").unwrap().cwd, home());
                 }
                 "add-stall" => {
                     record_use(&old);
@@ -1340,6 +1570,7 @@ mod tests {
         fs::write(&zoxide_file, zoxide.join("\n") + "\n").unwrap();
         let executable = root.join("zoxide");
         fs::write(&executable, r##"#!/bin/sh
+[ "$1" = --version ] && exit 0
 printf '%s\n' "$$" >> "$IMUX_DISCOVERY_ROOT/pids"
 printf '%s\n' "$0" >> "$IMUX_DISCOVERY_ROOT/executable-used"
 case "$IMUX_DISCOVERY_CHILD_CASE" in
@@ -1354,6 +1585,9 @@ esac
 exec sleep 30
 "##).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        // macOS can spend longer than the command deadline on the first
+        // launch of a newly written executable, before its script even runs.
+        assert!(Command::new(&executable).arg("--version").status().unwrap().success());
         fs::create_dir_all(root.join(".cargo/bin")).unwrap();
         std::os::unix::fs::symlink(&executable, root.join(".cargo/bin/zoxide")).unwrap();
         std::os::unix::fs::symlink(&executable, root.join("explicit-zoxide")).unwrap();

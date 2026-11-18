@@ -1,6 +1,6 @@
 -- Native operations used by the persistent coordinator and direct CLI fallback.
 -- All identity is supplied as full Rex IDs; labels are presentation only.
-return function(request, context)
+return function(request, context, preview_view)
   local operation = request.operation
   local target = request.target
   local options = request.args or {}
@@ -51,7 +51,9 @@ return function(request, context)
     if type(candidate) ~= "table" or type(candidate.session_id) ~= "string" then
       error("Select an existing Rex target", 0)
     end
-    local view = call("session.view", { session_id = candidate.session_id })
+    local view = operation == "preview" and preview_view
+    if view and view.session_id ~= candidate.session_id then error("The preview session changed; reload the list", 0) end
+    view = view or call("session.view", { session_id = candidate.session_id })
     local window, block
     for _, w in ipairs(view.windows or {}) do
       -- An exact pane determines its own window. The active window may come

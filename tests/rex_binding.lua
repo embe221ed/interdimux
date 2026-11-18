@@ -215,9 +215,18 @@ end
 views.a.active_window_id = "a1"
 views.a.windows[1].focused_block_id = "pane:a1"
 local palette = { server = remote.server, session_id = "a", client_id = "home-app" }
-actions.interdimux_last_session(palette)
-assert(remote_layers[#remote_layers].window_id == "a1" and not palette.block_id,
-  "a remote palette toggle can use the active window without changing its caller")
+local before_palette_views = session_views
+for _, name in ipairs({ "interdimux_last_session", "interdimux", "interdimux_agent_next" }) do
+  actions[name](palette)
+  local layer = remote_layers[#remote_layers]
+  assert(layer.window_id == "a1" and not palette.block_id
+    and table.concat(layer.layout.block.options.command, "|"):find("--block|pane:a1", 1, true),
+    "remote palette actions must resolve the focused pane from the attached view")
+end
+assert(session_views == before_palette_views, "remote palette focus must reuse the existing attachment")
+views.a.windows[1].focused_block_id = nil
+assert(not pcall(actions.interdimux, palette), "a session without a focused pane must not guess an origin")
+views.a.windows[1].focused_block_id = "pane:a1"
 local remote_count = #remote_layers
 sessions = { { session_id = "a" } }
 actions.interdimux_last_session(remote)

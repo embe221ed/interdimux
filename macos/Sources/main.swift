@@ -8,10 +8,10 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var previewGate = PickerPreviewGate()
     private var previewWork: DispatchWorkItem?
     private var previewOpening: Int?
+    private var previewPreparation: (id: Int, request: PickerPreviewRequest)?
     private var previewRequest: (id: Int, request: PickerPreviewRequest)?
     private var previewReady = false
     private var previewFailed = false
-    private var previewTargetID: String?
     private let content = PickerView(frame: NSRect(x: 0, y: 0, width: 1080, height: 760))
     private var dashboard: DashboardView?
     private var dashboardVisible = false
@@ -34,6 +34,16 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var openingRequest: Int?
     private var openingSelectionID: String?
     private var acceptOpeningWhenReady = false
+    private enum PendingPrevious { case select, activate }
+    private var pendingRemotePrevious: PendingPrevious? {
+        didSet {
+            if pendingRemotePrevious == .activate {
+                content.status.stringValue = "Waiting for previous session…"
+            } else if oldValue == .activate && content.status.stringValue == "Waiting for previous session…" {
+                content.status.stringValue = "↵ switch · ⌘R refresh"
+            }
+        }
+    }
     // The protocol caps each result at 100. Keep cells for those bounded row
     // slots across count changes, including no-match -> results transitions.
     private var cells: [Int: PickerCell] = [:]
@@ -47,6 +57,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var displayedRequest = -1
     private var displayedSearch: PickerSearchIdentity?
     private var activation: Int?
+    private var nativeRevealRequest: Int?
     private var actionRequest: Int?
     private var presentingDialog = false
     private var queryDeferred = false
@@ -54,6 +65,13 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var projectSearchGeneration: UInt64 = 0
     private var projectSearchVisible = false
     private var remotePending = false
+    private var nativeCatalogOrigin: Int?
+    private var nativeCatalogToken: UInt64?
+    private var nativeCatalogReply: Int?
+    private var readNativeCatalog = RemoteSessionAutomation.readCatalogInBackground
+    private static let firstRemotePollDelay: TimeInterval = 0.05
+    private var remotePollDelay = PickerApplication.firstRemotePollDelay
+    private var extraOpeningRemotePolls = 0
     private var remotePollWork: DispatchWorkItem?
     private var remotePollRequest: Int?
     private var remoteResultsNeeded = false
@@ -135,6 +153,10 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.table.onAccept = { [weak self] in self?.accept() }
         content.table.onCancel = { [weak self] in self?.dismiss() }
         content.table.onNavigate = { [weak self] delta in self?.move(delta) }
+        content.table.onRowPress = { [weak self] row in
+            guard let self, self.items.indices.contains(row), !self.items[row].contextOnly else { return }
+            self.recordSelection(row)
+        }
         content.table.onBranch = { [weak self] towardChildren in self?.moveBranch(towardChildren) }
         content.table.onType = { [weak self] event in
             guard let self else { return }
@@ -226,7 +248,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
               ["open", "dashboard"].contains(url.host ?? "") else { return }
         let showDashboard = url.host == "dashboard"
         var supplied: [String: String] = [:]
-        for item in url.queryItems ?? [] where ["client_id", "session_id", "window_id", "block_id", "origin_server", "origin_session_id"].contains(item.name) {
+        for item in url.queryItems ?? [] where ["client_id", "session_id", "window_id", "block_id",
+            "origin_server", "origin_session_id", "origin_window_id", "origin_block_id"].contains(item.name) {
             if let value = item.value, !value.isEmpty { supplied[item.name] = value }
         }
         if panel == nil {
@@ -249,8 +272,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         loading = true
         openingRefresh = false
         openingRequest = nil
-        openingSelectionID = nil
-        acceptOpeningWhenReady = false
+        cancelOpeningSelection()
         openingFrameMS = nil
         hasOpened = true
         queryDeferred = false
@@ -274,7 +296,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         var startupError: String?
         do {
             try backend.start()
-            pending = backend.send("open", fields: ["context": context])
+            pending = backend.send("open", fields: ["context": context, "native_catalog": true])
+            nativeCatalogOrigin = pending
             openingRequest = pending
         } catch { startupError = "Could not start the search helper: \(error.localizedDescription)" }
         scope = "all"
@@ -295,16 +318,20 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let reuseOpening = supplied["client_id"].map { !$0.isEmpty && $0 == openingClientID } == true
             && originSessionID.map { !$0.isEmpty } == true
         let currentSessionRow = reuseOpening ? cachedSessionID(server: originServer, sessionID: originSessionID) : nil
-        items = reuseOpening ? openingItems.map { item in
-            var item = item
-            switch item.kind {
-            case "session": item.current = item.id == currentSessionRow
-            case "window": item.current = item.id == supplied["window_id"]
-            case "pane": item.current = item.id == supplied["block_id"]
-            default: break
+        let focus = originServer == nil ? (tab: supplied["window_id"], pane: supplied["block_id"]) : cachedRemoteFocus(
+            session: currentSessionRow, window: supplied["origin_window_id"], block: supplied["origin_block_id"])
+        items = reuseOpening ? openingItems : []
+        for index in items.indices {
+            let focusedID: String?
+            switch items[index].kind {
+            case "session": focusedID = currentSessionRow
+            case "window": focusedID = focus.tab
+            case "pane": focusedID = focus.pane
+            default: continue
             }
-            return item
-        } : []
+            let current = items[index].id == focusedID
+            if items[index].current != current { items[index].current = current }
+        }
         tree = reuseOpening ? openingTree : []
         openingFrameHadRows = !showDashboard && !items.isEmpty
         displayedRequest = -1
@@ -358,8 +385,32 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private func cachedSessionID(server: String?, sessionID: String?) -> String? {
         guard let sessionID else { return nil }
         guard let server else { return sessionID }
-        let matches = openingItems.filter { $0.host != nil && $0.sessionID == sessionID }
-        return matches.first { $0.host?.lowercased() == server }?.id ?? (matches.count == 1 ? matches[0].id : nil)
+        var candidate: String?
+        var matches = 0
+        var knownHost = false
+        for row in openingItems where row.kind == "session" && row.host != nil {
+            let sameHost = row.host?.lowercased() == server || row.hostID?.lowercased() == server
+            if row.sessionID == sessionID {
+                if sameHost { return row.id }
+                matches += 1
+                candidate = row.id
+            }
+            knownHost = knownHost || sameHost
+        }
+        return matches == 1 && !knownHost ? candidate : nil
+    }
+
+    private func cachedRemoteFocus(session: String?, window: String?, block: String?) -> (tab: String?, pane: String?) {
+        guard let session, window != nil || block != nil else { return (nil, nil) }
+        let tabs = openingItems.filter { $0.kind == "window" && $0.parentID == session }
+        let exactTab = window.flatMap { id in tabs.first { $0.windowID == id }?.id }
+        guard let block else { return (exactTab, nil) }
+        let tabIDs = Set(tabs.map(\.id))
+        let pane = openingItems.first { row in
+            row.kind == "pane" && row.blockID == block && row.parentID.map { tabIDs.contains($0) && (exactTab == nil || $0 == exactTab) } == true
+        }
+        let tab = exactTab ?? pane?.parentID ?? tabs.first { $0.combined && $0.blockID == block }?.id
+        return (tab, pane?.id)
     }
 
     private func focusSearch() {
@@ -458,14 +509,52 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let id = (message["id"] as? NSNumber)?.intValue ?? -1
         let type = message["type"] as? String ?? ""
         defer { updateRemoteSessions() }
-        if remotePollRequest == id {
-            remotePollRequest = nil
-            remotePending = type == "remote_update" && message["pending"] as? Bool == true
+        if let prepared = previewPreparation, prepared.id == id {
+            previewPreparation = nil
+            if type == "preview_target", previewGate.isCurrent(prepared.request),
+               message["target_id"] as? String == prepared.request.targetID,
+               let target = message["target"] as? [String: Any] {
+                let capture = previewBackend.send("capture_preview", fields: [
+                    "target_id": prepared.request.targetID, "target": target, "lines": 80,
+                ])
+                previewRequest = (capture, prepared.request)
+            } else {
+                finishPreview(prepared.request, message: message)
+            }
+            return
+        }
+        // Only a response to a request we own may ask us to read the Rex app.
+        let isCatalogOpening = type == "results" && id == nativeCatalogOrigin
+            && (id == openingRequest || loading && id == pending)
+        if (isCatalogOpening || type == "remote_update" && id == remotePollRequest),
+           let offer = message["native_catalog"] as? [String: Any] {
+            receiveNativeCatalogOffer(offer, source: id)
+        }
+        let catalogReply = nativeCatalogReply == id
+        if catalogReply || remotePollRequest == id {
+            if catalogReply {
+                nativeCatalogReply = nil
+                guard type == "native_catalog" else { return }
+            } else {
+                remotePollRequest = nil
+            }
+            let valid = catalogReply || type == "remote_update"
+            remotePending = valid && message["pending"] as? Bool == true
             // A newer foreground request already runs against this catalog.
-            if type == "remote_update", message["changed"] as? Bool == true, id > pending {
-                remoteResultsNeeded = true
+            if valid && message["changed"] as? Bool == true {
+                extraOpeningRemotePolls = 0
+                remotePollDelay = Self.firstRemotePollDelay
+                if id > pending { remoteResultsNeeded = true }
+            } else if remotePending && extraOpeningRemotePolls > 0 {
+                extraOpeningRemotePolls -= 1
+            } else {
+                extraOpeningRemotePolls = 0
+                remotePollDelay = min(0.2, remotePollDelay * 2)
             }
             if !remotePending {
+                if message["changed"] as? Bool != true && !remoteResultsNeeded && remoteResultsRequest == nil {
+                    pendingRemotePrevious = nil
+                }
                 if content.emptyDetail.stringValue == remoteEmptyHint { content.emptyDetail.stringValue = noMatchingHint }
                 if content.status.stringValue == remoteCreateHint { content.status.stringValue = createHint }
             }
@@ -508,6 +597,20 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             return
         }
         if route == .activation {
+            if type == "reveal_remote" {
+                guard nativeRevealRequest == id else { return }
+                nativeRevealRequest = nil
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    let result = RemoteSessionAutomation.reveal(message)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.activation == id else { return }
+                        self.activation = self.backend.send("complete_remote_reveal",
+                            fields: ["activation_id": id, "result": result])
+                    }
+                }
+                return
+            }
+            nativeRevealRequest = nil
             self.activation = nil
             if type == "activated" { dismiss(returnToDashboard: false) }
             else { showError(message["message"] as? String ?? "Could not switch to that target.") }
@@ -524,6 +627,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if openingReply { openingRequest = nil }
         let openingSelection = openingSelectionID
         let acceptOpening = acceptOpeningWhenReady
+        let deferredPrevious = pendingRemotePrevious
+        pendingRemotePrevious = nil
         openingRefresh = false
         openingSelectionID = nil
         acceptOpeningWhenReady = false
@@ -554,7 +659,6 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let previousViewport = content.scroll.contentView.bounds.origin
         let fresh = (message["rows"] as? [[String: Any]] ?? []).compactMap(PickerItem.init)
         let updated = preserveOrder ? PickerTreeLayout.preservingOrder(of: items, in: fresh) : fresh
-        let preserveViewport = preserveOpening || (remoteReply && updated.contains { $0.id == previous && !$0.contextOnly })
         if updated != items {
             let structureChanged = updated.count != items.count || zip(updated, items).contains {
                 $0.id != $1.id || $0.parentID != $1.parentID
@@ -566,24 +670,20 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if !remoteReply { displayedRequest = id }
         let search = PickerSearchIdentity(query: resultQuery, scope: resultScope, field: resultField, actionFilter: resultAction,
             directoryBase: scope == "directory" ? directoryBase : nil, directoryDeep: scope == "directory" && directoryDeep)
+        let previousSession = message["previous_session_id"] as? String
+        let latePrevious = deferredPrevious != nil ? previousSession : nil
         if !dashboardVisible {
-            if let selected = PickerSelection.index(in: items, previousID: openingSelection ?? previous, preferredID: message["preferred_id"] as? String,
+            if let selected = PickerSelection.index(in: items, previousID: latePrevious ?? openingSelection ?? previous, preferredID: message["preferred_id"] as? String,
                     previousSearch: wasOpening && openingSelection != nil ? search : displayedSearch, search: search) {
                 if content.table.selectedRow != selected {
                     content.table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
                 }
-                if !preserveViewport { content.table.scrollRowToVisible(selected) }
+                let row = items[selected]
+                let revealRemotePrevious = row.host != nil && row.id == previousSession && row.id != previous
+                if !revealRemotePrevious && (preserveOpening || (remoteReply && row.id == previous)) {
+                    restoreViewport(previousViewport)
+                } else { content.table.scrollRowToVisible(selected) }
             } else { content.table.deselectAll(nil) }
-            if preserveViewport {
-                let clip = content.scroll.contentView
-                var bounds = clip.bounds
-                bounds.origin = previousViewport
-                let origin = clip.constrainBoundsRect(bounds).origin
-                if clip.bounds.origin != origin {
-                    clip.scroll(to: origin)
-                    content.scroll.reflectScrolledClipView(clip)
-                }
-            }
         }
         displayedSearch = search
         let matched = (message["matched"] as? NSNumber)?.intValue ?? items.count
@@ -617,7 +717,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         var count = resultQuery.isEmpty ? "\(matched) \(resultNoun)\(matched == 1 ? "" : "s")" : "\(matched) of \(total)"
         var status = matched > shown ? "Top \(shown) matches · keep typing to narrow" : "⌘R Refresh"
         if scope == "directory" { status = "↵ open session · ⌘→ browse folder · ⌃F search deeper" }
-        let checkingRemote = remotePending && (scope == "all" || scope == "session") && resultAction.isEmpty && swapSource == nil
+        let checkingRemote = remotePending && showsRemoteRows && resultAction.isEmpty && swapSource == nil
         if items.contains(where: { $0.kind == "create" }) {
             count = "New session"
             status = checkingRemote ? remoteCreateHint : createHint
@@ -650,9 +750,22 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if measureDisplay { panel.displayIfNeeded() }
         let displayedAt = ProcessInfo.processInfo.systemUptime
         updatePreviewSelection()
-        if acceptOpening && !dashboardVisible,
-           openingSelection == nil || items.contains(where: { $0.id == openingSelection && !$0.contextOnly }) {
-            accept()
+        if !dashboardVisible && projectSearchVisible {
+            // Only an untouched opening follows a late host. Local results
+            // stay actionable while discovery validates the previous session.
+            let waitingForPrevious = (wasOpening && openingSelection == nil || deferredPrevious != nil)
+                && message["previous_session_pending"] as? Bool == true
+            // Check six times at 50 ms when the opening needs its first host or its previous session.
+            if openingReply && remotePending && (waitingForPrevious || !openingFrameHadRows && !items.contains(where: { $0.host != nil })) {
+                extraOpeningRemotePolls = 5
+            } else { extraOpeningRemotePolls = 0 }
+            if waitingForPrevious {
+                pendingRemotePrevious = acceptOpening || deferredPrevious == .activate ? .activate : .select
+                if acceptOpening { updateRemoteSessions(immediate: true) }
+            } else if acceptOpening && (openingSelection == nil || selectedItem?.id == openingSelection)
+                        || deferredPrevious == .activate && latePrevious != nil && selectedItem?.id == latePrevious {
+                accept()
+            }
         }
         scheduleProjectSearch(message, search: search, requestID: displayedRequest)
         if wasLoading {
@@ -702,18 +815,20 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         }
     }
 
+    private var showsRemoteRows: Bool { scope == "all" || scope == "session" || scope == "window" || scope == "pane" }
+
     private var canUpdateRemoteSessions: Bool {
         // Only poll while the ordinary result is actionable. The remote round
         // has its own request IDs and leaves local Enter/navigation available.
         projectSearchVisible && !dashboardVisible && !loading && backend.isRunning
             && activation == nil && actionRequest == nil && dashboardRequest == nil && !presentingDialog
             && swapSource == nil && targetRoute?.operation == nil
-            && (scope == "all" || scope == "session")
+            && showsRemoteRows
             && pending == displayedRequest && displayedSearch == activeSearch
             && (content.search.currentEditor() as? NSTextView)?.hasMarkedText() != true
     }
 
-    private func updateRemoteSessions() {
+    private func updateRemoteSessions(immediate: Bool = false) {
         guard remotePending || remoteResultsNeeded,
               remotePollRequest == nil, remoteResultsRequest == nil, canUpdateRemoteSessions else { return }
         if remoteResultsNeeded {
@@ -721,7 +836,17 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             remoteResultsRequest = backend.send("query", fields: searchParameters)
             return
         }
-        guard remotePending, remotePollWork == nil else { return }
+        guard remotePending else { return }
+        if immediate {
+            // Return is waiting for host discovery. Consume anything already
+            // published now, without starting another network request.
+            remotePollWork?.cancel()
+            remotePollWork = nil
+            remotePollDelay = Self.firstRemotePollDelay
+            remotePollRequest = backend.send("remote_update")
+            return
+        }
+        guard remotePollWork == nil else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.remotePollWork = nil
@@ -729,15 +854,55 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             self.remotePollRequest = self.backend.send("remote_update")
         }
         remotePollWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + remotePollDelay, execute: work)
+    }
+
+    private func restoreViewport(_ previous: NSPoint) {
+        let clip = content.scroll.contentView
+        var bounds = clip.bounds
+        bounds.origin = previous
+        let origin = clip.constrainBoundsRect(bounds).origin
+        if clip.bounds.origin != origin {
+            clip.scroll(to: origin)
+            content.scroll.reflectScrolledClipView(clip)
+        }
+    }
+
+    private func cancelOpeningSelection() {
+        acceptOpeningWhenReady = false
+        openingSelectionID = nil
+        pendingRemotePrevious = nil
+    }
+
+    private func receiveNativeCatalogOffer(_ offer: [String: Any], source: Int) {
+        guard let origin = nativeCatalogOrigin, source >= origin, projectSearchVisible, backend.isRunning,
+              let token = offer["token"] as? UInt64, token > (nativeCatalogToken ?? 0),
+              let pid = offer["pid"] as? pid_t, pid > 0, let birth = offer["birth"] as? String, !birth.isEmpty
+        else { return }
+        let connection = backend.connection
+        nativeCatalogToken = token
+        readNativeCatalog(offer) { [weak self] hosts in
+            guard let self, self.nativeCatalogOrigin == origin, self.nativeCatalogToken == token,
+                  self.backend.connection == connection, self.backend.isRunning, self.projectSearchVisible else { return }
+            self.nativeCatalogReply = self.backend.send("native_catalog", fields: ["token": token, "catalog": hosts])
+        }
+    }
+
+    private func abandonNativeCatalog() {
+        nativeCatalogOrigin = nil
+        nativeCatalogToken = nil
+        nativeCatalogReply = nil
     }
 
     private func stopRemoteUpdates() {
+        abandonNativeCatalog()
         remotePollWork?.cancel()
         remotePollWork = nil
         remotePollRequest = nil
         remoteResultsRequest = nil
         remotePending = false
+        remotePollDelay = Self.firstRemotePollDelay
+        extraOpeningRemotePolls = 0
         remoteResultsNeeded = false
     }
 
@@ -806,8 +971,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func query() {
         cancelProjectSearch()
-        acceptOpeningWhenReady = false
-        openingSelectionID = nil
+        cancelOpeningSelection()
         // Reset at dispatch, not only at receipt: A → B → A while requests
         // are pending must still choose the best result for the edited query.
         if displayedSearch != activeSearch { displayedSearch = nil }
@@ -836,8 +1000,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func controlTextDidChange(_ notification: Notification) {
         cancelProjectSearch()
-        acceptOpeningWhenReady = false
-        openingSelectionID = nil
+        cancelOpeningSelection()
         displayedSearch = nil
         content.clear.isHidden = content.search.stringValue.isEmpty
         previewGate.noteInput(at: ProcessInfo.processInfo.systemUptime)
@@ -868,6 +1031,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         guard !items.isEmpty, !loading || openingRefresh, actionRequest == nil, activation == nil else { return }
         guard let next = PickerNavigation.nextIndex(current: content.table.selectedRow,
                 count: items.count, direction: delta, isSelectable: { !self.items[$0].contextOnly }) else { return }
+        recordSelection(next)
         content.table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
         content.table.scrollRowToVisible(next)
     }
@@ -892,8 +1056,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     @objc func changeScope(_ sender: NSButton) {
         guard actionRequest == nil, activation == nil, !presentingDialog else { return }
         cancelProjectSearch()
-        acceptOpeningWhenReady = false
-        openingSelectionID = nil
+        cancelOpeningSelection()
         if targetRoute?.operation != nil && sender.tag == 5 {
             content.status.stringValue = "Choose a live target, or press Escape to return to the dashboard."
             return
@@ -1011,6 +1174,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         guard !loading, !presentingDialog, actionRequest == nil, activation == nil, dashboardRequest == nil,
               displayedRequest == pending, displayedSearch == activeSearch,
               items.indices.contains(row), !items[row].contextOnly else { return }
+        recordSelection(row)
         content.table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         trackActionsMenu(track)
     }
@@ -1210,6 +1374,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
 
     func refresh() {
         guard activation == nil, actionRequest == nil, dashboardRequest == nil, !presentingDialog, !loading else { return }
+        pendingRemotePrevious = nil
         cancelProjectSearch()
         stopPreview()
         if scope == "directory", backend.isRunning { loadDirectories(["reload": true]); return }
@@ -1220,7 +1385,9 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         do {
             let running = backend.isRunning
             try backend.start()
-            pending = backend.send(running ? "refresh" : "open", fields: running ? [:] : ["context": context])
+            abandonNativeCatalog()
+            pending = backend.send(running ? "refresh" : "open", fields: running ? [:] : ["context": context, "native_catalog": true])
+            nativeCatalogOrigin = pending
         } catch { showError(error.localizedDescription) }
     }
 
@@ -1242,10 +1409,16 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             }
             return
         }
-        guard row >= 0, row < items.count else { return }
-        guard !items[row].contextOnly else { return }
         // Never activate the previous query's selection while a result is pending.
         guard pending == displayedRequest else { return }
+        if let waiting = pendingRemotePrevious {
+            if waiting == .select {
+                pendingRemotePrevious = .activate
+                updateRemoteSessions(immediate: true)
+            }
+            return
+        }
+        guard items.indices.contains(row), !items[row].contextOnly else { return }
         // A background result can replace the one-use create token even when
         // the query text stays the same. Real targets keep their stable IDs.
         guard items[row].kind != "create" || remoteResultsRequest == nil else { return }
@@ -1265,7 +1438,14 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         }
         content.status.stringValue = items[row].kind == "create" ? "Creating session…" : items[row].kind == "directory" ? "Opening project…" : "Switching to \(items[row].title)…"
         stopPreview()
-        activation = backend.send("activate", fields: ["target_id": items[row].id])
+        // Rex brings its window forward before the remote pane focus reply.
+        // Let it cover the picker as soon as the session is shown.
+        if items[row].host != nil { panel.level = .normal }
+        let resident = items[row].host != nil && items[row].kind == "session"
+        var fields: [String: Any] = ["target_id": items[row].id]
+        if resident { fields["native_reveal"] = true }
+        activation = backend.send("activate", fields: fields)
+        nativeRevealRequest = resident ? activation : nil
     }
 
     @objc func togglePreview() {
@@ -1273,7 +1453,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let visible = !content.previewVisible
         stopPreview()
         content.setPreviewVisible(visible)
-        if visible { updatePreviewSelection() }
+        if visible { updatePreviewSelection(settled: true) }
         panel.makeFirstResponder(content.search)
     }
 
@@ -1282,17 +1462,16 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         previewWork = nil
         previewBackend.stop()
         previewOpening = nil
+        previewPreparation = nil
         previewRequest = nil
         previewReady = false
         previewFailed = false
-        previewTargetID = nil
         previewGate.invalidate(cancelInFlight: true)
     }
 
-    func updatePreviewSelection() {
+    func updatePreviewSelection(settled: Bool = false) {
         guard !dashboardVisible, content.previewVisible, panel.isVisible, !presentingDialog else { return }
         guard let selected = selectedItem else {
-            previewTargetID = nil
             previewGate.select(nil, at: ProcessInfo.processInfo.systemUptime)
             previewWork?.cancel()
             content.showPreview(title: "Preview", detail: "", text: "Choose a terminal or project to inspect.")
@@ -1306,16 +1485,15 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
                        selected.kind == "directory" ? "Return opens this project’s session.\n⌘→ browses its folders." : selected.kind == "create" ? "Return creates this session using the current search." : "No terminal preview is available for this item."].filter { !$0.isEmpty }.joined(separator: "\n\n"))
             return
         }
-        let changed = previewTargetID != selected.id
-        previewTargetID = selected.id
-        previewGate.select(selected.id, at: ProcessInfo.processInfo.systemUptime)
+        let changed = previewGate.select(selected.id, parent: selected.parentID, pane: selected.paneID,
+                                         settled: settled, at: ProcessInfo.processInfo.systemUptime)
         guard !previewFailed else { return }
         if changed { content.showPreview(title: selected.title, detail: selected.path, text: "", loading: true) }
         if !previewReady && previewOpening == nil {
             content.showPreview(title: selected.title, detail: selected.path, text: "", loading: true)
             do {
                 try previewBackend.start()
-                previewOpening = previewBackend.send("open", fields: ["context": context, "preview_only": true])
+                previewOpening = previewBackend.send("open_preview", fields: ["context": context])
             } catch { previewFailure(error.localizedDescription) }
         }
         schedulePreview()
@@ -1332,8 +1510,13 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
                   let selected = self.selectedItem,
                   let request = self.previewGate.begin(at: ProcessInfo.processInfo.systemUptime) else { return }
             self.content.showPreview(title: selected.title, detail: selected.path, text: "", loading: true)
-            let id = self.previewBackend.send("preview", fields: ["target_id": request.targetID, "lines": 80])
-            self.previewRequest = (id, request)
+            // Resolve against the same catalog as the visible row. Only the
+            // independent worker waits for Rex to read the terminal.
+            var fields: [String: Any] = ["target_id": request.targetID, "lines": 80, "prepare": true]
+            fields["pane_id"] = request.paneID
+            fields["parent_id"] = request.parentID
+            let id = self.backend.send("preview", fields: fields)
+            self.previewPreparation = (id, request)
         }
         previewWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0.001, deadline - ProcessInfo.processInfo.systemUptime), execute: work)
@@ -1344,16 +1527,21 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let type = message["type"] as? String ?? ""
         if id == previewOpening {
             previewOpening = nil
-            guard type == "results" else { previewFailure(message["message"] as? String ?? "Unable to load preview."); return }
+            guard type == "preview_ready" else { previewFailure(message["message"] as? String ?? "Unable to load preview."); return }
             previewReady = true
             schedulePreview()
             return
         }
         guard let pending = previewRequest, pending.id == id else { return }
         previewRequest = nil
-        let current = previewGate.finish(pending.request)
-        if current, content.previewVisible, panel.isVisible, let selected = selectedItem, selected.id == pending.request.targetID {
-            let text = type == "preview" ? (message["text"] as? String ?? "") : (message["message"] as? String ?? "Preview unavailable. Refresh to retry.")
+        finishPreview(pending.request, message: message)
+    }
+
+    private func finishPreview(_ request: PickerPreviewRequest, message: [String: Any]) {
+        let current = previewGate.finish(request)
+        if current, content.previewVisible, panel.isVisible, let selected = selectedItem, selected.id == request.targetID {
+            let matches = message["type"] as? String == "preview" && message["target_id"] as? String == request.targetID
+            let text = matches ? (message["text"] as? String ?? "") : (message["message"] as? String ?? "Preview unavailable. Refresh to retry.")
             content.showPreview(title: selected.title, detail: selected.path, text: text.isEmpty ? "No terminal output yet." : text)
         }
         schedulePreview()
@@ -1367,12 +1555,17 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         }
     }
 
-    func tableViewSelectionDidChange(_ notification: Notification) {
+    // Mouse presses count even when AppKit keeps the already-highlighted row.
+    private func recordSelection(_ row: Int) {
+        pendingRemotePrevious = nil
         if loading && openingRefresh {
             acceptOpeningWhenReady = false
-            let row = content.table.selectedRow
             openingSelectionID = items.indices.contains(row) && !items[row].contextOnly ? items[row].id : nil
         }
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        recordSelection(content.table.selectedRow)
         updatePreviewSelection()
     }
 
@@ -1423,12 +1616,14 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         projectSearchVisible = false
         cancelProjectSearch()
         stopRemoteUpdates()
-        acceptOpeningWhenReady = false
+        cancelOpeningSelection()
         openingRefresh = false
-        openingSelectionID = nil
         deferredDashboardAction = nil
         stopPreview()
+        let focusHandedOff = panel.level == .normal && !panel.isKeyWindow
         panel.orderOut(nil)
+        panel.level = .floating
+        if focusHandedOff { return }
         // Escape/Cmd+W must return keyboard focus just like accepting a result.
         // Hiding an accessory app's panel alone can leave Rex without focus.
         let target: NSRunningApplication?
@@ -1456,20 +1651,19 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             projectSearchVisible = false
             cancelProjectSearch()
             stopRemoteUpdates()
-            acceptOpeningWhenReady = false
+            cancelOpeningSelection()
             openingRefresh = false
-            openingSelectionID = nil
             deferredDashboardAction = nil
             stopPreview(); panel.orderOut(nil)
         }
     }
 
     func showError(_ message: String) {
+        panel.level = .floating
         cancelProjectSearch()
-        acceptOpeningWhenReady = false
+        cancelOpeningSelection()
         openingRefresh = false
         openingRequest = nil
-        openingSelectionID = nil
         loading = false
         activation = nil
         actionRequest = nil
@@ -1503,6 +1697,15 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 }
 
+// Native process entry point.
+if CommandLine.arguments.dropFirst().first == "--show-remote-session" {
+    RemoteSessionAutomation.run(Array(CommandLine.arguments.dropFirst(2)))
+    exit(0)
+}
+if CommandLine.arguments.dropFirst().first == "--remote-session-catalog" {
+    RemoteSessionAutomation.runCatalog(Array(CommandLine.arguments.dropFirst(2)))
+    exit(0)
+}
 let app = NSApplication.shared
 let delegate = PickerApplication()
 app.delegate = delegate

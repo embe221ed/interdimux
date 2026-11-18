@@ -124,7 +124,7 @@ if 'local snapshot=' not in source:
 with (root / 'calls').open('a') as out:
     out.write('snapshot\n')
 snapshot = json.loads((root / 'snapshot.json').read_text())
-if 'local clients=' in source:
+if 'client.list' in source:
     print(json.dumps({'clients': {'clients': [{'client_id': 'client:test', 'info': {'kind': 'app', 'platform': 'macos'}, 'principal': {'kind': 'peer', 'transport': 'unix'}}]}, 'snapshot': snapshot}))
 else:
     print(json.dumps(snapshot))

@@ -110,20 +110,21 @@ pub(crate) struct BoundedCommand {
 
 impl BoundedCommand {
     fn start(command: Command, deadline: Instant, limit: usize) -> Option<Self> {
-        Self::start_with_stderr(command, deadline, limit, false).ok()
+        Self::spawn(command, deadline, limit, false, Stdio::null()).ok()
     }
 
-    fn start_with_stderr(
+    fn spawn(
         mut command: Command,
         deadline: Instant,
         limit: usize,
         capture_stderr: bool,
+        stdin: Stdio,
     ) -> io::Result<Self> {
         if Instant::now() >= deadline {
             return Err(command_timed_out());
         }
         command
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(if capture_stderr { Stdio::piped() } else { Stdio::null() });
         #[cfg(unix)]
@@ -143,10 +144,72 @@ impl BoundedCommand {
             finished: false,
         };
         nonblocking(&result.stdout)?;
+        if let Some(pipe) = &result.child.stdin {
+            nonblocking(pipe)?;
+        }
         if let Some(stderr) = &result.stderr {
             nonblocking(stderr)?;
         }
         Ok(result)
+    }
+
+    #[cfg(feature = "macos-picker")]
+    pub(crate) fn interactive(command: Command, deadline: Instant, limit: usize) -> io::Result<Self> {
+        Self::spawn(command, deadline, limit, true, Stdio::piped())
+    }
+
+    #[cfg(feature = "macos-picker")]
+    pub(crate) fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Read a first newline-delimited reply while the command waits for input.
+    #[cfg(feature = "macos-picker")]
+    pub(crate) fn first_line(&mut self, cancelled: impl Fn() -> bool) -> io::Result<Vec<u8>> {
+        let mut line = Vec::new();
+        let mut errors = Vec::new();
+        let mut eof = false;
+        let mut stderr_eof = false;
+        loop {
+            if cancelled() || Instant::now() >= self.deadline {
+                return Err(command_timed_out());
+            }
+            let offset = line.len();
+            let progress = read_command_pipe(&mut self.stdout, &mut line, &mut eof, self.limit)?;
+            if line[offset..].contains(&b'\n') {
+                return Ok(line);
+            }
+            if let Some(stderr) = self.stderr.as_mut().filter(|_| !stderr_eof) {
+                read_command_pipe(stderr, &mut errors, &mut stderr_eof, self.limit)?;
+            }
+            if eof {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, String::from_utf8_lossy(&errors).trim().to_owned()));
+            }
+            if !progress { std::thread::sleep(Duration::from_millis(5)); }
+        }
+    }
+
+    /// Commit one bounded command line. A closed pipe before the first byte
+    /// permits a cold retry. Once any input went through, report the outcome.
+    #[cfg(feature = "macos-picker")]
+    pub(crate) fn exchange_line(&mut self, line: &[u8], deadline: Instant, cancelled: impl Fn() -> bool) -> Option<io::Result<Vec<u8>>> {
+        use std::io::Write;
+        self.deadline = deadline;
+        let input = self.child.stdin.as_mut()?;
+        let mut offset = 0;
+        while offset < line.len() {
+            if cancelled() || Instant::now() >= deadline {
+                return (offset != 0).then(|| Err(command_timed_out()));
+            }
+            match input.write(&line[offset..]) {
+                Ok(0) => return (offset != 0).then(|| Err(io::ErrorKind::WriteZero.into())),
+                Ok(n) => offset += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
+                Err(e) => return (offset != 0).then_some(Err(e)),
+            }
+        }
+        Some(self.first_line(cancelled))
     }
 
     fn stop(&mut self) {
@@ -241,7 +304,7 @@ pub(crate) fn bounded_command_output(
     limit: usize,
     cancelled: impl Fn() -> bool,
 ) -> io::Result<Output> {
-    BoundedCommand::start_with_stderr(command, Instant::now() + timeout, limit, true)?
+    BoundedCommand::spawn(command, Instant::now() + timeout, limit, true, Stdio::null())?
         .output_until(cancelled)
 }
 

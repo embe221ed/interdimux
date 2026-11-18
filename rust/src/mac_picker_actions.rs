@@ -2,7 +2,7 @@
 //! values remain literal data and existing Rex operations recheck membership.
 
 use crate::model::{Snapshot, Target};
-use crate::projects::CreateTarget;
+use crate::projects::{resolve_directory, CreateTarget};
 use crate::rex::{self, RexContext};
 use serde_json::{json, Value};
 
@@ -47,6 +47,24 @@ fn kind(target: &Target) -> Result<Kind, String> {
     } else {
         Kind::Session
     })
+}
+
+pub(super) fn decode_preview_target(request: &Value) -> Result<Target, String> {
+    let id = request["target_id"]
+        .as_str()
+        .ok_or("target_id must be a string")?;
+    let value = &request["target"];
+    let target = crate::interactive::decode_target(value, "rex")?;
+    let matches_row = match kind(&target)? {
+        Kind::Session => value["session_id"] == id,
+        Kind::Window => value["window_id"] == id,
+        // A single-pane tab retains its window row ID.
+        Kind::Pane => value["window_id"] == id || value["block_id"] == id,
+    };
+    if !matches_row || crate::interactive::target_json(&target) != *value {
+        return Err("Invalid Rex preview target".into());
+    }
+    Ok(target)
 }
 
 fn pane_target(selected: &ActionSelection) -> Result<&Target, String> {
@@ -115,6 +133,15 @@ fn result(close: bool, message: String) -> Value {
     json!({"close_picker":close,"refresh":!close,"message":message})
 }
 
+pub(super) fn preview_lines(request: &Value) -> Result<u64, String> {
+    request.get("lines").map_or(Ok(80), |value| {
+        value
+            .as_u64()
+            .filter(|n| (1..=200).contains(n))
+            .ok_or_else(|| "Preview lines must be between 1 and 200".into())
+    })
+}
+
 fn caption(selected: &ActionSelection) -> &str {
     if selected.title.is_empty() {
         &selected.name
@@ -156,19 +183,6 @@ pub(super) fn run(
             }
         },
     )
-}
-
-fn resolve_directory(snapshot: &Snapshot, path: &str) -> Result<CreateTarget, String> {
-    let physical = super::directories::exact_path(path)?;
-    // The shared create-session parser strips fzf operators. Quote the entire
-    // literal absolute path and escape spaces so path characters retain their
-    // meaning, including a final $, apostrophes, backslashes and " | ".
-    let query = format!("'{}'", physical.replace(' ', "\\ "));
-    let resolved = crate::projects::resolve(snapshot, &query)?;
-    if !resolved.path_query || resolved.cwd != physical {
-        return Err("The selected directory could not be resolved exactly".into());
-    }
-    Ok(resolved)
 }
 
 pub(super) fn open_directory(
@@ -277,13 +291,7 @@ fn run_with(
         }
         "new-window" => {
             let query = value(request, "a tab name or directory", false)?;
-            let (name, mut cwd) = crate::projects::normalize_query(&query)?;
-            if crate::projects::query_directory(&query).is_none()
-                && cwd == crate::env_text("HOME")
-                && !selected.path.is_empty()
-            {
-                cwd = selected.path.clone();
-            }
+            let (name, cwd) = crate::projects::normalize_query(&query)?.window_in(&selected.path);
             dispatch(
                 "create",
                 Some(&selected.target),
@@ -321,13 +329,7 @@ fn run_with(
             Ok(result(false, message))
         }
         "preview" => {
-            let lines = match request.get("lines") {
-                None => 80,
-                Some(value) => value
-                    .as_u64()
-                    .filter(|lines| (1..=200).contains(lines))
-                    .ok_or("Preview lines must be between 1 and 200")?,
-            };
+            let lines = preview_lines(request)?;
             let data = dispatch(
                 "preview",
                 Some(pane_target(selected)?),

@@ -2,7 +2,7 @@
 
 This optional AppKit app searches and switches Rex sessions, windows, and panes, and supports the core Rex editing actions below. It remains an experimental port. Its integration makes the native picker and dashboard the primary entry points while the terminal picker stays available separately. It refreshes when opened, after mutations, and with **Cmd+R**.
 
-Requires macOS 13+, the Xcode Command Line Tools, Rust 1.80+, Python 3, and a running local Rex app/server. The companion runs on the Mac and can switch to sessions on configured remote Rex servers. The existing Rust core still supports Rust 1.74 when built without the optional `macos-picker` feature.
+Requires macOS 13+, the Xcode Command Line Tools, Rust 1.80+, Python 3, and a running local Rex app/server. The companion runs on the Mac and can switch to sessions, tabs, and panes on configured remote Rex servers. The existing Rust core still supports Rust 1.74 when built without the optional `macos-picker` feature.
 
 ```sh
 ./macos/build.sh
@@ -18,7 +18,7 @@ The build creates `macos/build/Interdimux Picker.app`, containing the AppKit exe
   --window 'window:…' --block 'block:…'
 ```
 
-IDs are full Rex IDs, passed as arguments and URL-encoded. Session/window/block context is optional for standalone launch; when present, it identifies the originating pane. `REX_CLIENT`, `REX_SESSION`, `REX_WINDOW`, and `REX_BLOCK` supply defaults. `INTERDIMUX_REX_BIN` can select the installed Rex CLI. `--print-url` validates the local app and prints the launch URL without opening a window.
+IDs are full Rex IDs, passed as arguments and URL-encoded. Session/window/block context is optional for standalone launch; when present, it identifies the originating pane. `REX_CLIENT`, `REX_SESSION`, `REX_WINDOW`, and `REX_BLOCK` supply defaults. Passing an explicit session and pane resolves the tab that contains that pane. `INTERDIMUX_REX_BIN` can select the installed Rex CLI. `--print-url` validates the local app and prints the launch URL without opening a window.
 
 Load this after the existing Interdimux setup in Rex's `init.lua`, then reload the configuration. Keep the terminal integration for its remaining tools; bind its picker to `ctrl+b>w` if desired:
 
@@ -30,17 +30,27 @@ dofile("/opt/tools/interdimux/integrations/rex_macos.lua").setup {
 }
 ```
 
-Adjust the checkout path and key if needed. This registers **Interdimux: Native macOS Picker** and **Interdimux: Native macOS Dashboard** in the command palette. The action validates the local app and launches the bundle directly through Launch Services with the originating pane context for local sessions or the host and session for remote sessions. It checks the bundle's required files without starting Python or walking the source tree on every hotkey. After source edits, rebuild and restart the picker; `./macos/open.sh --check-build` provides the full development staleness check. The native defaults replace prefix+f and prefix+g; prefix+w is not modified. An explicit prefix+u alias can remain bound to `interdimux_macos`.
+Adjust the checkout path and key if needed. This registers **Interdimux: Native macOS Picker** and **Interdimux: Native macOS Dashboard** in the command palette. The action validates the local app and launches the bundle directly through Launch Services with the originating pane context, including the host for remote sessions. It checks the bundle's required files without starting Python or walking the source tree on every hotkey. After source edits, rebuild and restart the picker; `./macos/open.sh --check-build` provides the full development staleness check. The native defaults replace prefix+f and prefix+g; prefix+w is not modified. An explicit prefix+u alias can remain bound to `interdimux_macos`.
 
-Type to search; use **Cmd+1–6** to change scope, **↑/↓** or **Ctrl+N/P** to select (wrapping at either end and skipping contextual parents), **Enter** to switch, and **Escape** to dismiss. **Cmd+F** focuses and selects the search query. Reopening immediately reuses the cached list for the same Rex client, including when switching sessions. The opening refresh preserves cached row order and viewport, even if Rex returns a differently ordered catalog; it updates metadata in place and selects the previous session. Unchanged rows reuse their existing tree and cells. New siblings follow surviving siblings, and removed rows disappear. **Cmd+R** explicitly reloads the catalog; typed searches retain relevance ordering. Cached selection uses the last known previous session (or the prior origin after a session switch), then refresh confirms the same target as **Prefix+L**. An early Enter waits for that confirmation; deliberate navigation among cached rows preserves the chosen target if it still exists. Typing, changing scope, dismissing, or losing focus cancels a queued Enter. A different client or unknown origin waits for fresh results. **Cmd+Q** quits the background app. The panel grows to 1080 × 760 points, constrained to the current screen’s usable area.
+Type to search. Use **Cmd+1–6** to change scope, **↑/↓** or **Ctrl+N/P** to select, **Enter** to switch, and **Escape** to dismiss. Navigation wraps and skips contextual parents. **Cmd+F** focuses and selects the search query. **Cmd+Q** quits the background app. The panel grows to 1080 × 760 points within the current screen’s usable area.
+
+Reopening from a known session on the same Rex client immediately shows the cached list. The refresh keeps surviving siblings in place and updates their metadata. With an empty search, the picker selects the previously visited session. The running helper remembers the sessions each client opens the picker from and the sessions it switches to successfully. Sidebar visits between those observations are invisible to the helper. If it is still locating the previous remote session, local rows appear immediately and the picker scrolls the remote selection into view when it arrives. Moving the selection yourself preserves your choice across updates. An early Enter waits for confirmation and cancels if the previous remote session is unavailable. Typing, changing scope, dismissing, or losing focus also cancels a queued Enter. A different client or unknown origin waits for fresh results. **Cmd+R** explicitly reloads the catalog.
 
 The picker and dashboard follow Rex's appearance mode and selected light or dark theme, including imported themes. Colors refresh when opening and while the panel is visible, without clearing the query or selection. Automatic mode follows macOS. Native controls and confirmation sheets use the matching light or dark appearance too.
 
-**All** and **Sessions** include sessions from `rex hosts list`. Local results are ready as soon as the local snapshot arrives. Remote hosts refresh independently in the background, and reopening reuses the remote results held by the running picker. Search for a session name or, in **All fields**, a Rex host label. A remote row shows its host and indicates when the last refresh failed. Press **Enter** to switch through the Mac app's connection to that host. This requires a connected host in the originating Rex Mac app and a version with the AppleScript **show** command (preview.28 or later). The first remote switch can ask for macOS Automation permission. You can manage that permission under **System Settings → Privacy &amp; Security → Automation**. Local rows also include tabs, panes, previews, and management actions.
+**All**, **Sessions**, **Tabs**, and **Panes** include results from hosts in `rex hosts list`. Local results are ready as soon as the local snapshot arrives. On a cold open, the running picker can read the connected-session list from the originating Rex app when Automation access is already available. It shows sessions for matching physical hosts while direct host discovery continues. Each host’s reply reconciles that list, then adds tabs and panes in the background. Remote rows fill in automatic names from foreground commands, verified terminal titles, and working directories as that metadata arrives. Explicit Rex labels take precedence over automatic names. Reopening reuses the remote rows held by the running picker. Search by name or type a Rex host label in **All fields**. A remote row shows its host and marks cached data if a refresh fails.
 
-The picker can reuse Rex's active SSH forwards on the Mac after matching them to saved host IDs. For other connections it uses the standard Rex CLI host lookup, which uses the SSH agent and OpenSSH configuration available to the picker process.
+Press **Enter** on a remote row to open its exact session, tab, or pane. This requires a connected host in the originating Rex Mac app and a version with the AppleScript **show** command (preview.28 or later). The first remote switch can ask for macOS Automation permission. You can manage that permission under **System Settings → Privacy &amp; Security → Automation**. Terminal previews and editing actions are available for local rows.
 
-The results form an expanded **session → tab → pane** tree, with compact rows, subtle branch lines and a shared, left-truncated path column. A tab with one pane uses one combined row: rename, close and swap operate on the tab, while switching, zooming, splitting and sending address its exact pane. The pane's title, command and path remain searchable. Split tabs retain their pane children. Filtering keeps a match's ancestors visible; dim parent rows provide context and are skipped by keyboard selection. Matching branches are ranked by relevance while staying together. Opening or clearing the query restores session recency order with the current session's whole branch last. The previously visited session is first and selected, matching **Last Session / prefix+L**. Escape and Cmd+W return focus to Rex; clicking another app dismisses without pulling focus back.
+On the first open, an existing Automation grant lets the picker read connected sessions from the Mac app while the servers are responding. Opening the list never asks for that grant. Each server’s reply replaces the early session rows and supplies its tabs and panes.
+
+For a remote session, the picker asks the originating Mac app to show its exact session object. It checks the connected host against the physical server ID in Rex’s saved host record. When that identity is unavailable, it verifies the host and session through the Rex CLI. A conflicting host identity requires a refresh.
+
+For tabs and panes, the picker can reuse the connections it opened to read remote layouts. It keeps up to two, releases idle connections after 45 seconds, and checks the target again when you press Enter. Other targets use a fresh connection. The picker can use Rex’s active SSH forwards after matching their host IDs, or the SSH agent and OpenSSH configuration available to the Rex CLI.
+
+Remote terminal details arrive in batches of four over a separate connection to each host. The first batch can update the list while later reads run. Reopening shares the current work. **Cmd+R** can start fresh discovery even when an earlier metadata read is still pending.
+
+The results form an expanded **session → tab → pane** tree, with compact rows, subtle branch lines and a shared, left-truncated path column. A tab with one pane uses one combined row: rename, close and swap operate on the tab, while switching, zooming, splitting and sending address its exact pane. The pane's title, command and path remain searchable. Split tabs retain their pane children. Filtering keeps a match's ancestors visible; dim parent rows provide context and are skipped by keyboard selection. Matching branches are ranked by relevance while staying together. Clearing the query restores the catalog tree and its previous-session selection. Escape and Cmd+W return focus to Rex; clicking another app dismisses without pulling focus back.
 
 Press **Tab** from search to focus the result list. **←** selects the nearest selectable parent and **→** the first selectable child, following the visible tree through dim context rows. Roots and leaves stay selected when there is no target in that direction. While typing in search, **←/→** move the text cursor. **Cmd+F** returns to search. In a narrow list, target names take priority over the path column. The full path is available in the row’s tooltip and accessibility label.
 
@@ -82,7 +92,7 @@ The **Projects** scope additionally lists configured project roots and supports 
 
 The search-field menu restricts fuzzy matching to **All fields**, **Names**, **Paths**, or **Commands**. Changing fields preserves the query and scope. Matching uses full metadata, even when displayed text is truncated. A combined tab includes its pane’s name/title and command metadata.
 
-**Preview / Cmd+P** opens a side panel with selectable terminal output or project details. Terminal captures wait for selection to settle and run on a separate helper, so a slow capture cannot block query filtering. Only one capture runs at a time; rapid navigation coalesces to the latest selection, and stale replies never replace its preview. There is no continuous capture polling. Preview work is invalidated when the picker closes, refreshes, switches context, or performs a mutation. Toggle preview or refresh to retry a failed capture.
+**Preview / Cmd+P** opens a side panel with selectable terminal output or project details. Opening preview on a settled selection starts its capture as soon as the preview helper is ready. When you move or type, it waits for selection to settle. The helper uses the displayed row’s exact pane and reuses a local Rex connection for subsequent captures. It checks the current layout before reading terminal output. A slow capture runs independently of search filtering. Only one capture runs at a time; rapid navigation coalesces to the latest selection, and stale replies never replace its preview. There is no continuous capture polling. Preview work is invalidated when the picker closes, refreshes, switches context, or performs a mutation. Toggle preview or refresh to retry a failed capture.
 
 **Attention** counts only verified agents waiting for `approve` or `input`, including questions and required user interaction. Completed, idle, working and error-only states are excluded. Combined tab rows count their agent once. Status and capability metadata are computed when collecting the snapshot; typing does not poll Rex, inspect processes, scan directories or capture terminal output.
 
@@ -121,9 +131,17 @@ For lazy zoxide loading, run the isolated protocol benchmark after building the 
 
 ```sh
 python3 macos/benchmark_zoxide.py --output /tmp/interdimux-zoxide-performance.json
+python3 macos/benchmark_zoxide.py --remote-publication --sizes 446 5000 12000 --rounds 10 --queries 10 --output /tmp/interdimux-remote-publication.json
 ```
 
 It uses private Rex/zoxide shims and synthetic inventories of 446 and 5,000 paths. It checks that opening and cached hits make no zoxide calls, measures cached queries before/during/after loading and cached reopening, and exercises a stalled worker. Three rounds include raw samples, median/p95, and the helper hash. The timing includes serialization, pipes, matching, and fixture processes; it excludes real Rex collection, AppKit, rendering, and the UI idle delay. It neither activates sessions nor accesses the real zoxide database.
+
+For directory discovery, compare release helpers on the same temporary project trees. This reports scan time and the number of directories found within the 150 ms metadata budget. It also checks that visible rows retain their association with renamed sessions.
+
+```sh
+python3 macos/benchmark_project_discovery.py --helper before=/path/to/previous/imux \
+  --helper 'after=macos/build/Interdimux Picker.app/Contents/Helpers/imux'
+```
 
 On the development Intel Mac running macOS 26.6.2, November 6, 2026:
 
@@ -171,6 +189,28 @@ To repeat the explicit live checks, first record the original session/window and
 python3 macos/test_live_actions.py --run-live \
   --client 'client:…' --restore-session 'session:…' --restore-window 'window:…'
 ```
+
+To time remote switches, supply a connected SSH host. This creates two disposable sessions on that host, switches between them in the selected Mac app and restores the original view. The report times when the app first reports the destination and when the helper confirms the switch. It also checks the active tab and focused pane. Screen painting and the keyboard hotkey are outside the measurement.
+
+```sh
+python3 macos/benchmark_remote_switch.py --run-live --host 'my-host' \
+  --helper current='macos/build/Interdimux Picker.app/Contents/Helpers/imux' --resident current
+```
+
+Add another `--helper` to interleave trials with an earlier bundle. Repeat `--resident` for each build that supports revealing the session inside the running picker. Use `--targets session` to measure just the session switch.
+
+To measure cold discovery without switching the Mac app, use a host with an existing session. Each sample starts a fresh helper. The report times the first local result and the first actionable row for the exact remote session.
+
+```sh
+python3 macos/benchmark_remote_switch.py --cold-rows --host 'my-host' --rounds 12 \
+  --helper before='/path/to/Previous.app/Contents/Helpers/imux' --early-poll before \
+  --helper current='macos/build/Interdimux Picker.app/Contents/Helpers/imux' --early-poll current \
+  --resident-catalog current
+```
+
+Trials rotate the helper order. Pass `--early-poll` for both helpers to compare them at the same polling interval. Omit it for an older bundle when measuring that bundle's original backoff.
+
+`--resident-catalog` compiles this checkout's read-only Swift catalog operation and keeps it running across trials. After the helper supplies the validated Rex app PID and process birth time, the driver reads the catalog while remote discovery continues. The report counts trials with a catalog offer, a submitted hint containing the exact target, and a callback that changed the helper's rows. If the Mac app cannot provide a hint, the benchmark still waits for the verified remote row. Both helpers should come from their respective app bundles so any standalone catalog command is available.
 
 Launcher checks run without opening an app or contacting Rex:
 

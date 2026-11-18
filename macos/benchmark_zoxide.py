@@ -54,7 +54,23 @@ class Case:
         rex = self.root / "rex"
         rex.write_text('''#!/bin/sh
 source=$(/bin/cat)
-case "$source" in *"local clients="*) ;; *) exit 2 ;; esac
+if [ "$IMUX_BENCHMARK_MODE" = remote ]; then
+  case " $* " in
+    *" hosts list --json "*)
+      echo '{"hosts":[{"host":{"label":"oxide-host","host_id":"h1"}}]}'; exit ;;
+    *" --server=oxide-host "*)
+      while [ ! -f "$IMUX_BENCHMARK_ROOT/publish" ]; do /bin/sleep 0.01; done
+      case " $* " in
+        *" api call session.bootstrap "*) echo '{"server_status":{"host_id":"h1"},"attach_all":{"sessions":[{"session_id":"session:remote","label":"project-target"}]}}'; exit ;;
+      esac
+      case " $* " in
+        *"local function picker_block"*) echo '{"host_id":"h1","layouts":{"session:remote":[]}}' ;;
+        *) echo '{"host_id":"h1","sessions":[{"session_id":"session:remote","label":"project-target"}]}' ;;
+      esac
+      exit ;;
+  esac
+fi
+case "$source" in *"client.list"*) ;; *) exit 2 ;; esac
 case "$source" in *"local snapshot="*) ;; *) exit 2 ;; esac
 printf 'snapshot\\n' >> "$IMUX_BENCHMARK_ROOT/rex-calls"
 exec /bin/cat "$IMUX_BENCHMARK_ROOT/snapshot.json"
@@ -82,7 +98,7 @@ exec /bin/cat "$IMUX_BENCHMARK_ROOT/zoxide-output"
         warm = dict(environment, IMUX_BENCHMARK_MODE="success")
         subprocess.run([str(zoxide), "query", "--list", "--all"], env=warm,
                        stdout=subprocess.DEVNULL, check=True, timeout=5)
-        subprocess.run([str(rex)], input=b"local clients=\nlocal snapshot=\n", env=warm,
+        subprocess.run([str(rex)], input=b"client.list\nlocal snapshot=\n", env=warm,
                        stdout=subprocess.DEVNULL, check=True, timeout=5)
         for name in ("zoxide-calls", "zoxide-pids", "rex-calls"):
             (self.root / name).unlink(missing_ok=True)
@@ -182,6 +198,48 @@ def successful_round(helper, size, query_count, poll_ms):
         case.close()
 
 
+def remote_publication_round(helper, size, query_count):
+    """Hold a remote session until the project search index is warm."""
+    case = Case(helper, size, "remote")
+    try:
+        target = query_fields(f"'zoxide-project-{size - 1:05}")
+        result, _ = case.protocol.request("load_projects", **target)
+        deadline = time.monotonic() + 5
+        while result.get("projects_loading") and time.monotonic() < deadline:
+            time.sleep(0.002)
+            result, _ = case.protocol.request("query", **target)
+        if result["matched"] != 1 or case.calls("zoxide") != 1:
+            raise RuntimeError("Project inventory failed to load before publication")
+
+        pending, _ = case.protocol.request("remote_update")
+        if pending["changed"] or not pending["pending"]:
+            raise RuntimeError("Remote fixture published before the gate opened")
+        (case.root / "publish").touch()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            update, elapsed = case.protocol.request("remote_update")
+            if update["changed"]:
+                break
+            time.sleep(0.002)
+        else:
+            raise RuntimeError("Remote session failed to publish")
+
+        result, _ = case.protocol.request("query", **query_fields("'project-target"))
+        if not any(row.get("host") == "oxide-host" for row in result["rows"]):
+            raise RuntimeError("Published session missing from results")
+        retained, _ = case.protocol.request("query", **target)
+        if retained["matched"] != 1:
+            raise RuntimeError("Remote publication discarded the loaded project inventory")
+        # Both searches match the entire inventory. Only the second matches
+        # the remote session name and triggers the contiguous-name ranking bonus.
+        return {"publication_ms": elapsed,
+                "host_label": measured_queries(case, ["oxide"], query_count),
+                "session_name": measured_queries(case, ["project"], query_count),
+                "blank": measured_queries(case, [""], query_count)}
+    finally:
+        case.close()
+
+
 def stalled_round(helper, query_count):
     case = Case(helper, 446, "stall")
     try:
@@ -228,6 +286,8 @@ def main():
     parser.add_argument("--queries", type=int, default=120)
     parser.add_argument("--poll-ms", type=float, default=5)
     parser.add_argument("--label", default="current")
+    parser.add_argument("--remote-publication", action="store_true",
+                        help="Publish one remote session against a warm project index and measure mixed queries.")
     args = parser.parse_args()
     if any(size < 1 or size > 15000 for size in args.sizes) or args.rounds < 1 or args.queries < 10 or args.poll_ms <= 0:
         parser.error("sizes must be 1–15000, rounds positive, queries at least 10, poll-ms positive")
@@ -240,19 +300,25 @@ def main():
               "poll_interval_ms": args.poll_ms, "warmup_queries_per_phase": 10,
               "queries_per_phase": args.queries, "search_field": "all", "corpora": [], "stalled_worker": []}
     for size in args.sizes:
-        rounds = [successful_round(helper, size, args.queries, args.poll_ms) for _ in range(args.rounds)]
+        if args.remote_publication:
+            rounds = [remote_publication_round(helper, size, args.queries) for _ in range(args.rounds)]
+            print(json.dumps({"entries": size, "publication": summary([r["publication_ms"] for r in rounds])}),
+                  flush=True)
+        else:
+            rounds = [successful_round(helper, size, args.queries, args.poll_ms) for _ in range(args.rounds)]
+            print(json.dumps({"entries": size,
+                              "cached_hit_before_ms": [r["cached_hit_before_inventory"]["round_trip"] for r in rounds],
+                              "cached_hit_after_ms": [r["cached_hit_after_inventory"]["round_trip"] for r in rounds],
+                              "load_to_match_ms": [r["load_to_first_match_ms"] for r in rounds]}), flush=True)
         report["corpora"].append({"inventory_entries": size, "rounds": rounds})
-        print(json.dumps({"entries": size,
-                          "cached_hit_before_ms": [run["cached_hit_before_inventory"]["round_trip"] for run in rounds],
-                          "cached_hit_after_ms": [run["cached_hit_after_inventory"]["round_trip"] for run in rounds],
-                          "load_to_match_ms": [run["load_to_first_match_ms"] for run in rounds]}), flush=True)
-    report["stalled_worker"] = [stalled_round(helper, args.queries) for _ in range(args.rounds)]
+    if not args.remote_publication:
+        report["stalled_worker"] = [stalled_round(helper, args.queries) for _ in range(args.rounds)]
+        print(json.dumps({"stalled_worker": [
+            {"dispatch_ms": run["dispatch_ms"], "observed_failure_ms": run["load_until_failure_observed_ms"],
+             "cached_hit_round_trip": run["cached_hits_during_stall"]["round_trip"]}
+            for run in report["stalled_worker"]]}), flush=True)
     if hashlib.sha256(helper.read_bytes()).hexdigest() != report["helper_sha256"]:
         raise RuntimeError("Helper changed during measurement; rerun after the build finishes")
-    print(json.dumps({"stalled_worker": [
-        {"dispatch_ms": run["dispatch_ms"], "observed_failure_ms": run["load_until_failure_observed_ms"],
-         "cached_hit_round_trip": run["cached_hits_during_stall"]["round_trip"]}
-        for run in report["stalled_worker"]]}), flush=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(f"Report: {args.output}")

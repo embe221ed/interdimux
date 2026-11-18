@@ -29,10 +29,16 @@ class LauncherTests(unittest.TestCase):
 
     def launch(self, args=(), clients=None, env=None, platform="darwin", endpoint="unix:///default.sock"):
         output, errors = io.StringIO(), io.StringIO()
-        def reply(command, **_):
+        def reply(command, **options):
             if command[-2:] == ["whoami", "--json"]:
-                return json.dumps({"endpoint": endpoint, "session_id": "session:mine",
-                                   "block_id": "block:mine", "window_id": "window:mine"})
+                pairs = {
+                    ("session:mine", "block:mine"): "window:mine",
+                    ("session:other", "block:other"): "window:other",
+                    ("session:mine", "block:tab2"): "window:tab2",
+                }
+                sid, bid = (options["env"].get(key) for key in ("REX_SESSION", "REX_BLOCK"))
+                return json.dumps({"endpoint": endpoint, "session_id": sid, "block_id": bid,
+                                   "window_id": pairs.get((sid, bid))})
             return json.dumps({"clients": clients if clients is not None else [app()]})
 
         with patch.object(sys, "argv", ["open.sh", str(self.macos), *args]), \
@@ -162,6 +168,30 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(len(queries), 1)
         self.assertNotIn("REX_SERVER", queries[0].kwargs["env"])
         self.assertFalse(calls)
+
+    def test_explicit_origin_resolves_its_own_window(self):
+        env = {"REX_SESSION": "session:mine", "REX_BLOCK": "block:mine", "REX_WINDOW": "window:mine"}
+        for arguments, session, block, window in (
+                (["--session", "session:other", "--block", "block:other"], "session:other", "block:other", "window:other"),
+                (["--block", "block:tab2"], "session:mine", "block:tab2", "window:tab2")):
+            with self.subTest(arguments=arguments):
+                status, out, _, queries, _ = self.launch(["--dashboard", "--print-url", *arguments], env=env)
+                self.assertEqual(status, 0)
+                self.assertEqual(parse_qs(urlsplit(out.strip()).query), {
+                    "client_id": ["client:local"], "session_id": [session], "window_id": [window], "block_id": [block]})
+                self.assertEqual(len(queries), 2)
+                self.assertNotIn("REX_WINDOW", queries[0].kwargs["env"])
+
+    def test_partial_override_drops_unrelated_inherited_ids(self):
+        env = {"REX_SESSION": "session:mine", "REX_WINDOW": "window:mine", "REX_BLOCK": "block:mine"}
+        for arguments, expected in (
+                (["--session", "session:other"], {"session_id": ["session:other"]}),
+                (["--window", "window:other"], {"session_id": ["session:mine"], "window_id": ["window:other"]})):
+            with self.subTest(arguments=arguments):
+                status, out, _, queries, _ = self.launch(["--print-url", *arguments], env=env)
+                self.assertEqual(status, 0)
+                self.assertEqual(parse_qs(urlsplit(out.strip()).query), {"client_id": ["client:local"], **expected})
+                self.assertEqual(len(queries), 1)
 
     def test_changed_vendored_matcher_requires_rebuild(self):
         bundle = self.built()
