@@ -42,6 +42,14 @@ function M.setup(options)
     -- client actions queued in the action's reply. Our detached coordinator
     -- needs the persistent app ID explicitly before creating any float.
     local client_id = arguments and arguments.client_id or ctx.client_id
+    local attached
+    if ctx.server then
+      if not ctx.session_id then error("Select a Rex session first", 0) end
+      local err
+      attached, err = rex.call("session.attach", { session_id = ctx.session_id })
+      if not attached then error(err, 0) end
+      if not (arguments and arguments.client_id) then client_id = attached.client_id end
+    end
     local listed, list_error = rex.call("client.list", { kinds = { "app" } })
     if not listed then error(list_error, 0) end
     for _, client in ipairs(listed.clients or {}) do
@@ -49,30 +57,70 @@ function M.setup(options)
         local context = {}
         for key, value in pairs(ctx) do context[key] = value end
         context.client_id = client_id
+        context.attached_view = attached and attached.view
         return context
       end
     end
     error("Interdimux needs a connected Rex app client. Open it from the app, or pass client_id=<app ID> to rex do; -C is not exposed to configuration actions.", 0)
   end
 
+  local function origin_window(ctx)
+    local view, err = ctx.attached_view
+    if not view then view, err = rex.session.view { session_id = ctx.session_id } end
+    if not view then error(err, 0) end
+    for _, window in ipairs(view.windows or {}) do
+      -- Remote callbacks from the palette can have a session without a block.
+      if not ctx.block_id and window.window_id == view.active_window_id and window.focused_block_id then
+        ctx.block_id = window.focused_block_id
+        return window
+      end
+      for _, layer in ipairs(window.layers or {}) do
+        for _, block in ipairs(layer.blocks or {}) do
+          if block.block_id == ctx.block_id then return window end
+        end
+      end
+    end
+    error("The originating Rex pane no longer exists", 0)
+  end
+
+  -- Standalone imux runs on the selected host so its Rex CLI, agent registry
+  -- and session history all belong to that host. The remote shell supplies
+  -- PATH and may override the checkout or binary; no Mac paths are executed.
+  local function remote_command(ctx, window, verb, extra, mru)
+    local command = { "sh", "-c", [[
+      root=${INTERDIMUX_ROOT:-$1}
+      shift
+      exec "${INTERDIMUX_BIN:-$root/rust/target/release/imux}" "$@"
+    ]], "interdimux", root, verb, "--backend", "rex", "--client", ctx.client_id,
+      "--session", ctx.session_id, "--window", window.window_id, "--block", ctx.block_id }
+    for _, value in ipairs(extra or {}) do command[#command + 1] = value end
+    if window.zoomed_block_id then
+      command[#command + 1] = "--origin-zoom"
+      command[#command + 1] = window.zoomed_block_id
+    end
+    if mru then
+      table.insert(command, 1, "INTERDIMUX_ORDER=mru")
+      table.insert(command, 1, "env")
+    end
+    local created, err = rex.session.new_layer {
+      session_id = ctx.session_id, window_id = window.window_id, focus = true,
+      bounds = { (1 - width) / 2, (1 - height) / 2, width, height },
+      layout = rex.layout.block {
+        flavor = "com.superlogical.terminal.shell", label = "interdimux",
+        options = { command = command, exit = { on_completion = true } },
+      },
+    }
+    if not created then error(err, 0) end
+  end
+
   local function launch(ctx, mode)
       if not ctx.client_id or not ctx.session_id or not ctx.block_id then
         error("Open interdimux from a focused Rex pane", 0)
       end
-      if not readable(binary) then
+      if not ctx.server and not readable(binary) then
         error("Build interdimux first: cd " .. root .. "/rust && cargo build --release --locked", 0)
       end
-      local view, view_error = rex.session.view { session_id = ctx.session_id }
-      if not view then error(view_error, 0) end
-      local origin
-      for _, window in ipairs(view.windows or {}) do
-        for _, layer in ipairs(window.layers or {}) do
-          for _, block in ipairs(layer.blocks or {}) do
-            if block.block_id == ctx.block_id then origin = window end
-          end
-        end
-      end
-      if not origin then error("The originating Rex pane no longer exists", 0) end
+      local origin = origin_window(ctx)
       for _, layer in ipairs(origin.layers or {}) do
         for _, block in ipairs(layer.blocks or {}) do
           if layer.kind == "floating" and block.label == "interdimux" and block.owner == ctx.client_id then
@@ -92,6 +140,7 @@ function M.setup(options)
           end
         end
       end
+      if ctx.server then return remote_command(ctx, origin, "pick", { "--mode", mode }) end
       -- A picker in another session/window must not lock this hotkey out.
       -- Suppress only duplicate launches while this origin's pane is pending.
       local key = ctx.client_id .. "|" .. ctx.session_id .. "|" .. origin.window_id
@@ -150,18 +199,10 @@ function M.setup(options)
 
   local function direct(ctx, verb, extra)
     if not ctx.client_id or not ctx.session_id or not ctx.block_id then error("Run interdimux from a focused Rex pane", 0) end
-    local view = assert(rex.session.view { session_id = ctx.session_id })
-    local window_id
-    for _, window in ipairs(view.windows or {}) do
-      for _, layer in ipairs(window.layers or {}) do
-        for _, block in ipairs(layer.blocks or {}) do
-          if block.block_id == ctx.block_id then window_id = window.window_id end
-        end
-      end
-    end
-    if not window_id then error("The originating Rex pane no longer exists", 0) end
+    local window = origin_window(ctx)
+    if ctx.server then return remote_command(ctx, window, verb, extra) end
     local command = { binary, verb, "--backend", "rex", "--client", ctx.client_id,
-      "--session", ctx.session_id, "--window", window_id, "--block", ctx.block_id }
+      "--session", ctx.session_id, "--window", window.window_id, "--block", ctx.block_id }
     for _, value in ipairs(extra or {}) do command[#command + 1] = value end
     local result, err = rex.exec(command, { env = { REX_SESSION = false, REX_BLOCK = false, REX_CLIENT = false } })
     if not result then error(err, 0) end
@@ -184,6 +225,12 @@ function M.setup(options)
       if not ctx.session_id then error("Select a Rex session first", 0) end
       local listed, list_error = rex.call("session.list", {})
       if not listed then error(list_error, 0) end
+      if ctx.server then
+        if #(listed.sessions or {}) < 2 then return end
+        -- jump 1 in MRU order excludes the current session and uses the
+        -- same on-host history as the standalone terminal picker.
+        return remote_command(app, origin_window(app), "jump", { "1" }, true)
+      end
       local history = session_history.read()
       local recent = history and history.sessions or {}
       local target, newest, origin_found

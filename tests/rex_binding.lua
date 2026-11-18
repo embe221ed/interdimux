@@ -6,6 +6,7 @@ local definitions = {}
 local sessions = { { session_id = "c" }, { session_id = "b" }, { session_id = "a" } }
 local history = { last = 300, sessions = { a = 300, b = 200, c = 100, closed = 900 } }
 local queued, performed, remembered, api_calls = {}, {}, {}, {}
+local remote_layers, attach_error, layer_error = {}
 local list_error, perform_error
 local session_views = 0
 local real_dofile = dofile
@@ -38,12 +39,23 @@ rex = {
   bind = function(key, action) bindings[key] = action end,
   json = { encode = function(value) starts[#starts + 1] = value; return "request" end },
   client = { queue = function(action, args) queued[#queued + 1] = { action = action, args = args } end },
+  layout = { block = function(block) return { block = block } end },
   session = {
+    new_layer = function(payload)
+      if layer_error then return nil, layer_error end
+      remote_layers[#remote_layers + 1] = payload
+      return { layer_id = "remote-layer" }
+    end,
     view = function(payload) session_views = session_views + 1; return views[payload.session_id] end,
     set_layer_state = function(payload) focuses[#focuses + 1] = payload; return {} end,
   },
   call = function(method, payload)
     api_calls[#api_calls + 1] = method
+    if method == "session.attach" then
+      if attach_error then return nil, attach_error end
+      assert(views[payload.session_id], "unknown remote session")
+      return { client_id = "app-on-remote", view = views[payload.session_id] }
+    end
     if method == "client.list" then
       assert(#payload.kinds == 1 and payload.kinds[1] == "app")
       return { clients = clients }
@@ -169,6 +181,61 @@ history = { last = 0, sessions = {} }
 invoke("a", "a3", "interdimux_last_session")
 assert(queued[3].args.session_id == "c", "unrecorded history retains session-order fallback")
 print("passed: native MRU toggle, closed-session filtering, shared history, errors, and zero-process keyboard path")
+
+-- Each host assigns its own app ID. Standalone commands should receive the
+-- exact remote client and origin even when other apps are attached.
+local remote = { server = "remote-host", client_id = "home-app", session_id = "a", block_id = "pane:a1" }
+clients = { { client_id = "app-on-remote" }, { client_id = "other-remote-app" } }
+views.a.windows[1].zoomed_block_id = "pane:a1"
+local launched_locally, queued_locally = #starts, #queued
+for _, case in ipairs({
+  { "interdimux", "pick", "--mode", "switch" },
+  { "interdimux_agents", "pick", "--mode", "agents" },
+  { "interdimux_dashboard", "pick", "--mode", "dashboard" },
+  { "interdimux_agent_next", "agent-next" },
+  { "interdimux_jump_2", "jump", "2" },
+  { "interdimux_last_session", "jump", "1" },
+}) do
+  local before = #remote_layers
+  actions[case[1]](remote)
+  assert(#remote_layers == before + 1)
+  local layer = remote_layers[#remote_layers]
+  assert(layer.session_id == "a" and layer.window_id == "a1" and layer.focus)
+  local command = layer.layout.block.options.command
+  local first = case[1] == "interdimux_last_session" and 3 or 1
+  if first == 3 then assert(command[1] == "env" and command[2] == "INTERDIMUX_ORDER=mru") end
+  assert(command[first] == "sh" and command[first + 1] == "-c" and command[first+4] == root)
+  local expected = { case[2], "--backend", "rex", "--client", "app-on-remote", "--session", "a",
+    "--window", "a1", "--block", "pane:a1" }
+  for i = 3, #case do expected[#expected + 1] = case[i] end
+  expected[#expected + 1] = "--origin-zoom"
+  expected[#expected + 1] = "pane:a1"
+  assert(table.concat(command, "|", first + 5) == table.concat(expected, "|"), case[1])
+end
+views.a.active_window_id = "a1"
+views.a.windows[1].focused_block_id = "pane:a1"
+local palette = { server = remote.server, session_id = "a", client_id = "home-app" }
+actions.interdimux_last_session(palette)
+assert(remote_layers[#remote_layers].window_id == "a1" and not palette.block_id,
+  "a remote palette toggle can use the active window without changing its caller")
+local remote_count = #remote_layers
+sessions = { { session_id = "a" } }
+actions.interdimux_last_session(remote)
+assert(#remote_layers == remote_count, "a lone remote session must not launch a session jump")
+attach_error = "remote disconnected"
+local ok, err = pcall(actions.interdimux, remote)
+assert(not ok and tostring(err):find(attach_error, 1, true))
+attach_error = nil
+layer_error = "remote launch failed"
+ok, err = pcall(actions.interdimux_agent_next, remote)
+assert(not ok and tostring(err):find(layer_error, 1, true))
+layer_error = nil
+assert(not pcall(actions.interdimux, { server = "remote", client_id = "home-app", session_id = "a", block_id = "closed" }))
+assert(not pcall(actions.interdimux, remote, { client_id = "home-app" }))
+assert(#remote_layers == remote_count and #starts == launched_locally and #queued == queued_locally
+  and #commands == 2, "remote actions must not launch or perform on home")
+clients = { { client_id = "app" } }
+print("passed: remote client identity, standalone picker and agent commands, remote MRU, failures and exact origins")
 
 actions, bindings, definitions = {}, {}, {}
 local before_native = #starts
