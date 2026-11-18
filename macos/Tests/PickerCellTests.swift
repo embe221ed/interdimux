@@ -65,7 +65,7 @@ struct PickerCellTests {
         value["attention"] = true
         item = PickerItem(value)!
         try check(cell.configure(item, tree: tree, separatesGroup: false), "Changed attention must reconfigure")
-        try check(cell.kind.stringValue == "APPROVAL", "Blocked state was hidden by the cache")
+        try check(cell.kind.stringValue == "Approval", "Blocked state was hidden by the cache")
         try check(cell.accessibilityLabel()?.contains("needs approval") == true,
                   "Changed attention state must update accessibility")
 
@@ -74,7 +74,7 @@ struct PickerCellTests {
         value["current"] = true
         item = PickerItem(value)!
         try check(cell.configure(item, tree: tree, separatesGroup: false), "Resolved attention/current state must reconfigure")
-        try check(cell.kind.stringValue == "PANE" && cell.isCurrent,
+        try check(cell.kind.stringValue == "Pane" && cell.isCurrent,
                   "Resolved attention/current state was hidden by the cache")
 
         tree = PickerTreePosition(depth: 1, ancestorContinuations: [], hasNextSibling: false, hasChildren: false)
@@ -94,13 +94,34 @@ struct PickerCellTests {
         try check(cell.subviews.count == 1, "Text fields and the current marker should not allocate per-row view hierarchies")
         let create = PickerItem(["id": "create:project", "kind": "create", "title": "Create session ‘project’", "path": "/workspace/project"])!
         cell.configure(create, tree: tree, separatesGroup: false)
-        try check(cell.symbol.image != nil && cell.kind.stringValue == "CREATE", "Create-session row must have a visible plus icon and caption")
+        try check(cell.symbol.image != nil && cell.kind.stringValue == "Create", "Create-session row must have a visible plus icon and caption")
         let remote = PickerItem(["id": "remote:devbox:project", "kind": "session", "title": "project",
                                  "host": "devbox", "session_id": "session:project", "stale": true])!
         cell.configure(remote, tree: tree, separatesGroup: false)
-        try check(cell.primary.stringValue == "project  ·  devbox (cached)" && cell.kind.stringValue == "SESSION"
+        try check(cell.primary.stringValue == "project  ·  devbox (cached)" && cell.kind.stringValue == "Session"
                   && cell.accessibilityLabel()?.contains("host devbox (cached)") == true,
                   "A remote session must identify its host and whether its listing came from cache")
+        let hover: NSViewToolTipOwner = cell
+        func hoverText() -> String { hover.view(cell, stringForToolTip: 0, point: .zero, userData: nil) }
+        try check(hoverText().contains("devbox (cached)"), "The native hover callback should identify a cached remote host")
+        let folder = PickerItem(["id": "recent/project", "kind": "directory", "title": "project",
+                                 "path": "/workspace/clients/acme/project"])!
+        cell.configure(folder, tree: tree, separatesGroup: false)
+        try check(cell.path.stringValue == "/workspace/clients/acme" && cell.accessibilityLabel()?.contains(folder.path) == true,
+                  "Project rows should show their parent path, with the complete path available to VoiceOver")
+        try check(hoverText().contains(folder.path) && !hoverText().contains("devbox"),
+                  "Hovering a reused row must show the current target's full path")
+        let alias = PickerItem(["id": "recent/nickname", "kind": "directory", "title": "Personal",
+                                "path": "/workspace/project"])!
+        cell.configure(alias, tree: tree, separatesGroup: false)
+        try check(cell.path.stringValue == alias.path, "A project alias must retain the actual folder name")
+        weak var detached: PickerCell?
+        autoreleasepool {
+            let temporary = PickerCell(frame: NSRect(x: 0, y: 0, width: 440, height: 38))
+            temporary.layout()
+            detached = temporary
+        }
+        try check(detached == nil, "Tooltip tracking should release its cell with the view hierarchy")
         try countTransitions()
         print("Picker cell checks passed: unchanged reuse, title/path/status freshness, tree branches, resize")
     }
@@ -115,6 +136,22 @@ struct PickerCellTests {
         window.contentView = view
         view.table.dataSource = rows
         view.table.delegate = rows
+        view.setDirectoryVisible(true)
+        try check(view.search.accessibilityLabel() == "Search projects", "Projects search must identify its scope")
+        view.setDashboardRoute("Move tab")
+        try check(!view.dashboardButton.isHidden && view.search.placeholderAttributedString?.string.contains("Move tab") == true,
+                  "Target search must show its action and a return control")
+        view.setDashboardRoute(nil)
+        try check(view.dashboardButton.isHidden && view.search.accessibilityLabel() == "Search projects",
+                  "Returning from a dashboard action must restore the active search scope")
+        view.setDirectoryVisible(false)
+        try check(view.search.accessibilityLabel() == "Search sessions, tabs, panes and projects",
+                  "Workspace search retained the project prompt")
+        let hints = view.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue.contains("Navigate") }
+        try check(window.makeFirstResponder(view.table) && hints?.stringValue.contains("Tree") == true,
+                  "Focusing the general results table should reveal horizontal tree navigation")
+        try check(window.makeFirstResponder(view.search) && hints?.stringValue.contains("Navigate") == true,
+                  "Returning to search should restore the search navigation hint")
         view.layoutSubtreeIfNeeded()
         for (generation, count) in [100, 7, 70, 0, 12, 12, 1].enumerated() {
             let previousCount = rows.items.count

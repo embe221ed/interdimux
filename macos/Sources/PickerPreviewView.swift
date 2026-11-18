@@ -31,19 +31,21 @@ enum PickerGeometry {
         let current: NSRect
     }
 
-    static func rowFrames(width: CGFloat, depth: Int) -> RowFrames {
+    static func rowFrames(width: CGFloat, depth: Int, project: Bool = false) -> RowFrames {
         let width = max(0, width)
         let right = max(0, width - (width < 600 ? 18 : 26))
         let center = 34 + CGFloat(max(0, depth)) * 22
         let textLeft = center + 17
-        let deepestTextLeft: CGFloat = 34 + 2 * 22 + 17
+        // Projects form a flat list, so they can use the tree's indentation
+        // allowance for parent paths that distinguish identical folder names.
+        let deepestTextLeft: CGFloat = project ? 51 : 34 + 2 * 22 + 17
         let gap: CGFloat = width < 600 ? 12 : 18
         let metadata: CGFloat = 83
         // Preserve useful identity space with an open preview. Paths retain
         // their suffix; at unusually small widths omit the path column before
         // consuming the identity with an ellipsis-only path.
         var pathWidth = max(0, min(340, width * 0.32, right - metadata - gap * 2 - deepestTextLeft - 150))
-        if pathWidth < 48 { pathWidth = 0 }
+        if pathWidth < 96 { pathWidth = 0 }
         let pathLeft = right - metadata - gap - pathWidth
         let textWidth = max(0, pathLeft - gap - textLeft)
         func bounded(_ rect: NSRect) -> NSRect {
@@ -69,10 +71,10 @@ private final class PreviewTextView: NSTextView {
 }
 
 final class PickerPreviewView: NSView {
-    private let heading = label("PREVIEW", size: 9, weight: .semibold, color: Palette.faint)
-    private let title = label("Select a target", size: 13, weight: .medium)
+    private let title = label("Select a target", size: 15, weight: .semibold)
     private let detail = label("Terminal output and project details", size: 10.5, color: Palette.secondary)
     private let spinner = NSProgressIndicator()
+    private var isLoading = false
     private let scroll = NSScrollView()
     private let text = PreviewTextView(frame: .zero)
     var onCancel: (() -> Void)? {
@@ -84,10 +86,11 @@ final class PickerPreviewView: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = Palette.insetBackground.cgColor
-        for view in [heading, title, detail, spinner, scroll] {
+        for view in [title, detail, spinner, scroll] {
             view.translatesAutoresizingMaskIntoConstraints = true
             addSubview(view)
         }
+        detail.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
         detail.lineBreakMode = .byTruncatingHead
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -96,7 +99,7 @@ final class PickerPreviewView: NSView {
         text.isSelectable = true
         text.isRichText = false
         text.drawsBackground = false
-        text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        text.font = .monospacedSystemFont(ofSize: 11.5, weight: .regular)
         text.textColor = Palette.text
         text.textContainerInset = NSSize(width: 16, height: 12)
         text.textContainer?.lineFragmentPadding = 0
@@ -127,11 +130,10 @@ final class PickerPreviewView: NSView {
     override func layout() {
         super.layout()
         let width = max(0, bounds.width - 32)
-        heading.frame = NSRect(x: 16, y: 14, width: max(0, width - 24), height: 14)
-        spinner.frame = NSRect(x: max(0, bounds.width - 32), y: 13, width: 16, height: 16)
-        title.frame = NSRect(x: 16, y: 34, width: width, height: 18)
-        detail.frame = NSRect(x: 16, y: 57, width: width, height: 15)
-        scroll.frame = NSRect(x: 1, y: 84, width: max(0, bounds.width - 1), height: max(0, bounds.height - 84))
+        spinner.frame = NSRect(x: max(0, bounds.width - 32), y: 16, width: 16, height: 16)
+        title.frame = NSRect(x: 16, y: 13, width: max(0, width - (isLoading ? 22 : 0)), height: 21)
+        detail.frame = NSRect(x: 16, y: 38, width: width, height: 15)
+        scroll.frame = NSRect(x: 1, y: 66, width: max(0, bounds.width - 1), height: max(0, bounds.height - 66))
         let contentWidth = max(0, scroll.contentSize.width)
         text.setFrameSize(NSSize(width: contentWidth, height: max(text.frame.height, scroll.contentSize.height)))
     }
@@ -140,22 +142,30 @@ final class PickerPreviewView: NSView {
         super.draw(dirtyRect)
         Palette.line.setFill()
         NSRect(x: 0, y: 0, width: 1, height: bounds.height).fill()
-        NSRect(x: 16, y: 83, width: max(0, bounds.width - 32), height: 1).fill()
+        NSRect(x: 16, y: 65, width: max(0, bounds.width - 32), height: 1).fill()
     }
 
     func show(title: String, detail: String, text value: String, loading: Bool) {
-        self.title.stringValue = title
-        self.title.toolTip = title
-        self.detail.stringValue = detail
-        self.detail.toolTip = detail
+        if self.title.stringValue != title {
+            self.title.stringValue = title
+            self.title.toolTip = title
+            text.setAccessibilityLabel("Preview of \(title)")
+        }
+        if self.detail.stringValue != detail {
+            self.detail.stringValue = detail
+            self.detail.toolTip = detail
+        }
         let output = loading && value.isEmpty ? "Loading preview…" : value
         if text.string != output {
             text.string = output
             text.scrollRangeToVisible(NSRange(location: 0, length: 0))
         }
-        text.textColor = loading ? Palette.secondary : Palette.text
-        text.setAccessibilityLabel("Preview of \(title)")
-        if loading { spinner.startAnimation(nil) }
-        else { spinner.stopAnimation(nil) }
+        if isLoading != loading {
+            isLoading = loading
+            text.textColor = loading ? Palette.secondary : Palette.text
+            needsLayout = true
+            if loading { spinner.startAnimation(nil) }
+            else { spinner.stopAnimation(nil) }
+        }
     }
 }

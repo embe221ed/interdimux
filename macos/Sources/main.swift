@@ -135,6 +135,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.table.onAccept = { [weak self] in self?.accept() }
         content.table.onCancel = { [weak self] in self?.dismiss() }
         content.table.onNavigate = { [weak self] delta in self?.move(delta) }
+        content.table.onBranch = { [weak self] towardChildren in self?.moveBranch(towardChildren) }
         content.table.onType = { [weak self] event in
             guard let self else { return }
             self.panel.makeFirstResponder(self.content.search)
@@ -278,6 +279,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         } catch { startupError = "Could not start the search helper: \(error.localizedDescription)" }
         scope = "all"
         directoriesLoaded = false
+        if directoryBase != nil || directoryDeep { content.setDirectoryLocation(path: nil, deep: false) }
         directoryBase = nil
         directoryDeep = false
         content.searchField.selectItem(at: 0)
@@ -325,10 +327,10 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             }
         }
         openingRefresh = true
-        content.count.stringValue = items.isEmpty ? "" : "\(openingTotal) places"
+        content.count.stringValue = items.isEmpty ? "" : "\(openingTotal) \(openingTotal == 1 ? "place" : "places")"
         content.empty.isHidden = !items.isEmpty
         content.emptyTitle.stringValue = "Loading your workspace"
-        content.emptyDetail.stringValue = "Sessions, tabs and panes, together."
+        content.emptyDetail.stringValue = ""
         if content.previewVisible { content.showPreview(title: "Preview", detail: "", text: "Choose a terminal or project to inspect.") }
         content.status.stringValue = items.isEmpty ? "Connecting to Rex…" : "Refreshing…"
         content.status.textColor = Palette.secondary
@@ -536,9 +538,13 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             dashboard?.updateSummary(dashboardSummary)
         }
         directoriesLoaded = message["directories_loaded"] as? Bool ?? directoriesLoaded
-        directoryBase = message["directories_base"] as? String
-        directoryDeep = message["directories_deep"] as? Bool ?? false
-        content.setDirectoryLocation(path: directoryBase, deep: directoryDeep)
+        let newBase = message["directories_base"] as? String
+        let newDeep = message["directories_deep"] as? Bool ?? false
+        if directoryBase != newBase || directoryDeep != newDeep {
+            directoryBase = newBase
+            directoryDeep = newDeep
+            content.setDirectoryLocation(path: newBase, deep: newDeep)
+        }
         if scope == "directory" && !directoriesLoaded { loadDirectories(); return }
         if resultQuery != content.search.stringValue || resultScope != scope || resultField != searchField || resultAction != (targetRoute?.operation ?? "") { query(); return }
         let previous = content.table.selectedRow >= 0 && content.table.selectedRow < items.count ? items[content.table.selectedRow].id : nil
@@ -593,31 +599,48 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             openingSessionID = context["origin_session_id"] ?? context["session_id"]
             openingServer = context["origin_server"]?.lowercased()
         }
-        content.scopes[4].title = "Attention \(attention)"
-        content.scopes[4].setAccessibilityLabel("Attention, \(attention) agents, Command 5")
-        content.scopes[4].needsDisplay = true
-        content.count.stringValue = content.search.stringValue.isEmpty ? "\(matched) \(scope == "directory" ? "projects" : "places")" : "\(matched) of \(total)"
-        content.status.stringValue = matched > shown ? "Top \(shown) matches · keep typing to narrow" : "\(matched == 1 ? "1 place" : "\(matched) places") · ⌘R refresh"
-        content.status.textColor = Palette.secondary
-        if scope == "directory" { content.status.stringValue = "↵ open session · ⌘→ browse folder · ⌃F search deeper" }
+        let attentionTitle = attention > 0 ? "Attention \(attention)" : "Attention"
+        if content.scopes[4].title != attentionTitle {
+            content.scopes[4].title = attentionTitle
+            content.scopes[4].setAccessibilityLabel("Attention, \(attention) agents, Command 5")
+            content.scopes[4].needsDisplay = true
+        }
+        let resultNoun: String
+        switch scope {
+        case "session": resultNoun = "session"
+        case "window": resultNoun = "tab"
+        case "pane": resultNoun = "pane"
+        case "attention": resultNoun = "agent"
+        case "directory": resultNoun = "project"
+        default: resultNoun = "place"
+        }
+        var count = resultQuery.isEmpty ? "\(matched) \(resultNoun)\(matched == 1 ? "" : "s")" : "\(matched) of \(total)"
+        var status = matched > shown ? "Top \(shown) matches · keep typing to narrow" : "⌘R Refresh"
+        if scope == "directory" { status = "↵ open session · ⌘→ browse folder · ⌃F search deeper" }
         let checkingRemote = remotePending && (scope == "all" || scope == "session") && resultAction.isEmpty && swapSource == nil
         if items.contains(where: { $0.kind == "create" }) {
-            content.count.stringValue = "New session"
-            content.status.stringValue = checkingRemote ? remoteCreateHint : createHint
+            count = "New session"
+            status = checkingRemote ? remoteCreateHint : createHint
         }
         if let source = swapSource {
-            content.status.stringValue = "Swap \(source.title) → choose destination · esc cancels"
-            content.status.textColor = Palette.accent
+            status = "Swap \(source.title) → choose destination · esc cancels"
         } else if let operation = targetRoute?.operation {
-            content.status.stringValue = "\(operation.capitalized) · choose a target · esc returns to dashboard"
+            status = "\(operation.capitalized) · choose a target · esc returns to dashboard"
         }
+        if content.count.stringValue != count { content.count.stringValue = count }
+        if content.status.stringValue != status { content.status.stringValue = status }
+        if content.status.toolTip != nil { content.status.toolTip = nil }
+        let statusColor = swapSource == nil ? Palette.secondary : Palette.accent
+        if content.status.textColor !== statusColor { content.status.textColor = statusColor }
         if dashboardVisible {
             dashboard?.setLoading(false)
             dashboard?.setStatus("Choose a tool or press its key")
         }
         content.empty.isHidden = !items.isEmpty
-        content.emptyTitle.stringValue = scope == "attention" && attention == 0 ? "No agents need attention" : "No matching places"
-        content.emptyDetail.stringValue = scope == "attention" ? "Only agents waiting for your approval or input appear here. ⌘R refreshes their status." : scope == "directory" ? "Try Search deeper, browse another folder, or open a folder with ⌘O." : checkingRemote ? remoteEmptyHint : noMatchingHint
+        if items.isEmpty {
+            content.emptyTitle.stringValue = scope == "attention" && attention == 0 ? "No agents need attention" : "No matching \(resultNoun)s"
+            content.emptyDetail.stringValue = scope == "attention" ? "Only agents waiting for your approval or input appear here. ⌘R refreshes their status." : scope == "directory" ? "Try Search deeper, browse another folder, or open a folder with ⌘O." : checkingRemote ? remoteEmptyHint : noMatchingHint
+        }
         let preparedAt = ProcessInfo.processInfo.systemUptime
         // This measures through native layout/display submission, not physical
         // monitor presentation. Never report it as GPU or end-to-end latency.
@@ -829,6 +852,11 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         switch selector {
         case #selector(NSResponder.moveDown(_:)): move(1)
         case #selector(NSResponder.moveUp(_:)): move(-1)
+        case #selector(NSResponder.insertTab(_:)):
+            guard control === content.search, !dashboardVisible, !presentingDialog, actionRequest == nil, activation == nil,
+                  openingRefresh || (!loading && pending == displayedRequest),
+                  content.table.selectedRow >= 0 else { return false }
+            return panel.makeFirstResponder(content.table)
         case #selector(NSResponder.insertNewline(_:)): accept()
         case #selector(NSResponder.cancelOperation(_:)): dismiss()
         default: return false
@@ -840,6 +868,15 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         guard !items.isEmpty, !loading || openingRefresh, actionRequest == nil, activation == nil else { return }
         guard let next = PickerNavigation.nextIndex(current: content.table.selectedRow,
                 count: items.count, direction: delta, isSelectable: { !self.items[$0].contextOnly }) else { return }
+        content.table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        content.table.scrollRowToVisible(next)
+    }
+
+    private func moveBranch(_ towardChildren: Bool) {
+        guard !dashboardVisible, !presentingDialog, actionRequest == nil, activation == nil,
+              openingRefresh || (!loading && pending == displayedRequest),
+              let next = PickerTreeLayout.branchIndex(in: items, from: content.table.selectedRow,
+                                                      towardChildren: towardChildren) else { return }
         content.table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
         content.table.scrollRowToVisible(next)
     }
@@ -1345,8 +1382,10 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         // Preserve AppKit's visible row hierarchy when the result count changes.
         // reloadData tears it down even when most of the rows are unchanged.
         if content.table.numberOfRows != items.count { content.table.noteNumberOfRowsChanged() }
-        for index in items.indices {
-            (content.table.view(atColumn: 0, row: index, makeIfNecessary: false) as? PickerCell)?.configure(items[index], tree: tree[index], separatesGroup: index > 0 && tree[index].depth == 0)
+        content.table.enumerateAvailableRowViews { rowView, index in
+            guard self.items.indices.contains(index), rowView.numberOfColumns > 0,
+                  let cell = rowView.view(atColumn: 0) as? PickerCell else { return }
+            cell.configure(self.items[index], tree: self.tree[index], separatesGroup: index > 0 && self.tree[index].depth == 0)
         }
     }
 
@@ -1367,7 +1406,15 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         return cell
     }
 
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { PickerRow() }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        let identifier = NSUserInterfaceItemIdentifier("place-row")
+        if let available = tableView.makeView(withIdentifier: identifier, owner: nil) as? PickerRow {
+            return available
+        }
+        let view = PickerRow()
+        view.identifier = identifier
+        return view
+    }
 
     func dismiss(returnToDashboard: Bool = true) {
         if activation != nil || actionRequest != nil || dashboardRequest != nil || presentingDialog { return }

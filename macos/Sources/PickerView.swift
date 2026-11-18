@@ -4,13 +4,20 @@ enum Palette {
     private static var backgroundValue = NSColor(srgbRed: 36/255, green: 37/255, blue: 35/255, alpha: 1)
     private static var foregroundValue = NSColor(srgbRed: 221/255, green: 213/255, blue: 197/255, alpha: 1)
     private static var accentValue = NSColor(srgbRed: 231/255, green: 138/255, blue: 78/255, alpha: 1)
+    private static var secondaryValue = subdued(dark: 0.34, light: 0.18)
+    private static var faintValue = subdued(dark: 0.42, light: 0.24)
+
+    private static func subdued(dark: CGFloat, light: CGFloat) -> NSColor {
+        let fraction = backgroundValue.brightnessComponent > foregroundValue.brightnessComponent ? light : dark
+        return foregroundValue.blended(withFraction: fraction, of: backgroundValue) ?? foregroundValue
+    }
 
     // Keep the color objects themselves stable: labels, icons and cached
     // attributed row titles must resolve the current palette when redrawn.
     static let accent = NSColor(name: nil) { _ in accentValue }
     static let text = NSColor(name: nil) { _ in foregroundValue }
-    static let secondary = NSColor(name: nil) { _ in foregroundValue.blended(withFraction: 0.34, of: backgroundValue) ?? foregroundValue }
-    static let faint = NSColor(name: nil) { _ in foregroundValue.blended(withFraction: 0.42, of: backgroundValue) ?? foregroundValue }
+    static let secondary = NSColor(name: nil) { _ in secondaryValue }
+    static let faint = NSColor(name: nil) { _ in faintValue }
     static let background = NSColor(name: nil) { _ in backgroundValue }
     static let line = NSColor(name: nil) { _ in foregroundValue.withAlphaComponent(0.10) }
     static let border = NSColor(name: nil) { _ in foregroundValue.withAlphaComponent(0.14) }
@@ -25,6 +32,8 @@ enum Palette {
         backgroundValue = background
         foregroundValue = foreground
         accentValue = accent
+        secondaryValue = subdued(dark: 0.34, light: 0.18)
+        faintValue = subdued(dark: 0.42, light: 0.24)
         return true
     }
 
@@ -80,6 +89,18 @@ final class PickerTable: NSTableView {
     var onCancel: (() -> Void)?
     var onType: ((NSEvent) -> Void)?
     var onRowMenu: ((Int, NSEvent) -> Void)?
+    var onBranch: ((Bool) -> Void)?
+    var onFocusChange: ((Bool) -> Void)?
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { onFocusChange?(true) }
+        return accepted
+    }
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onFocusChange?(false) }
+        return resigned
+    }
     override func rightMouseDown(with event: NSEvent) {
         let index = row(at: convert(event.locationInWindow, from: nil))
         if index >= 0 { onRowMenu?(index, event) }
@@ -89,11 +110,16 @@ final class PickerTable: NSTableView {
         else { super.mouseDown(with: event) }
     }
     override func keyDown(with event: NSEvent) {
+        if (123...124).contains(event.keyCode), event.pickerModifiers.isEmpty, let onBranch {
+            onBranch(event.keyCode == 124)
+            return
+        }
         switch event.keyCode {
         case 125: onNavigate?(1)
         case 126: onNavigate?(-1)
         case 36, 76: onAccept?()
         case 53: onCancel?()
+        case 48: super.keyDown(with: event)
         default: onType?(event)
         }
     }
@@ -102,15 +128,15 @@ final class PickerTable: NSTableView {
 final class PickerRow: NSTableRowView {
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
     override func drawSelection(in dirtyRect: NSRect) {
-        let rect = bounds.insetBy(dx: 9, dy: 3)
-        Palette.accent.withAlphaComponent(0.075).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9).fill()
+        let rect = bounds.insetBy(dx: 9, dy: 2)
+        Palette.accent.withAlphaComponent(0.14).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7).fill()
         Palette.accent.withAlphaComponent(0.85).setFill()
         NSBezierPath(roundedRect: NSRect(x: 9, y: 10, width: 3, height: bounds.height - 20), xRadius: 1.5, yRadius: 1.5).fill()
     }
 }
 
-final class PickerCell: NSTableCellView {
+final class PickerCell: NSTableCellView, NSViewToolTipOwner {
     private static let images: [String: NSImage] = {
         var images: [String: NSImage] = [:]
         for name in ["terminal", "macwindow", "square.stack.3d.up", "folder", "plus.circle"] {
@@ -120,7 +146,7 @@ final class PickerCell: NSTableCellView {
     }()
     let symbol = NSImageView()
     private static let titleFont = NSFont.systemFont(ofSize: 13, weight: .regular)
-    private static let sessionFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    private static let sessionFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
     private static let truncatedTitleStyle: NSParagraphStyle = {
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
@@ -145,10 +171,12 @@ final class PickerCell: NSTableCellView {
     }
     let primary = PickerCell.textCell(size: 13, color: Palette.text)
     let path = PickerCell.textCell(size: 10.5, color: Palette.faint)
-    let kind = PickerCell.textCell(size: 9, color: Palette.faint)
+    let kind = PickerCell.textCell(size: 10.5, color: Palette.faint)
     private(set) var isCurrent = false
     private(set) var textFrames = PickerGeometry.rowFrames(width: 0, depth: 0)
     private var configuredItem: PickerItem?
+    private var toolTipRect = NSRect.zero
+    private var toolTipTag: NSView.ToolTipTag?
     private var tree = PickerTreePosition(depth: 0, ancestorContinuations: [], hasNextSibling: false, hasChildren: false)
     private var separatesGroup = false
     override var isFlipped: Bool { true }
@@ -160,8 +188,10 @@ final class PickerCell: NSTableCellView {
         symbol.contentTintColor = Palette.secondary
         path.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
         path.lineBreakMode = .byTruncatingHead
-        kind.font = .systemFont(ofSize: 9, weight: .medium)
+        kind.font = .systemFont(ofSize: 10.5, weight: .regular)
         kind.alignment = .right
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -169,17 +199,33 @@ final class PickerCell: NSTableCellView {
     // re-solving hundreds of intrinsic text-size constraints on each query.
     override func layout() {
         super.layout()
-        let frames = PickerGeometry.rowFrames(width: bounds.width, depth: tree.depth)
+        let frames = PickerGeometry.rowFrames(width: bounds.width, depth: tree.depth, project: configuredItem?.kind == "directory")
         textFrames = frames
         symbol.frame = frames.symbol
+        if toolTipRect != bounds {
+            if let toolTipTag { removeToolTip(toolTipTag) }
+            toolTipRect = bounds
+            toolTipTag = bounds.isEmpty ? nil : addToolTip(bounds, owner: self, userData: nil)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        if separatesGroup {
+        if separatesGroup, configuredItem?.kind == "session" {
             Palette.text.withAlphaComponent(0.045).setFill()
             NSRect(x: 24, y: 0, width: max(0, bounds.width - 48), height: 1).fill()
         }
+        if tree.hasChildren || tree.depth > 0 { drawBranches() }
+        primary.draw(withFrame: textFrames.title, in: self)
+        if textFrames.path.width > 0 && !path.stringValue.isEmpty { path.draw(withFrame: textFrames.path, in: self) }
+        kind.draw(withFrame: textFrames.kind, in: self)
+        if isCurrent {
+            Palette.accent.withAlphaComponent(0.8).setFill()
+            NSBezierPath(ovalIn: textFrames.current).fill()
+        }
+    }
+
+    private func drawBranches() {
         let lines = NSBezierPath()
         lines.lineWidth = 1
         let middle = bounds.midY
@@ -198,13 +244,6 @@ final class PickerCell: NSTableCellView {
         if tree.hasChildren { vertical(tree.depth, middle + 11, bounds.height) }
         Palette.secondary.withAlphaComponent(0.28).setStroke()
         lines.stroke()
-        primary.draw(withFrame: textFrames.title, in: self)
-        if textFrames.path.width > 0 { path.draw(withFrame: textFrames.path, in: self) }
-        kind.draw(withFrame: textFrames.kind, in: self)
-        if isCurrent {
-            Palette.accent.withAlphaComponent(0.8).setFill()
-            NSBezierPath(ovalIn: textFrames.current).fill()
-        }
     }
 
     @discardableResult
@@ -212,20 +251,27 @@ final class PickerCell: NSTableCellView {
         // Most incremental queries retain many visible rows. Keep their
         // attributed strings and accessibility values until metadata or tree
         // position actually changes; resizing still invokes normal layout.
-        guard configuredItem != item || self.tree != tree || self.separatesGroup != separatesGroup else { return false }
+        let previous = configuredItem
+        guard previous != item || self.tree != tree || self.separatesGroup != separatesGroup else { return false }
+        if previous == nil || tree.depth != self.tree.depth || (previous?.kind == "directory") != (item.kind == "directory") {
+            needsLayout = true
+        }
         configuredItem = item
         self.tree = tree
         self.separatesGroup = separatesGroup
-        primary.font = item.kind == "session" ? Self.sessionFont : Self.titleFont
-        primary.textColor = item.contextOnly ? Palette.secondary : Palette.text
-        // Keep editable pane labels visible even when the terminal publishes a
-        // conversation title; otherwise a successful rename appears to do nothing.
-        let identity = item.kind == "pane" && !item.name.isEmpty ? item.name : item.title
-        let host = item.host.map { route in
-            let label = item.subtitle.isEmpty ? route : item.subtitle
-            return item.stale ? label + " (cached)" : label
+        if previous?.kind != item.kind {
+            primary.font = item.kind == "session" ? Self.sessionFont : Self.titleFont
+            symbol.image = Self.images[item.symbol]
         }
-        let subtitle = host == nil ? item.subtitle : ""
+        if previous?.contextOnly != item.contextOnly {
+            primary.textColor = item.contextOnly ? Palette.secondary : Palette.text
+            alphaValue = item.contextOnly ? 0.72 : 1
+        }
+        if previous?.kind != item.kind || previous?.contextOnly != item.contextOnly {
+            symbol.contentTintColor = item.kind == "session" && !item.contextOnly ? Palette.accent : Palette.secondary
+        }
+        let identity = item.rowTitle
+        let host = item.hostLabel
         let detail = host ?? (item.combined ? item.detail : identity != item.title ? item.title : "")
         if !detail.isEmpty && (host != nil || detail != identity) {
             let identityFont = item.kind == "session" ? Self.sessionFont : Self.titleFont
@@ -233,37 +279,84 @@ final class PickerCell: NSTableCellView {
             title.append(NSAttributedString(string: "  ·  " + detail, attributes: [.font: Self.titleFont, .paragraphStyle: Self.truncatedTitleStyle, .foregroundColor: Palette.secondary]))
             primary.attributedStringValue = title
         } else { primary.stringValue = identity }
-        path.stringValue = item.path
-        kind.stringValue = item.attention ? (item.agentState == "approve" ? "APPROVAL" : "INPUT") : item.kindLabel
-        kind.textColor = item.attention ? Palette.accent : Palette.faint
+        // The leading column already displays the project name. Reserve the
+        // path column's visible suffix for the parent that distinguishes it.
+        if item.kind == "directory", let slash = item.path.lastIndex(of: "/"),
+           item.path[item.path.index(after: slash)...] == identity {
+            path.stringValue = slash == item.path.startIndex ? "/" : String(item.path[..<slash])
+        } else {
+            path.stringValue = item.path
+        }
+        let caption = item.attention ? (item.agentState == "approve" ? "Approval" : "Input") : item.kindLabel
+        if kind.stringValue != caption { kind.stringValue = caption }
+        if previous?.attention != item.attention { kind.textColor = item.attention ? Palette.accent : Palette.faint }
         isCurrent = item.current
-        symbol.contentTintColor = item.kind == "session" && !item.contextOnly ? Palette.accent : Palette.secondary
-        alphaValue = item.contextOnly ? 0.72 : 1
-        let image = Self.images[item.symbol]
-        if symbol.image !== image { symbol.image = image }
-        setAccessibilityElement(true)
-        setAccessibilityRole(.staticText)
-        setAccessibilityLabel("\(identity)\(identity != item.title ? ", " + item.title : ""), \(item.kindLabel)\(item.combined ? ", single pane: " + item.detail : "")\(host.map { ", host " + $0 } ?? ""), level \(tree.depth + 1), \(subtitle), \(item.path)\(item.current ? ", current" : "")\(item.contextOnly ? ", parent context" : "")\(item.attention ? ", needs " + (item.agentState == "approve" ? "approval" : "input") : "")")
-        toolTip = [identity, item.title, host ?? "", item.detail, subtitle, item.path, item.agentState ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
-        needsLayout = true
         needsDisplay = true
         return true
+    }
+
+    // Native hover and accessibility callbacks can read the current reused
+    // cell directly instead of building two descriptions on every keystroke.
+    override func accessibilityLabel() -> String? {
+        guard let item = configuredItem else { return super.accessibilityLabel() }
+        let identity = item.rowTitle
+        let host = item.hostLabel
+        let subtitle = host == nil ? item.subtitle : ""
+        return "\(identity)\(identity != item.title ? ", " + item.title : ""), \(item.kindLabel)\(item.combined ? ", single pane: " + item.detail : "")\(host.map { ", host " + $0 } ?? ""), level \(tree.depth + 1), \(subtitle), \(item.path)\(item.current ? ", current" : "")\(item.contextOnly ? ", parent context" : "")\(item.attention ? ", needs " + (item.agentState == "approve" ? "approval" : "input") : "")"
+    }
+
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        guard let item = configuredItem else { return "" }
+        let identity = item.rowTitle
+        let context = item.hostLabel ?? item.subtitle
+        return [identity, identity == item.title ? "" : item.title, context, item.detail, item.path, item.agentState ?? ""]
+            .filter { !$0.isEmpty }.joined(separator: "\n")
     }
 }
 
 final class ScopeButton: NSButton {
-    var chosen = false { didSet { state = chosen ? .on : .off; needsDisplay = true } }
+    var chosen = false {
+        didSet {
+            guard chosen != oldValue else { return }
+            state = chosen ? .on : .off
+            needsDisplay = true
+        }
+    }
+    var scopeTab = false
+    var shortcut: String?
     override func draw(_ dirtyRect: NSRect) {
-        if chosen {
-            Palette.text.withAlphaComponent(0.065).setFill()
+        let activeTab = scopeTab && chosen
+        if isHighlighted || (chosen && !scopeTab) {
+            Palette.text.withAlphaComponent(isHighlighted ? 0.12 : 0.075).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
         }
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: chosen ? .semibold : .regular),
-            .foregroundColor: (chosen ? Palette.text : Palette.secondary).withAlphaComponent(isEnabled ? 1 : 0.4)
+            .font: NSFont.systemFont(ofSize: 12, weight: chosen ? .semibold : .regular),
+            .foregroundColor: (chosen || shortcut != nil ? Palette.text : Palette.secondary)
+                .withAlphaComponent(isEnabled ? 1 : 0.4)
         ]
         let size = (title as NSString).size(withAttributes: attrs)
-        (title as NSString).draw(at: NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2), withAttributes: attrs)
+        let midY = bounds.midY
+        let shortcutWidth: CGFloat = shortcut == nil ? 0 : 32
+        let left = floor((bounds.width - size.width - shortcutWidth) / 2)
+        (title as NSString).draw(at: NSPoint(x: left, y: floor(midY - size.height / 2)), withAttributes: attrs)
+        if activeTab {
+            Palette.accent.setFill()
+            NSRect(x: max(4, left - 4), y: isFlipped ? bounds.maxY - 2 : 0,
+                   width: min(bounds.width - 8, ceil(size.width + 8)), height: 2).fill()
+        }
+        if let shortcut {
+            let key = NSRect(x: left + ceil(size.width) + 6, y: midY - 8, width: 26, height: 16)
+            Palette.text.withAlphaComponent(0.075).setFill()
+            NSBezierPath(roundedRect: key, xRadius: 4, yRadius: 4).fill()
+            let keyAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+                .foregroundColor: Palette.secondary.withAlphaComponent(isEnabled ? 1 : 0.4)
+            ]
+            let keySize = (shortcut as NSString).size(withAttributes: keyAttrs)
+            (shortcut as NSString).draw(at: NSPoint(x: floor(key.midX - keySize.width / 2),
+                                                    y: floor(key.midY - keySize.height / 2)), withAttributes: keyAttrs)
+        }
     }
 }
 
@@ -274,15 +367,16 @@ final class PickerView: NSView {
     let count = label("", size: 10, color: Palette.faint)
     let status = label("Connecting to Rex…", size: 11, color: Palette.secondary)
     let emptyTitle = label("Loading your workspace", size: 17, weight: .medium)
-    let emptyDetail = label("Sessions, tabs and panes, together.", size: 12, color: Palette.secondary)
+    let emptyDetail = label("Fetching sessions and projects…", size: 12, color: Palette.secondary)
     let empty = NSStackView()
     var scopes: [ScopeButton] = []
     let clear = NSButton()
-    let actions = ScopeButton(title: "Actions  ⌘K", target: nil, action: nil)
-    let dashboardButton = ScopeButton(title: "‹ Dashboard", target: nil, action: nil)
-    private let origin = label("REX  /  QUICK SWITCH", size: 9, weight: .medium, color: Palette.faint)
-    private let shortcuts = label("↑↓ navigate   ↩ switch   esc close", size: 10, color: Palette.faint)
-    let previewButton = ScopeButton(title: "Preview  ⌘P", target: nil, action: nil)
+    let actions = ScopeButton(title: "Actions", target: nil, action: nil)
+    let dashboardButton = NSButton()
+    private let glass = icon("magnifyingglass", size: 20, color: Palette.secondary)
+    private var dashboardRoute: String?
+    private let shortcuts = label("↑↓ Navigate     ↩ Switch", size: 11, color: Palette.secondary)
+    let previewButton = ScopeButton(title: "Preview", target: nil, action: nil)
     let searchField = NSPopUpButton(frame: .zero, pullsDown: false)
     let directoryUp = NSButton()
     let directoryHome = ScopeButton(title: "Recents", target: nil, action: nil)
@@ -305,22 +399,19 @@ final class PickerView: NSView {
         // A solid themed surface avoids a full-window backdrop dependency.
         layer?.backgroundColor = Palette.background.cgColor
 
-        let brandIcon = icon("square.stack.3d.up", size: 12, color: Palette.accent)
-        let brand = label("INTERDIMUX", size: 10, weight: .semibold, color: Palette.secondary)
-        let glass = icon("magnifyingglass", size: 20, color: Palette.accent)
-        for view in [brandIcon, brand, origin, glass, search, clear, searchField, count, directoryBar, resultsArea, status, empty] {
+        for view in [glass, search, clear, searchField, count, directoryBar, resultsArea, status, empty] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        search.font = .systemFont(ofSize: 23, weight: .regular)
+        search.font = .systemFont(ofSize: 22, weight: .regular)
         search.textColor = Palette.text
         search.drawsBackground = false
         search.isBordered = false
         search.focusRingType = .none
         search.cell?.isScrollable = true
         search.cell?.wraps = false
-        search.placeholderAttributedString = NSAttributedString(string: "Where do you want to go?", attributes: [.foregroundColor: Palette.faint, .font: NSFont.systemFont(ofSize: 23, weight: .regular)])
-        search.setAccessibilityLabel("Search sessions, tabs, panes and projects")
+        search.setAccessibilityHelp("Press Tab to focus the results.")
+        search.toolTip = "Press Tab to focus the results. Use Left and Right to move between parents and children."
         clear.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Clear search")
         clear.isBordered = false
         clear.contentTintColor = Palette.faint
@@ -328,6 +419,7 @@ final class PickerView: NSView {
         searchField.controlSize = .small
         searchField.font = .systemFont(ofSize: 11)
         searchField.bezelStyle = .rounded
+        searchField.isBordered = false
         searchField.setAccessibilityLabel("Search field")
         searchField.toolTip = "Choose which fields to search"
         for (title, field) in [("All fields", "all"), ("Names", "name"), ("Paths", "path"), ("Commands", "command")] {
@@ -336,13 +428,14 @@ final class PickerView: NSView {
         }
         let tabs = NSStackView()
         tabs.orientation = .horizontal
-        tabs.spacing = 4
+        tabs.spacing = 2
         tabs.translatesAutoresizingMaskIntoConstraints = false
         addSubview(tabs)
-        let scopeWidths: [CGFloat] = [48, 76, 50, 54, 110, 76]
-        for (index, title) in ["All", "Sessions", "Tabs", "Panes", "Attention 0", "Projects"].enumerated() {
+        let scopeWidths: [CGFloat] = [40, 70, 48, 52, 98, 68]
+        for (index, title) in ["All", "Sessions", "Tabs", "Panes", "Attention", "Projects"].enumerated() {
             let button = ScopeButton(title: title, target: nil, action: nil)
             button.isBordered = false
+            button.scopeTab = true
             button.tag = index
             button.chosen = index == 0
             button.setAccessibilityLabel("\(title), Command \(index + 1)")
@@ -370,6 +463,10 @@ final class PickerView: NSView {
             button.translatesAutoresizingMaskIntoConstraints = false
             addSubview(button)
         }
+        actions.shortcut = "⌘K"
+        previewButton.shortcut = "⌘P"
+        dashboardButton.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)
+        dashboardButton.contentTintColor = Palette.text
         actions.setAccessibilityLabel("Actions, Command K")
         dashboardButton.isHidden = true
         dashboardButton.setAccessibilityLabel("Back to dashboard")
@@ -389,6 +486,8 @@ final class PickerView: NSView {
         table.allowsMultipleSelection = false
         table.focusRingType = .none
         table.setAccessibilityLabel("Sessions, tabs, panes and projects")
+        table.setAccessibilityHelp("Use the Up and Down arrows to navigate, Left to select a parent, or Right to select a child. Press Return to choose.")
+        table.onFocusChange = { [weak self] in self?.updateShortcutHints(resultsFocused: $0) }
         scroll.documentView = table
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -400,14 +499,17 @@ final class PickerView: NSView {
         preview.onCancel = { [weak self] in self?.table.onCancel?() }
 
         directoryBar.isHidden = true
+        updateSearchContext()
         directoryHeight = directoryBar.heightAnchor.constraint(equalToConstant: 0)
         directoryHeight.isActive = true
+        directoryUp.isEnabled = false
         directoryUp.image = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: "Parent directory")
         directoryUp.contentTintColor = Palette.secondary
         directoryUp.toolTip = "Parent directory (⌘←)"
         directoryHome.setAccessibilityLabel("Recent projects")
         directoryDeep.setAccessibilityLabel("Search subdirectories, Control F")
         directoryDeep.toolTip = "Search subdirectories (⌃F)"
+        directoryPath.toolTip = "Recent projects and configured project roots"
         directoryPath.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
         directoryPath.lineBreakMode = .byTruncatingHead
         directoryPath.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -436,25 +538,22 @@ final class PickerView: NSView {
         empty.addArrangedSubview(emptyTitle)
         empty.addArrangedSubview(emptyDetail)
         NSLayoutConstraint.activate([
-            brandIcon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26), brandIcon.topAnchor.constraint(equalTo: topAnchor, constant: 23), brandIcon.widthAnchor.constraint(equalToConstant: 14), brandIcon.heightAnchor.constraint(equalToConstant: 14),
-            brand.leadingAnchor.constraint(equalTo: brandIcon.trailingAnchor, constant: 8), brand.centerYAnchor.constraint(equalTo: brandIcon.centerYAnchor),
-            dashboardButton.leadingAnchor.constraint(equalTo: brand.trailingAnchor, constant: 18), dashboardButton.centerYAnchor.constraint(equalTo: brand.centerYAnchor), dashboardButton.widthAnchor.constraint(equalToConstant: 100), dashboardButton.heightAnchor.constraint(equalToConstant: 26),
-            origin.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -27), origin.centerYAnchor.constraint(equalTo: brand.centerYAnchor),
-            glass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 27), glass.topAnchor.constraint(equalTo: brand.bottomAnchor, constant: 26), glass.widthAnchor.constraint(equalToConstant: 23), glass.heightAnchor.constraint(equalToConstant: 26),
-            search.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 16), search.trailingAnchor.constraint(equalTo: clear.leadingAnchor, constant: -10), search.centerYAnchor.constraint(equalTo: glass.centerYAnchor), search.heightAnchor.constraint(equalToConstant: 34),
-            clear.trailingAnchor.constraint(equalTo: searchField.leadingAnchor, constant: -14), clear.centerYAnchor.constraint(equalTo: glass.centerYAnchor), clear.widthAnchor.constraint(equalToConstant: 24), clear.heightAnchor.constraint(equalToConstant: 24),
-            searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -25), searchField.centerYAnchor.constraint(equalTo: glass.centerYAnchor), searchField.widthAnchor.constraint(equalToConstant: 136), searchField.heightAnchor.constraint(equalToConstant: 26),
-            tabs.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22), tabs.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 20),
-            count.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -27), count.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
-            count.leadingAnchor.constraint(greaterThanOrEqualTo: tabs.trailingAnchor, constant: 12),
-            separator.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 14),
+            glass.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 25), glass.topAnchor.constraint(equalTo: topAnchor, constant: 22), glass.widthAnchor.constraint(equalToConstant: 21), glass.heightAnchor.constraint(equalToConstant: 24),
+            dashboardButton.centerXAnchor.constraint(equalTo: glass.centerXAnchor), dashboardButton.centerYAnchor.constraint(equalTo: glass.centerYAnchor), dashboardButton.widthAnchor.constraint(equalToConstant: 30), dashboardButton.heightAnchor.constraint(equalToConstant: 30),
+            search.leadingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 12), search.trailingAnchor.constraint(equalTo: clear.leadingAnchor, constant: -6), search.centerYAnchor.constraint(equalTo: glass.centerYAnchor), search.heightAnchor.constraint(equalToConstant: 32),
+            clear.trailingAnchor.constraint(equalTo: searchField.leadingAnchor, constant: -8), clear.centerYAnchor.constraint(equalTo: glass.centerYAnchor), clear.widthAnchor.constraint(equalToConstant: 22), clear.heightAnchor.constraint(equalToConstant: 24),
+            searchField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20), searchField.centerYAnchor.constraint(equalTo: glass.centerYAnchor), searchField.widthAnchor.constraint(equalToConstant: 98), searchField.heightAnchor.constraint(equalToConstant: 26),
+            tabs.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16), tabs.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 11),
+            count.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -25), count.centerYAnchor.constraint(equalTo: tabs.centerYAnchor),
+            count.leadingAnchor.constraint(greaterThanOrEqualTo: tabs.trailingAnchor, constant: 8),
+            separator.topAnchor.constraint(equalTo: tabs.bottomAnchor),
             directoryBar.topAnchor.constraint(equalTo: separator.bottomAnchor), directoryBar.leadingAnchor.constraint(equalTo: leadingAnchor), directoryBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             resultsArea.topAnchor.constraint(equalTo: directoryBar.bottomAnchor, constant: 7), resultsArea.leadingAnchor.constraint(equalTo: leadingAnchor), resultsArea.trailingAnchor.constraint(equalTo: trailingAnchor), resultsArea.bottomAnchor.constraint(equalTo: footerLine.topAnchor, constant: -7),
             footerLine.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -42),
             status.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 25), status.centerYAnchor.constraint(equalTo: shortcuts.centerYAnchor), status.trailingAnchor.constraint(lessThanOrEqualTo: shortcuts.leadingAnchor, constant: -15),
             shortcuts.trailingAnchor.constraint(equalTo: previewButton.leadingAnchor, constant: -12), shortcuts.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -15),
-            previewButton.trailingAnchor.constraint(equalTo: actions.leadingAnchor, constant: -6), previewButton.centerYAnchor.constraint(equalTo: shortcuts.centerYAnchor), previewButton.widthAnchor.constraint(equalToConstant: 106), previewButton.heightAnchor.constraint(equalToConstant: 28),
-            actions.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -17), actions.centerYAnchor.constraint(equalTo: shortcuts.centerYAnchor), actions.widthAnchor.constraint(equalToConstant: 94), actions.heightAnchor.constraint(equalToConstant: 28),
+            previewButton.trailingAnchor.constraint(equalTo: actions.leadingAnchor, constant: -6), previewButton.centerYAnchor.constraint(equalTo: shortcuts.centerYAnchor), previewButton.widthAnchor.constraint(equalToConstant: 92), previewButton.heightAnchor.constraint(equalToConstant: 28),
+            actions.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -17), actions.centerYAnchor.constraint(equalTo: shortcuts.centerYAnchor), actions.widthAnchor.constraint(equalToConstant: 90), actions.heightAnchor.constraint(equalToConstant: 28),
             empty.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), empty.centerYAnchor.constraint(equalTo: scroll.centerYAnchor), empty.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor, constant: -64)
         ])
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -497,9 +596,33 @@ final class PickerView: NSView {
     }
 
     func setDashboardRoute(_ title: String?) {
+        guard dashboardRoute != title else { return }
+        dashboardRoute = title
         dashboardButton.isHidden = title == nil
-        origin.stringValue = "REX  /  " + (title?.uppercased() ?? "QUICK SWITCH")
-        shortcuts.stringValue = title == nil ? "↑↓ navigate   ↩ switch   esc close" : "↑↓ navigate   ↩ choose   esc back"
+        glass.isHidden = title != nil
+        updateSearchContext()
+    }
+
+    private func updateSearchContext() {
+        let prompt: String
+        if let dashboardRoute {
+            prompt = dashboardRoute + " · Search targets…"
+            search.setAccessibilityLabel("Search targets for " + dashboardRoute)
+        } else if directoryBar.isHidden {
+            prompt = "Search your workspace…"
+            search.setAccessibilityLabel("Search sessions, tabs, panes and projects")
+        } else {
+            prompt = "Search projects…"
+            search.setAccessibilityLabel("Search projects")
+        }
+        let font = search.font ?? .systemFont(ofSize: 22)
+        search.placeholderAttributedString = NSAttributedString(string: prompt, attributes: [.foregroundColor: Palette.secondary, .font: font])
+        updateShortcutHints(resultsFocused: window?.firstResponder === table)
+    }
+
+    private func updateShortcutHints(resultsFocused: Bool) {
+        let hint = resultsFocused && scopes.first?.chosen == true ? "←→ Tree     ↩ Switch" : "↑↓ Navigate     ↩ Switch"
+        shortcuts.stringValue = directoryBar.isHidden && dashboardRoute == nil ? hint : ""
     }
 
     func showPreview(title: String, detail: String, text: String, loading: Bool = false) {
@@ -507,7 +630,9 @@ final class PickerView: NSView {
     }
 
     func setDirectoryVisible(_ visible: Bool) {
+        guard directoryBar.isHidden == visible else { return }
         directoryBar.isHidden = !visible
+        updateSearchContext()
         directoryHeight.constant = visible ? 36 : 0
         needsLayout = true
     }

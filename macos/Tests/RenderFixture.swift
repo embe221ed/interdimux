@@ -26,6 +26,7 @@ private struct Scenario {
     let projects: Bool
     let preview: Bool
     var empty = false
+    var light = false
 }
 
 @main
@@ -44,6 +45,10 @@ struct RenderFixture {
         let items = values.compactMap(PickerItem.init)
         let wide = NSSize(width: 1080, height: 760)
         let narrow = NSSize(width: 720, height: 620)
+        let darkPalette = (Palette.background.usingColorSpace(.sRGB)!, Palette.text.usingColorSpace(.sRGB)!, Palette.accent.usingColorSpace(.sRGB)!)
+        let lightPalette = (NSColor(srgbRed: 0.98, green: 0.97, blue: 0.94, alpha: 1),
+                            NSColor(srgbRed: 0.15, green: 0.16, blue: 0.17, alpha: 1),
+                            NSColor(srgbRed: 0.60, green: 0.24, blue: 0.08, alpha: 1))
         let scenarios = [
             Scenario(name: "wide-tree", size: wide, projects: false, preview: false),
             Scenario(name: "wide-tree-preview", size: wide, projects: false, preview: true),
@@ -51,7 +56,8 @@ struct RenderFixture {
             Scenario(name: "wide-projects-preview", size: wide, projects: true, preview: true),
             Scenario(name: "narrow-tree-preview", size: narrow, projects: false, preview: true),
             Scenario(name: "narrow-projects-preview", size: narrow, projects: true, preview: true),
-            Scenario(name: "narrow-empty-preview", size: narrow, projects: true, preview: true, empty: true)
+            Scenario(name: "narrow-empty-preview", size: narrow, projects: true, preview: true, empty: true),
+            Scenario(name: "wide-tree-light", size: wide, projects: false, preview: false, light: true)
         ]
         for scenario in scenarios {
             let rows = FixtureRows(scenario.empty ? [] : items.filter { ($0.kind == "directory") == scenario.projects })
@@ -60,7 +66,9 @@ struct RenderFixture {
             // the same AppKit view tree without presenting a desktop window.
             let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
-            window.appearance = NSAppearance(named: .darkAqua)
+            window.appearance = NSAppearance(named: scenario.light ? .aqua : .darkAqua)
+            let (background, foreground, accent) = scenario.light ? lightPalette : darkPalette
+            Palette.apply(background: background, foreground: foreground, accent: accent)
             let content = PickerView(frame: frame)
             window.contentView = content
             content.table.dataSource = rows
@@ -71,8 +79,10 @@ struct RenderFixture {
             content.search.stringValue = scenario.empty ? "not-a-real-project" : ""
             content.clear.isHidden = !scenario.empty
             content.count.stringValue = "\(rows.items.count) \(scenario.projects ? "projects" : "places")"
-            content.status.stringValue = scenario.projects ? "↵ open session · ⌘→ browse folder · ⌃F search deeper" : "3 places · ⌘R refresh"
+            content.status.stringValue = scenario.projects ? "↵ open session · ⌘→ browse folder · ⌃F search deeper" : "⌘R Refresh"
             for (index, scope) in content.scopes.enumerated() { scope.chosen = index == (scenario.projects ? 5 : 0) }
+            let attentionCount = items.filter(\.attention).count
+            if attentionCount > 0 { content.scopes[4].title = "Attention \(attentionCount)" }
             content.setDirectoryVisible(scenario.projects)
             content.setDirectoryLocation(path: scenario.projects ? "/Users/fixture/projects/company/platform/services/customer-experience" : nil, deep: false)
             content.setPreviewVisible(scenario.preview)

@@ -74,8 +74,23 @@ struct PickerItem: Equatable {
         }
     }
     var kindLabel: String {
-        if kind == "directory" { return current ? "OPEN" : "PROJECT" }
-        return kind == "window" ? "TAB" : kind.uppercased()
+        switch kind {
+        case "session": return "Session"
+        case "window": return "Tab"
+        case "pane": return "Pane"
+        case "directory": return current ? "Open" : "Project"
+        case "create": return "Create"
+        default: return kind.capitalized
+        }
+    }
+
+    // Keep editable pane names visible alongside the terminal's conversation title.
+    var rowTitle: String { kind == "pane" && !name.isEmpty ? name : title }
+
+    var hostLabel: String? {
+        guard let host else { return nil }
+        let label = subtitle.isEmpty ? host : subtitle
+        return stale ? label + " (cached)" : label
     }
 }
 

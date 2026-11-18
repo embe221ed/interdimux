@@ -24,6 +24,8 @@ struct OpeningTests {
         try lazyProjectSearch()
         try remoteSessions()
         try keyboardShortcuts()
+        try treeKeyboardFocus()
+        try visibleResultMetadata()
         try dashboardHandoffs()
         try rowActions()
         try themePolling()
@@ -508,6 +510,83 @@ struct OpeningTests {
                   "Caps Lock must leave Command-2 scope navigation available")
     }
 
+    private static func visibleResultMetadata() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        picker.open(context: ["client_id": "client:one"])
+        let table = picker.content.table
+        func results(_ ids: [Int]) {
+            let rows = ids.map { ["id": "pane:\($0)", "kind": "pane", "title": "Pane \($0)", "path": "/work/\($0)"] }
+            picker.receive(["id": picker.pending, "type": "results", "rows": rows,
+                            "query": picker.content.search.stringValue])
+            picker.content.layoutSubtreeIfNeeded()
+        }
+        func checkRow(_ index: Int, target: Int) throws {
+            table.scrollRowToVisible(index)
+            picker.content.layoutSubtreeIfNeeded()
+            let cell = table.view(atColumn: 0, row: index, makeIfNecessary: true) as? PickerCell
+            try check(cell?.primary.stringValue == "Pane \(target)" && cell?.path.stringValue == "/work/\(target)",
+                      "Scrolled row \(index) retained metadata from a previous ranking")
+        }
+
+        results(Array(0..<100))
+        try checkRow(90, target: 90)
+        picker.content.search.stringValue = "pane"
+        picker.query()
+        results(Array((0..<100).reversed()))
+        try checkRow(0, target: 99)
+        try checkRow(90, target: 9)
+        picker.content.search.stringValue = "pane 2"
+        picker.query()
+        results([2])
+        try checkRow(0, target: 2)
+    }
+
+    private static func treeKeyboardFocus() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        picker.open(context: ["client_id": "client:one"])
+        let content = picker.content
+        let rows = [["id": "s", "kind": "session", "title": "Work"],
+                    ["id": "w", "parent_id": "s", "kind": "window", "title": "Editor"],
+                    ["id": "p", "parent_id": "w", "kind": "pane", "title": "Tests"]]
+        picker.receive(["id": picker.pending, "type": "results", "rows": rows, "preferred_id": "s"])
+        let editor = NSTextView()
+        func arrow(_ code: CGKeyCode) {
+            let key = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!
+            key.flags.formUnion([.maskNumericPad, .maskSecondaryFn])
+            content.table.keyDown(with: NSEvent(cgEvent: key)!)
+        }
+        let requestCount = picker.backend.requests.count
+        try check(!picker.control(content.search, textView: editor, doCommandBy: #selector(NSResponder.moveRight(_:)))
+                  && !picker.control(content.search, textView: editor, doCommandBy: #selector(NSResponder.moveLeft(_:))),
+                  "Left and Right must remain text editing commands in the search field")
+        try check(picker.control(content.search, textView: editor, doCommandBy: #selector(NSResponder.insertTab(_:)))
+                  && picker.panel.firstResponder === content.table,
+                  "Tab in search must enter the results")
+        arrow(124)
+        arrow(124)
+        try check(content.table.selectedRow == 2, "Two Right presses must reach the pane")
+        arrow(124)
+        try check(content.table.selectedRow == 2, "Right on a leaf must preserve the selection")
+        arrow(123)
+        try check(content.table.selectedRow == 1, "Left from the pane must select its tab")
+        try check(picker.backend.requests.count == requestCount,
+                  "Moving through the tree must not search, create, or activate a target")
+        content.search.stringValue = "a different search"
+        picker.query()
+        arrow(123)
+        try check(content.table.selectedRow == 1, "An outstanding query cannot navigate obsolete results")
+        content.search.stringValue = ""
+        picker.changeScope(content.scopes[2])
+        picker.receive(["id": picker.pending, "type": "results", "scope": "window", "rows": [rows[1]]])
+        try check(content.count.stringValue == "1 tab", "Tab scope must name its single match")
+    }
+
     private static func remoteSessions() throws {
         let picker = PickerApplication()
         picker.setupPanel()
@@ -780,5 +859,14 @@ struct OpeningTests {
         reopenWork.perform()
         try check(picker.backend.requests.count == reopenCount && picker.projectSearchWork == nil,
                   "Reopening retained another invocation's delayed project request")
+        try check(!picker.content.directoryUp.isEnabled && !picker.content.directoryDeep.chosen,
+                  "Recent projects must start with parent navigation and deep search off")
+        picker.receive(["id": picker.pending, "type": "results", "rows": [],
+                        "directories_base": "/work/fixtures", "directories_deep": true])
+        try check(picker.content.directoryUp.isEnabled && picker.content.directoryDeep.chosen,
+                  "Browsing a directory must update its parent and depth controls")
+        picker.open(context: origin)
+        try check(!picker.content.directoryUp.isEnabled && !picker.content.directoryDeep.chosen,
+                  "Reopening must clear the previous directory controls")
     }
 }

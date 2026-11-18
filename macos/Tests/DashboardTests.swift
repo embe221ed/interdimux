@@ -32,7 +32,7 @@ struct DashboardTests {
         for width: CGFloat in [520, 620, 680, 940] {
             let layout = DashboardGeometry.groups(width: width)
             let bounds = NSRect(x: 0, y: 0, width: width, height: layout.height)
-            try check(layout.frames.count == 4 && layout.frames.allSatisfy { contains(bounds, $0) }, "Group card escapes scroll document")
+            try check(layout.frames.count == 3 && layout.frames.allSatisfy { contains(bounds, $0) }, "Group card escapes scroll document")
             for first in layout.frames.indices {
                 for second in layout.frames.indices where second > first {
                     try check(!layout.frames[first].intersects(layout.frames[second]), "Dashboard group cards overlap")
@@ -97,9 +97,19 @@ struct DashboardTests {
         try check(view.selectedActionID == "send", "Navigation must skip unavailable terminal handoffs")
         view.updateSummary(DashboardSummary(counts: ["terminal_tools_available": 1]))
         try check(view.choose(key: "h") && choices.last == "health", "A local origin must restore terminal tools")
-        let compactLayout = DashboardGeometry.groups(width: 680, rowHeight: 35)
-        try check(compactLayout.height <= 560 - 154 - 51, "All dashboard tools must fit the compact two-column panel")
-
+        try check(Set(actions.filter { $0.group == "Rex terminal" }.map(\.id)) == Set(actions.filter(\.terminal).map(\.id)),
+                  "Every external handoff must be grouped under Rex terminal")
+        view.layoutSubtreeIfNeeded()
+        view.resetSelection()
+        hardwareKey(124)
+        try check(view.selectedActionID == "rename", "Right should move across to the command in the same row")
+        hardwareKey(123)
+        try check(view.selectedActionID == "switch", "Left should return to the same row in Navigate")
+        _ = view.choose(key: "a")
+        hardwareKey(124)
+        try check(view.selectedActionID == "jobs", "Right must move to the next terminal tool")
+        view.updateSummary(DashboardSummary(counts: ["terminal_tools_available": 0]))
+        try check(view.selectedActionID == "switch", "Losing access should restore the first enabled item")
         let smallFrame = NSRect(x: 0, y: 0, width: 520, height: 480)
         let smallWindow = NSWindow(contentRect: smallFrame, styleMask: .borderless, backing: .buffered, defer: false)
         smallWindow.isReleasedWhenClosed = false
@@ -115,12 +125,31 @@ struct DashboardTests {
                   "Keyboard navigation must reveal tools below the compact viewport")
         try check((health as? NSButton)?.refusesFirstResponder == true,
                   "A queued action click must leave dashboard letter navigation available")
+        let footer = smallDashboard.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue.contains("↩") }!
+        try check(contains(smallDashboard.bounds, footer.frame) && footer.fittingSize.width <= footer.frame.width
+                  && footer.stringValue.contains("esc  Close"), "All compact footer shortcuts must remain visible")
+        try check(health.accessibilityLabel()?.contains("opens in Rex terminal") == true,
+                  "External handoffs must be explained to VoiceOver")
+        let attention = descendants(smallDashboard).compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == "dashboard-attention-summary" }!
+        smallDashboard.onChoose = { choices.append($0) }
+        smallDashboard.updateSummary(DashboardSummary(sessions: 1, tabs: 2, panes: 2, attention: 1))
+        try check(attention.accessibilityRole() == .button && attention.accessibilityLabel()?.contains("1 agent waiting") == true,
+                  "Announce the attention count as an accessible action")
+        attention.performClick(nil)
+        try check(choices.last == "attention", "The attention summary must open the matching agent list")
+        smallDashboard.updateSummary(DashboardSummary(sessions: 1, tabs: 2, panes: 2, attention: 0))
+        try check(attention.accessibilityLabel()?.contains("No agents waiting") == true, "Clear stale attention counts")
+        smallWindow.setContentSize(NSSize(width: 680, height: 560))
+        smallDashboard.layoutSubtreeIfNeeded()
+        try check(scroll.documentVisibleRect.contains(scroll.documentView!.bounds), "All tools must fit the compact two-column panel")
         smallWindow.close()
 
         if CommandLine.arguments.count > 1 {
             let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
             try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
             for (name, size, loading) in [
+                ("dashboard-default", NSSize(width: 840, height: 546), false),
+                ("dashboard-light", NSSize(width: 840, height: 546), false),
                 ("dashboard-wide", NSSize(width: 940, height: 680), false),
                 ("dashboard-compact", NSSize(width: 680, height: 560), false),
                 ("dashboard-narrow", NSSize(width: 520, height: 480), false),
@@ -129,7 +158,17 @@ struct DashboardTests {
                 let frame = NSRect(origin: .zero, size: size)
                 let window = NSWindow(contentRect: frame, styleMask: .borderless, backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false
-                window.appearance = NSAppearance(named: .darkAqua)
+                let light = name == "dashboard-light"
+                window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
+                if light {
+                    Palette.apply(background: NSColor(srgbRed: 0.98, green: 0.98, blue: 0.97, alpha: 1),
+                                  foreground: NSColor(srgbRed: 0.13, green: 0.14, blue: 0.16, alpha: 1),
+                                  accent: NSColor(srgbRed: 0.13, green: 0.33, blue: 0.63, alpha: 1))
+                } else {
+                    Palette.apply(background: NSColor(srgbRed: 36/255, green: 37/255, blue: 35/255, alpha: 1),
+                                  foreground: NSColor(srgbRed: 221/255, green: 213/255, blue: 197/255, alpha: 1),
+                                  accent: NSColor(srgbRed: 231/255, green: 138/255, blue: 78/255, alpha: 1))
+                }
                 let dashboard = DashboardView(frame: frame)
                 window.contentView = dashboard
                 if !loading { dashboard.updateSummary(DashboardSummary(sessions: 4, tabs: 13, panes: 24, attention: 2)) }

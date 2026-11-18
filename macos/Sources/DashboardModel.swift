@@ -11,20 +11,20 @@ struct DashboardAction: Equatable {
 }
 
 enum DashboardCatalog {
-    static let groups = ["NAVIGATE", "MANAGE", "AUTOMATE", "TOOLS"]
+    static let groups = ["Navigate", "Manage", "Rex terminal"]
     static let actions: [DashboardAction] = [
-        .init(id: "switch", key: "s", title: "Switch", detail: "Sessions, tabs, and panes", symbol: "arrow.left.arrow.right", group: "NAVIGATE"),
-        .init(id: "attention", key: "e", title: "Agents", detail: "Waiting for approval or input", symbol: "person.crop.circle.badge.exclamationmark", group: "NAVIGATE"),
-        .init(id: "next-agent", key: "j", title: "Next agent", detail: "Jump to the next waiting agent", symbol: "arrow.turn.down.right", group: "NAVIGATE"),
-        .init(id: "projects", key: "n", title: "New session", detail: "Find a project directory", symbol: "plus.square", group: "NAVIGATE"),
-        .init(id: "rename", key: "r", title: "Rename", detail: "Give a target a useful name", symbol: "pencil", group: "MANAGE"),
-        .init(id: "close", key: "i", title: "Close", detail: "Choose a target, then confirm", symbol: "xmark", group: "MANAGE"),
-        .init(id: "swap", key: "w", title: "Swap", detail: "Exchange two tabs or panes", symbol: "arrow.triangle.swap", group: "MANAGE"),
-        .init(id: "zoom", key: "z", title: "Zoom", detail: "Focus or restore a pane", symbol: "arrow.up.left.and.arrow.down.right", group: "MANAGE"),
-        .init(id: "send", key: "t", title: "Send", detail: "Send command text or a key", symbol: "paperplane", group: "AUTOMATE"),
-        .init(id: "schedule", key: "a", title: "Schedule", detail: "Send later", symbol: "clock", group: "AUTOMATE", terminal: true),
-        .init(id: "jobs", key: "o", title: "Jobs", detail: "Inspect output or cancel work", symbol: "list.bullet.rectangle", group: "AUTOMATE", terminal: true),
-        .init(id: "health", key: "h", title: "Health", detail: "Check tools and setup", symbol: "checkmark.shield", group: "TOOLS", terminal: true)
+        .init(id: "switch", key: "s", title: "Switch", detail: "Sessions, tabs, and panes", symbol: "arrow.left.arrow.right", group: "Navigate"),
+        .init(id: "attention", key: "e", title: "Agents", detail: "Waiting for approval or input", symbol: "person.crop.circle.badge.exclamationmark", group: "Navigate"),
+        .init(id: "next-agent", key: "j", title: "Next agent", detail: "Jump to the next waiting agent", symbol: "arrow.turn.down.right", group: "Navigate"),
+        .init(id: "projects", key: "n", title: "New session", detail: "Find a project directory", symbol: "plus.square", group: "Navigate"),
+        .init(id: "rename", key: "r", title: "Rename", detail: "Name a session, tab or pane", symbol: "pencil", group: "Manage"),
+        .init(id: "close", key: "i", title: "Close", detail: "Choose a target, then confirm", symbol: "xmark", group: "Manage"),
+        .init(id: "swap", key: "w", title: "Swap", detail: "Exchange two tabs or panes", symbol: "arrow.triangle.swap", group: "Manage"),
+        .init(id: "zoom", key: "z", title: "Zoom", detail: "Focus or restore a pane", symbol: "arrow.up.left.and.arrow.down.right", group: "Manage"),
+        .init(id: "send", key: "t", title: "Send", detail: "Send command text or a key", symbol: "paperplane", group: "Manage"),
+        .init(id: "schedule", key: "a", title: "Schedule", detail: "Queue a timed send", symbol: "clock", group: "Rex terminal", terminal: true),
+        .init(id: "jobs", key: "o", title: "Jobs", detail: "Inspect or cancel a job", symbol: "list.bullet.rectangle", group: "Rex terminal", terminal: true),
+        .init(id: "health", key: "h", title: "Health", detail: "Check tools and setup", symbol: "checkmark.shield", group: "Rex terminal", terminal: true)
     ]
 }
 
@@ -51,32 +51,40 @@ struct DashboardSummary: Equatable {
 
 enum DashboardGeometry {
     static func panelFrame(in visible: NSRect) -> NSRect {
-        let width = max(0, min(940, visible.width - 48))
-        let height = max(0, min(680, visible.height - 60))
+        let width = max(0, min(840, visible.width - 48))
+        let height = max(0, min(546, visible.height - 60))
         let margin = min(30, max(0, visible.height / 2))
         let y = min(visible.midY - height / 2 + 32, visible.maxY - margin - height)
         return NSRect(x: visible.midX - width / 2, y: max(visible.minY + margin, y), width: width, height: height)
     }
 
-    static func groups(width: CGFloat, rowHeight: CGFloat = 44) -> (frames: [NSRect], height: CGFloat) {
-        let padding: CGFloat = min(28, max(0, width / 8))
-        let available = max(0, width - padding * 2)
-        let gap: CGFloat = 14
-        let upperHeight = 48 + rowHeight * 4
-        let lowerHeight = 48 + rowHeight * 3
-        if width >= 620 {
-            let column = max(0, (available - gap) / 2)
-            return ([NSRect(x: padding, y: 0, width: column, height: upperHeight),
-                     NSRect(x: padding + column + gap, y: 0, width: column, height: upperHeight),
-                     NSRect(x: padding, y: upperHeight + gap, width: column, height: lowerHeight),
-                     NSRect(x: padding + column + gap, y: upperHeight + gap, width: column, height: lowerHeight)], upperHeight + gap + lowerHeight)
-        }
-        let heights: [CGFloat] = [upperHeight, upperHeight, lowerHeight, 148]
+    static let horizontalThreshold: CGFloat = 620
+    static let headingHeight: CGFloat = 30
+    private static let counts = DashboardCatalog.groups.map { name in
+        DashboardCatalog.actions.filter { $0.group == name }.count
+    }
+
+    static func groups(width: CGFloat, rowHeight: CGFloat = 48) -> (frames: [NSRect], height: CGFloat) {
+        let margin: CGFloat = min(20, max(0, width / 8))
+        let available = max(0, width - margin * 2)
+        let gap: CGFloat = 16
         var y: CGFloat = 0
-        let frames = heights.map { height -> NSRect in
-            defer { y += height + gap }
-            return NSRect(x: padding, y: y, width: available, height: height)
+        if width < horizontalThreshold {
+            let frames = counts.map { count -> NSRect in
+                let height = headingHeight + CGFloat(count) * rowHeight
+                defer { y += height + gap }
+                return NSRect(x: margin, y: y, width: available, height: height)
+            }
+            return (frames, y - gap)
         }
-        return (frames, max(0, y - gap))
+
+        let column = (available - gap) / 2
+        let columns = counts.prefix(2).enumerated().map { index, count in
+            NSRect(x: margin + CGFloat(index) * (column + gap), y: 0,
+                   width: column, height: headingHeight + CGFloat(count) * rowHeight)
+        }
+        y = max(columns[0].maxY, columns[1].maxY) + gap
+        let tools = NSRect(x: margin, y: y, width: available, height: headingHeight + rowHeight)
+        return (columns + [tools], tools.maxY)
     }
 }

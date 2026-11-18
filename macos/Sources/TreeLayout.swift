@@ -51,6 +51,31 @@ enum PickerTreeLayout {
         return result
     }
 
+    /// Walk the displayed IDs on an arrow press. A filtered-out ancestor
+    /// can connect two matches without becoming a selectable destination.
+    static func branchIndex(in items: [PickerItem], from row: Int, towardChildren: Bool) -> Int? {
+        guard items.indices.contains(row) else { return nil }
+        if towardChildren {
+            var parents: Set<String> = [items[row].id]
+            for index in (row + 1)..<items.count {
+                let item = items[index]
+                guard let parent = item.parentID, parents.contains(parent) else { continue }
+                if !item.contextOnly { return index }
+                parents.insert(item.id)
+            }
+        } else {
+            var parent = items[row].parentID
+            for index in items[..<row].indices.reversed() {
+                guard let id = parent else { break }
+                let item = items[index]
+                guard item.id == id else { continue }
+                if !item.contextOnly { return index }
+                parent = item.parentID
+            }
+        }
+        return nil
+    }
+
     /// Work only with visible, preceding parents. Missing/forward references
     /// remain roots rather than drawing a branch to an unrelated result.
     static func positions(for items: [PickerItem]) -> [PickerTreePosition] {

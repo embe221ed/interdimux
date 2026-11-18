@@ -88,6 +88,23 @@ struct TreeLayoutTests {
             Expected(1, [], false, false)
         ], "two independent sessions with multiple tabs and panes")
 
+        try check(PickerTreeLayout.branchIndex(in: tree, from: 0, towardChildren: true) == 1,
+                  "Right reaches the first tab in this session")
+        try check(PickerTreeLayout.branchIndex(in: tree, from: 8, towardChildren: false) == 7,
+                  "Left reaches the parent of the selected pane")
+        try check(PickerTreeLayout.branchIndex(in: tree, from: 5, towardChildren: true) == nil,
+                  "Right on a leaf must not cross into another session")
+        let sparse = [item("session", "session"), item("tab", "window", parent: "session", context: true),
+                      item("other", "session"), item("pane", "pane", parent: "tab")]
+        try check(PickerTreeLayout.branchIndex(in: sparse, from: 0, towardChildren: true) == 3,
+                  "Navigation uses IDs even when a context row intervenes")
+        try check(PickerTreeLayout.branchIndex(in: sparse, from: 3, towardChildren: false) == 0,
+                  "An inactive parent can lead to a selectable ancestor")
+        try check(PickerTreeLayout.branchIndex(in: sparse, from: 2, towardChildren: false) == nil,
+                  "Left on a root must not select the previous visible row")
+        try check(PickerTreeLayout.branchIndex(in: [], from: -1, towardChildren: true) == nil,
+                  "An empty tree has no keyboard destination")
+
         let filtered = [
             item("s1", "session", context: true),
             item("t1", "window", parent: "s1", context: true),

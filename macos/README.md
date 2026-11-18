@@ -42,16 +42,17 @@ The picker can reuse Rex's active SSH forwards on the Mac after matching them to
 
 The results form an expanded **session → tab → pane** tree, with compact rows, subtle branch lines and a shared, left-truncated path column. A tab with one pane uses one combined row: rename, close and swap operate on the tab, while switching, zooming, splitting and sending address its exact pane. The pane's title, command and path remain searchable. Split tabs retain their pane children. Filtering keeps a match's ancestors visible; dim parent rows provide context and are skipped by keyboard selection. Matching branches are ranked by relevance while staying together. Opening or clearing the query restores session recency order with the current session's whole branch last. The previously visited session is first and selected, matching **Last Session / prefix+L**. Escape and Cmd+W return focus to Rex; clicking another app dismisses without pulling focus back.
 
-**Prefix+G** opens the native dashboard directly; `./macos/open.sh --dashboard` is its standalone launcher. It shows workspace counts and four groups of tools, with the same single-letter keys as the terminal dashboard. The panel appears before collection finishes, and native tool choices reuse the resident helper. Click a card, press its letter, or use arrows / Ctrl+N/P and Enter. Escape closes it and returns focus to Rex; Cmd+R refreshes its counts.
+Press **Tab** from search to focus the result list. **←** selects the nearest selectable parent and **→** the first selectable child, following the visible tree through dim context rows. Roots and leaves stay selected when there is no target in that direction. While typing in search, **←/→** move the text cursor. **Cmd+F** returns to search. In a narrow list, target names take priority over the path column. The full path is available in the row’s tooltip and accessibility label.
+
+**Prefix+G** opens the native dashboard. Use `./macos/open.sh --dashboard` to open it directly. The header shows workspace counts. Click the waiting-agent count to see which agents need input or approval. Navigate and Manage sit side by side above the Rex terminal tools, and stack on narrow screens. The panel appears before collection finishes, and native tool choices reuse the resident helper. Click a command or press its letter to run it. Use **↑/↓** or **Ctrl+N/P** to move through the commands, **←/→** to move across columns, and **Enter** to run the selection. **Escape** returns to Rex. **Cmd+R** refreshes the counts.
 
 | Group | Tools and keys |
 | --- | --- |
 | Navigate | **S** Switch · **E** Agents · **J** Next agent · **N** New session |
-| Manage | **R** Rename · **I** Close · **W** Swap · **Z** Zoom |
-| Automate | **T** Send · **A** Schedule · **O** Jobs |
-| Tools | **H** Health |
+| Manage | **R** Rename · **I** Close · **W** Swap · **Z** Zoom · **T** Send |
+| Rex terminal | **A** Schedule · **O** Jobs · **H** Health |
 
-Management choices open a native target picker filtered to the relevant capabilities. Enter performs the chosen operation, with the normal confirmation for Close. Escape or **‹ Dashboard** returns to the dashboard; accepting a switch or project returns to Rex. Schedule, Jobs, and Health are labeled **Terminal** and open their existing full interfaces in Rex. These handoffs require the original focused Rex pane and validate it again before launch. When the origin is remote or the pane is unavailable, the dashboard dims those cards and keyboard navigation skips them. Dashboard counts describe the full cached workspace rather than the 100 displayed results; combined tabs still count their underlying panes.
+Management choices open a native target picker filtered to the relevant capabilities. Enter performs the chosen operation, with the normal confirmation for Close. Escape or the back button beside search returns to the dashboard. Accepting a switch or project returns to Rex. Schedule, Jobs and Health open their full interfaces in the originating Rex pane. The dashboard validates that pane before launch. When the origin is remote or the pane is unavailable, these commands appear dimmed and keyboard navigation skips them. Dashboard counts cover the full cached workspace, including underlying panes on combined tab rows.
 
 **Actions / Cmd+K** shows the operations available for the selected target. Right-click or Control-click a result to open the same menu for that row:
 
@@ -87,7 +88,7 @@ The search-field menu restricts fuzzy matching to **All fields**, **Names**, **P
 
 Remaining port work includes raw filtering parity, native scheduling/jobs/health screens, and automatic live snapshot updates. Those remain available in the terminal picker.
 
-The transport is `interdimux-picker://open?client_id=…&session_id=…&window_id=…&block_id=…`. The app communicates with its bundled helper using JSON over standard input/output. Queries search full, untruncated metadata locally using Nucleo with two workers. At most 100 rows, including parent context, are displayed; keep typing to narrow. The footer counts matching targets separately from contextual parents. Nucleo's syntax and ranking are not a promise of complete fzf compatibility, including fzf's OR expressions.
+The transport is `interdimux-picker://open?client_id=…&session_id=…&window_id=…&block_id=…`. The app communicates with its bundled helper using JSON over standard input/output. Queries search full, untruncated metadata locally using Nucleo with two workers. At most 100 rows, including parent context, are displayed; keep typing to narrow. The count beside the scopes excludes contextual parents. The footer indicates when more matches are available. Nucleo's syntax and ranking are not a promise of complete fzf compatibility, including fzf's OR expressions.
 
 ## Validation and performance
 
@@ -136,6 +137,16 @@ Opening is measured separately from querying. The report distinguishes immediate
 The Rex hotkey directly starts Launch Services instead of invoking Python twice and repeating client discovery. A controlled no-UI launch-path profile measured **283 ms → 61 ms median**, including the outer Rex CLI used by the test. This measures launch preparation, not end-to-end opening; the old standalone build check separately cost about 118 ms and Python startup about 90 ms. The direct hotkey checks bundle presence; the standalone launcher retains the full source staleness audit.
 
 Rows now use lightweight native text cells with Unicode-aware head/tail truncation instead of three text-field view hierarchies per result. Count changes preserve bounded row slots, and normal updates let AppKit coalesce layout and drawing. A nearly concealed backdrop blur was removed. Three controlled offscreen runs, holding the previous reload strategy constant, measured empty-to-100-row layout **8.91 → 4.21 ms**, mixed count-change layout **10.69 → 5.36 ms**, and full CPU bitmap drawing **41.85 → 28.02 ms**. CPU bitmap rendering is not GPU presentation. Repeat the row benchmark with `python3 macos/benchmark_render.py --mode note --runs 3`.
+
+Use the same native views to measure dashboard keyboard selection, count updates, and full bitmap drawing, or to compare changed and repeated terminal output. Add `--compact` to the dashboard or picker modes for a 680 × 560 window. The preview workload uses a 388-point column and a 40-line terminal transcript.
+
+```sh
+python3 macos/benchmark_render.py --mode dashboard --runs 6
+python3 macos/benchmark_render.py --mode dashboard --compact --runs 6
+python3 macos/benchmark_render.py --mode preview --runs 6
+```
+
+The November 18 comparison used `ee8e63c` as the baseline on an Intel Mac running macOS 26.7.3. After six paired runs during development, three alternating pairs checked the final source with 324 measured queries per build against the same 5,000-item fixture and Rust helper. Native result preparation and layout took **3.13 → 2.86 ms median** and **9.70 → 9.04 ms p95**. Including the helper round trip, queries took **10.26 → 10.08 ms median** and **12.50 → 12.24 ms p95** through native display submission. Picker bitmap drawing took **9.45 → 8.27 ms median** at 1080 × 760. Dashboard drawing took **23.79 → 12.65 ms median** at 940 × 680. A separate 24-pair check measured the first picker frame at **12.51 → 11.71 ms median** and fresh results at **112.34 → 113.62 ms median**. These are offscreen AppKit measurements. Physical input, Launch Services and display presentation are outside the timing interval.
 
 To repeat the read-only opening benchmark against the local Rex workspace, quit the normal picker first, then run:
 

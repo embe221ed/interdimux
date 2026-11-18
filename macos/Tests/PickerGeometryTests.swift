@@ -91,6 +91,12 @@ struct PickerGeometryTests {
         let narrow = PickerGeometry.rowFrames(width: 392, depth: 2)
         try check(narrow.path.width == 0 && narrow.title.width >= 150,
                   "At narrow widths the path must yield before the pane name")
+        let splitPane = PickerGeometry.rowFrames(width: 440, depth: 2)
+        let splitProject = PickerGeometry.rowFrames(width: 440, depth: 0, project: true)
+        try check(splitPane.path.width == 0 && splitPane.title.width >= 210,
+                  "In the compact split view a short path must yield to the pane title")
+        try check(splitProject.path.width >= 96 && splitProject.title.width >= 150,
+                  "Flat project results should retain their distinguishing parent in the compact split view")
         for width: CGFloat in [392, 440, 680, 1080] {
             let root = PickerGeometry.rowFrames(width: width, depth: 0)
             let pane = PickerGeometry.rowFrames(width: width, depth: 2)

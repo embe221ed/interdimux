@@ -20,6 +20,10 @@ private func luminance(_ color: NSColor) -> CGFloat {
     let rgb = components(color).prefix(3).map { $0 <= 0.04045 ? $0 / 12.92 : pow(($0 + 0.055) / 1.055, 2.4) }
     return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722
 }
+private func contrast(_ a: NSColor, _ b: NSColor) -> CGFloat {
+    let x = luminance(a), y = luminance(b)
+    return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+}
 
 private final class Rows: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     let items = [
@@ -60,7 +64,7 @@ struct ThemeTests {
         picker.table.delegate = rows
         picker.empty.isHidden = true
         picker.count.stringValue = "3 places"
-        picker.status.stringValue = "3 places · ⌘R refresh"
+        picker.status.stringValue = "⌘R Refresh"
         picker.setPreviewVisible(true)
         picker.showPreview(title: "Theme preview", detail: "/Users/fixture/project", text: "$ cargo test\nTheme switching keeps text, selection, borders and previews readable.\n東京 👩🏽‍💻")
         picker.layoutSubtreeIfNeeded()
@@ -99,10 +103,15 @@ struct ThemeTests {
             try check(equal(previewText.textColor!, foreground), "\(name): existing preview text retained old color")
             let separators = picker.subviews.filter { $0.layer?.backgroundColor != nil && $0.bounds.height <= 1 }
             try check(separators.count == 2 && separators.allSatisfy { equal($0.layer?.backgroundColor, Palette.line) }, "\(name): separator CG colors did not refresh")
-            let groups = descendants(dashboard).filter { String(describing: type(of: $0)) == "DashboardGroup" }
-            try check(groups.count == 4 && groups.allSatisfy { equal($0.layer?.borderColor, Palette.line) && equal($0.layer?.backgroundColor, foreground.withAlphaComponent(0.018)) }, "\(name): dashboard card CG colors did not refresh")
-            let bright = max(luminance(background), luminance(foreground)), dark = min(luminance(background), luminance(foreground))
-            try check((bright + 0.05) / (dark + 0.05) > 7, "\(name): unreadable foreground contrast")
+            let workspaceIcon = dashboard.subviews.compactMap { $0 as? NSImageView }.first
+            try check(equal(workspaceIcon?.layer?.backgroundColor, accent.withAlphaComponent(0.10)),
+                      "\(name): dashboard header retained its previous accent")
+            let selectedButton = descendants(dashboard).first { $0.accessibilityIdentifier() == "switch" }
+            let selectedSymbol = selectedButton?.subviews.compactMap { $0 as? NSImageView }.first
+            try check(selectedSymbol?.contentTintColor.map { equal($0, accent) } == true,
+                      "\(name): selected dashboard command retained its previous tint")
+            try check(contrast(background, foreground) > 7, "\(name): unreadable foreground contrast")
+            try check(contrast(background, Palette.faint) >= 4.5, "\(name): small path and type labels lost readable contrast")
             try check(picker.table.selectedRow == 1 && dashboard.selectedActionID == "switch", "\(name): theme refresh changed selection")
             for (surfaceName, window) in zip(["picker", "dashboard"], windows) {
                 let view = window.contentView!
@@ -115,6 +124,16 @@ struct ThemeTests {
                 }
             }
         }
+        let previewText = descendants(picker).compactMap { $0 as? NSTextView }.first { !$0.isEditable }!
+        picker.showPreview(title: "New selection", detail: "Path", text: "", loading: true)
+        try check(previewText.string == "Loading preview…" && equal(previewText.textColor!, Palette.secondary),
+                  "A pending preview should use the loading text color")
+        picker.showPreview(title: "New selection", detail: "Path", text: "New output")
+        try check(equal(previewText.textColor!, Palette.text) && previewText.accessibilityLabel() == "Preview of New selection",
+                  "A completed preview must restore the text color and announce its target")
+        previewText.setSelectedRange(NSRange(location: 0, length: 3))
+        picker.showPreview(title: "New selection", detail: "Path", text: "New output")
+        try check(previewText.selectedRange().length == 3, "Receiving the same preview should preserve the text selection")
         print("Theme checks passed: existing picker/dashboard/preview, cached rows and attributed text, derived colors, CG surfaces and preserved selection across dark/light/custom changes")
     }
 }
