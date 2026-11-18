@@ -33,6 +33,7 @@ struct DashboardSummary: Equatable {
     var tabs: Int?
     var panes: Int?
     var attention: Int?
+    var terminalToolsAvailable: Bool?
 
     init(sessions: Int? = nil, tabs: Int? = nil, panes: Int? = nil, attention: Int? = nil) {
         self.sessions = sessions.map { max(0, $0) }
@@ -44,6 +45,7 @@ struct DashboardSummary: Equatable {
     init(counts: [String: Int]) {
         self.init(sessions: counts["sessions"], tabs: counts["tabs"] ?? counts["windows"],
                   panes: counts["panes"], attention: counts["attention"])
+        terminalToolsAvailable = counts["terminal_tools_available"].map { $0 != 0 }
     }
 }
 

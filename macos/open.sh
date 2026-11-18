@@ -34,6 +34,7 @@ def bundle(macos, parser, build_missing):
         sources.extend((macos / "Sources").glob("*.swift"))
         sources.extend((root / "rust/src").rglob("*.rs"))
         sources.extend((root / "rust/src").rglob("*.lua"))
+        sources.extend((root / "rust/src").rglob("*.js"))
         sources.extend((root / "rust/vendor").rglob("*.rs"))
         sources.extend((root / "rust/vendor").rglob("Cargo.toml"))
         stamped = stamp.stat().st_mtime_ns if stamp.is_file() else 0
@@ -56,7 +57,8 @@ def main():
     if args.check_build:
         bundle(macos, parser, build_missing=False)
         return
-    if os.environ.get("REX_SERVER"):
+    inherited_server = os.environ.get("REX_SERVER")
+    if inherited_server and not inherited_server.startswith("unix:///"):
         parser.error("remote/custom REX_SERVER launch is unsupported; use the local default Rex server")
 
     rex = os.environ.get("INTERDIMUX_REX_BIN") or shutil.which("rex")
@@ -71,8 +73,21 @@ def main():
                 break
     if not rex:
         parser.error("cannot find Rex; set INTERDIMUX_REX_BIN to its CLI path")
-    command = [rex, "--autostart=false", "--color=never", "--timeout=5s", "api", "call", "client.list", '{"kinds":["app"]}']
-    listed = json.loads(subprocess.check_output(command, text=True, timeout=10))
+    command = [rex, "--autostart=false", "--color=never", "--timeout=5s"]
+    local_env = os.environ.copy()
+    local_env.pop("REX_SERVER", None)
+    if inherited_server or (args.session and args.block and not args.window):
+        # Local Rex panes export their socket too. Ask the default server
+        # where it is rather than connecting to an inherited custom socket.
+        location = json.loads(subprocess.check_output(command + ["whoami", "--json"],
+                                                      text=True, timeout=10, env=local_env))
+        if inherited_server and inherited_server != location.get("endpoint"):
+            parser.error("custom REX_SERVER launch is unsupported; use the local default Rex server")
+        if (not args.window and args.session and args.block
+                and args.session == location.get("session_id") and args.block == location.get("block_id")):
+            args.window = location.get("window_id")
+    listed = json.loads(subprocess.check_output(command + ["api", "call", "client.list", '{"kinds":["app"]}'],
+                                                text=True, timeout=10, env=local_env))
     clients = []
     for client in listed.get("clients") or []:
         principal = client.get("principal") or {}

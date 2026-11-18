@@ -5,6 +5,119 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
+#[test]
+fn native_picker_publishes_fast_hosts_while_slow_hosts_are_pending() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    // Keep the synthetic Darwin socket path below sun_path's 104-byte limit.
+    let temp = std::path::Path::new("/tmp").join(format!("imux-remote-picker-{}", std::process::id()));
+    fs::create_dir(&temp).unwrap();
+    let rex = temp.join("rex");
+    let release = temp.join("release-slow-host");
+    #[cfg(target_os = "macos")]
+    let _tunnel = {
+        use std::os::unix::net::UnixListener;
+        let directory = temp.join("Library/Application Support/rex/ssh");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("123456789abcdef0.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        listener
+    };
+    fs::write(&rex, r#"#!/bin/sh
+case " $* " in
+    *' hosts list --json '*)
+        printf '%s\n' '{"hosts":[{"host":{"label":"slow-vps","host_id":"slow","endpoints":["ssh://slow"]}},{"host":{"label":"fast-vps","host_id":"fast"}}]}' ;;
+    *'123456789abcdef0.sock '*)
+        # The direct host needs no tunnel. It must be published before we
+        # release this probe, so it cannot be hidden behind stale sockets.
+        until [ -e "$IMUX_TEST_RELEASE_HOST" ]; do sleep 0.02; done
+        printf '%s\n' '{"host_id":"slow","sessions":[{"session_id":"session:slow","label":"Slow workspace"}]}' ;;
+    *' --server=slow-vps '*)
+        if [ -S "$HOME/Library/Application Support/rex/ssh/123456789abcdef0.sock" ]; then
+            echo 'Tunnel timed out before the fast direct host was available' >&2
+            exit 1
+        fi
+        until [ -e "$IMUX_TEST_RELEASE_HOST" ]; do sleep 0.02; done
+        printf '%s\n' '{"host_id":"slow","sessions":[{"session_id":"session:slow","label":"Slow workspace"}]}' ;;
+    *' --server=fast-vps '*)
+        printf '%s\n' '{"host_id":"fast","sessions":[{"session_id":"session:fast","label":"Fast workspace"}]}' ;;
+    *)
+        cat >/dev/null
+        printf '%s\n' '{"clients":{"clients":[{"client_id":"client:mac","info":{"kind":"app","platform":"macos"},"principal":{"kind":"peer","transport":"unix"}}]},"snapshot":{"version":1,"local_host_id":"local","sessions":[{"session_id":"session:local","label":"Local workspace"}],"views":{"session:local":{"windows":[]}}}}' ;;
+esac
+"#).unwrap();
+    fs::set_permissions(&rex, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_imux"))
+        .args(["macos-serve"])
+        .env("HOME", &temp)
+        .env("INTERDIMUX_REX_BIN", &rex)
+        .env("IMUX_TEST_RELEASE_HOST", &release)
+        .env("INTERDIMUX_SHOW_DIRS", "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut serial = 0;
+    let mut exchange = |mut request: Value| -> Value {
+        serial += 1;
+        request["id"] = json!(serial);
+        writeln!(input, "{request}").unwrap();
+        input.flush().unwrap();
+        let mut line = String::new();
+        assert!(output.read_line(&mut line).unwrap() > 0);
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], serial);
+        if request["type"] != "activate" {
+            assert_ne!(response["type"], "error", "{response}");
+        }
+        response
+    };
+
+    let open = exchange(json!({"type":"open"}));
+    assert_eq!(open["remote_pending"], true);
+    assert_eq!(open["rows"][0]["id"], "session:local");
+    let query = exchange(json!({"type":"query","query":"Local workspace","scope":"session"}));
+    assert_eq!(query["rows"][0]["id"], "session:local");
+    let wait_for_update = |exchange: &mut dyn FnMut(Value) -> Value| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let update = exchange(json!({"type":"remote_update"}));
+            if update["changed"] == true || update["pending"] == false {
+                return update;
+            }
+            assert!(Instant::now() < deadline, "No host published a result");
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    };
+    assert_eq!(wait_for_update(&mut exchange)["pending"], true);
+    let warm = exchange(json!({"type":"open"}));
+    assert_eq!(warm["remote_pending"], true);
+    assert!(warm["rows"].as_array().unwrap().iter().any(|row| row["host"] == "fast-vps"));
+    let miss = exchange(json!({"type":"query","query":"Slow workspace","scope":"all"}));
+    assert_eq!(miss["can_create"], true);
+    fs::write(&release, "").unwrap();
+    wait_for_update(&mut exchange);
+    let stale = exchange(json!({"type":"activate","target_id":miss["preferred_id"]}));
+    assert_eq!(stale["type"], "error");
+    assert!(stale["message"].as_str().unwrap().contains("no longer available"));
+    let combined = exchange(json!({"type":"query","query":"","scope":"session"}));
+    assert_eq!(combined["matched"], 3);
+    let preview = exchange(json!({"type":"open","preview_only":true}));
+    assert_eq!(preview["remote_pending"], false);
+    assert!(preview["rows"].as_array().unwrap().iter().all(|row| row["host"].is_null()));
+
+    drop(exchange);
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    fs::remove_dir_all(temp).unwrap();
+}
+
 #[test]
 fn native_picker_normalization_uses_declared_letters_without_false_matches() {
     let cases = [

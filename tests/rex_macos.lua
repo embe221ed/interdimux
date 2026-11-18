@@ -4,7 +4,7 @@ local started
 local terminal_actions = { interdimux_schedule = {}, interdimux_jobs = {}, interdimux_health = {} }
 local actions, bindings = {}, { ["ctrl+b>w"] = "interdimux" }
 for name, definition in pairs(terminal_actions) do actions[name] = definition end
-local checked_files, list_calls, view_calls = {}, 0, 0
+local checked_files, list_calls, view_calls, local_list_calls = {}, 0, 0, 0
 local missing_file, expected_session = nil, "session"
 local real_open = io.open
 io.open = function(path, mode)
@@ -23,7 +23,7 @@ local view = { windows = {
   { window_id = "wrong-window", layers = { { blocks = { { block_id = "other-pane" } } } } },
   { window_id = "exact-window", layers = { { blocks = { { block_id = "origin-pane" } } } } },
 } }
-local start_error
+local start_error, local_list_error
 rex = {
   action = function(definition) actions[definition.name] = definition end,
   bind = function(key, name) bindings[key] = name end,
@@ -37,15 +37,25 @@ rex = {
     view_calls = view_calls + 1
     return view
   end },
-  exec = {
+  json = { decode = function(data)
+    assert(data == "local-client-list")
+    return { clients = clients }
+  end },
+  exec = setmetatable({
     start = function(command, options)
       if start_error then return nil, start_error end
       started = { command = command, options = options }
       return {}
     end,
-  },
+  }, { __call = function(_, command, options)
+    local_list_calls = local_list_calls + 1
+    assert(table.concat(command, "|") == '/path/to/rex|--autostart=false|--color=never|--timeout=1s|api|call|client.list|{"kinds":["app"]}')
+    assert(options.env.REX_SERVER == false and options.env.REX_SESSION == false and options.timeout == 2)
+    if local_list_error then return { ok = false, stderr = local_list_error } end
+    return { ok = true, stdout = "local-client-list" }
+  end }),
 }
-dofile(root .. "/integrations/rex_macos.lua").setup { root = root }
+dofile(root .. "/integrations/rex_macos.lua").setup { root = root, rex_binary = "/path/to/rex" }
 assert(bindings["ctrl+b>f"] == "interdimux_macos" and bindings["ctrl+b>g"] == "interdimux_macos_dashboard")
 assert(bindings["ctrl+b>w"] == "interdimux" and bindings["ctrl+b>u"] == nil,
   "native defaults must leave terminal/optional alias bindings untouched")
@@ -55,7 +65,7 @@ end
 
 local function check_action(name, host)
   local action = assert(actions[name])
-  checked_files, list_calls, view_calls = {}, 0, 0
+  checked_files, list_calls, view_calls, local_list_calls = {}, 0, 0, 0
   expected_session = "session"
   view.windows[2].window_id = "exact-window"
   view.windows[2].layers[1].blocks[1].block_id = "origin-pane"
@@ -64,7 +74,7 @@ local function check_action(name, host)
   local app = root .. "/macos/build/Interdimux Picker.app"
   assert(table.concat(started.command, "|") == "/usr/bin/open|-g|-a|" .. app
     .. "|interdimux-picker://" .. host .. "?client_id=app&session_id=session&window_id=exact-window&block_id=origin-pane")
-  assert(#checked_files == 3 and list_calls == 1 and view_calls == 1,
+  assert(#checked_files == 3 and list_calls == 1 and view_calls == 1 and local_list_calls == 0,
     "hotkey must only inspect the bundle and use existing Rex calls, without a blocking child process")
   assert(started.options.detach and started.options.stdout == false and started.options.stderr == false)
   assert(started.options.env.REX_CLIENT == false and started.options.env.REX_SERVER == false)
@@ -109,6 +119,21 @@ local function check_action(name, host)
     and values.window_id == view.windows[2].window_id and values.block_id == hostile_block)
   assert(started.command[5]:find("interdimux-picker://" .. host .. "?", 1, true) == 1)
   assert(#started.command == 5 and started.command[4] == app, "launch arguments must remain separate")
+
+  checked_files, list_calls, view_calls, local_list_calls, started = {}, 0, 0, 0, nil
+  local remote = { client_id = "app", server = "dev & build", session_id = "session:remote", block_id = "block:remote" }
+  action.run(remote)
+  assert(started.command[5] == "interdimux-picker://" .. host
+    .. "?client_id=app&origin_server=dev%20%26%20build&origin_session_id=session%3Aremote")
+  assert(#checked_files == 3 and list_calls == 0 and view_calls == 0 and local_list_calls == 1,
+    "a remote-origin launch must not issue any host-routed API calls")
+  remote.client_id, started = "remote", nil
+  ok, err = pcall(action.run, remote)
+  assert(not ok and tostring(err):find("local macOS Rex app", 1, true) and not started)
+  remote.client_id, local_list_error = "app", "local lookup failed"
+  ok, err = pcall(action.run, remote)
+  assert(not ok and tostring(err):find(local_list_error, 1, true) and not started)
+  local_list_error = nil
 end
 check_action("interdimux_macos", "open")
 check_action("interdimux_macos_dashboard", "dashboard")
@@ -118,4 +143,4 @@ dofile(root .. "/integrations/rex_macos.lua").setup {
 assert(bindings["ctrl+b>u"] == "interdimux_macos" and bindings["ctrl+b>d"] == "interdimux_macos_dashboard")
 assert(bindings["ctrl+b>w"] == "interdimux")
 io.open = real_open
-print("passed: native picker/dashboard bindings, retained terminal actions, direct launch, exact encoded origin, local app guard, explicit CLI target, bounded file checks, visible build/start errors")
+print("passed: native picker/dashboard bindings, direct launch, encoded local and remote origins, local app guard, bounded checks, visible launch errors")

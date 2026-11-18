@@ -41,7 +41,7 @@ pub(super) fn counts(rows: &[Candidate], attention: usize) -> Value {
         .collect::<HashSet<_>>()
         .len();
     json!({
-        "sessions":rows.iter().filter(|row| row.kind == "session").count(),
+        "sessions":rows.iter().filter(|row| row.kind == "session" && row.remote_session.is_none()).count(),
         "tabs":rows.iter().filter(|row| row.kind == "window").count(),
         // Combined tab rows still retain the exact underlying pane ID.
         "panes":panes,"attention":attention,

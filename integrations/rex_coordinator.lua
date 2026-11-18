@@ -484,7 +484,14 @@ local function prepare()
     if request.operation ~= "preview" and request.operation ~= "health"
         and request.operation ~= "schedule-target" then
       local refreshed, refresh_error = pcall(save_snapshot, operation_changes(request, data))
-      if not refreshed and ok then ok, data = false, refresh_error end
+      if not refreshed and ok then
+        if request.operation == "snapshot" then
+          ok, data = false, refresh_error
+        else
+          -- Preserve the committed result, including any newly allocated IDs.
+          data.refresh_error = tostring(refresh_error)
+        end
+      end
     end
     local response = { version = 1, id = request.id, ok = ok }
     if ok then response.data = data else response.error = tostring(data) end

@@ -52,6 +52,15 @@ func icon(_ symbol: String, size: CGFloat, color: NSColor) -> NSImageView {
     return view
 }
 
+extension NSEvent {
+    var pickerModifiers: ModifierFlags {
+        var flags = modifierFlags.intersection([.command, .option, .control, .shift, .function])
+        // AppKit sets .function on physical arrow keys, even with Fn released.
+        if (123...126).contains(keyCode) { flags.remove(.function) }
+        return flags
+    }
+}
+
 final class PickerPanel: NSPanel {
     var onCommand: ((String) -> Bool)?
     var onShortcut: ((NSEvent) -> Bool)?
@@ -59,8 +68,8 @@ final class PickerPanel: NSPanel {
     override var canBecomeMain: Bool { false }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if onShortcut?(event) == true { return true }
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-           let key = event.charactersIgnoringModifiers, onCommand?(key) == true { return true }
+        if event.pickerModifiers == .command,
+           let key = event.charactersIgnoringModifiers?.lowercased(), onCommand?(key) == true { return true }
         return super.performKeyEquivalent(with: event)
     }
 }
@@ -70,6 +79,15 @@ final class PickerTable: NSTableView {
     var onAccept: (() -> Void)?
     var onCancel: (() -> Void)?
     var onType: ((NSEvent) -> Void)?
+    var onRowMenu: ((Int, NSEvent) -> Void)?
+    override func rightMouseDown(with event: NSEvent) {
+        let index = row(at: convert(event.locationInWindow, from: nil))
+        if index >= 0 { onRowMenu?(index, event) }
+    }
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control) { rightMouseDown(with: event) }
+        else { super.mouseDown(with: event) }
+    }
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 125: onNavigate?(1)
@@ -203,9 +221,15 @@ final class PickerCell: NSTableCellView {
         // Keep editable pane labels visible even when the terminal publishes a
         // conversation title; otherwise a successful rename appears to do nothing.
         let identity = item.kind == "pane" && !item.name.isEmpty ? item.name : item.title
-        let detail = item.combined ? item.detail : identity != item.title ? item.title : ""
-        if !detail.isEmpty && detail != identity {
-            let title = NSMutableAttributedString(string: identity, attributes: [.font: Self.titleFont, .paragraphStyle: Self.truncatedTitleStyle, .foregroundColor: item.contextOnly ? Palette.secondary : Palette.text])
+        let host = item.host.map { route in
+            let label = item.subtitle.isEmpty ? route : item.subtitle
+            return item.stale ? label + " (cached)" : label
+        }
+        let subtitle = host == nil ? item.subtitle : ""
+        let detail = host ?? (item.combined ? item.detail : identity != item.title ? item.title : "")
+        if !detail.isEmpty && (host != nil || detail != identity) {
+            let identityFont = item.kind == "session" ? Self.sessionFont : Self.titleFont
+            let title = NSMutableAttributedString(string: identity, attributes: [.font: identityFont, .paragraphStyle: Self.truncatedTitleStyle, .foregroundColor: item.contextOnly ? Palette.secondary : Palette.text])
             title.append(NSAttributedString(string: "  ·  " + detail, attributes: [.font: Self.titleFont, .paragraphStyle: Self.truncatedTitleStyle, .foregroundColor: Palette.secondary]))
             primary.attributedStringValue = title
         } else { primary.stringValue = identity }
@@ -219,8 +243,8 @@ final class PickerCell: NSTableCellView {
         if symbol.image !== image { symbol.image = image }
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
-        setAccessibilityLabel("\(identity)\(identity != item.title ? ", " + item.title : ""), \(item.kindLabel)\(item.combined ? ", single pane: " + item.detail : ""), level \(tree.depth + 1), \(item.subtitle), \(item.path)\(item.current ? ", current" : "")\(item.contextOnly ? ", parent context" : "")\(item.attention ? ", needs " + (item.agentState == "approve" ? "approval" : "input") : "")")
-        toolTip = [identity, item.title, item.detail, item.subtitle, item.path, item.agentState ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
+        setAccessibilityLabel("\(identity)\(identity != item.title ? ", " + item.title : ""), \(item.kindLabel)\(item.combined ? ", single pane: " + item.detail : "")\(host.map { ", host " + $0 } ?? ""), level \(tree.depth + 1), \(subtitle), \(item.path)\(item.current ? ", current" : "")\(item.contextOnly ? ", parent context" : "")\(item.attention ? ", needs " + (item.agentState == "approve" ? "approval" : "input") : "")")
+        toolTip = [identity, item.title, host ?? "", item.detail, subtitle, item.path, item.agentState ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
         needsLayout = true
         needsDisplay = true
         return true

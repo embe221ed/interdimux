@@ -1,14 +1,14 @@
 -- Coalesce native changes without polling the server while the picker is idle.
 local M = {}
 local structural = { session_view_changed = true, session_created = true,
-  session_destroyed = true, block_closed = true }
+  session_destroyed = true, session_moved = true, block_closed = true }
 local terminal = { ["terminal.process_changed"] = true, ["terminal.pwd_changed"] = true,
-  ["terminal.title_changed"] = true, ["terminal.progress_report"] = true,
+  ["terminal.title_changed"] = true,
   ["terminal.program_status_changed"] = true, ["terminal.program_status_removed"] = true,
   ["terminal.child_exited"] = true }
-M.events = { "session_view_changed", "session_created", "session_destroyed", "block_closed",
+M.events = { "session_view_changed", "session_created", "session_destroyed", "session_moved", "block_closed",
   "terminal.process_changed", "terminal.pwd_changed", "terminal.title_changed",
-  "terminal.progress_report", "terminal.program_status_changed", "terminal.program_status_removed",
+  "terminal.program_status_changed", "terminal.program_status_removed",
   "terminal.child_exited" }
 
 function M.new(rx, args, refresh)
@@ -28,7 +28,8 @@ function M.new(rx, args, refresh)
       if not session_id then return end
       if name == "session_view_changed" and type(event.revision) == "number"
           and event.revision <= (revisions[session_id] or -1) then return end
-      sessions[session_id] = true
+      -- An order change needs only the catalog already read for each batch.
+      if name ~= "session_moved" then sessions[session_id] = true end
     else
       if not block_id then return end
       blocks[block_id] = true

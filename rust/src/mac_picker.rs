@@ -1,8 +1,8 @@
 //! Experimental, UI-neutral JSON-lines service for the native macOS picker.
 //!
-//! Only open/refresh collect Rex state. Queries use one persistent, two-thread
-//! matcher and full metadata, independent of terminal rendering or fzf. Fixture
-//! mode is deliberately incapable of activating anything on a real server.
+//! Open/refresh collect the local workspace and start remote session discovery
+//! in the background. Queries use one persistent, two-thread matcher and cached
+//! metadata. Fixture mode cannot activate anything on a real server.
 //! A typed miss may request one bounded background zoxide inventory; queries
 //! only poll its channel and match cached paths, never wait on that process.
 
@@ -26,6 +26,8 @@ mod actions;
 mod dashboard;
 #[path = "mac_picker_directories.rs"]
 mod directories;
+#[path = "mac_picker_remote.rs"]
+mod remote;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum SearchField {
@@ -114,6 +116,7 @@ struct Candidate {
     // Keep the warm main-list recents independent of explicit project browsing.
     main_recent: bool,
     directory_visible: bool,
+    remote_session: Option<remote::RemoteSession>,
 }
 
 impl Candidate {
@@ -143,6 +146,9 @@ impl Candidate {
     }
 
     fn available_operations(&self) -> Vec<&'static str> {
+        if self.remote_session.is_some() {
+            return Vec::new();
+        }
         if self.kind == "directory" {
             return vec!["preview"];
         }
@@ -196,12 +202,18 @@ impl Candidate {
         } else {
             self.operations.as_slice()
         };
-        json!({"id":self.id,"kind":self.kind,"title":self.title,"name":self.name,
+        let mut value = json!({"id":self.id,"kind":self.kind,"title":self.title,"name":self.name,
             "subtitle":self.subtitle,"path":display_path(&self.path),"current":self.current,
             "parent_id":self.parent_id,"context_only":context_only,
             "pane_id":self.pane_id,"combined":self.combined,"detail":self.detail,
             "agent_state":self.agent_state,"agent_name":self.agent_name,"attention":self.attention(),
-            "actions":operations})
+            "actions":operations});
+        if let Some(session) = &self.remote_session {
+            value["host"] = json!(session.host);
+            value["session_id"] = json!(session.session_id);
+            value["stale"] = json!(session.stale);
+        }
+        value
     }
 }
 
@@ -325,6 +337,11 @@ struct Picker {
     fixture: Option<PathBuf>,
     defaults: RexContext,
     context: Option<RexContext>,
+    local_host_id: Option<String>,
+    local_app: Option<remote::LocalApp>,
+    remote_catalog: remote::RemoteCatalog,
+    remote_origin: Option<(String, String)>,
+    include_remote: bool,
     snapshot: Option<Snapshot>,
     lazy_projects: LazyProjects,
     projects_indexed: bool,
@@ -371,6 +388,11 @@ impl Picker {
             fixture,
             defaults,
             context: None,
+            local_host_id: None,
+            local_app: None,
+            remote_catalog: remote::RemoteCatalog::default(),
+            remote_origin: None,
+            include_remote: false,
             snapshot: None,
             lazy_projects: LazyProjects::default(),
             projects_indexed: false,
@@ -447,6 +469,9 @@ impl Picker {
         // app client, even if its old rows remain visible in the frontend.
         self.opened = false;
         self.context = None;
+        self.local_app = None;
+        self.remote_origin = None;
+        self.include_remote = self.fixture.is_none() && request["preview_only"] != true;
         self.snapshot = None;
         self.projects_indexed = false;
         self.preferred_session_id = None;
@@ -485,12 +510,27 @@ impl Picker {
                         *dest = value.as_str().ok_or("Context IDs must be strings")?.into();
                     }
                 }
+                if let Some(origin_server) = value["origin_server"].as_str().filter(|s| !s.is_empty()) {
+                    let session_id = value["origin_session_id"].as_str()
+                        .filter(|s| !s.is_empty()).ok_or("The remote origin requires a session ID")?;
+                    self.remote_origin = Some((origin_server.into(), session_id.into()));
+                    // Origin IDs from another host must never scope local controls.
+                    context.session_id.clear();
+                    context.window_id.clear();
+                    context.block_id.clear();
+                }
             }
             let collect_started = Instant::now();
-            let (clients, snapshot) = rex::collect_native(&context, DISCOVER_CLIENTS)?;
+            let (clients, snapshot, host_id) = rex::collect_native(&context, DISCOVER_CLIENTS)?;
             context.client_id = choose_client(&clients, &context.client_id)?;
             self.open_timing_ms["client_snapshot"] = json!(millis(collect_started));
+            self.local_app = clients["clients"].as_array().and_then(|clients| {
+                clients.iter().find(|client| client["client_id"] == context.client_id)
+            }).and_then(remote::LocalApp::from_client);
+            self.local_host_id = host_id;
+            self.refresh_remote_catalog();
             let mut rows = snapshot_rows_timed(&snapshot, &mut self.open_timing_ms);
+            rows.extend(self.remote_rows());
             let projects_started = Instant::now();
             let mut recent =
                 directories::candidates(crate::projects::cached_directories(&snapshot));
@@ -524,7 +564,9 @@ impl Picker {
             self.directories.fixture_catalog = catalog;
         } else {
             let snapshot = rex::collect(self.context.as_ref().ok_or("Open the picker first")?)?;
+            self.refresh_remote_catalog();
             let mut rows = snapshot_rows(&snapshot);
+            rows.extend(self.remote_rows());
             let old_inventory: HashSet<_> = self.lazy_projects.paths.as_ref()
                 .map(|paths| directories::candidates(crate::projects::cached_paths(&snapshot, paths))
                     .into_iter().map(|row| row.id).collect())
@@ -557,6 +599,38 @@ impl Picker {
             self.update_terminal_tools();
         }
         Ok(())
+    }
+
+    fn refresh_remote_catalog(&mut self) {
+        if self.include_remote {
+            self.remote_catalog.poll();
+            self.remote_catalog.refresh(self.local_host_id.clone());
+        }
+    }
+
+    fn remote_rows(&self) -> Vec<Candidate> {
+        if !self.include_remote {
+            return Vec::new();
+        }
+        let sessions: Vec<_> = self.remote_catalog.sessions().collect();
+        let current = remote_current(&sessions, self.remote_origin.as_ref());
+        sessions.into_iter()
+            .map(|session| remote_row(session, current == Some(session)))
+            .collect()
+    }
+
+    fn update_remote_sessions(&mut self) -> Result<bool, String> {
+        if !self.include_remote || !self.remote_catalog.poll() {
+            return Ok(false);
+        }
+        let mut rows: Vec<_> = self.rows.iter().filter(|row| row.remote_session.is_none())
+            .cloned().collect();
+        rows.extend(self.remote_rows());
+        self.replace(rows)?;
+        // The old no-match result may now match a remote session. Invalidate
+        // its create token before the frontend can send Enter or re-query.
+        self.pending_create = None;
+        Ok(true)
     }
 
     fn update_terminal_tools(&mut self) {
@@ -752,6 +826,18 @@ impl Picker {
             included[index] = true;
             remaining -= 1;
         }
+        if empty_query && self.scope == "all" && self.action_filter.is_empty()
+            && self.rows.iter().any(|row| row.remote_session.is_some())
+        {
+            // Leave room for session names even in a workspace with many panes.
+            for &index in self.hierarchy.roots.iter().filter(|&&index| {
+                self.rows[index].kind == "session" && ranks[index] != usize::MAX
+                    && Some(index) != preferred_session
+            }).take(remaining) {
+                included[index] = true;
+                remaining -= 1;
+            }
+        }
         let mut chain = Vec::with_capacity(3);
         for &index in order {
             if ranks[index] == usize::MAX {
@@ -840,7 +926,7 @@ impl Picker {
         }
         let mut dashboard = self.dashboard.clone();
         dashboard["terminal_tools_available"] = json!(self.terminal_tools_available);
-        Ok(json!({"id":id,"type":"results","rows":rows,"total":total,
+        let mut response = json!({"id":id,"type":"results","total":total,
             "matched":matched,"shown_matches":shown_matches,"preferred_id":preferred_id,
             "attention_count":self.attention_count,
             "query":self.query,"scope":self.scope,"search_field":self.search_field.label(),
@@ -848,9 +934,13 @@ impl Picker {
             "directories_base":self.directories.base,"directories_loaded":self.directories.loaded,
             "directories_deep":self.directories.deep,
             "projects_needed":projects_needed,"projects_loading":projects_loading,
+            "remote_pending":self.include_remote && self.remote_catalog.pending(),
             "can_create":self.pending_create.is_some(),"open_timing_ms":self.open_timing_ms,
-            "dashboard":dashboard,
-            "elapsed_ms":started.elapsed().as_secs_f64()*1000.0}))
+            "elapsed_ms":started.elapsed().as_secs_f64()*1000.0});
+        // Move the assembled row objects into the envelope without copying their fields.
+        response["rows"] = Value::Array(rows);
+        response["dashboard"] = dashboard;
+        Ok(response)
     }
 
     fn request(&mut self, request: &Value) -> Value {
@@ -897,6 +987,10 @@ impl Picker {
             self.pending_create = None;
         }
         match operation {
+            "remote_update" => {
+                let changed = self.update_remote_sessions()?;
+                Ok(json!({"id":id,"type":"remote_update","pending":self.include_remote && self.remote_catalog.pending(),"changed":changed}))
+            }
             "dashboard_action" => {
                 if self.fixture.is_some() {
                     return Err("Fixture mode never performs Rex dashboard actions".into());
@@ -1116,6 +1210,10 @@ impl Picker {
                 if self.fixture.is_some() {
                     return Err("Fixture mode never activates Rex targets".into());
                 }
+                if let Some(session) = &row.remote_session {
+                    remote::activate(session, self.local_app.as_ref())?;
+                    return Ok(json!({"id":id,"type":"activated"}));
+                }
                 if row.kind == "directory" {
                     actions::open_directory(
                         self.context.as_ref().ok_or("Open the picker first")?,
@@ -1301,6 +1399,41 @@ fn millis(started: Instant) -> f64 {
 
 fn snapshot_rows(snapshot: &Snapshot) -> Vec<Candidate> {
     snapshot_rows_timed(snapshot, &mut json!({}))
+}
+
+fn remote_current<'a>(
+    sessions: &[&'a remote::RemoteSession],
+    origin: Option<&(String, String)>,
+) -> Option<&'a remote::RemoteSession> {
+    let (host, id) = origin?;
+    let mut matches = sessions.iter().copied().filter(|session| &session.session_id == id);
+    matches.clone()
+        .find(|session| {
+            host.eq_ignore_ascii_case(&session.host) || host.eq_ignore_ascii_case(&session.host_id)
+        })
+        .or_else(|| {
+            // The Mac app can supply its own server key. A unique session ID
+            // still identifies the current row among the remote sessions.
+            let first = matches.next()?;
+            matches.next().is_none().then_some(first)
+        })
+}
+
+fn remote_row(session: &remote::RemoteSession, current: bool) -> Candidate {
+    let host = clean(&session.host);
+    let label = clean(&session.label);
+    Candidate {
+        id: format!("remote:{}:{}", session.host_id, session.session_id),
+        kind: "session".into(),
+        title: label.clone(),
+        name: label.clone(),
+        subtitle: host.clone(),
+        current,
+        search: format!("{label} {host}"),
+        name_search: label,
+        remote_session: Some(session.clone()),
+        ..Candidate::default()
+    }
 }
 
 fn previous_session(snapshot: &Snapshot) -> Option<String> {
@@ -1571,6 +1704,7 @@ fn read_fixture(path: &PathBuf) -> Result<Vec<Candidate>, String> {
             operations: Vec::new(),
             main_recent: kind == "directory" && value["recent"] != false,
             directory_visible: kind == "directory",
+            remote_session: None,
         });
     }
     Ok(rows)
@@ -1686,6 +1820,62 @@ mod tests {
             .iter()
             .map(|row| row["id"].as_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn remote_sessions_share_the_search_index_without_local_actions() {
+        let session = remote::RemoteSession {
+            host: "vps".into(),
+            host_id: "host:remote".into(),
+            session_id: "session:same".into(),
+            label: "dusty-sierra".into(),
+            stale: true,
+            tunnel: None,
+        };
+        let mut picker = Picker::new(None, empty_context());
+        picker.opened = true;
+        let mut rows = vec![Candidate {
+            id: session.session_id.clone(),
+            kind: "session".into(),
+            title: "local-project".into(),
+            search: "local-project".into(),
+            ..Candidate::default()
+        }];
+        rows.extend((0..MAX_ROWS).map(|i| Candidate {
+            id: format!("window:{i}"),
+            parent_id: Some(session.session_id.clone()),
+            kind: "window".into(),
+            ..Candidate::default()
+        }));
+        let origin = ("app-server-key".into(), session.session_id.clone());
+        let current = remote_current(&[&session], Some(&origin));
+        rows.push(remote_row(&session, current == Some(&session)));
+        let other_host = remote::RemoteSession {
+            host: "other-vps".into(),
+            host_id: "host:other".into(),
+            ..session.clone()
+        };
+        assert_eq!(remote_current(&[&session, &other_host], Some(&origin)), None);
+        let named_origin = ("VPS".into(), session.session_id.clone());
+        assert_eq!(remote_current(&[&session, &other_host], Some(&named_origin)), Some(&session));
+        picker.replace(rows).unwrap();
+
+        let all = query(&mut picker, "", "all");
+        let ids = result_ids(&all);
+        assert_eq!(ids.len(), MAX_ROWS);
+        assert!(ids.contains(&"session:same"));
+        assert!(ids.contains(&"remote:host:remote:session:same"));
+        assert_eq!(result_ids(&query(&mut picker, "", "session")),
+            ["session:same", "remote:host:remote:session:same"]);
+        let remote = query(&mut picker, "vps dusty", "all");
+        let row = &remote["rows"][0];
+        assert_eq!(row["title"], "dusty-sierra");
+        assert_eq!(row["host"], "vps");
+        assert_eq!(row["session_id"], "session:same");
+        assert_eq!(row["current"], true);
+        assert_eq!(row["stale"], true);
+        assert_eq!(row["actions"], json!([]));
+        assert_eq!(query(&mut picker, "vps", "window")["matched"], 0);
     }
 
     #[test]

@@ -17,7 +17,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="interdimux-theme-tests-") as directory:
         binary = Path(directory) / "theme-tests"
         sources = ["Backend.swift", "TreeLayout.swift", "PickerView.swift", "PickerPreviewView.swift",
-                   "DashboardModel.swift", "DashboardView.swift"]
+                   "DashboardModel.swift", "DashboardView.swift", "PickerNavigation.swift"]
         subprocess.run([
             "xcrun", "swiftc", *[str(root / "Sources" / source) for source in sources],
             str(root / "Tests/ThemeTests.swift"), "-framework", "AppKit", "-o", str(binary)

@@ -29,9 +29,10 @@ emit("terminal.process_changed", { block_id = "picker" })
 emit("terminal.title_changed", { block_id = "picker" })
 emit("terminal.clipboard_written", { block_id = "b1" })
 emit("block_event", { block_id = "b1" })
+for _ = 1, 100 do emit("terminal.progress_report", { block_id = "b1" }) end
 assert(#timers == 0 and #calls == 0, "stale revisions, picker changes, and raw output do not refresh")
 for _ = 1, 100 do emit("terminal.program_status_changed", { session_id = "s", block_id = "b1" }) end
-emit("terminal.progress_report", { session_id = "s", block_id = "b2" })
+emit("terminal.program_status_changed", { session_id = "s", block_id = "b2" })
 emit("session_view_changed", { session_id = "s", revision = 11 })
 assert(#timers == 1 and #calls == 0, "one hundred native changes schedule only one delayed collection")
 local pending_copy = watcher.pending()
@@ -59,6 +60,14 @@ emit("block_closed", { session_id = "s", block_id = "b4" })
 timers[#timers].callback()
 assert(calls[#calls].sessions.gone and calls[#calls].sessions.s)
 print("passed: manual refresh supersedes pending work and topology changes invalidate affected sessions")
+
+local before_moves = #timers
+for _ = 1, 10 do emit("session_moved", { session_id = "s", before_session_id = "t" }) end
+assert(#timers == before_moves + 1, "session reorder events must coalesce")
+timers[#timers].callback()
+assert(not next(calls[#calls].sessions) and not next(calls[#calls].blocks),
+  "only the catalog order changed, keep session layouts and terminal metadata")
+print("passed: reorder refreshes only the session catalog")
 
 fail = true
 emit("terminal.title_changed", { block_id = "retry" })

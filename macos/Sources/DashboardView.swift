@@ -170,7 +170,10 @@ final class DashboardView: NSView {
             button.tag = index
             button.target = self
             button.action = #selector(chooseButton(_:))
-            button.onHover = { [weak self] in self?.select(index) }
+            button.onHover = { [weak self] in
+                guard let self, self.buttons[index].isEnabled else { return }
+                self.select(index)
+            }
             buttons.append(button)
         }
         for name in DashboardCatalog.groups {
@@ -233,7 +236,14 @@ final class DashboardView: NSView {
     }
 
     func updateSummary(_ summary: DashboardSummary) {
+        guard self.summary != summary else { return }
         self.summary = summary
+        for button in buttons where button.descriptor.terminal {
+            button.isEnabled = summary.terminalToolsAvailable != false
+            button.alphaValue = button.isEnabled ? 1 : 0.55
+            button.detail = button.isEnabled ? button.descriptor.detail : "Requires a local Rex pane"
+        }
+        if !buttons[selectedIndex].isEnabled { resetSelection() }
         for (index, count) in [summary.sessions, summary.tabs, summary.panes, summary.attention].enumerated() {
             metrics[index].stringValue = count.map(String.init) ?? "—"
         }
@@ -256,12 +266,16 @@ final class DashboardView: NSView {
 
     func resetSelection() { select(0) }
     func moveSelection(_ delta: Int) {
-        let count = buttons.count
-        select(((selectedIndex + delta) % count + count) % count)
+        if let next = PickerNavigation.nextIndex(current: selectedIndex, count: buttons.count, direction: delta,
+                isSelectable: { self.buttons[$0].isEnabled }) { select(next) }
     }
     @discardableResult func chooseSelected() -> Bool { onChoose?(selectedActionID); return true }
     @discardableResult func choose(key: String) -> Bool {
         guard let index = DashboardCatalog.actions.firstIndex(where: { $0.key == key.lowercased() }) else { return false }
+        guard buttons[index].isEnabled else {
+            setStatus("Open the dashboard from a local Rex pane to use " + buttons[index].descriptor.title + ".")
+            return true
+        }
         select(index)
         return chooseSelected()
     }
@@ -277,7 +291,7 @@ final class DashboardView: NSView {
     @objc private func chooseButton(_ sender: NSButton) { select(sender.tag); chooseSelected() }
 
     override func keyDown(with event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
+        let modifiers = event.pickerModifiers
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if modifiers.contains(.command) || modifiers.contains(.option) { super.keyDown(with: event); return }
         if modifiers == .control && (key == "n" || key == "p") { moveSelection(key == "n" ? 1 : -1); return }

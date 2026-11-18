@@ -16,7 +16,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var dashboard: DashboardView?
     private var dashboardVisible = false
     private var dashboardOrigin = false
-    private var dashboardCounts: [String: Int] = [:]
+    private var dashboardSummary = DashboardSummary()
     private var targetRoute: DashboardRoute?
     private var deferredDashboardAction: DashboardRoute?
     private var dashboardRequest: Int?
@@ -29,6 +29,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var openingTotal = 0
     private var openingClientID: String?
     private var openingSessionID: String?
+    private var openingServer: String?
     private var openingRefresh = false
     private var openingRequest: Int?
     private var openingSelectionID: String?
@@ -52,6 +53,15 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     private var projectSearchWork: DispatchWorkItem?
     private var projectSearchGeneration: UInt64 = 0
     private var projectSearchVisible = false
+    private var remotePending = false
+    private var remotePollWork: DispatchWorkItem?
+    private var remotePollRequest: Int?
+    private var remoteResultsNeeded = false
+    private var remoteResultsRequest: Int?
+    private let remoteEmptyHint = "Checking remote hosts…"
+    private let noMatchingHint = "Try another query or choose All fields."
+    private let createHint = "↵ create session · keep typing to search"
+    private let remoteCreateHint = "↵ create session · checking remote hosts…"
     private var menuChoice: String?
     private var swapSource: PickerItem?
     private var loading = false
@@ -130,6 +140,12 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             self.panel.makeFirstResponder(self.content.search)
             self.content.search.currentEditor()?.keyDown(with: event)
         }
+        content.table.onRowMenu = { [weak self] row, event in
+            guard let self else { return }
+            self.showRowActions(row) { menu in
+                NSMenu.popUpContextMenu(menu, with: event, for: self.content.table)
+            }
+        }
         content.clear.target = self
         content.clear.action = #selector(clearSearch)
         content.actions.target = self
@@ -148,17 +164,26 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.directoryDeep.action = #selector(searchDeeper)
         for button in content.scopes { button.target = self; button.action = #selector(changeScope(_:)) }
         refreshTheme()
-        // Rex stores its appearance and selected themes in its own preferences.
-        // Refresh only while visible; reopening also checks before presentation.
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self, self.panel.isVisible else { return }
-            self.refreshTheme()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        themeTimer = timer
         appearanceObservation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
             DispatchQueue.main.async { self?.refreshTheme() }
         }
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        setThemePolling(panel.occlusionState.contains(.visible))
+    }
+
+    private func setThemePolling(_ visible: Bool) {
+        guard visible else {
+            themeTimer?.invalidate()
+            themeTimer = nil
+            return
+        }
+        guard themeTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.refreshTheme() }
+        timer.tolerance = 0.05
+        RunLoop.main.add(timer, forMode: .common)
+        themeTimer = timer
     }
 
     private func refreshTheme() {
@@ -200,7 +225,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
               ["open", "dashboard"].contains(url.host ?? "") else { return }
         let showDashboard = url.host == "dashboard"
         var supplied: [String: String] = [:]
-        for item in url.queryItems ?? [] where ["client_id", "session_id", "window_id", "block_id"].contains(item.name) {
+        for item in url.queryItems ?? [] where ["client_id", "session_id", "window_id", "block_id", "origin_server", "origin_session_id"].contains(item.name) {
             if let value = item.value, !value.isEmpty { supplied[item.name] = value }
         }
         if panel == nil {
@@ -216,6 +241,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     func open(context supplied: [String: String], dashboard showDashboard: Bool = false) {
         guard activation == nil, actionRequest == nil, dashboardRequest == nil, !presentingDialog else { return }
         cancelProjectSearch()
+        stopRemoteUpdates()
         projectSearchVisible = true
         refreshTheme()
         startedAt = ProcessInfo.processInfo.systemUptime
@@ -262,12 +288,15 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         for button in content.scopes { button.chosen = button.tag == 0 }
         // The catalog order does not depend on the origin or MRU. Reuse its
         // rows and tree immediately; only the preferred selection changes.
+        let originSessionID = supplied["origin_session_id"] ?? supplied["session_id"]
+        let originServer = supplied["origin_server"]?.lowercased()
         let reuseOpening = supplied["client_id"].map { !$0.isEmpty && $0 == openingClientID } == true
-            && supplied["session_id"].map { !$0.isEmpty } == true
+            && originSessionID.map { !$0.isEmpty } == true
+        let currentSessionRow = reuseOpening ? cachedSessionID(server: originServer, sessionID: originSessionID) : nil
         items = reuseOpening ? openingItems.map { item in
             var item = item
             switch item.kind {
-            case "session": item.current = item.id == supplied["session_id"]
+            case "session": item.current = item.id == currentSessionRow
             case "window": item.current = item.id == supplied["window_id"]
             case "pane": item.current = item.id == supplied["block_id"]
             default: break
@@ -280,7 +309,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         displayedSearch = nil
         if !showDashboard {
             updateTable()
-            let preferred = supplied["session_id"] != openingSessionID ? openingSessionID : openingPreferredID
+            let sameOrigin = originSessionID == openingSessionID && originServer == openingServer
+            let preferred = sameOrigin ? openingPreferredID : cachedSessionID(server: openingServer, sessionID: openingSessionID)
             let selected = items.firstIndex { $0.id == preferred && $0.kind == "session" && !$0.current && !$0.contextOnly }
                 ?? items.firstIndex { $0.id == openingPreferredID && $0.kind == "session" && !$0.current && !$0.contextOnly }
                 ?? items.firstIndex { $0.kind == "session" && !$0.current && !$0.contextOnly }
@@ -304,7 +334,9 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.status.textColor = Palette.secondary
         if showDashboard {
             let view = ensureDashboard()
-            view.updateSummary(DashboardSummary(counts: reuseOpening ? dashboardCounts : [:]))
+            var firstSummary = reuseOpening ? dashboardSummary : DashboardSummary()
+            firstSummary.terminalToolsAvailable = nil
+            view.updateSummary(firstSummary)
             view.resetSelection()
             view.setLoading(true)
             view.setStatus("Refreshing your workspace…")
@@ -319,6 +351,13 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             openingFrameMS = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
         }
         if let startupError { showError(startupError) }
+    }
+
+    private func cachedSessionID(server: String?, sessionID: String?) -> String? {
+        guard let sessionID else { return nil }
+        guard let server else { return sessionID }
+        let matches = openingItems.filter { $0.host != nil && $0.sessionID == sessionID }
+        return matches.first { $0.host?.lowercased() == server }?.id ?? (matches.count == 1 ? matches[0].id : nil)
     }
 
     private func focusSearch() {
@@ -380,6 +419,10 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         guard !loading, dashboardRequest == nil else { return }
         cancelProjectSearch()
         deferredDashboardAction = nil
+        if route != .nextAgent && dashboardSummary.terminalToolsAvailable == false {
+            dashboard?.setStatus("Open the dashboard from a local Rex pane to use " + route.title + ".")
+            return
+        }
         dashboard?.setLoading(true)
         dashboard?.setStatus(route == .nextAgent ? "Finding the next agent…" : "Opening \(route.title)…")
         dashboardRequest = backend.send("dashboard_action", fields: ["operation": route.rawValue])
@@ -400,7 +443,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         scope = "all"
         for button in content.scopes { button.chosen = button.tag == 0 }
         let view = ensureDashboard()
-        view.updateSummary(DashboardSummary(counts: dashboardCounts))
+        view.updateSummary(dashboardSummary)
         view.setLoading(loading)
         view.setStatus(loading ? "Refreshing your workspace…" : "Choose a tool or press its key")
         presentSurface()
@@ -412,6 +455,29 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let receivedAt = ProcessInfo.processInfo.systemUptime
         let id = (message["id"] as? NSNumber)?.intValue ?? -1
         let type = message["type"] as? String ?? ""
+        defer { updateRemoteSessions() }
+        if remotePollRequest == id {
+            remotePollRequest = nil
+            remotePending = type == "remote_update" && message["pending"] as? Bool == true
+            // A newer foreground request already runs against this catalog.
+            if type == "remote_update", message["changed"] as? Bool == true, id > pending {
+                remoteResultsNeeded = true
+            }
+            if !remotePending {
+                if content.emptyDetail.stringValue == remoteEmptyHint { content.emptyDetail.stringValue = noMatchingHint }
+                if content.status.stringValue == remoteCreateHint { content.status.stringValue = createHint }
+            }
+            return
+        }
+        let remoteReply = remoteResultsRequest == id
+        if remoteReply {
+            remoteResultsRequest = nil
+            guard type == "results", id > pending else { return }
+            guard canUpdateRemoteSessions else {
+                remoteResultsNeeded = true
+                return
+            }
+        }
         let route = PickerResponseRouting.route(id: id, actionRequest: actionRequest, activation: activation, pending: pending, dashboardRequest: dashboardRequest)
         if route == .dashboardAction {
             dashboardRequest = nil
@@ -445,9 +511,11 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             else { showError(message["message"] as? String ?? "Could not switch to that target.") }
             return
         }
-        guard route == .query else { return }
+        guard route == .query || remoteReply else { return }
         if type == "error" { showError(message["message"] as? String ?? "Unable to load Rex sessions."); return }
         guard type == "results" else { return }
+        if let pending = message["remote_pending"] as? Bool { remotePending = pending }
+        if !remoteReply { remoteResultsNeeded = false }
         let wasLoading = loading
         let wasOpening = openingRefresh
         let openingReply = openingRequest == id
@@ -464,8 +532,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let resultField = message["search_field"] as? String ?? "all"
         let resultAction = message["action_filter"] as? String ?? ""
         if let summary = message["dashboard"] as? [String: Any] {
-            dashboardCounts = summary.compactMapValues { ($0 as? NSNumber)?.intValue }
-            dashboard?.updateSummary(DashboardSummary(counts: dashboardCounts))
+            dashboardSummary = DashboardSummary(counts: summary.compactMapValues { ($0 as? NSNumber)?.intValue })
+            dashboard?.updateSummary(dashboardSummary)
         }
         directoriesLoaded = message["directories_loaded"] as? Bool ?? directoriesLoaded
         directoryBase = message["directories_base"] as? String
@@ -476,9 +544,11 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         let previous = content.table.selectedRow >= 0 && content.table.selectedRow < items.count ? items[content.table.selectedRow].id : nil
         let preserveOpening = openingReply && openingFrameHadRows && !dashboardVisible
             && resultQuery.isEmpty && resultScope == "all" && resultField == "all" && resultAction.isEmpty
-        let openingViewport = content.scroll.contentView.bounds.origin
+        let preserveOrder = preserveOpening || (remoteReply && resultQuery.isEmpty)
+        let previousViewport = content.scroll.contentView.bounds.origin
         let fresh = (message["rows"] as? [[String: Any]] ?? []).compactMap(PickerItem.init)
-        let updated = preserveOpening ? PickerTreeLayout.preservingOrder(of: items, in: fresh) : fresh
+        let updated = preserveOrder ? PickerTreeLayout.preservingOrder(of: items, in: fresh) : fresh
+        let preserveViewport = preserveOpening || (remoteReply && updated.contains { $0.id == previous && !$0.contextOnly })
         if updated != items {
             let structureChanged = updated.count != items.count || zip(updated, items).contains {
                 $0.id != $1.id || $0.parentID != $1.parentID
@@ -487,7 +557,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             if structureChanged { tree = PickerTreeLayout.positions(for: items) }
             if !dashboardVisible { updateTable() }
         }
-        displayedRequest = id
+        if !remoteReply { displayedRequest = id }
         let search = PickerSearchIdentity(query: resultQuery, scope: resultScope, field: resultField, actionFilter: resultAction,
             directoryBase: scope == "directory" ? directoryBase : nil, directoryDeep: scope == "directory" && directoryDeep)
         if !dashboardVisible {
@@ -496,12 +566,12 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
                 if content.table.selectedRow != selected {
                     content.table.selectRowIndexes(IndexSet(integer: selected), byExtendingSelection: false)
                 }
-                if !preserveOpening { content.table.scrollRowToVisible(selected) }
+                if !preserveViewport { content.table.scrollRowToVisible(selected) }
             } else { content.table.deselectAll(nil) }
-            if preserveOpening {
+            if preserveViewport {
                 let clip = content.scroll.contentView
                 var bounds = clip.bounds
-                bounds.origin = openingViewport
+                bounds.origin = previousViewport
                 let origin = clip.constrainBoundsRect(bounds).origin
                 if clip.bounds.origin != origin {
                     clip.scroll(to: origin)
@@ -520,7 +590,8 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             openingPreferredID = message["preferred_id"] as? String
             openingTotal = matched
             openingClientID = context["client_id"]
-            openingSessionID = context["session_id"]
+            openingSessionID = context["origin_session_id"] ?? context["session_id"]
+            openingServer = context["origin_server"]?.lowercased()
         }
         content.scopes[4].title = "Attention \(attention)"
         content.scopes[4].setAccessibilityLabel("Attention, \(attention) agents, Command 5")
@@ -529,9 +600,10 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         content.status.stringValue = matched > shown ? "Top \(shown) matches · keep typing to narrow" : "\(matched == 1 ? "1 place" : "\(matched) places") · ⌘R refresh"
         content.status.textColor = Palette.secondary
         if scope == "directory" { content.status.stringValue = "↵ open session · ⌘→ browse folder · ⌃F search deeper" }
+        let checkingRemote = remotePending && (scope == "all" || scope == "session") && resultAction.isEmpty && swapSource == nil
         if items.contains(where: { $0.kind == "create" }) {
             content.count.stringValue = "New session"
-            content.status.stringValue = "↵ create session · keep typing to search"
+            content.status.stringValue = checkingRemote ? remoteCreateHint : createHint
         }
         if let source = swapSource {
             content.status.stringValue = "Swap \(source.title) → choose destination · esc cancels"
@@ -545,7 +617,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         }
         content.empty.isHidden = !items.isEmpty
         content.emptyTitle.stringValue = scope == "attention" && attention == 0 ? "No agents need attention" : "No matching places"
-        content.emptyDetail.stringValue = scope == "attention" ? "Only agents waiting for your approval or input appear here. ⌘R refreshes their status." : scope == "directory" ? "Try Search deeper, browse another folder, or open a folder with ⌘O." : "Try another query or choose All fields."
+        content.emptyDetail.stringValue = scope == "attention" ? "Only agents waiting for your approval or input appear here. ⌘R refreshes their status." : scope == "directory" ? "Try Search deeper, browse another folder, or open a folder with ⌘O." : checkingRemote ? remoteEmptyHint : noMatchingHint
         let preparedAt = ProcessInfo.processInfo.systemUptime
         // This measures through native layout/display submission, not physical
         // monitor presentation. Never report it as GPU or end-to-end latency.
@@ -559,7 +631,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
            openingSelection == nil || items.contains(where: { $0.id == openingSelection && !$0.contextOnly }) {
             accept()
         }
-        scheduleProjectSearch(message, search: search, requestID: id)
+        scheduleProjectSearch(message, search: search, requestID: displayedRequest)
         if wasLoading {
             let elapsed = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
             FileHandle.standardError.write(Data(String(format: "picker snapshot + native update: %.2f ms\n", elapsed).utf8))
@@ -593,7 +665,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             }
         }
         if let action = deferredDashboardAction, dashboardVisible { runDashboardAction(action) }
-        if benchmarkOutput != nil {
+        if benchmarkOutput != nil && !remoteReply {
             if benchmarking {
                 benchmarkSamples.append((displayedAt - requestedAt) * 1000)
                 benchmarkStages.append(["transport_and_match_ms": (receivedAt - requestedAt) * 1000,
@@ -605,6 +677,45 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             benchmarking = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.nextBenchmarkQuery() }
         }
+    }
+
+    private var canUpdateRemoteSessions: Bool {
+        // Only poll while the ordinary result is actionable. The remote round
+        // has its own request IDs and leaves local Enter/navigation available.
+        projectSearchVisible && !dashboardVisible && !loading && backend.isRunning
+            && activation == nil && actionRequest == nil && dashboardRequest == nil && !presentingDialog
+            && swapSource == nil && targetRoute?.operation == nil
+            && (scope == "all" || scope == "session")
+            && pending == displayedRequest && displayedSearch == activeSearch
+            && (content.search.currentEditor() as? NSTextView)?.hasMarkedText() != true
+    }
+
+    private func updateRemoteSessions() {
+        guard remotePending || remoteResultsNeeded,
+              remotePollRequest == nil, remoteResultsRequest == nil, canUpdateRemoteSessions else { return }
+        if remoteResultsNeeded {
+            remoteResultsNeeded = false
+            remoteResultsRequest = backend.send("query", fields: searchParameters)
+            return
+        }
+        guard remotePending, remotePollWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.remotePollWork = nil
+            guard self.canUpdateRemoteSessions, self.remotePending else { return }
+            self.remotePollRequest = self.backend.send("remote_update")
+        }
+        remotePollWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+    }
+
+    private func stopRemoteUpdates() {
+        remotePollWork?.cancel()
+        remotePollWork = nil
+        remotePollRequest = nil
+        remoteResultsRequest = nil
+        remotePending = false
+        remoteResultsNeeded = false
     }
 
     private func cancelProjectSearch() {
@@ -674,12 +785,9 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         cancelProjectSearch()
         acceptOpeningWhenReady = false
         openingSelectionID = nil
-        let search = PickerSearchIdentity(query: content.search.stringValue, scope: scope, field: searchField,
-            actionFilter: targetRoute?.operation ?? "", directoryBase: scope == "directory" ? directoryBase : nil,
-            directoryDeep: scope == "directory" && directoryDeep)
         // Reset at dispatch, not only at receipt: A → B → A while requests
         // are pending must still choose the best result for the edited query.
-        if displayedSearch != search { displayedSearch = nil }
+        if displayedSearch != activeSearch { displayedSearch = nil }
         guard !loading, activation == nil, actionRequest == nil, dashboardRequest == nil else { return }
         // Results can arrive while AppKit tracks a menu or sheet. Remember a
         // corrective query instead of leaving old rows permanently unselectable.
@@ -689,8 +797,18 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         previewGate.select(nil, at: ProcessInfo.processInfo.systemUptime)
         previewWork?.cancel()
         requestedAt = ProcessInfo.processInfo.systemUptime
-        pending = backend.send("query", fields: ["query": content.search.stringValue, "scope": scope, "search_field": searchField,
-            "action_filter": targetRoute?.operation ?? "", "allow_create": swapSource == nil && targetRoute?.operation == nil])
+        pending = backend.send("query", fields: searchParameters)
+    }
+
+    private var activeSearch: PickerSearchIdentity {
+        PickerSearchIdentity(query: content.search.stringValue, scope: scope, field: searchField,
+            actionFilter: targetRoute?.operation ?? "", directoryBase: scope == "directory" ? directoryBase : nil,
+            directoryDeep: scope == "directory" && directoryDeep)
+    }
+
+    private var searchParameters: [String: Any] {
+        ["query": content.search.stringValue, "scope": scope, "search_field": searchField,
+         "action_filter": targetRoute?.operation ?? "", "allow_create": swapSource == nil && targetRoute?.operation == nil]
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -821,7 +939,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if dashboardVisible { return false }
         guard !presentingDialog,
               (content.search.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return false }
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
+        let modifiers = event.pickerModifiers
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         if modifiers == [.command, .shift], key == "n" { performAction("create-session"); return true }
         if modifiers == .command, event.keyCode == 51 { performAction("close"); return true }
@@ -847,6 +965,20 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     }
 
     @objc func showActions() {
+        trackActionsMenu { menu in
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: content.actions.bounds.height), in: content.actions)
+        }
+    }
+
+    private func showRowActions(_ row: Int, track: (NSMenu) -> Void) {
+        guard !loading, !presentingDialog, actionRequest == nil, activation == nil, dashboardRequest == nil,
+              displayedRequest == pending, displayedSearch == activeSearch,
+              items.indices.contains(row), !items[row].contextOnly else { return }
+        content.table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        trackActionsMenu(track)
+    }
+
+    private func trackActionsMenu(_ track: (NSMenu) -> Void) {
         guard !presentingDialog, actionRequest == nil, activation == nil else { return }
         if projectSearchWork != nil { queryDeferred = true }
         cancelProjectSearch()
@@ -892,16 +1024,22 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         }
         presentingDialog = true
         menuChoice = nil
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: content.actions.bounds.height), in: content.actions)
+        track(menu)
         presentingDialog = false
-        if let choice = menuChoice { performAction(choice) }
+        if let choice = menuChoice {
+            // AppKit tracks menus in a nested run loop. A delayed result may
+            // have removed or replaced this target while the menu was open.
+            if selected?.id == selectedItem?.id { performAction(choice) }
+        }
         else if !panel.isKeyWindow {
             projectSearchVisible = false
             cancelProjectSearch()
+            stopRemoteUpdates()
             stopPreview(); panel.orderOut(nil)
         }
         else { updatePreviewSelection() }
         if queryDeferred && panel.isVisible { query() }
+        updateRemoteSessions()
     }
 
     @objc func chooseAction(_ sender: NSMenuItem) { menuChoice = sender.representedObject as? String }
@@ -999,6 +1137,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         panel.makeFirstResponder(content.search)
         if queryDeferred { query() }
         else { updatePreviewSelection() }
+        updateRemoteSessions()
     }
 
     func setActionBusy(_ busy: Bool) {
@@ -1070,6 +1209,9 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         guard !items[row].contextOnly else { return }
         // Never activate the previous query's selection while a result is pending.
         guard pending == displayedRequest else { return }
+        // A background result can replace the one-use create token even when
+        // the query text stays the same. Real targets keep their stable IDs.
+        guard items[row].kind != "create" || remoteResultsRequest == nil else { return }
         cancelProjectSearch()
         if let source = swapSource {
             let destination = items[row]
@@ -1122,7 +1264,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if selected.kind == "directory" || !selected.actions.contains("preview") {
             previewGate.select(nil, at: ProcessInfo.processInfo.systemUptime)
             previewWork?.cancel()
-            content.showPreview(title: selected.title, detail: selected.kindLabel,
+            content.showPreview(title: selected.title, detail: selected.host == nil ? selected.kindLabel : selected.subtitle,
                 text: [selected.path, selected.detail, selected.subtitle,
                        selected.kind == "directory" ? "Return opens this project’s session.\n⌘→ browses its folders." : selected.kind == "create" ? "Return creates this session using the current search." : "No terminal preview is available for this item."].filter { !$0.isEmpty }.joined(separator: "\n\n"))
             return
@@ -1136,7 +1278,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
             content.showPreview(title: selected.title, detail: selected.path, text: "", loading: true)
             do {
                 try previewBackend.start()
-                previewOpening = previewBackend.send("open", fields: ["context": context])
+                previewOpening = previewBackend.send("open", fields: ["context": context, "preview_only": true])
             } catch { previewFailure(error.localizedDescription) }
         }
         schedulePreview()
@@ -1233,6 +1375,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if returnToDashboard && dashboardOrigin { self.returnToDashboard(); return }
         projectSearchVisible = false
         cancelProjectSearch()
+        stopRemoteUpdates()
         acceptOpeningWhenReady = false
         openingRefresh = false
         openingSelectionID = nil
@@ -1265,6 +1408,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
         if !benchmarking && openBenchmarkOutput == nil && activation == nil && actionRequest == nil && dashboardRequest == nil && !presentingDialog {
             projectSearchVisible = false
             cancelProjectSearch()
+            stopRemoteUpdates()
             acceptOpeningWhenReady = false
             openingRefresh = false
             openingSelectionID = nil
@@ -1304,6 +1448,7 @@ final class PickerApplication: NSObject, NSApplicationDelegate, NSTableViewDataS
     func applicationWillTerminate(_ notification: Notification) {
         projectSearchVisible = false
         cancelProjectSearch()
+        stopRemoteUpdates()
         themeTimer?.invalidate()
         appearanceObservation = nil
         stopPreview()

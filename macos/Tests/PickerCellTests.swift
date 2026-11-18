@@ -95,6 +95,12 @@ struct PickerCellTests {
         let create = PickerItem(["id": "create:project", "kind": "create", "title": "Create session ‘project’", "path": "/workspace/project"])!
         cell.configure(create, tree: tree, separatesGroup: false)
         try check(cell.symbol.image != nil && cell.kind.stringValue == "CREATE", "Create-session row must have a visible plus icon and caption")
+        let remote = PickerItem(["id": "remote:devbox:project", "kind": "session", "title": "project",
+                                 "host": "devbox", "session_id": "session:project", "stale": true])!
+        cell.configure(remote, tree: tree, separatesGroup: false)
+        try check(cell.primary.stringValue == "project  ·  devbox (cached)" && cell.kind.stringValue == "SESSION"
+                  && cell.accessibilityLabel()?.contains("host devbox (cached)") == true,
+                  "A remote session must identify its host and whether its listing came from cache")
         try countTransitions()
         print("Picker cell checks passed: unchanged reuse, title/path/status freshness, tree branches, resize")
     }

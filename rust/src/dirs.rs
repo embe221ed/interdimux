@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Output, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 fn recent_file() -> String {
@@ -97,42 +97,56 @@ fn zoxide_query(all: bool) -> Command {
 const ZOXIDE_TIMEOUT: Duration = Duration::from_millis(250);
 const ZOXIDE_OUTPUT_LIMIT: usize = 1_048_576;
 
-pub(crate) struct Zoxide {
+pub(crate) type Zoxide = BoundedCommand;
+
+pub(crate) struct BoundedCommand {
     child: Child,
     stdout: ChildStdout,
+    stderr: Option<ChildStderr>,
     deadline: Instant,
     limit: usize,
     finished: bool,
 }
 
-impl Zoxide {
-    fn start(mut command: Command, deadline: Instant, limit: usize) -> Option<Self> {
+impl BoundedCommand {
+    fn start(command: Command, deadline: Instant, limit: usize) -> Option<Self> {
+        Self::start_with_stderr(command, deadline, limit, false).ok()
+    }
+
+    fn start_with_stderr(
+        mut command: Command,
+        deadline: Instant,
+        limit: usize,
+        capture_stderr: bool,
+    ) -> io::Result<Self> {
         if Instant::now() >= deadline {
-            return None;
+            return Err(command_timed_out());
         }
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(if capture_stderr { Stdio::piped() } else { Stdio::null() });
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.spawn().ok()?;
-        let stdout = child.stdout.take()?;
-        let mut result = Self {
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().expect("child stdout is piped");
+        let stderr = child.stderr.take();
+        let result = Self {
             child,
             stdout,
+            stderr,
             deadline,
             limit,
             finished: false,
         };
-        if nonblocking(&result.stdout).is_err() {
-            result.stop();
-            return None;
+        nonblocking(&result.stdout)?;
+        if let Some(stderr) = &result.stderr {
+            nonblocking(stderr)?;
         }
-        Some(result)
+        Ok(result)
     }
 
     fn stop(&mut self) {
@@ -155,61 +169,90 @@ impl Zoxide {
         self.finished = true;
     }
 
-    fn output(mut self) -> Option<Output> {
-        let mut bytes = Vec::new();
+    fn output(self) -> Option<Output> {
+        self.output_until(|| false).ok()
+    }
+
+    fn output_until(mut self, cancelled: impl Fn() -> bool) -> io::Result<Output> {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
         let mut status = None;
-        let mut eof = false;
-        let mut chunk = [0; 8192];
+        let mut stdout_eof = false;
+        let mut stderr_eof = self.stderr.is_none();
         loop {
-            loop {
-                if Instant::now() >= self.deadline {
-                    return None;
-                }
-                match self.stdout.read(&mut chunk) {
-                    Ok(0) => {
-                        eof = true;
-                        break;
-                    }
-                    Ok(n) => {
-                        if n > self.limit.saturating_sub(bytes.len()) {
-                            return None;
-                        }
-                        bytes.extend_from_slice(&chunk[..n]);
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(_) => return None,
-                }
-            }
-            if status.is_none() {
-                status = self.child.try_wait().ok()?;
-            }
-            if let Some(status) = status.filter(|_| eof) {
-                self.finished = true;
-                return Some(Output {
-                    status,
-                    stdout: bytes,
-                    stderr: Vec::new(),
-                });
+            if cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "command cancelled"));
             }
             let remaining = self.deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return None;
+                return Err(command_timed_out());
             }
-            std::thread::sleep(remaining.min(Duration::from_millis(5)));
+            let mut progress = false;
+            if !stdout_eof {
+                progress |= read_command_pipe(&mut self.stdout, &mut stdout, &mut stdout_eof, self.limit)?;
+            }
+            if let Some(pipe) = self.stderr.as_mut().filter(|_| !stderr_eof) {
+                progress |= read_command_pipe(pipe, &mut stderr, &mut stderr_eof, self.limit)?;
+            }
+            if status.is_none() {
+                status = self.child.try_wait()?;
+            }
+            if let Some(status) = status.filter(|_| stdout_eof && stderr_eof) {
+                self.finished = true;
+                return Ok(Output { status, stdout, stderr });
+            }
+            if !progress {
+                std::thread::sleep(remaining.min(Duration::from_millis(5)));
+            }
         }
     }
 }
 
-impl Drop for Zoxide {
+fn command_timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "command timed out")
+}
+
+fn read_command_pipe(
+    pipe: &mut impl Read,
+    output: &mut Vec<u8>,
+    eof: &mut bool,
+    limit: usize,
+) -> io::Result<bool> {
+    let mut chunk = [0; 8192];
+    match pipe.read(&mut chunk) {
+        Ok(0) => *eof = true,
+        Ok(n) => {
+            if n > limit.saturating_sub(output.len()) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "command output exceeded its limit"));
+            }
+            output.extend_from_slice(&chunk[..n]);
+            return Ok(true);
+        }
+        Err(error) if matches!(error.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => {}
+        Err(error) => return Err(error),
+    }
+    Ok(false)
+}
+
+#[cfg(feature = "macos-picker")]
+pub(crate) fn bounded_command_output(
+    command: Command,
+    timeout: Duration,
+    limit: usize,
+    cancelled: impl Fn() -> bool,
+) -> io::Result<Output> {
+    BoundedCommand::start_with_stderr(command, Instant::now() + timeout, limit, true)?
+        .output_until(cancelled)
+}
+
+impl Drop for BoundedCommand {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
 #[cfg(unix)]
-fn nonblocking(stdout: &ChildStdout) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
+fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
     extern "C" {
         fn fcntl(fd: i32, command: i32, ...) -> i32;
     }
@@ -217,7 +260,7 @@ fn nonblocking(stdout: &ChildStdout) -> io::Result<()> {
     const NONBLOCK: i32 = 0x800;
     #[cfg(not(target_os = "linux"))]
     const NONBLOCK: i32 = 0x4;
-    let fd = stdout.as_raw_fd();
+    let fd = pipe.as_raw_fd();
     let flags = unsafe { fcntl(fd, 3) };
     if flags < 0 || unsafe { fcntl(fd, 4, flags | NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
@@ -226,8 +269,8 @@ fn nonblocking(stdout: &ChildStdout) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn nonblocking(_: &ChildStdout) -> io::Result<()> {
-    // zoxide is optional. Do not use an unbounded pipe on an unsupported host.
+fn nonblocking<T>(_: &T) -> io::Result<()> {
+    // Do not use an unbounded pipe on an unsupported host.
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "nonblocking pipe unavailable",

@@ -66,6 +66,17 @@ struct DashboardTests {
             view.keyDown(with: event)
         }
         view.resetSelection()
+        // Quartz supplies .numericPad and .function on real arrow events.
+        func hardwareKey(_ code: CGKeyCode) {
+            let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!
+            view.keyDown(with: NSEvent(cgEvent: event)!)
+        }
+        hardwareKey(125)
+        try check(view.selectedActionID == "attention", "Hardware Down must select the next dashboard card")
+        hardwareKey(76)
+        try check(choices.last == "attention", "Keypad Enter must open the selected dashboard card")
+        hardwareKey(126)
+        try check(view.selectedActionID == "switch", "Hardware Up must select the previous dashboard card")
         key("n", code: 45, modifiers: .control)
         try check(view.selectedActionID == "attention", "Control-N must navigate without opening New session")
         key("\r", code: 36)
@@ -75,6 +86,17 @@ struct DashboardTests {
         key("q", code: 12)
         key("\u{1b}", code: 53)
         try check(cancelled == 2, "Escape and q should dismiss")
+        let beforeUnavailable = choices.count
+        view.updateSummary(DashboardSummary(counts: ["terminal_tools_available": 0]))
+        for key in ["a", "o", "h"] {
+            try check(view.choose(key: key) && choices.count == beforeUnavailable,
+                      "Unavailable terminal key dispatched an action")
+        }
+        view.resetSelection()
+        view.moveSelection(-1)
+        try check(view.selectedActionID == "send", "Navigation must skip unavailable terminal handoffs")
+        view.updateSummary(DashboardSummary(counts: ["terminal_tools_available": 1]))
+        try check(view.choose(key: "h") && choices.last == "health", "A local origin must restore terminal tools")
         let compactLayout = DashboardGeometry.groups(width: 680, rowHeight: 35)
         try check(compactLayout.height <= 560 - 154 - 51, "All dashboard tools must fit the compact two-column panel")
 

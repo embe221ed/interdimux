@@ -27,6 +27,9 @@ struct PickerItem: Equatable {
     let name: String
     let subtitle: String
     let path: String
+    let host: String?
+    let sessionID: String?
+    let stale: Bool
     var current: Bool
     let parentID: String?
     let contextOnly: Bool
@@ -47,6 +50,9 @@ struct PickerItem: Equatable {
         name = value["name"] as? String ?? title
         subtitle = value["subtitle"] as? String ?? ""
         path = value["path"] as? String ?? ""
+        host = value["host"] as? String
+        sessionID = value["session_id"] as? String
+        stale = value["stale"] as? Bool ?? false
         current = value["current"] as? Bool ?? false
         parentID = value["parent_id"] as? String
         contextOnly = value["context_only"] as? Bool ?? false

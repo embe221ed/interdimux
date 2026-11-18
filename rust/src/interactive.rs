@@ -681,8 +681,15 @@ impl<A: Adapter> Runtime<'_, A> {
                 if data["deferred"].as_bool() == Some(true) {
                     self.final_done.store(true, Ordering::Release);
                 } else {
-                    self.cached()?;
-                    self.message = format!("{} completed", op);
+                    self.preview_cache.clear();
+                    let refresh_error = match data["refresh_error"].as_str() {
+                        Some(error) => Some(error.to_owned()),
+                        None => self.cached().err(),
+                    };
+                    self.message = match refresh_error {
+                        Some(error) => format!("{op} completed. Ctrl+r to reload the list ({error})"),
+                        None => format!("{op} completed"),
+                    };
                 }
                 Ok(data)
             }
@@ -2248,7 +2255,7 @@ mod tests {
         );
         snapshot
     }
-    fn runtime(adapter: &Fake, mode: Mode) -> Runtime<'_, Fake> {
+    fn runtime<A: Adapter>(adapter: &A, mode: Mode) -> Runtime<'_, A> {
         let snapshot = fixture();
         let rows =
             crate::navigator::rows(&snapshot, 117, mode, &["approve".into(), "input".into()]);
@@ -2436,6 +2443,59 @@ mod tests {
                     assert!(footer.contains("reload"), "{footer}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn committed_actions_survive_hosted_and_local_refresh_errors() {
+        struct Committed {
+            hosted: bool,
+            calls: AtomicU64,
+        }
+        impl Adapter for Committed {
+            fn cached(&self) -> Result<Snapshot, String> {
+                Err("cache unavailable".into())
+            }
+            fn refresh(&self) -> Result<Snapshot, String> {
+                Ok(fixture())
+            }
+            fn activate(&self, _: &Target) -> Result<(), String> {
+                unreachable!()
+            }
+            fn backend_name(&self) -> &'static str {
+                "rex"
+            }
+            fn action(&self, op: &str, _: Option<&Target>, _: &Value) -> Result<Value, String> {
+                assert_eq!(op, "create");
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let mut result = json!({"target":{"session_id":"created"}});
+                if self.hosted {
+                    result["refresh_error"] = json!("publication failed");
+                }
+                Ok(result)
+            }
+        }
+        for hosted in [true, false] {
+            let adapter = Committed {
+                hosted,
+                calls: AtomicU64::new(0),
+            };
+            let mut r = runtime(&adapter, Mode::Switch);
+            let result = r
+                .handle(&json!({"event":"action","operation":"create"}))
+                .unwrap();
+            assert_eq!(result["target"]["session_id"], "created");
+            assert!(r.message.contains("create completed. Ctrl+r"));
+            let expected = if hosted {
+                "publication failed"
+            } else {
+                "cache unavailable"
+            };
+            assert!(r.message.contains(expected));
+            r.handle(&json!({"event":"action","operation":"refresh"}))
+                .unwrap();
+            assert_eq!(r.message, "List refreshed");
+            assert_eq!(adapter.calls.load(Ordering::Relaxed), 1);
         }
     }
 

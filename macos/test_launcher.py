@@ -27,13 +27,19 @@ class LauncherTests(unittest.TestCase):
         self.macos = Path(self.temp.name) / "macos"
         self.macos.mkdir()
 
-    def launch(self, args=(), clients=None, env=None, platform="darwin"):
+    def launch(self, args=(), clients=None, env=None, platform="darwin", endpoint="unix:///default.sock"):
         output, errors = io.StringIO(), io.StringIO()
+        def reply(command, **_):
+            if command[-2:] == ["whoami", "--json"]:
+                return json.dumps({"endpoint": endpoint, "session_id": "session:mine",
+                                   "block_id": "block:mine", "window_id": "window:mine"})
+            return json.dumps({"clients": clients if clients is not None else [app()]})
+
         with patch.object(sys, "argv", ["open.sh", str(self.macos), *args]), \
                 patch.object(sys, "platform", platform), \
                 patch.dict(os.environ, env or {}, clear=True), \
                 patch("shutil.which", return_value="/fake/rex"), \
-                patch("subprocess.check_output", return_value=json.dumps({"clients": clients if clients is not None else [app()]})) as query, \
+                patch("subprocess.check_output", side_effect=reply) as query, \
                 patch("subprocess.run") as run, \
                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             status = 0
@@ -137,6 +143,25 @@ class LauncherTests(unittest.TestCase):
             status, _, _, queries, calls = self.launch(**kwargs)
             self.assertEqual(status, 2)
             self.assertFalse(queries or calls)
+
+    def test_local_rex_terminal_inherits_default_socket_and_pane(self):
+        endpoint = "unix:///Users/test/Library/Application%20Support/rex/server.sock"
+        status, out, _, queries, calls = self.launch(["--print-url"], env={
+            "REX_SERVER": endpoint, "REX_SESSION": "session:mine", "REX_BLOCK": "block:mine"
+        }, endpoint=endpoint)
+        self.assertEqual(status, 0)
+        self.assertEqual(parse_qs(urlsplit(out.strip()).query)["window_id"], ["window:mine"])
+        self.assertEqual(len(queries), 2)
+        self.assertNotIn("REX_SERVER", queries[0].kwargs["env"])
+        self.assertFalse(calls)
+
+    def test_other_unix_socket_fails_after_local_only_lookup(self):
+        status, _, error, queries, calls = self.launch(["--dashboard"], env={"REX_SERVER": "unix:///other.sock"})
+        self.assertEqual(status, 2)
+        self.assertIn("default Rex server", error)
+        self.assertEqual(len(queries), 1)
+        self.assertNotIn("REX_SERVER", queries[0].kwargs["env"])
+        self.assertFalse(calls)
 
     def test_changed_vendored_matcher_requires_rebuild(self):
         bundle = self.built()

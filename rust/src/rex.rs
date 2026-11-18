@@ -47,7 +47,7 @@ pub(crate) fn collect(context: &RexContext) -> Result<Snapshot, String> {
 pub(crate) fn collect_native(
     context: &RexContext,
     discovery: &str,
-) -> Result<(Value, Snapshot), String> {
+) -> Result<(Value, Snapshot, Option<String>), String> {
     let source = format!(
         "local clients=(function()\n{discovery}\nend)()\n\
          local snapshot=(function()\n{SNAPSHOT_SCRIPT}\nend)()\n\
@@ -57,11 +57,10 @@ pub(crate) fn collect_native(
     let output = run_script(context, &source, None, &json!({}))?;
     let mut result: Value = serde_json::from_slice(&output)
         .map_err(|error| format!("Cannot decode Rex collection: {error}"))?;
-    let bytes = serde_json::to_vec(&result["snapshot"])
-        .map_err(|error| format!("Cannot decode Rex snapshot: {error}"))?;
-    let mut snapshot = parse_snapshot(&bytes, context)?;
+    let mut snapshot = normalize_snapshot(&result["snapshot"], context)?;
     crate::native_config::merge_registry(&mut snapshot);
-    Ok((result["clients"].take(), snapshot))
+    let host_id = result["snapshot"]["local_host_id"].as_str().map(str::to_owned);
+    Ok((result["clients"].take(), snapshot, host_id))
 }
 
 pub(crate) fn collect_sessions(context: &RexContext) -> Result<Snapshot, String> {
@@ -418,7 +417,7 @@ pub(crate) fn run_script(
     Ok(output.stdout)
 }
 
-fn resolve_binary() -> Result<PathBuf, String> {
+pub(crate) fn resolve_binary() -> Result<PathBuf, String> {
     if let Some(binary) = env::var_os("INTERDIMUX_REX_BIN").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(binary));
     }
@@ -699,6 +698,10 @@ fn id<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 fn parse_snapshot(bytes: &[u8], context: &RexContext) -> Result<Snapshot, String> {
     let data: Value = serde_json::from_slice(bytes)
         .map_err(|e| format!("Cannot decode Rex snapshot JSON: {e}"))?;
+    normalize_snapshot(&data, context)
+}
+
+fn normalize_snapshot(data: &Value, context: &RexContext) -> Result<Snapshot, String> {
     if data["version"].as_u64() != Some(1) {
         return Err("Unsupported Rex snapshot version; rebuild interdimux".into());
     }
@@ -763,7 +766,7 @@ fn parse_snapshot(bytes: &[u8], context: &RexContext) -> Result<Snapshot, String
                 for block in array(layer.get("blocks"))? {
                     let block_id = id(block, "block_id")?;
                     if context.picker_block_id.as_deref() != Some(block_id)
-                        && !is_picker_ui(&data, block)
+                        && !is_picker_ui(data, block)
                     {
                         blocks.push(block);
                     }
@@ -792,7 +795,7 @@ fn parse_snapshot(bytes: &[u8], context: &RexContext) -> Result<Snapshot, String
             }
             let (active_command, active_path) = active_block
                 .and_then(|block| block["block_id"].as_str())
-                .map(|id| process_metadata(&data, id))
+                .map(|id| process_metadata(data, id))
                 .unwrap_or_default();
             if default_window_name(&name) {
                 name = if active_command.is_empty() {
@@ -828,7 +831,7 @@ fn parse_snapshot(bytes: &[u8], context: &RexContext) -> Result<Snapshot, String
             });
             for (block_index, block) in blocks.iter().enumerate() {
                 let block_id = id(block, "block_id")?;
-                let (command, path) = process_metadata(&data, block_id);
+                let (command, path) = process_metadata(data, block_id);
                 let metadata = &data["metadata"][block_id];
                 let local = ((context.snapshot_file.is_some() && context.result_file.is_some())
                     || (data["local_host_id"]

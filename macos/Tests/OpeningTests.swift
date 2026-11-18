@@ -22,6 +22,11 @@ struct OpeningTests {
         NSApplication.shared.setActivationPolicy(.prohibited)
         NSApp.finishLaunching()
         try lazyProjectSearch()
+        try remoteSessions()
+        try keyboardShortcuts()
+        try dashboardHandoffs()
+        try rowActions()
+        try themePolling()
         let picker = PickerApplication()
         picker.setupPanel()
         picker.panel.isReleasedWhenClosed = false
@@ -376,6 +381,243 @@ struct OpeningTests {
                       "\(theme.name): confirmation theme refresh disturbed picker state")
         }
         print("Opening checks passed: lazy project search, unchanged cached frame across shuffled catalogs, previous-session selection, deferred Enter, navigation/typing and controller/sheet themes")
+    }
+
+    private static func themePolling() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        let change = Notification(name: NSWindow.didChangeOcclusionStateNotification, object: picker.panel)
+        picker.windowDidChangeOcclusionState(change)
+        try check(picker.themeTimer == nil, "Hidden panel scheduled a repeating timer")
+        picker.setThemePolling(true)
+        let first = picker.themeTimer
+        picker.setThemePolling(true)
+        try check(first?.isValid == true && first === picker.themeTimer, "Visible panel must schedule just one refresh timer")
+        picker.windowDidChangeOcclusionState(change)
+        try check(first?.isValid == false && picker.themeTimer == nil, "Occluding the panel must invalidate its timer")
+        picker.setThemePolling(true)
+        try check(picker.themeTimer?.isValid == true && first !== picker.themeTimer, "Showing the panel must resume theme updates")
+        picker.setThemePolling(false)
+    }
+
+    private static func rowActions() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        picker.open(context: ["client_id": "client:local"])
+        let rows: [[String: Any]] = [
+            ["id": "session:a", "kind": "session", "title": "Context", "context_only": true],
+            ["id": "pane:a", "kind": "pane", "title": "First", "actions": ["split-right"]],
+            ["id": "pane:b", "kind": "pane", "title": "Second", "actions": ["split-right", "rename"]]
+        ]
+        picker.receive(["id": picker.pending, "type": "results", "rows": rows, "preferred_id": "pane:a"])
+        picker.content.layoutSubtreeIfNeeded()
+        let table = picker.content.table
+        var menus: [[String]] = []
+        func operations(_ menu: NSMenu) -> [String] {
+            menu.items.filter(\.isEnabled).compactMap { $0.representedObject as? String }
+        }
+        // Exercise both hardware event entry points without tracking a visible menu.
+        table.onRowMenu = { row, _ in
+            picker.showRowActions(row) { menus.append(operations($0)) }
+        }
+        func click(_ row: Int, control: Bool) {
+            let rect = table.rect(ofRow: row)
+            let location = table.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            let event = NSEvent.mouseEvent(with: control ? .leftMouseDown : .rightMouseDown,
+                location: location, modifierFlags: control ? .control : [], timestamp: 0,
+                windowNumber: picker.panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            if control { table.mouseDown(with: event) } else { table.rightMouseDown(with: event) }
+        }
+        let dispatched = picker.backend.requests.count
+        click(2, control: false)
+        try check(table.selectedRow == 2 && menus.last?.contains("rename") == true && picker.backend.requests.count == dispatched,
+                  "Cancelling a row menu must select the clicked target without dispatch")
+        var keyboardActions: [String] = []
+        picker.trackActionsMenu { keyboardActions = operations($0) }
+        try check(menus.last == keyboardActions, "Row menu diverged from the keyboard Actions menu")
+        click(1, control: true)
+        try check(menus.count == 2 && table.selectedRow == 1 && menus.last?.contains("rename") == false,
+                  "Control-click must present only the clicked row's capabilities")
+        click(0, control: false)
+        picker.showRowActions(-1) { menus.append(operations($0)) }
+        try check(menus.count == 2 && table.selectedRow == 1, "Context ancestors or empty space exposed another row's actions")
+        picker.showRowActions(2) { menu in
+            picker.chooseAction(menu.items.first { $0.representedObject as? String == "split-right" }!)
+            table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        }
+        try check(picker.backend.requests.count == dispatched, "Selection changes during menu tracking redirected a mutation")
+        picker.showRowActions(2) { menu in
+            picker.chooseAction(menu.items.first { $0.representedObject as? String == "split-right" }!)
+        }
+        try check(picker.backend.requests.last?.fields["target_id"] as? String == "pane:b", "Row menu sent action to the wrong pane")
+        click(1, control: false)
+        try check(menus.count == 2 && table.selectedRow == 2, "An in-flight action allowed another row menu")
+    }
+
+    private static func dashboardHandoffs() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        picker.open(context: ["client_id": "client:home", "origin_server": "lab", "origin_session_id": "session:remote"], dashboard: true)
+        let dashboard = picker.ensureDashboard()
+        try check(dashboard.choose(key: "h") && picker.deferredDashboardAction == .health,
+                  "A handoff selected before collection should wait for its origin")
+        func deliver(available: Bool) {
+            picker.receive(["id": picker.pending, "type": "results",
+                            "dashboard": ["terminal_tools_available": available], "rows": []])
+        }
+        deliver(available: false)
+        try check(picker.deferredDashboardAction == nil && picker.dashboardRequest == nil
+                  && !picker.backend.requests.contains { $0.type == "dashboard_action" },
+                  "A pending terminal handoff from a remote origin dispatched against the local Rex server")
+        picker.open(context: ["client_id": "client:home", "session_id": "session:local",
+                              "window_id": "window:local", "block_id": "block:local"], dashboard: true)
+        try check(dashboard.choose(key: "o") && picker.deferredDashboardAction == .jobs,
+                  "Reopening must reconsider the new origin's capabilities")
+        deliver(available: true)
+        try check(picker.backend.requests.last?.fields["operation"] as? String == "jobs",
+                  "A valid terminal handoff must run once the original pane is validated")
+    }
+
+    private static func keyboardShortcuts() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        let directory = ["id": "directory:example", "kind": "directory", "title": "Example"]
+        picker.open(context: ["client_id": "client:one"])
+        picker.receive(["id": picker.pending, "type": "results", "rows": [directory]])
+        func press(_ code: CGKeyCode, _ flags: CGEventFlags) -> Bool {
+            let key = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)!
+            key.flags.formUnion(flags)
+            return picker.panel.performKeyEquivalent(with: NSEvent(cgEvent: key)!)
+        }
+        try check(press(124, .maskCommand) && picker.backend.requests.last?.fields["base_id"] as? String == "directory:example",
+                  "Command-Right with hardware arrow flags must browse the selected folder")
+        picker.receive(["id": picker.pending, "type": "results", "scope": "directory", "directories_loaded": true,
+                        "directories_base": "/example", "rows": [directory]])
+        try check(press(123, .maskCommand) && picker.backend.requests.last?.fields["parent"] as? Bool == true,
+                  "Command-Left with hardware arrow flags must browse the parent")
+        picker.receive(["id": picker.pending, "type": "results", "scope": "directory", "directories_loaded": true, "rows": []])
+        try check(press(19, [.maskCommand, .maskAlphaShift]) && picker.scope == "session",
+                  "Caps Lock must leave Command-2 scope navigation available")
+    }
+
+    private static func remoteSessions() throws {
+        let picker = PickerApplication()
+        picker.setupPanel()
+        picker.panel.isReleasedWhenClosed = false
+        defer { picker.panel.close() }
+        let local = ["client_id": "client:one", "session_id": "session:a"]
+        let remote = ["client_id": "client:one", "origin_session_id": "session:a", "origin_server": "DEVBOX"]
+        let a = ["id": "session:a", "kind": "session", "title": "A"]
+        let b = ["id": "session:b", "kind": "session", "title": "B"]
+        let remoteID = "remote:server:session:a"
+        let hostSession = ["id": remoteID, "kind": "session", "title": "Remote A", "host": "devbox", "session_id": "session:a"]
+        func results(_ rows: [[String: Any]], id: Int? = nil, text: String = "", more: Bool = true) {
+            picker.receive(["id": id ?? picker.pending, "type": "results", "query": text, "scope": "all",
+                            "remote_pending": more, "preferred_id": "session:b", "rows": rows])
+        }
+        func poll() throws -> Int {
+            guard let work = picker.remotePollWork else { throw TestFailure(description: "Remote poll was not scheduled") }
+            work.perform()
+            guard let id = picker.remotePollRequest else { throw TestFailure(description: "Scheduled work did not request a remote update") }
+            return id
+        }
+        func deliverPoll(_ id: Int, more: Bool, changed: Bool) {
+            picker.receive(["id": id, "type": "remote_update", "pending": more, "changed": changed])
+        }
+
+        picker.open(context: local)
+        results([a, b])
+        let openingRequest = picker.pending
+        let delayedPoll = try poll()
+        try check(!picker.loading && picker.displayedRequest == openingRequest,
+                  "Remote poll blocked the local opening result")
+        picker.accept()
+        try check(picker.backend.requests.last?.type == "activate"
+                  && picker.backend.requests.last?.fields["target_id"] as? String == "session:b",
+                  "Waiting for a remote host prevented immediate local switching")
+        deliverPoll(delayedPoll, more: true, changed: true)
+        try check(picker.remoteResultsRequest == nil && picker.items.map(\.id) == ["session:a", "session:b"],
+                  "Remote discovery interrupted a local switch")
+        picker.activation = nil // This offscreen test never gives focus to live Rex.
+
+        picker.open(context: local)
+        results([a, b])
+        let normalRequest = picker.pending
+        let readyPoll = try poll()
+        deliverPoll(readyPoll, more: true, changed: true)
+        guard let refreshID = picker.remoteResultsRequest else {
+            throw TestFailure(description: "An available host did not request updated results")
+        }
+        try check(picker.pending == normalRequest && picker.displayedRequest == normalRequest && !picker.loading,
+                  "A remote re-query invalidated actionability of current local rows")
+        let oldViewport = picker.content.scroll.contentView.bounds.origin
+        results([hostSession, b, a], id: refreshID)
+        try check(picker.items.map(\.id) == ["session:a", "session:b", remoteID]
+                  && picker.content.table.selectedRow == 1
+                  && picker.content.scroll.contentView.bounds.origin == oldViewport,
+                  "A newly available host moved the existing results, selection, or viewport")
+        try check(picker.remotePollWork != nil && picker.openingItems.last?.host == "devbox",
+                  "A remote row was not cached while other hosts were still pending")
+
+        let finalPoll = try poll()
+        deliverPoll(finalPoll, more: false, changed: true)
+        guard let staleRefreshID = picker.remoteResultsRequest else {
+            throw TestFailure(description: "Last host result was dropped")
+        }
+        picker.content.search.stringValue = "remote"
+        picker.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: picker.content.search))
+        results([a], id: staleRefreshID, more: false)
+        try check(picker.items.contains { $0.id == remoteID }, "A late background result replaced an actively edited search")
+        results([hostSession], text: "remote", more: false)
+        picker.accept()
+        try check(picker.backend.requests.last?.fields["target_id"] as? String == remoteID,
+                  "A remote result did not switch using its host-scoped ID")
+        picker.activation = nil
+
+        picker.open(context: remote)
+        try check(picker.openingFrameHadRows && picker.items.filter(\.current).map(\.id) == [remoteID],
+                  "Cached opening from a remote origin marked the same-ID local session as current")
+        var aliasedOrigin = remote
+        aliasedOrigin["origin_server"] = "app-server-key"
+        picker.open(context: aliasedOrigin)
+        try check(picker.items.filter(\.current).map(\.id) == [remoteID],
+                  "A unique remote session did not resolve the app's private server key")
+        results([a, b, hostSession])
+        let hiddenPoll = try poll()
+        picker.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: picker.panel))
+        let beforeHiddenReply = picker.backend.requests.count
+        deliverPoll(hiddenPoll, more: true, changed: true)
+        try check(picker.backend.requests.count == beforeHiddenReply && picker.remotePollWork == nil,
+                  "A dismissed picker kept polling or re-querying remote hosts")
+
+        // The final host can finish with an unchanged catalog. There is no
+        // reason to re-query, but neither kind of miss should keep its hint.
+        for offerCreate in [false, true] {
+            picker.open(context: local)
+            results([a, b])
+            picker.content.search.stringValue = "missing"
+            picker.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: picker.content.search))
+            let rows = offerCreate ? [["id": "create:missing", "kind": "create", "title": "Create missing"]] : []
+            results(rows, text: "missing")
+            let hint = offerCreate ? picker.content.status : picker.content.emptyDetail
+            try check(hint.stringValue.localizedCaseInsensitiveContains("checking remote hosts"),
+                      "A miss did not indicate that hosts were still being checked")
+            let lastPoll = try poll()
+            let beforeFinalReply = picker.backend.requests.count
+            deliverPoll(lastPoll, more: false, changed: false)
+            try check(hint.stringValue == (offerCreate ? picker.createHint : picker.noMatchingHint)
+                      && picker.backend.requests.count == beforeFinalReply && picker.remotePollWork == nil,
+                      "An unchanged final catalog left a remote-loading hint or triggered another request")
+        }
+        print("Remote opening checks passed: independent local action, incremental rows, latest search, origin cache, dismissal, unchanged completion")
     }
 
     private static func lazyProjectSearch() throws {

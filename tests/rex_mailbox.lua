@@ -25,6 +25,7 @@ os.getenv = function() return nil end
 os.rename = function(from, to) files[to] = files[from]; files[from] = nil; return true end
 os.remove = function(path) files[path] = nil; return true end
 local timer, snapshots, operations = nil, 0, {}
+local collection_error
 local handlers, delayed, cache_inputs = {}, {}, {}
 rex = {
   args = { root = root, binary = "/unused/imux", client_id = "client:origin",
@@ -48,6 +49,7 @@ rex = {
 }
 dofile = function(path)
   if path == root .. "/rust/src/rex_snapshot.lua" then
+    if collection_error then error(collection_error, 0) end
     snapshots = snapshots + 1
     cache_inputs[#cache_inputs + 1] = { previous = rex.args.live_previous_snapshot,
       blocks = rex.args.live_dirty_blocks, sessions = rex.args.live_dirty_sessions }
@@ -120,6 +122,31 @@ for _, request in ipairs({
       "send refreshes exactly the target pane or window's processes")
   end
 end
+
+-- A completed mutation and its follow-up snapshot have distinct outcomes.
+collection_error = "snapshot temporarily unavailable"
+local created = { session_id = "new-session" }
+for _, operation in ipairs({ "create", "send", "snapshot" }) do
+  local id = #operations + 1
+  files["/private-picker/request.json"] = encode { version = 1, id = id,
+    operation = operation, target = { session_id = "s" }, args = { created = created } }
+  timer()
+  local reply = encoded[files["/private-picker/response.json"]]
+  if operation == "snapshot" then
+    assert(not reply.ok and reply.error == collection_error, "an explicit failed reload still fails")
+  else
+    assert(reply.ok and reply.data.operation == operation and reply.data.refresh_error == collection_error,
+      "a committed operation must survive a failed refresh")
+    assert(reply.data.target.session_id == created.session_id)
+  end
+  timer()
+  assert(#operations == id, "never replay a committed mutation")
+end
+collection_error = nil
+files["/private-picker/request.json"] = encode { version = 1, id = #operations + 1, operation = "snapshot", args = {} }
+timer()
+assert(encoded[files["/private-picker/response.json"]].ok and operations[#operations] == "snapshot")
+print("passed: create/send survive collection failures and retrying reload only collects")
 
 local before_events = snapshots
 local before_delayed = #delayed
